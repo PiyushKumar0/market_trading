@@ -1,4 +1,4 @@
-"""WarmupGate (§2.6 step 6 / §7.1 ``warmup_ready`` + ``regime_data_ready``) — ready / missing /
+"""WarmupGate (``warmup_ready`` + ``regime_data_ready``) — ready / missing /
 frozen paths, against a fake MarketStore (the store's own coverage SQL is tested in
 test_market_store.py; here the subject is the gate's requirements + the lifecycle consequence)."""
 
@@ -139,7 +139,7 @@ async def test_daily_shortfall_blocks_daily_strategies(clock):
 
 @pytest.mark.asyncio
 async def test_missing_regime_history_blocks_regime(clock):
-    """§7.1 regime_data_ready: NIFTY 50 + India VIX history must be present, not just the watchlist."""
+    """regime_data_ready: NIFTY 50 + India VIX history must be present, not just the watchlist."""
     store = FakeStore()
     _fill_ready(store)
     store.daily["NIFTY 50"] = []
@@ -177,7 +177,7 @@ async def test_before_open_accrues_no_intraday_requirement():
     assert store.intraday_ranges == []
 
 
-# --------------------------------------------------------------------- young-listing exclusion (F3)
+# --------------------------------------------------------------------- young-listing exclusion
 @pytest.mark.asyncio
 async def test_young_listing_alone_does_not_block(clock):
     """A fresh listing (a bar for every session since it listed < the lookback ago) can never satisfy
@@ -304,7 +304,7 @@ def test_ready_for_is_per_symbol():
     assert status.ready_for(CLASS_DAILY) is False
     assert status.ready_for(CLASS_REGIME, "TCS") is True      # nothing regime is short
 
-    # A line in the class that attributes to NOBODY refuses every symbol in it (fail closed, R6) —
+    # A line in the class that attributes to NOBODY refuses every symbol in it (fail closed) —
     # and only in it: the daily class still answers per symbol.
     unattributed = WarmupStatus(ready=False, blockers=[
         "orb:RELIANCE bars 10/50",
@@ -363,7 +363,7 @@ def test_short_symbols_lists_attributed_symbols_once():
     assert status.short_symbols(CLASS_REGIME) == []
 
 
-# --------------------------------------------------------------------- lifecycle consequence (§2.6)
+# --------------------------------------------------------------------- lifecycle consequence
 class _FakeGate:
     def __init__(self, ready: bool, blockers: list[str] | None = None):
         self._status = WarmupStatus(ready=ready, blockers=blockers or [])
@@ -374,7 +374,7 @@ class _FakeGate:
 
 @pytest.mark.asyncio
 async def test_lifecycle_freezes_entries_when_warmup_not_ready(conn, clock, temp_config, monkeypatch):
-    """§2.6 step 6: a REGIME-class shortfall ⇒ FROZEN-for-entries via the risk-state setter +
+    """A REGIME-class shortfall ⇒ FROZEN-for-entries via the risk-state setter +
     WARMUP_FROZEN alert — never trade on thin data. Cold start too close to the window is exactly
     this path (chaos 18). The intraday line rides along and must NOT read as the cause (2026-09-13;
     the freezing blocker is a ``regime:`` one since 2026-09-17, when DAILY stopped freezing)."""
@@ -410,7 +410,7 @@ async def test_lifecycle_freezes_entries_when_warmup_not_ready(conn, clock, temp
     ["regime:NIFTY 50 daily bars 0/200"],                       # REGIME class alone
     ["orb:RELIANCE bars 12/50", "regime:INDIA VIX daily bars 4/20"],
     ["rsi2/trend/mom:AAA daily bars 3/200", "regime:INDIA VIX daily bars 4/20"],
-    ["warmup check failed"],                                    # UNATTRIBUTABLE ⇒ freezes (R6)
+    ["warmup check failed"],                                    # UNATTRIBUTABLE ⇒ freezes
 ])
 async def test_lifecycle_freezes_on_every_freezing_class(conn, clock, temp_config, monkeypatch, blockers):
     """2026-09-17: the freezing set is REGIME ∪ UNATTRIBUTABLE and nothing else. A non-freezing class
@@ -606,8 +606,7 @@ async def test_lifecycle_stays_normal_when_warmup_ready(conn, clock, temp_config
 
 @pytest.mark.asyncio
 async def test_selftest_freshness_surfaces_warmup_fail(conn, clock, temp_config, monkeypatch):
-    """The §3.2.12 pre-entries self-test rides the same gate, split per class on 2026-09-17 (the
-    residue the 09-13 addendum registered): a GLOBAL shortfall (regime / unattributable) is still
+    """The pre-entries self-test rides the same gate, split per class on 2026-09-17: a GLOBAL shortfall (regime / unattributable) is still
     FAIL implying FROZEN, while a per-symbol INTRADAY or DAILY one is a WARN implying nothing — a
     self-test that kept implying FROZEN would re-impose the global freeze the moment the standalone
     ``run()`` (or a dashboard/CLI selftest endpoint) was wired."""
@@ -630,7 +629,7 @@ async def test_selftest_freshness_surfaces_warmup_fail(conn, clock, temp_config,
     assert "per-symbol coverage short: rsi2/trend/mom:OLAELEC daily bars 193/200" == check.detail
     assert "warmup_ready" not in report.frozen_reasons
 
-    # An UNATTRIBUTABLE blocker is a global condition (R6) and keeps the FROZEN implication, and so
+    # An UNATTRIBUTABLE blocker is a global condition and keeps the FROZEN implication, and so
     # does a duck-typed status with no per-class answer at all (the flat fallback, never looser).
     lifecycle._selftest._warmup_gate = _FakeGate(ready=False, blockers=["warmup check failed"])
     report = await lifecycle._selftest.run(check_skew=False)

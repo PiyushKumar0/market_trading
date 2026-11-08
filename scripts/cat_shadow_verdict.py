@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""``cat`` v2 SHADOW VERDICT — the pre-registered retire-or-review rule (§2.7 2026-08-18 amendment).
+"""``cat`` v2 SHADOW VERDICT — the pre-registered retire-or-review rule (2026-08-18).
 
 ``cat`` v2 runs as a SHADOW strategy: its candidates are journalled at prescreen admission and the
-§7.1 C3 check rejects every one of them (no registered edge), so nothing reaches RECOMMEND. The
-WO-18 acceptance pre-registered how the shadow ends; this script applies that rule mechanically. It
+risk-gate cost check rejects every one of them (no registered edge), so nothing reaches RECOMMEND. The
+cat v2 shadow acceptance pre-registered how the shadow ends; this script applies that rule mechanically. It
 changes nothing: it reads two stores read-only and prints a verdict.
 
 ===============================================================================================
@@ -11,9 +11,9 @@ THE RULE (pre-registered 2026-08-18, clock restarted 2026-08-28 — do not re-de
 seeing the numbers)
 ===============================================================================================
 * Quoted: "shadow runs >= 30 sessions AND >= 20 admitted signals; then measure T+10/T+20 net drift
-  (next-session-open fills, spread-inclusive CNC costs, WO-3 margin floor) of the signal
+  (next-session-open fills, spread-inclusive CNC costs, margin floor) of the signal
   population. Net <= the cost floor at BOTH horizons => ``cat`` origination is retired and the
-  watchlist stays context-only permanently. Clearing it => owner review at the §8.6 gate (R4)
+  watchlist stays context-only permanently. Clearing it => owner review at the owner promotion gate
   before any live wiring." Clock restart (2026-08-28): "signals admitted 2026-08-18 through
   2026-08-28 are EXCLUDED from the verdict computation."
 * **Population:** every ``prescreen_day_slots`` row with ``strategy_id='cat'`` and ``d`` in
@@ -36,8 +36,8 @@ seeing the numbers)
   store hole HOLDS the verdict too ("fix the data, never skip the row").
   Then ``RETIRE`` iff cohort median net T+10 <= threshold_10 AND cohort median net T+20 <=
   threshold_20 (equality retires); otherwise ``OWNER REVIEW`` — clearing at either horizon sends
-  ``cat`` to the §8.6 owner review, and nothing is wired by this result.
-* **WO-3 margin floor:** WO-3 requires net expectancy >= cost_floor / 20 per day
+  ``cat`` to the owner promotion-gate review, and nothing is wired by this result.
+* **Margin floor:** it requires net expectancy >= cost_floor / 20 per day
   (``engine.learning.validate.margin_floor_pct_per_day``, ``MARGIN_FLOOR_DAYS`` = 20), so the bar at
   horizon H is ``cost_round_trip_pct x H / 20``: T+20 must net more than one full round trip and
   T+10 more than half of one. The report prints both thresholds and this derivation.
@@ -72,16 +72,16 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   under EVERY name of the instrument and merged by date, the current name's row winning on a shared
   date (rekey's rule), so it measures whether or not the rekey ran. Listed as ``OLD (now NEW)``.
 * **The 5% disaster stop and the 20-session time exit are not simulated.** The pre-registration
-  measures net DRIFT at fixed horizons; ``cat.stop_pct`` enters only through the §7.1 sizing
+  measures net DRIFT at fixed horizons; ``cat.stop_pct`` enters only through the per-trade risk sizing
   below (a wider stop means a smaller notional and a higher cost floor).
 * **Costs: one full CNC round trip from the repo's ``CostModel``** (``breakeven_pct``, spread
-  included) at the notional §7.1 sizing produces for this rule: ``per_trade_risk`` caps a swing
+  included) at the notional the per-trade risk sizing produces for this rule: ``per_trade_risk`` caps a swing
   position at ``equity x swing_position_pct% / (overnight_gap_mult x cat.stop_pct%)``
   (``scripts/hi52_forward_verdict.resolve_cost_floor`` called with ``cat``'s ``stop_pct``: the same
   code the ``hi52`` verdict charges). ``cat.stop_pct`` is read from ``config/settings.yaml`` through the
   repo loader (fallback: ``cat.DEFAULT_PARAMS``, stated). The equity is the SMALLEST
   ``equity_snapshots`` reading in the window (the tightest base any signal would have been sized
-  under); with no snapshot it is the §7.1 ``equity_floor_rung`` (the smallest book that can still
+  under); with no snapshot it is the risk-limits ``equity_floor_rung`` (the smallest book that can still
   open a position), stated. Integer-qty rounding lands a real notional at or below the cap, so the
   floor is a lower bound by a few hundredths of a pp. ``--equity`` / ``--notional`` are what-ifs;
   ``--notional`` prints ``OVERRIDE``.
@@ -123,9 +123,9 @@ DIAGNOSTICS (each one decides nothing)
 ===============================================================================================
 * **Running cells** over ALL measured signals in the window (n, median/mean net, hit rate on net
   ``> 0``), each horizon on its own event set.
-* **Segments** (owner directive: split at the first NIFTY 500 universe build, O15, and at the news
-  scorer's switch to sonnet-5.5), by journal day ``d``: pre-O15 [``--from``,
-  :data:`O15_FIRST_SESSION` - 1], O15 + Sonnet-5 scorer [:data:`O15_FIRST_SESSION`, S - 1],
+* **Segments** (owner directive: split at the first NIFTY 500 universe build, and at the news
+  scorer's switch to sonnet-5.5), by journal day ``d``: pre-NIFTY-500 [``--from``,
+  :data:`O15_FIRST_SESSION` - 1], NIFTY 500 + Sonnet-5 scorer [:data:`O15_FIRST_SESSION`, S - 1],
   Sonnet-5.5 scorer [S, ``as_of``]. S = the first trading session strictly after the IST date of the
   earliest ``news_clusters.scored_at`` with ``scorer_model = 'sonnet-5.5'`` (bounded by ``as_of``);
   when that cannot be read, or no such row exists, S = :data:`SCORER_SWITCH_FALLBACK`, stated. Both
@@ -204,7 +204,7 @@ def _load_script(name: str) -> ModuleType:
     return mod
 
 
-#: The hi52 verdict's store openers, §7.1 limit readers, min-equity read and cell statistics.
+#: The hi52 verdict's store openers, risk-limit readers, min-equity read and cell statistics.
 h52v = _load_script("hi52_forward_verdict")
 
 # =============================================================================== pinned constants
@@ -231,7 +231,7 @@ SESSION_OPEN_IST = time(9, 15)
 #: session after the first origination; 10 calendar days covers any holiday run).
 DUPLICATE_LOOKBACK_DAYS = 10
 
-#: Segment boundary 1 (owner directive): the first session on the NIFTY 500 universe (O15).
+#: Segment boundary 1 (owner directive): the first session on the NIFTY 500 universe (owner decision).
 O15_FIRST_SESSION = date(2026, 9, 7)
 O15_PROVENANCE = (
     "WORKLOG 2026-09-04: O15 implemented after the session; first sweep on the NIFTY 500 universe "
@@ -269,7 +269,7 @@ _HUNDRED = Decimal("100")
 
 # =============================================================================== the rule
 def margin_threshold_pct(cost_pct: float, horizon: int) -> float:
-    """WO-3 bar at ``horizon``: the per-day floor (``cost / MARGIN_FLOOR_DAYS``) times the hold."""
+    """Margin-floor bar at ``horizon``: the per-day floor (``cost / MARGIN_FLOOR_DAYS``) times the hold."""
     per_day = margin_floor_pct_per_day(cost_pct)
     if per_day is None:          # only for a None cost, which no caller passes
         raise ValueError("no cost floor")

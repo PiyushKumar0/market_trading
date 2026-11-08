@@ -1,6 +1,6 @@
-"""Pre-open Kite access-token validity check (WO-21 (iii), R6/A5).
+"""Pre-open Kite access-token validity check.
 
-The Kite access token is minted daily and dies at ~06:00 IST (A5). Nothing in the engine LOOKED at
+The Kite access token is minted daily and dies at ~06:00 IST. Nothing in the engine LOOKED at
 it between the boot probe and the first live call, so on 2026-08-20 a stale token survived the whole
 pre-open: the first rejection surfaced at 09:50 as a mid-session ``TokenException`` → FROZEN, and
 ~108 minutes of the trade window were gone before the owner could re-login. The boot probe
@@ -11,7 +11,7 @@ This job closes that hole with the cheapest possible answer to "is today's token
 authenticated REST call at 08:40 IST, ~35 minutes before the 09:15 open, with a loud owner alert if
 it fails. It is deliberately NOT a registry job and carries NO ``job_runs`` watermark: a
 pre-open check replayed at 14:00 by a catch-up pass answers a question nobody is asking any more.
-Missing today's fire is simply missing it; the boot probe and the mid-day circuit breaker (R6)
+Missing today's fire is simply missing it; the boot probe and the mid-day circuit breaker
 remain the other two layers.
 
 **Never load-bearing.** :meth:`TokenCheckJob.run` does not raise, does not freeze, does not gate
@@ -56,7 +56,7 @@ class TokenCheckJob:
         The :class:`~engine.broker.kite_client.KiteClient` facade. ``margins()`` is the probe: it is
         the cheapest authenticated endpoint the facade exposes (Kite's ``/user/margins``), reads
         account state only, and places/modifies/cancels nothing. It routes through
-        ``KiteClient._call``, so a ``TokenException`` ALSO fires the existing R6 circuit breaker
+        ``KiteClient._call``, so a ``TokenException`` ALSO fires the existing token-rejection circuit breaker
         (``SessionManager.on_token_rejected`` → freeze entries + login link) — which is the correct
         pre-open posture and is idempotent with this job's own alert.
     clock, calendar:
@@ -124,7 +124,7 @@ class TokenCheckJob:
         return "Send /token <request_token> after logging in to Kite."
 
     def _invalid_message(self, error: str) -> CatalogMessage:
-        # LOGIN_PROMPT is the R6 kind for "the daily Kite login is required" — which is exactly the
+        # LOGIN_PROMPT is the notification kind for "the daily Kite login is required" — which is exactly the
         # owner action here; the title/body carry the pre-open framing the generic prompt lacks.
         return CatalogMessage(
             kind=MessageKind.LOGIN_PROMPT,

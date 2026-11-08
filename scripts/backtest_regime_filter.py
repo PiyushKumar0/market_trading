@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""C2 regime-filter study (IMPLEMENTATION_PLAN §6.1 "C2 REGIME-FILTER STUDY — PRE-REGISTERED 2026-10-07").
+"""Regime-filter study (pre-registered 2026-10-07).
 
 Per strategy (brk20 V2-N5 fills, hi52 v2, ins), the arm (ii) construct (registered entry, T+20 time
 exit, no stop) over the admitted events, split by the rsi2 NIFTY 50 regime at the signal session: ON
 is the trial, the full population the REFERENCE; OFF and the September 2026 down-leg are diagnostics.
 Family N = 1 per strategy. Evidence only; wires nothing. Exit codes: 0 ran, 2 refused.
-``backtest_selection_filters.py`` (C3) reuses the measurement, report and CLI helpers below.
+``backtest_selection_filters.py`` (the selection-filter study) reuses the measurement, report and CLI helpers below.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ STRATEGIES = ("brk20", "hi52", "ins")
 INDEX_SYMBOL = "NIFTY 50"
 FAMILY_N = 1
 MIN_N = 30
-T20 = rc.HORIZON - 1  # exit_sim counts sessions after the fill; T+20 counts the fill session as 1 (D2)
+T20 = rc.HORIZON - 1  # exit_sim counts sessions after the fill; T+20 counts the fill session as 1
 DOWN_LEG = (date(2026, 9, 1), date(2026, 9, 30))
 RULE = f"close(y) > SMA{_INDEX_DMA}(y) AND SMA{_INDEX_DMA}(y) > SMA{_INDEX_DMA}(y-{_RISING_LOOKBACK})"
 FULL, ON, OFF = "full_REFERENCE", "on", "off"
@@ -63,7 +63,7 @@ def regime_on(closes: np.ndarray | None) -> bool | None:
     return bool(closes[-1] > s.iloc[-1] > s.iloc[-1 - _RISING_LOOKBACK])
 
 
-# ----------------------------------------------------------------------------- shared with C3
+# ----------------------------------------------------------------------------- shared with the selection-filter study
 def build_population(name: str, conn, db: Path, end: date, symbols, max_symbols) -> rc.Population:
     kw = {"symbols": symbols, "max_symbols": max_symbols}
     if name == "hi52":
@@ -124,7 +124,7 @@ def meta(script: str, registration: str, db: Path, end: date, symbols, max_symbo
     }
 
 
-# ----------------------------------------------------------------------------- C2
+# ----------------------------------------------------------------------------- regime-filter study
 def decide(r: dict[str, Any]) -> str:
     on, off, full = (r["cohorts"][k] for k in (ON, OFF, FULL))
     if on["n"] < MIN_N or off["n"] < MIN_N:

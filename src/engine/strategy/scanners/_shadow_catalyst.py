@@ -78,13 +78,12 @@ def build_candidate(
     """Translate one ELIGIBLE watchlist row into a candidate, or ``None`` if it cannot be priced.
 
     Fails to ``None`` on a missing/non-positive/non-finite reference price, on a ``stop_pct`` that is
-    not a risk distance, or on tick-rounding degeneracy — never raises on ordinary data (§3.2.5
-    fail-to-zero posture). Eligibility is the caller's: it has already applied its own event filter.
+    not a risk distance, or on tick-rounding degeneracy — never raises on ordinary data (fail-to-zero posture). Eligibility is the caller's: it has already applied its own event filter.
 
     Levels are pinned identically for both rules (and for ``brk20``/``ins``): ``entry`` is the
     tick-rounded pre-open reference, ``stop`` sits ``stop_pct`` below it, ``target`` is ``None``
     because neither rule has one, and coherence is checked AFTER rounding so a stop that collapses
-    onto the entry emits nothing rather than shipping ``stop >= entry`` into §7.1 ``levels_coherent``.
+    onto the entry emits nothing rather than shipping ``stop >= entry`` into the gate's ``levels_coherent``.
     """
     ref = row.reference_close
     if ref is None:
@@ -141,7 +140,7 @@ def sweep[RowT: CatalystRow](
     is_eligible: Callable[[RowT], bool],
     translate: Callable[[RowT], SignalCandidate | None],
 ) -> list[SignalCandidate]:
-    """Filter rows to the caller's event, translate each, and order deterministically (§9.6).
+    """Filter rows to the caller's event, translate each, and order deterministically.
 
     Order is score desc, symbol asc — matching ``ins.sweep_crossings``/``brk20.sweep_daily`` so the
     ranked-admission path sees one convention. The intermediate symbol-ascending pass keeps the

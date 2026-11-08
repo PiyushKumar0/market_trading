@@ -1,10 +1,10 @@
-# config/calendar/2025.yaml — NSE trading calendar for 2025 (R6, B2).
+# config/calendar/2025.yaml — NSE trading calendar for 2025.
 #
 # SETTLED HISTORY — verified: true, verified_through: "2025-12-31". 2025 is fully elapsed (today is
 # 2026-07-10); every date below is a closed historical fact, sourced from the official NSE capital-market-
-# segment trading-holiday circular plus the muhurat-timing circular issued closer to Diwali. FAIL-SAFE
-# (R6): NSECalendar only counts a date as a trading day in strict mode when verified: true AND the date is
-# at/before verified_through — both hold here, extending the 200-session warmup lookback (§7.1/B2) through
+# segment trading-holiday circular plus the muhurat-timing circular issued closer to Diwali. FAIL-SAFE:
+# NSECalendar only counts a date as a trading day in strict mode when verified: true AND the date is
+# at/before verified_through — both hold here, extending the 200-session warmup lookback through
 # 2025.
 #
 # PRIMARY sources (NSE circular archive, nsearchives.nseindia.com/content/circulars/):
@@ -23,7 +23,7 @@
 # circular is the authoritative source for the fixed/movable list either way.
 
 year: 2025
-verified: true                            # settled history (R6) — see verified_through and sources above.
+verified: true                            # settled history — see verified_through and sources above.
 verified_through: "2025-12-31"
 source: "NSE/CMTR/65587 (2024-12-13, trading holidays for 2025) + NSE/CMTR/70319 (2025-09-22, Diwali muhurat schedule). Full text: nsearchives.nseindia.com/content/circulars/. No ad-hoc holidays or DR-drill sessions found for 2025 (see RESEARCH NOTE above) — owner cross-check recommended."
 

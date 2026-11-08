@@ -1,4 +1,4 @@
--- ---------------------------------------------------------------- §3.2.5 prescreen day-slot journal
+-- ---------------------------------------------------------------- prescreen day-slot journal
 -- 2026-08-04 (owner-directed): the once-per-day (symbol, strategy) dedupe and the daily candidate
 -- caps lived in process memory only, so every restart reset them — observed same day: ~54
 -- publications against the 20/day bound across two mid-session restarts, plus duplicate candidate

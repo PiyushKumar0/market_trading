@@ -1,8 +1,8 @@
-"""HeartbeatWriter — the dedicated-thread liveness writer (§2.2 pinned mechanism).
+"""HeartbeatWriter — the dedicated-thread liveness writer.
 
 The load-bearing property: the heartbeat keeps writing ``engine_lifecycle.last_alive_at`` while the
 MAIN thread is busy (a long backfill/scan would starve an asyncio-loop-hosted heartbeat and
-self-alarm the watchdog — the whole reason §2.2 pins a dedicated OS thread with its own sqlite3
+self-alarm the watchdog — the whole reason for a dedicated OS thread with its own sqlite3
 connection). Uses the real migrated temp SQLite db from conftest.
 """
 
@@ -39,7 +39,7 @@ def test_heartbeat_writes_while_main_thread_is_busy(conn, db_path):
     hb.start()
     try:
         # Busy-spin the main thread (~0.4 s). A loop-hosted heartbeat would be starved by exactly
-        # this pattern; the dedicated thread keeps beating through it (§2.2).
+        # this pattern; the dedicated thread keeps beating through it.
         t0 = time_mod.perf_counter()
         while time_mod.perf_counter() - t0 < 0.4:
             pass
@@ -67,7 +67,7 @@ def test_heartbeat_start_stop_idempotent(db_path, clock):
 
 def test_heartbeat_survives_write_failure(tmp_path, clock):
     """A missing table (schema not migrated / disk trouble) must never crash the thread — the miss
-    is logged and retried; the watchdog's down_stale_s absorbs it (§2.2)."""
+    is logged and retried; the watchdog's down_stale_s absorbs it."""
     bare = tmp_path / "bare.db"
     sqlite3.connect(str(bare)).close()  # empty db: no engine_lifecycle table
     hb = HeartbeatWriter(bare, clock, interval_s=0.02)
@@ -83,7 +83,7 @@ def test_heartbeat_survives_write_failure(tmp_path, clock):
 
 
 def test_pid_alive_probe():
-    """Own pid probes alive; an implausible pid probes dead (§2.6 step-0 single-instance guard)."""
+    """Own pid probes alive; an implausible pid probes dead (the startup single-instance guard)."""
     import os
 
     assert pid_alive(os.getpid()) is True

@@ -1,4 +1,4 @@
-"""Weekly owner summary of recommendation outcomes (plan Q2.6).
+"""Weekly owner summary of recommendation outcomes.
 
 HINDSIGHT: every figure is read from ``rec_outcomes`` and ``signal_outcomes``; the owner sees it, no
 decision code reads it.

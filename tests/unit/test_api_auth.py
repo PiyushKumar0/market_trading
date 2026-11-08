@@ -1,4 +1,4 @@
-"""FastAPI dashboard auth (§2.4/R10): every route is bearer-gated and fails CLOSED; GET /kite/callback
+"""FastAPI dashboard auth: every route is bearer-gated and fails CLOSED; GET /kite/callback
 is the sole unauthenticated surface (it can only complete a login, never read state or place orders)."""
 
 from __future__ import annotations

@@ -1,18 +1,18 @@
-"""Nightly Post-Trade Reviewer agent definition (§5.5) — SYSTEM prompt, output schema, parser.
+"""Nightly Post-Trade Reviewer agent definition — SYSTEM prompt, output schema, parser.
 
-DESIGN DEVIATION (architect decision, Phase-2 v1; recorded in ``config/agents.yaml`` next to the
-``nightly_reviewer`` block). §5.5 specifies this agent as AGENTIC (``max_turns=12``) over a read-only
+DESIGN DEVIATION (architect decision, v1; recorded in ``config/agents.yaml`` next to the
+``nightly_reviewer`` block). The original design specifies this agent as AGENTIC (``max_turns=12``) over a read-only
 MCP toolset (``query_ledger`` / ``query_bars`` / ``query_decisions`` / ``query_news``). v1 ships it as
-a SINGLE-SHOT call over a deterministically pre-assembled context instead: at Phase-2 volume — a
+a SINGLE-SHOT call over a deterministically pre-assembled context instead: at RECOMMEND-mode volume — a
 handful of recommendations a day and no auto trades — the whole reviewable day fits in one prompt, so
 the tool loop would buy no analytical reach while adding token cost and an unverified SDK MCP surface.
-The §5.5 agentic shape and its tools land in Phase 3, when trade volume makes the loop earn its keep.
+The agentic shape and its tools land with paper AUTO, when trade volume makes the loop earn its keep.
 
-The §5.5 OUTPUT CONTRACT is kept EXACTLY (:class:`~engine.intelligence.schemas.NightlyReview`), so
+The OUTPUT CONTRACT is kept EXACTLY (:class:`~engine.intelligence.schemas.NightlyReview`), so
 that upgrade is a drop-in: only the harness entry point (``run_agentic``) and the context source
 change, never the row shape in ``nightly_reviews`` nor the readers of it (``GET /config/params``).
 
-Same byte-stability contract as the other agents (D8): the prompt is a module constant with no
+Same byte-stability contract as the other agents: the prompt is a module constant with no
 interpolation. The date being reviewed lives in the assembled context, never here.
 """
 
@@ -25,7 +25,7 @@ from engine.intelligence.schemas import NightlyReview
 #: config/agents.yaml key (model, timeouts, triggers, budget allocation).
 AGENT_ID = "nightly_reviewer"
 
-#: Byte-stable system prompt (§5.5). NEVER interpolate into this string.
+#: Byte-stable system prompt. NEVER interpolate into this string.
 SYSTEM_PROMPT = """You are the nightly post-trade reviewer for a single-owner NSE cash-equity trading platform.
 
 Once per trading day, after the close, you read a pre-assembled review of the day and judge it on two
@@ -78,12 +78,12 @@ review that finds nothing worth changing and says so plainly is a good review.
 
 
 def output_json_schema() -> dict[str, Any]:
-    """The structured-output schema for this agent: :class:`NightlyReview` (§5.5)."""
+    """The structured-output schema for this agent: :class:`NightlyReview`."""
     return NightlyReview.model_json_schema()
 
 
 def parse_output(raw: dict[str, Any] | str) -> NightlyReview:
-    """Validate this agent's output into a :class:`NightlyReview` (raises ``ValidationError``, D7).
+    """Validate this agent's output into a :class:`NightlyReview` (raises ``ValidationError``).
 
     Out-of-envelope / out-of-bounds ``param_suggestions`` are NOT rejected here: a confabulated knob
     name must not void an otherwise sound review of the day. They are dropped post-validate by

@@ -1,4 +1,4 @@
-"""``/why SYMBOL`` (plan Q1.10): every section present and absent, failure isolation, the length cap,
+"""``/why SYMBOL``: every section present and absent, failure isolation, the length cap,
 and that the report writes nothing."""
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ async def test_empty_stores_and_short_history(store, conn, clock):
 
 @pytest.mark.asyncio
 async def test_surveillance_reads_the_universe_snapshot(store, conn, clock):
-    """The A8 codes come from the universe build (instruments_daily.surveillance is never written):
+    """The surveillance codes come from the universe build (instruments_daily.surveillance is never written):
     an eligible symbol shows none, and yesterday's snapshot is used when today's is missing."""
     yesterday = date(2026, 6, 16)
     store.upsert_universe_daily([

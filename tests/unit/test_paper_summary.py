@@ -127,7 +127,7 @@ def _live(conn, clock, capital_base) -> dict:
 
 
 def test_the_live_base_reprices_the_equity_and_the_curve_with_no_cliff(conn, clock) -> None:
-    """O19 §7: history in P&L space. A 40k → 60k change shows every point at today's base."""
+    """History in P&L space. A 40k → 60k change shows every point at today's base."""
     _seed_40k(conn)
     s = _live(conn, clock, Decimal("60000"))
     assert s["equity"] == {
@@ -155,7 +155,7 @@ def test_a_null_pnl_row_falls_back_to_its_stored_equity(conn, clock) -> None:
     ])
     s = _live(conn, clock, Decimal("60000"))
     assert [c["equity"] for c in s["curve"]] == ["40100.00", "40200.00"]
-    # The latest row too: its stored equity, and its P&L is equity − the live base (O19 §3.1).
+    # The latest row too: its stored equity, and its P&L is equity − the live base.
     assert (s["equity"]["equity"], s["equity"]["capital_base"], s["equity"]["pnl"]) == (
         "40200.00", "60000.00", "-19800.00")
 

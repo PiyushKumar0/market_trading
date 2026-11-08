@@ -1,17 +1,17 @@
-"""Plan §9.4 chaos case 3 — WebSocket drop mid-session (mid-position).
+"""Chaos case 3 — WebSocket drop mid-session (mid-position).
 
-Must hold (§9.4 row 3, verbatim): "stale-data guard FROZEN at 10 s (R2); ticker respawned (A4);
+Must hold: "stale-data guard FROZEN at 10 s; ticker respawned;
 positions remain broker-protected; entries resume only after feed healthy".
 
-§7.1 ``stale_data_guard`` row (the limit this case exercises): "max tick age 5 s (entry-time, per
-symbol + index); feed heartbeat silence 10 s ⇒ FROZEN + ticker respawn (A4/R2)" — ``on_breach:
+The ``stale_data_guard`` risk-limit row (the limit this case exercises): "max tick age 5 s (entry-time, per
+symbol + index); feed heartbeat silence 10 s ⇒ FROZEN + ticker respawn" — ``on_breach:
 reject_entry_or_frozen``.
 
 Scenario (10:05 IST, a trading day, RECOMMEND, entries open): the REAL ``TickerSupervisor`` owns a
 fake mt-ticker child — the only fake, standing in for the ``ticker/main.py`` Twisted process +
 KiteTicker websocket. The fake child is spawned through the supervisor's own
 ``asyncio.create_subprocess_exec`` call, connects to the supervisor's REAL loopback server (ephemeral
-port — never 8400/8401), passes the REAL §2.4 shared-secret handshake and speaks the pinned wire
+port — never 8400/8401), passes the REAL shared-secret handshake and speaks the pinned wire
 contract (length-prefixed msgpack hello / heartbeat / tick frames). Ticks flow through the supervisor's
 real parser onto the bus, into the composition root's live tick cache (``engine.ops.main`` ``last_ticks``
 / ``tick_age_s``, replicated verbatim) and from there into the real ``GateContextBuilder`` → real
@@ -20,7 +20,7 @@ cycle at a time on the scenario clock (its ``_monitor_sleep`` test seam); the re
 path (``_respawn`` → ``_terminate_child`` → ``_cancel_read_task`` → ``_spawn_child``) runs for real.
 
 Clauses:
-* "stale-data guard ... at 10 s" + "ticker respawned (A4)" + "entries resume only after feed
+* "stale-data guard ... at 10 s" + "ticker respawned" + "entries resume only after feed
   healthy" — ``test_total_feed_silence_respawns_at_10s_and_entries_resume_only_when_healthy``
   (the child wedges / link dies: frame silence 10 s is NOT stale, 11 s is ⇒ kill + respawn; entries are
   refused by the 5 s tick-age rule from second 6; they resume only once the respawned feed is
@@ -29,9 +29,9 @@ Clauses:
   (``on_noreconnect`` ⇒ child exits) ⇒ ``test_websocket_drop_inside_the_child_refuses_entries_then_respawns_on_exit``.
 * "FROZEN" — ``test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery``: STALE latches the
   ``feed_stale`` cause and the next HEALTHY clears it; the owner is paged by the two risk-state
-  changes (CD-1, fixed 2026-09-24). ``test_a_slow_owner_page_never_stalls_the_feed``: a stuck page
+  changes (fixed 2026-09-24). ``test_a_slow_owner_page_never_stalls_the_feed``: a stuck page
   never stalls the frame reader.
-* "positions remain broker-protected" — skipped as broker-resident R3 (``test_positions_remain_broker_protected``).
+* "positions remain broker-protected" — skipped as broker-resident protection (``test_positions_remain_broker_protected``).
 """
 
 from __future__ import annotations
@@ -172,7 +172,7 @@ class _FakeTickerChild:
 
 class _Pacer:
     """Stands in for ``ticker_supervisor._monitor_sleep``: the REAL ``_monitor_loop`` runs one cycle
-    per :meth:`cycle`, with the scenario clock advanced by exactly 1 s (zero overshoot ⇒ the WO-26b
+    per :meth:`cycle`, with the scenario clock advanced by exactly 1 s (zero overshoot ⇒ the
     loop-starvation discount never applies — this is genuine silence, not a starved loop)."""
 
     def __init__(self, now: _Now) -> None:
@@ -201,7 +201,7 @@ class _Pacer:
 async def feed_rig(conn, tmp_path, monkeypatch):
     monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))
     settings = load_settings()
-    assert settings.ticker.heartbeat_silence_kill_s == 10                    # shipped R2 budget
+    assert settings.ticker.heartbeat_silence_kill_s == 10                    # shipped heartbeat-silence budget
     limits = yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8"))["limits"]["stale_data_guard"]
     assert limits["feed_heartbeat_silence_s"] == 10 and limits["max_tick_age_s"] == 5
     ticker_settings = SimpleNamespace(ticker=settings.ticker.model_copy(update={"tcp_port": 0}))
@@ -333,7 +333,7 @@ async def test_total_feed_silence_respawns_at_10s_and_entries_resume_only_when_h
         if second == 6:                                   # tick age 6 s > the 5 s entry-time limit
             verdict, checks = await rig.checks()
             assert verdict == "reject" and not checks["stale_data_guard"].passed
-    # Exactly 10 s of frame silence is still within budget — no STALE, no kill (R2 is "> 10 s").
+    # Exactly 10 s of frame silence is still within budget — no STALE, no kill (the limit is "> 10 s").
     assert rig.sup.health().state == "HEALTHY" and len(rig.children) == 1
     assert rig.sup.health().last_frame_age_s == 10.0
 
@@ -342,7 +342,7 @@ async def test_total_feed_silence_respawns_at_10s_and_entries_resume_only_when_h
     assert "STALE" in rig.health_events
     assert child1.terminated and child1.returncode is not None      # the wedged child was killed
     assert child2.pid != child1.pid and child2.secret != child1.secret   # fresh process, fresh secret
-    assert rig.sup.health().state == "WARMING"            # a fresh spawn warms up again (§2.6)
+    assert rig.sup.health().state == "WARMING"            # a fresh spawn warms up again
 
     # Entries do NOT resume on the respawn alone ...
     _v, checks = await rig.checks()
@@ -391,9 +391,9 @@ async def test_websocket_drop_inside_the_child_refuses_entries_then_respawns_on_
     assert checks["stale_data_guard"].passed
 
 
-# ----------------------------------------------------------------------------------- FROZEN (R2)
+# ----------------------------------------------------------------------------------- FROZEN
 async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_rig):
-    """CD-1 (fixed 2026-09-24): STALE used to latch nothing and page nobody."""
+    """Fixed 2026-09-24: STALE used to latch nothing and page nobody."""
     rig = feed_rig
     child1 = await _healthy_feed(rig)
     assert rig.mode.risk_state() == RiskState.NORMAL
@@ -403,7 +403,7 @@ async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_
     child2 = await rig.spawned(2)
     assert "STALE" in rig.health_events and child1.terminated
 
-    # §9.4 / §7.1: "feed heartbeat silence 10 s ⇒ FROZEN" — and it must still hold while the
+    # "feed heartbeat silence 10 s ⇒ FROZEN" — and it must still hold while the
     # respawned feed is only WARMING (entries resume only after the feed is healthy).
     assert rig.mode.risk_state() == RiskState.FROZEN
     assert [c for c, _s, _d in rig.latch.active_causes()] == ["feed_stale"]
@@ -413,7 +413,7 @@ async def test_feed_silence_latches_a_frozen_cause_that_clears_on_recovery(feed_
     await child2.ticks(rig.now.at)
     await rig.delivered(rig.now.at)
     await asyncio.sleep(0.05)
-    # Symmetric clear (§3.5.3 data-quality class): no latch left set once the feed is healthy.
+    # Symmetric clear (data-quality class): no latch left set once the feed is healthy.
     assert rig.mode.risk_state() == RiskState.NORMAL
     assert rig.latch.active_causes() == []
     # The owner hears it from the two risk-state changes, which carry the cause; nothing else pages.
@@ -447,7 +447,7 @@ async def test_a_slow_owner_page_never_stalls_the_feed(feed_rig):
     telegram_down.set()
 
 
-# ------------------------------------------------------------------------------- kept skipped (plan Q4.5)
+# ------------------------------------------------------------------------------- kept skipped
 @pytest.mark.skip(reason=f"'positions remain broker-protected' — {BROKER_RESIDENT_R3}")
 async def test_positions_remain_broker_protected():
     raise AssertionError("unreachable — skipped")

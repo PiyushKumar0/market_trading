@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""PRE-REGISTERED FORWARD VERDICTS: the brk20 and ins kill rules and the analyst-value verdict (review §9
-#2/#5). Read-only: state.db through a ``file:...?mode=ro`` URI. Exit code is ALWAYS 0; a store that cannot
+"""PRE-REGISTERED FORWARD VERDICTS: the brk20 and ins kill rules and the analyst-value verdict. Read-only: state.db through a ``file:...?mode=ro`` URI. Exit code is ALWAYS 0; a store that cannot
 be read prints ``UNAVAILABLE`` as the verdict.
 
 THE RULE (pre-registered; do not re-derive it after seeing the numbers)
@@ -17,7 +16,7 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - A brk20 row scored as `rule` is a first publication, whatever its resting row's symbol.
 - `prompt_version` in the registered key covers the system prompt, the context template, the response schema and
   the effort.
-- Rolling back the C2 filter after R (`brk20.regime_filter: false`) ends the brk20 kill population: the rollback
+- Rolling back the regime filter after R (`brk20.regime_filter: false`) ends the brk20 kill population: the rollback
   commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the filter ran. Resuming it
   needs an owner-approved re-registration with a new R.
 
@@ -30,7 +29,7 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Outcome:** `signal_outcomes` `next_open`:
   - entry at the open of the first regular session after d;
   - exit at the close of the 20th regular session, counting the entry session;
-  - net of one CNC round trip at the §7.1 notional at the floor-rung equity, fixed at the row's first scoring.
+  - net of one CNC round trip at the per-trade-risk notional at the floor-rung equity, fixed at the row's first scoring.
 - **Cells:** a (d, strategy) cell exists once at least one enter and at least one no_action were decided. Cells are
   ordered by (d, strategy_id). A cell is final when all its decided rows are final. Its value is the mean net of
   its closed enters minus the mean net of its closed no_actions. A cell with an arm and no closed outcome is
@@ -42,29 +41,29 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Duration:** at least three months, since brk20 originates only in regime-ON sessions.
 
 **brk20 kill rule (registered 2026-10-29, population from R).**
-- **Population:** the brk20 crossings admitted on or after R (`brk20_resting_levels` rows), under C2.
+- **Population:** the brk20 crossings admitted on or after R (`brk20_resting_levels` rows), under the regime gate.
 - **Construct** (`signal_outcomes` `rule`):
   - entry: a limit resting at the broken level on `signal_d` (y+1, the session after the crossing session y)
     through `signal_d` + 4 sessions (V2-5);
   - fill: on the first regular daily bar whose low touches the level, at min(open, level). Touch fills are
-    optimistic, as in C2;
-  - exit: at the close of the 20th regular session, counting the fill session (C2's arm (ii); V2-5 itself
+    optimistic, as in the regime-filter study;
+  - exit: at the close of the 20th regular session, counting the fill session (the regime-filter study's arm (ii); V2-5 itself
     measured close(fill+20)). No stop, no target;
   - voids: a structural ex-date between `signal_d` and the exit voids the crossing;
-  - cost: one CNC round trip at the §7.1 notional implied by the signal's own stop at the floor-rung equity,
+  - cost: one CNC round trip at the per-trade-risk notional implied by the signal's own stop at the floor-rung equity,
     fixed at the row's first scoring.
 - **Looks:** look 1 is the first 20 filled crossings by (fill date, symbol), formed when all 20 are final. Look 2
   is the first 40 and supersedes it.
 - **Verdict:** DEMOTE iff the look's median net over its closed members ≤ 0.
-- **Scope:** this rule judges the signal's drift. The card's stop and target are D14/C5's question.
+- **Scope:** this rule judges the signal's drift. The card's stop and target are the paper no-stop exit test's question.
 - **Demotion:** add brk20 to `ops.main.NO_EDGE_SHADOW_STRATEGIES` in an owner-visible commit.
-- **Diagnostic only:** the C2 blocked arm (`rule_blocked`) against the admitted arm.
+- **Diagnostic only:** the regime-gate blocked arm (`rule_blocked`) against the admitted arm.
 - **Tool:** `scripts/forward_verdicts.py --rule brk20`.
 
 **ins kill rule (registered 2026-10-29, population from R).**
 - **Looks and verdict:** as brk20.
 - **Construct:** entry at the open of the publication session d, which is the validated next-session open after
-  the disclosure. Exit at the close of the 20th regular session. No stop. Cost at the §7.1 notional for the 5%
+  the disclosure. Exit at the close of the 20th regular session. No stop. Cost at the per-trade-risk notional for the 5%
   stop, fixed at first scoring.
 - **Demotion:** add ins to `NO_EDGE_SHADOW_STRATEGIES`, which wins over its registered edge (`gate.py:1046-1049`).
 - **Tool:** `scripts/forward_verdicts.py --rule ins`.

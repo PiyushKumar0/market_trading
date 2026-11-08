@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Build + persist the §3.2.4 universe for one date OUTSIDE the engine (owner tool, 2026-09-06).
+"""Build + persist the universe for one date OUTSIDE the engine (owner tool, 2026-09-06).
 
 Why it exists: the daily ``universe_build`` job is calendar-guarded at 08:30 and its output is what
 the swing/batch legs, the news resolver and the risk gate read for that date. When the configured
-index changes (O15: NIFTY 200 → NIFTY 500 on 2026-09-04) the first build under the new index only
-happens at the next trading day's 08:30 — or, on a late boot, inside the §2.6 catch-up chain. This
+index changes (owner decision: NIFTY 200 → NIFTY 500 on 2026-09-04) the first build under the new index only
+happens at the next trading day's 08:30 — or, on a late boot, inside the catch-up chain. This
 script performs exactly that build now, for an explicit ``--date``, wired the way the composition
 root wires it (``engine.ops.main`` ``job_universe``): MIS margins refreshed, surveillance lists
 current, the instruments token map hydrated from the persisted ``instruments_daily`` snapshot (the

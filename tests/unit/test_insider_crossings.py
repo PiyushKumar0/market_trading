@@ -1,4 +1,4 @@
-"""engine.datafeeds.insider_crossings — the live ``ins`` crossing rule (§2.8.2/§2.8.4): acq_mode
+"""engine.datafeeds.insider_crossings — the live ``ins`` crossing rule: acq_mode
 exclusions, the after-hours point-in-time entry session, and the trailing-10-session crossing + re-arm.
 """
 
@@ -35,7 +35,7 @@ def test_is_open_market_buy_taxonomy():
     assert is_open_market_buy("buy", "market purchase") is True          # case-insensitive txn_type
     # a Sell is never a buy
     assert is_open_market_buy("Sell", "Market Purchase") is False
-    # every §2.8.2 non-market mode is excluded (case-insensitive substring)
+    # every non-market mode is excluded (case-insensitive substring)
     for mode in ("ESOP", "ESOPs", "ESOP Allotment", "Gift", "Inter-se Transfer",
                  "Inter se Transfer", "Pledge Invocation", "Preferential Offer",
                  "Preferential Allotment", "Rights", "Bonus", "gift  "):
@@ -101,7 +101,7 @@ def test_insider_single_big_filing_fires_once_only():
 
 
 def test_after_hours_treats_unknown_midnight_time_as_after_close():
-    """A date-only broadcast parses to 00:00 — unknown time, NOT 'public before dawn' (WO-16).
+    """A date-only broadcast parses to 00:00 — unknown time, NOT 'public before dawn'.
 
     The feeds' date-only fallbacks and scripts/event_study.py's date-only earnings fallback both produce
     midnight; treating it as intraday would enter at that session's close on a filing that was in

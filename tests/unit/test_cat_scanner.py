@@ -1,4 +1,4 @@
-"""``cat`` v2 SHADOW scanner (§2.7 amendment, 2026-08-18) — watchlist row -> SignalCandidate.
+"""``cat`` v2 SHADOW scanner (2026-08-18) — watchlist row -> SignalCandidate.
 
 PINNED worked example: an ``originating``/``long`` watchlist row of weighted materiality 0.72, on a
 symbol whose PRIOR-session bhavcopy close was 100.00, at the shipped 5% stop. All arithmetic is
@@ -52,7 +52,7 @@ def _row(
 # =========================================================================== pinned level math
 def test_pinned_level_math_entry_stop_and_no_target():
     """entry = the pre-open reference (the PRIOR session's bhavcopy close); stop = entry x (1 - 5/100);
-    target = None — the v1 ATR/rr_target band died with the retired confirmation design (WO-18) and
+    target = None — the v1 ATR/rr_target band died with the retired confirmation design and
     is never re-invented."""
     cand = scan_entry(_row(), params=P)
     assert cand is not None
@@ -64,9 +64,9 @@ def test_pinned_level_math_entry_stop_and_no_target():
 
 
 def test_catalyst_ref_carries_the_watchlist_entry_id():
-    """The §6.5 audit link: candidate -> graded row -> (via cluster_refs) the headlines behind it.
+    """The audit link: candidate -> graded row -> (via cluster_refs) the headlines behind it.
     It is ALSO the field the pre-screen's catalyst cap keys on, so losing it would silently unbind
-    the §2.7 guard."""
+    the catalyst guard."""
     cand = scan_entry(_row("RELIANCE", entry_id="01J-ENTRY-ULID"), params=P)
     assert cand is not None
     assert cand.catalyst_ref == "01J-ENTRY-ULID"
@@ -74,7 +74,7 @@ def test_catalyst_ref_carries_the_watchlist_entry_id():
 
 
 def test_target_is_none_at_every_materiality():
-    """The absent target is STRUCTURAL, not an artefact of one fixture: `cat` exits on TIME (the §7.1
+    """The absent target is STRUCTURAL, not an artefact of one fixture: `cat` exits on TIME (the risk-limits
     20-td swing cap), so no story's strength may conjure a price level."""
     for materiality in (0.20, 0.55, 0.70, 0.95, 1.0):
         cand = scan_entry(_row(materiality=materiality), params=P)
@@ -99,7 +99,7 @@ def test_stop_sits_the_configured_percent_below_entry_across_prices():
 
 def test_entry_is_tick_rounded_not_the_raw_close():
     """A bhavcopy close is not guaranteed to sit on NSE's ₹0.05 tick; the ENTRY is quantized before
-    it can reach the §7.1 levels_coherent / sizing arithmetic (A10)."""
+    it can reach the levels_coherent / sizing arithmetic."""
     cand = scan_entry(_row(close="1234.567"), params=P)
     assert cand is not None
     assert cand.raw_levels.entry == Decimal("1234.55")     # 24691.34 ticks -> half-up 24691
@@ -116,9 +116,9 @@ def test_alternate_stop_pct_moves_only_the_stop():
         assert cand.raw_levels.stop == Decimal(expected), stop_pct
 
 
-# =========================================================================== fail-to-zero (§3.2.5)
+# =========================================================================== fail-to-zero
 def test_tick_rounding_degeneracy_emits_nothing():
-    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the §7.1
+    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the
     ``levels_coherent`` shape is then unsatisfiable and the rule must emit NOTHING rather than ship
     an incoherent plan (the brk20/ins convention: coherence is tested AFTER rounding).
 
@@ -146,7 +146,7 @@ def test_tick_rounding_boundary_the_smallest_price_that_still_emits():
 
 def test_missing_or_non_positive_reference_close_fails_to_none_never_raises():
     """A symbol with no prior daily bar in the lookback arrives with ``reference_close=None``; a
-    zero/negative close is corrupt data. Both cost this candidate and nothing else (§3.2.5)."""
+    zero/negative close is corrupt data. Both cost this candidate and nothing else."""
     assert scan_entry(_row(close=None), params=P) is None
     assert scan_entry(_row(close="0"), params=P) is None
     assert scan_entry(_row(close="-100.00"), params=P) is None
@@ -156,7 +156,7 @@ def test_missing_or_non_positive_reference_close_fails_to_none_never_raises():
 
 # =========================================================================== score
 def test_score_is_the_rows_weighted_materiality():
-    """§2.7: the score IS the digest's weighted materiality — the same number the grade decision
+    """The score IS the digest's weighted materiality — the same number the grade decision
     used (fan-out weighting already applied upstream). Nothing is recomputed here."""
     for materiality in (0.55, 0.70, 0.72, 0.9):
         cand = scan_entry(_row(materiality=materiality), params=P)
@@ -175,7 +175,7 @@ def test_score_is_clamped_into_the_contract_bounds():
 
 def test_missing_materiality_still_originates_but_ranks_at_the_floor():
     """The GRADE is the origination decision and the digest already made it, so a null materiality
-    may not silently drop a graded event — but an unmeasured magnitude must never flatter the §5.2(a)
+    may not silently drop a graded event — but an unmeasured magnitude must never flatter the
     funnel either, so it ranks at 0.0."""
     cand = scan_entry(_row(materiality=None), params=P)
     assert cand is not None
@@ -190,7 +190,7 @@ def test_is_eligible_pins_grade_direction_and_age():
     assert is_eligible(_row(age=2)) is False              # age-2 re-grade: the single-shot bound
     assert is_eligible(_row(age=None)) is False
     assert is_eligible(_row(grade="context")) is False
-    assert is_eligible(_row(direction="short")) is False   # §1.4.9 short gate is shut
+    assert is_eligible(_row(direction="short")) is False   # short gate is shut
     assert is_eligible(_row(direction=None)) is False
 
 
@@ -199,7 +199,7 @@ def test_sweep_owns_the_filter_so_a_widened_fetch_cannot_widen_the_rule():
     day's watchlist must still yield exactly the eligible rows."""
     rows = [
         _row("AAA"),                                   # eligible
-        _row("BBB", grade="context"),                  # never originates (§2.7 step 5)
+        _row("BBB", grade="context"),                  # never originates
         _row("CCC", direction="short"),                # long-only
         _row("DDD", age=2),                            # age-2 re-grade of a story already fired
         _row("EEE", age=None),
@@ -208,7 +208,7 @@ def test_sweep_owns_the_filter_so_a_widened_fetch_cannot_widen_the_rule():
 
 
 def test_age_two_regrade_of_the_same_story_never_re_originates():
-    """WO-18 single-shot semantics: the same (symbol, story) reappears on subsequent watchlists as
+    """cat v2 single-shot semantics: the same (symbol, story) reappears on subsequent watchlists as
     context/advisory, and the age bound — not a consumed flag — is what stops a second entry."""
     day1 = sweep_watchlist([_row("HAL", age=1, entry_id="e1")], params=P)
     day2 = sweep_watchlist([_row("HAL", age=2, entry_id="e2")], params=P)
@@ -218,7 +218,7 @@ def test_age_two_regrade_of_the_same_story_never_re_originates():
 
 # =========================================================================== sweep
 def test_sweep_orders_by_score_desc_then_symbol_and_drops_degenerates():
-    """§9.6 determinism, matching ``ins.sweep_crossings``/``brk20.sweep_daily`` exactly."""
+    """Determinism, matching ``ins.sweep_crossings``/``brk20.sweep_daily`` exactly."""
     rows = [
         _row("CCC", materiality=0.60),
         _row("AAA", materiality=0.95),
@@ -232,7 +232,7 @@ def test_sweep_orders_by_score_desc_then_symbol_and_drops_degenerates():
 
 
 def test_sweep_of_nothing_is_empty_not_an_error():
-    """The §2.7 fail-safe ladder's empty-watchlist case: no digest rows today ⇒ originate nothing."""
+    """The fail-safe ladder's empty-watchlist case: no digest rows today ⇒ originate nothing."""
     assert sweep_watchlist([], params=P) == []
 
 
@@ -253,7 +253,7 @@ def test_cat_is_not_a_registered_scanner():
     assert "cat" not in SCANNER_REGISTRY
 
 
-# ==================================================== catalyst_guard cap (§3.2.5 pre-screen, §7.1)
+# ==================================================== catalyst_guard cap (pre-screen)
 def _prescreen(**kw) -> SignalPreScreen:
     kw.setdefault("max_candidates_per_day", 20)
     return SignalPreScreen([], lambda bar: ScanContext(), None, **kw)
@@ -268,10 +268,10 @@ def _cat_cand(symbol: str, *, score: float = 0.8) -> SignalCandidate:
 
 
 def test_catalyst_guard_caps_entries_below_the_per_strategy_cap():
-    """§7.1 ``catalyst_guard.max_catalyst_entries_day`` (2) binds INDEPENDENTLY of
+    """``catalyst_guard.max_catalyst_entries_day`` (2) binds INDEPENDENTLY of
     ``max_per_strategy_day``: with the per-strategy cap deliberately loosened to 5, the third `cat`
     candidate of the day is still refused. This is the news carve-out's own anti-manipulation bound
-    and it is enforced at the pre-screen, never in the gate (§2.4 item 4)."""
+    and it is enforced at the pre-screen, never in the gate."""
     ps = _prescreen(max_per_strategy_day={"cat": 5}, catalyst_cap_fn=lambda: 2)
     admitted = ps.admit([_cat_cand("AAA"), _cat_cand("BBB"), _cat_cand("CCC")], DAY)
     assert [c.symbol for c in admitted] == ["AAA", "BBB"]
@@ -298,8 +298,8 @@ def test_catalyst_cap_binds_the_field_not_the_strategy_id():
 
 
 def test_unreadable_or_unwired_guard_refuses_catalyst_candidates_only():
-    """D7: an anti-manipulation surface that cannot be established must not degrade into "no cap".
-    Price baselines are untouched — a news-layer failure never blocks another strategy (E5)."""
+    """An anti-manipulation surface that cannot be established must not degrade into "no cap".
+    Price baselines are untouched — a news-layer failure never blocks another strategy."""
     def _boom() -> int:
         raise RuntimeError("limits.yaml hash mismatch")
 
@@ -310,7 +310,7 @@ def test_unreadable_or_unwired_guard_refuses_catalyst_candidates_only():
 
 
 def test_catalyst_cap_keeps_the_best_of_a_batch():
-    """WO-1 ranked admission still applies underneath: a binding catalyst cap keeps the batch's
+    """Ranked admission still applies underneath: a binding catalyst cap keeps the batch's
     highest-scored stories, not whichever the sweep emitted first."""
     ps = _prescreen(max_per_strategy_day={"cat": 5}, catalyst_cap_fn=lambda: 2)
     out = ps.admit(

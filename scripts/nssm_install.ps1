@@ -3,39 +3,38 @@
     Install / remove / control the `mt-engine` NSSM service for the AI trading platform.
 
 .DESCRIPTION
-    Plan refs: E7 (Windows ops via NSSM, SetThreadExecutionState, power-plan), D11 (service
-    account + DPAPI secrets, no secrets in repo/env), IMPLEMENTATION_PLAN.md §2.2 (process model:
+    Windows ops via NSSM, SetThreadExecutionState, power-plan; service account + DPAPI
+    secrets, no secrets in repo/env; process model:
     one supervised asyncio engine; manual/demand start; restart-on-failure gated to a crash during
     an active period; the engine spawns the pinned Claude Code CLI (agents.yaml llm.cli_path), which
-    authenticates with its own stored login; no engine code injects an OAuth token), §2.6 (operating model: the engine is up
+    authenticates with its own stored login; no engine code injects an OAuth token); operating model: the engine is up
     only during ACTIVE PERIODS and may be intentionally stopped between them; off outside an active
-    period is NORMAL, not a fault, so a clean self-initiated stop MUST NOT be auto-restarted) and the
-    authoritative service-setup text §10.7.
+    period is NORMAL, not a fault, so a clean self-initiated stop MUST NOT be auto-restarted.
 
-    This script is the §10.7 `scripts/nssm_install.ps1` and is intended to be idempotent: re-running
+    This script, `scripts/nssm_install.ps1`, is intended to be idempotent: re-running
     `-Action install` reconfigures the existing service rather than failing.
 
     DESIGN DECISIONS BAKED IN (read before changing):
 
     1. START TYPE = MANUAL / DEMAND (NSSM `Start = SERVICE_DEMAND_START`), NOT automatic.
-       Per §2.2/§2.6 the engine intends to be up only during active periods (morning prep, the
+       The engine intends to be up only during active periods (morning prep, the
        trade window + square-off, EOD jobs) and is deliberately stopped (PC slept) in between.
        Auto-start at boot would fight that model. Active periods are launched manually by the owner
        or by the wake-capable Windows Scheduled Tasks registered by `scripts/schedule_tasks.ps1`
-       (a separate optional helper, §10.7) — NOT by the service control manager.
+       (a separate optional helper) — NOT by the service control manager.
 
     2. RESTART-ON-FAILURE IS GATED BY THE `AppExit` MAPPING.
        NSSM's own exit handling distinguishes two outcomes via `AppExit`:
          - exit code 0  -> `AppExit 0 Exit`     : a CLEAN, self-initiated stop. NSSM does NOT
-                                                   restart. This is the §2.6 "intentional stop ==
+                                                   restart. This is the "intentional stop ==
                                                    normal, not a crash" path (planned stop / shutdown
-                                                   guard exit code, §10.8).
+                                                   guard exit code).
          - any other    -> `AppExit Default Restart` : a CRASH. NSSM restarts after the 15 s
                                                    `AppRestartDelay`, throttled by the crash-loop
                                                    guard below.
        NSSM cannot read a file or a database row as a restart predicate, so the exit code is the
        only gate at the NSSM level. "I intend to run" is the engine's sticky `engine_lifecycle.state`
-       (migration 0001; intend-to-run == state != 'STOPPED', §2.6 step 0/1): the engine uses it on
+       (migration 0001; intend-to-run == state != 'STOPPED'): the engine uses it on
        the next boot to decide whether the previous exit was intended. There is no sentinel file and
        no `AppEvents` hook (this script sets no `AppEvents` key).
 
@@ -44,22 +43,22 @@
                               failed start and applies the delay/backoff below instead of hot-looping.
        `AppRestartDelay 15000` : wait 15 s before each restart attempt so a reconnect storm or a
                               transient broker/Windows-Update hiccup does not spin the CPU. The 15 s
-                              delay also gives the §2.6 every-startup reconcile/catch-up room to run
+                              delay also gives the every-startup reconcile/catch-up room to run
                               cleanly rather than racing a half-dead predecessor. A persistent crash
-                              loop surfaces as repeated startup reports / SELFTEST_FAIL alerts (§10.3),
-                              and the missed-start watchdog (§10.4 case 19) covers a service that
+                              loop surfaces as repeated startup reports / SELFTEST_FAIL alerts,
+                              and the missed-start watchdog covers a service that
                               never comes up at all.
 
-    4. NO SECRETS IN THE SERVICE ENVIRONMENT (D11/§2.2/§2.4).
+    4. NO SECRETS IN THE SERVICE ENVIRONMENT.
        The engine loads its secrets from DPAPI (Windows Credential Manager via keyring) at startup.
        Injecting CLAUDE_CODE_OAUTH_TOKEN into the CLI child is NOT implemented: no engine code reads
        that secret, and the pinned Claude Code CLI (agents.yaml llm.cli_path; the SDK's bundled CLI
        only if that key is unset) authenticates with its own stored login. NSSM
        `AppEnvironmentExtra` for secrets is a DOCUMENTED FALLBACK ONLY (see the commented block in Install-Service) and is deliberately NOT
-       set by default — putting a token in the service env would violate R10 (secrets must live in an
-       encrypted store) and would let a stray ANTHROPIC_API_KEY silently outrank the OAuth token (D2).
+       set by default — putting a token in the service env would violate the rule that secrets must live in an
+       encrypted store, and would let a stray ANTHROPIC_API_KEY silently outrank the OAuth token.
 
-    5. STDOUT / STDERR -> rotating logs under data\logs (E7).
+    5. STDOUT / STDERR -> rotating logs under data\logs.
        `AppStdout` / `AppStderr` point at data\logs\service.out.log / service.err.log with NSSM's
        online rotation enabled. These capture pre-logger bootstrap output and any hard crash before
        structlog is up; normal structured logs are written by core.log to data\logs\engine.log.
@@ -71,7 +70,7 @@
     Full path to nssm.exe. If omitted, the script looks on PATH.
 
 .PARAMETER ServiceName
-    Service name. Default 'mt-engine' (§2.2). Override only for side-by-side test installs.
+    Service name. Default 'mt-engine'. Override only for side-by-side test installs.
 
 .PARAMETER RepoRoot
     Repo root (AppDirectory / working directory). Defaults to the parent of this script's folder.
@@ -110,7 +109,7 @@ param(
     [string]$RepoRoot,
 
     # Windows account the service logs on as (e.g. '.\piyush.kumar_atari'). REQUIRED in practice:
-    # DPAPI secrets decrypt only under the owner's profile (D11); LocalSystem cannot read them.
+    # DPAPI secrets decrypt only under the owner's profile; LocalSystem cannot read them.
     [string]$ServiceUser,
 
     [switch]$Confirm
@@ -130,7 +129,7 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $PythonExe   = Join-Path $RepoRoot '.venv\Scripts\python.exe'
-$LogsDir     = Join-Path $RepoRoot 'data\logs'           # core.log + service stdout/stderr (E7)
+$LogsDir     = Join-Path $RepoRoot 'data\logs'           # core.log + service stdout/stderr
 $RunDir      = Join-Path $RepoRoot 'data\run'
 $StdoutLog   = Join-Path $LogsDir 'service.out.log'
 $StderrLog   = Join-Path $LogsDir 'service.err.log'
@@ -237,12 +236,12 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'DisplayName',   'MT Engine (AI trading platform)')
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Description',   'Single-user AI trading engine (NSE/Kite). Manual/demand start per §2.6; secrets via DPAPI per D11.')
 
-    # (1) MANUAL / DEMAND start -- never auto (§2.2/§2.6).
+    # (1) MANUAL / DEMAND start -- never auto.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'Start', 'SERVICE_DEMAND_START')
 
     # (2) Exit handling: clean exit(0) => stay stopped; anything else => restart (crash path).
     #     NSSM cannot read a predicate, so the AppExit codes are the gate; the engine's sticky
-    #     engine_lifecycle.state is its own "intend to run" record (§2.6 step 1).
+    #     engine_lifecycle.state is its own "intend to run" record.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppExit', 'Default', 'Restart')
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppExit', '0', 'Exit')
 
@@ -256,7 +255,7 @@ function Install-Service {
     #      every stop since 2026-09-02 died mid-backup and was recorded as a crash (observed 09-23).
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStopMethodConsole', '30000')
 
-    # (5) Rotating stdout/stderr under data\logs (E7).
+    # (5) Rotating stdout/stderr under data\logs.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStdout', $StdoutLog)
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStderr', $StderrLog)
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppStdoutCreationDisposition', '4')  # append
@@ -265,7 +264,7 @@ function Install-Service {
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppRotateOnline',  '1')
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppRotateBytes',   '10485760')        # 10 MiB
 
-    # (6) Service account (D11 -- REQUIRED, not optional): the DPAPI secrets (Kite keys, Telegram
+    # (6) Service account (REQUIRED, not optional): the DPAPI secrets (Kite keys, Telegram
     #     bot token, Claude OAuth) were sealed under the OWNER's Windows profile. A service left on
     #     the LocalSystem default CANNOT decrypt them -- the engine boots secret-less and freezes.
     #     NSSM grants the 'Log on as a service' right automatically when ObjectName is set.
@@ -282,14 +281,14 @@ function Install-Service {
     }
 
     # ----------------------------------------------------------------------------------------------
-    # DOCUMENTED FALLBACK ONLY -- DO NOT UNCOMMENT BY DEFAULT (D11/§2.2/§2.4, R10/D2).
+    # DOCUMENTED FALLBACK ONLY -- DO NOT UNCOMMENT BY DEFAULT.
     #
     # If, and only if, the CLI's own stored login is ever unusable on this box (token injection from
     # DPAPI is not implemented), the OAuth token MAY be injected via the service environment as a
     # stopgap. This is the
-    # NSSM-AppEnvironmentExtra path that D11 originally suggested and that §2.2 explicitly demotes to
+    # NSSM-AppEnvironmentExtra path originally suggested and explicitly demoted to
     # a fallback. It is INSECURE relative to the default (the token sits in plaintext in the service
-    # registry config) and risks a stray ANTHROPIC_API_KEY silently outranking it (D2). Prefer fixing
+    # registry config) and risks a stray ANTHROPIC_API_KEY silently outranking it. Prefer fixing
     # DPAPI. If you must use it, set it OUT-OF-BAND (read from DPAPI/keyring at install time) so the
     # literal never lands in this file or in source control:
     #
@@ -297,7 +296,7 @@ function Install-Service {
     #   # Invoke-Nssm -Nssm $Nssm -NssmArgs @('set', $ServiceName, 'AppEnvironmentExtra', "CLAUDE_CODE_OAUTH_TOKEN=$tok")
     #
     # Note: never set ANTHROPIC_API_KEY here unless the owner has deliberately enabled pay-as-you-go
-    # overflow (D6) -- the startup self-test asserts it is absent (§2.2).
+    # overflow -- the startup self-test asserts it is absent.
     # ----------------------------------------------------------------------------------------------
 
     Write-Host ""
@@ -347,7 +346,7 @@ function Stop-Engine {
         return
     }
     # A clean `nssm stop` lets the engine run its shutdown guard (flatten/verify protection,
-    # snapshot backup if due) and exit 0 -> AppExit 0 Exit -> NOT auto-restarted (§2.6).
+    # snapshot backup if due) and exit 0 -> AppExit 0 Exit -> NOT auto-restarted.
     Invoke-Nssm -Nssm $Nssm -NssmArgs @('stop', $ServiceName)
     Write-Host "Stopped cleanly. Being off between active periods is NORMAL -- no auto-restart (§2.6)."
 }

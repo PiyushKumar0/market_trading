@@ -1,11 +1,11 @@
-"""Token-budget governor (D6, §5.6).
+"""Token-budget governor.
 
-No credit-balance API exists (D6), so this ledger IS the platform's only view of LLM spend: every SDK
-result message's billed usage is priced at the D4 standard rates in ``config/agents.yaml``, appended to
+No credit-balance API exists, so this ledger IS the platform's only view of LLM spend: every SDK
+result message's billed usage is priced at the standard rates in ``config/agents.yaml``, appended to
 ``budget_ledger``, and the window-to-date total drives the degrade ladder. A tier change publishes on
-``budget.state`` (§3.2.1) — the dashboard, the owner alert (R8), and the D6 mode-capability mapping all
+``budget.state`` — the dashboard, the owner alert, and the mode-capability mapping all
 read that single signal. The ledger dollar is a governor PROXY: billing is the subscription's weekly
-quota, so there is no console figure to reconcile (RUNBOOK G2 budget-discipline item, re-scoped
+quota, so there is no console figure to reconcile (re-scoped
 2026-08-13). Systematic under-count (a timed-out call books only the per-turn usage streamed before
 the cutoff, often none, while the subscription bills the whole call) is why the ladder trips well
 below the credit.
@@ -18,12 +18,12 @@ the forward cap 48→4 for three weeks). The anchor is ``llm.quota_window`` conf
 ``window_bounds`` are its wall-clock arithmetic and are deliberately calendar-BLIND (a Thursday holiday
 still rolls the quota — the NSE calendar only shapes the pace denominator).
 
-Pace is measured over TRADING sessions (R6): counting calendar days would declare a perfectly healthy
+Pace is measured over TRADING sessions: counting calendar days would declare a perfectly healthy
 week over-pace every weekend. "No burn on holidays" is emergent — no calls fire — but the denominator
 must agree with that or the pace is nonsense. The two boundary Thursdays are HALF sessions: the morning
 is billed to the window ending at 14:00, the afternoon to the one starting there.
 
-Pay-as-you-go overflow (``llm.overflow_enabled``) is off by default (D6) and is NOT a lever here: DG4
+Pay-as-you-go overflow (``llm.overflow_enabled``) is off by default and is NOT a lever here: DG4
 trips at the credit regardless, and enabling overflow is an owner action outside this class.
 """
 
@@ -51,20 +51,20 @@ _log = get_logger("engine.intelligence.governor")
 
 _MICRO = Decimal(1_000_000)
 
-# §11.2 cache pricing (D8): read = 0.1× the input rate, write = 1.25× the input rate. Both are
+# Cache pricing: read = 0.1× the input rate, write = 1.25× the input rate. Both are
 # multipliers ON THE INPUT RATE, never separate table entries — agents.yaml lists input/output only.
 CACHE_READ_MULT = Decimal("0.1")
 CACHE_WRITE_MULT = Decimal("1.25")
 
-# §5.4/§5.6 DG2 row: news-analyst batching coarsens from the normal 30-min cadence to 60 min.
+# DG2 row: news-analyst batching coarsens from the normal 30-min cadence to 60 min.
 NEWS_BATCH_CADENCE_MIN = 30
 DEGRADED_NEWS_BATCH_CADENCE_MIN = 60
-# §5.6 DG1 row: the degraded pre-screen cap is a FRACTION of the configured base, not the old flat 4 —
+# DG1 row: the degraded pre-screen cap is a FRACTION of the configured base, not the old flat 4 —
 # that constant was written when the base was 6 and silently became a 92% cut once the owner raised the
 # base to 48 (2026-08-18). Owner-tunable as ``degrade_ladder.DG1.degraded_forward_cap_frac``.
 DEFAULT_DEGRADED_FORWARD_CAP_FRAC = Decimal("0.67")
 
-# §5.6 DG3 row: all intraday LLM calls off + news analyst off. The pre-open planner is intraday-class
+# DG3 row: all intraday LLM calls off + news analyst off. The pre-open planner is intraday-class
 # (it plans the session it can no longer afford to run); nightly/weekly keep running — they are the
 # cheap-per-window agents that produce the learning the ladder exists to protect.
 DG3_BLOCKED_AGENTS = frozenset({"intraday_analyst", "news_analyst", "preopen_planner"})
@@ -99,7 +99,7 @@ class WindowAnchor(NamedTuple):
 
 
 class TokenUsage(BaseModel):
-    """Billed usage of one SDK call, as reported on its result message (D6)."""
+    """Billed usage of one SDK call, as reported on its result message."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -124,7 +124,7 @@ def _pct(value: Any) -> Decimal:
 
 
 class BudgetGovernor:
-    """Prices SDK usage into ``budget_ledger`` and derives the §5.6 degrade tier from it."""
+    """Prices SDK usage into ``budget_ledger`` and derives the degrade tier from it."""
 
     def __init__(
         self,
@@ -165,7 +165,7 @@ class BudgetGovernor:
         self._dg2_global = _pct(dg2.get("global_alloc_pct", 85))
         self._dg3_global = _pct(dg3.get("global_alloc_pct", 95))
         # DG4 is a latch on the WINDOW it was raised in, so the next Thursday 14:00 clears it without
-        # owner action (§5.6: the quota itself is what refilled).
+        # owner action (the quota itself is what refilled).
         self._billing_error_window: str | None = None
         # Last tier PUBLISHED, not the tier itself: ``degrade_tier`` stays a pure function of the ledger
         # so nothing can desync it. This latch exists only so the rollover DG4→DG0 recovery still alerts.
@@ -183,7 +183,7 @@ class BudgetGovernor:
         base = Path(cfg_dir) if cfg_dir is not None else config_dir()
         return cls(conn, clock, calendar, load_yaml(base / "agents.yaml"), bus=bus)
 
-    # ----------------------------------------------------------------- pricing (D4 rates)
+    # ----------------------------------------------------------------- pricing
     def price(self, model: str, usage: TokenUsage) -> Decimal:
         """USD cost of one call. Decimal throughout — a float here silently corrupts the ledger."""
         rates = self._pricing.get(model)
@@ -208,7 +208,7 @@ class BudgetGovernor:
         usage: TokenUsage,
         at: datetime | None = None,
     ) -> DegradeTier:
-        """Price + append one call, then recompute the tier; publish only if it CHANGED (R8)."""
+        """Price + append one call, then recompute the tier; publish only if it CHANGED."""
         when = at if at is not None else self._clock.now()
         if when.tzinfo is None:
             # ``at`` is range-scanned as an ISO STRING (see :meth:`_window_iso`), which only sorts if
@@ -233,7 +233,7 @@ class BudgetGovernor:
                     usage.out_tokens,
                     usage.cache_read,
                     usage.cache_write,
-                    str(cost),          # TEXT column: decimal-as-string (§8.1), never a float
+                    str(cost),          # TEXT column: decimal-as-string, never a float
                     _month_key(when),
                 ),
             )
@@ -250,13 +250,13 @@ class BudgetGovernor:
         return tier
 
     def note_billing_error(self, reason: str = "sdk_billing_error") -> None:
-        """An SDK billing error trips DG4 on its own (§5.6): the ledger only ever sees calls that
+        """An SDK billing error trips DG4 on its own: the ledger only ever sees calls that
         SUCCEEDED, so it can read healthy at the exact moment the quota ran out."""
         self._billing_error_window = self._window()
         _log.error("budget_billing_error", reason=reason, window=self._billing_error_window)
 
     async def raise_billing_error(self, reason: str = "sdk_billing_error") -> DegradeTier:
-        """:meth:`note_billing_error` + publish the resulting tier change (R8 alerts on EVERY change)."""
+        """:meth:`note_billing_error` + publish the resulting tier change (the owner is alerted on EVERY change)."""
         window = self._window()
         prior = self._last_tier if self._last_tier is not None else self.degrade_tier(window)
         self.note_billing_error(reason)
@@ -272,7 +272,7 @@ class BudgetGovernor:
         """Per-agent WEEKLY allocations (USD), a copy — public for the owner surfaces."""
         return dict(self._allocations)
 
-    # ----------------------------------------------------------------- quota window (§5.6)
+    # ----------------------------------------------------------------- quota window
     def window_key(self, at: datetime | None = None) -> str:
         """Key of the quota window containing ``at`` (default: now) — the start Thursday's ISO date."""
         return _window_key(at if at is not None else self._clock.now(), self._anchor)
@@ -318,13 +318,13 @@ class BudgetGovernor:
 
     def _sum(self, sql: str, params: tuple[Any, ...]) -> Decimal:
         # Summed in Python, NOT by SQLite: SUM() on a TEXT column coerces to float and reintroduces the
-        # binary-float error the decimal-as-string convention exists to keep out (§8.1).
+        # binary-float error the decimal-as-string convention exists to keep out.
         rows = self._conn.execute(sql, params).fetchall()
         return sum((Decimal(r["cost_usd"]) for r in rows), Decimal(0))
 
-    # ----------------------------------------------------------------- pace (R6, trading sessions)
+    # ----------------------------------------------------------------- pace (trading sessions)
     def trading_sessions(self, window: str | None = None) -> tuple[Decimal, Decimal]:
-        """``(elapsed_including_today, total)`` trading SESSIONS in ``window`` (R6).
+        """``(elapsed_including_today, total)`` trading SESSIONS in ``window``.
 
         The two boundary Thursdays are half-sessions — the morning belongs to the window that ENDS at
         14:00, the afternoon to the one that starts there — so each contributes 0.5 when it is a
@@ -346,7 +346,7 @@ class BudgetGovernor:
         return elapsed, total
 
     def pro_rata_to_date(self, window: str | None = None) -> Decimal | None:
-        """Credit the window SHOULD have consumed by the close of today (R6), or ``None``.
+        """Credit the window SHOULD have consumed by the close of today, or ``None``.
 
         ``None`` is UNMEASURABLE — deliberately NOT ``Decimal(0)``, which reads as "nothing should
         have been spent yet" and is the same value a genuine zero pace would carry. Every consumer
@@ -355,7 +355,7 @@ class BudgetGovernor:
         the owner surfaces would print ``$0.0000`` where the honest answer is "not yet measurable".
 
         Two states reach it:
-          * ``total == 0`` — no calendar file for that year (R6: never over-pace on no data);
+          * ``total == 0`` — no calendar file for that year (never over-pace on no data);
           * ``elapsed == 0`` — the window's sessions have not started. The reset is wall-clock, so a
             window whose reset Thursday is an NSE holiday OPENS at 14:00 on a zero-session day, and
             that evening's news sweep (19:00–22:00, not window-gated) bills before session one.
@@ -365,7 +365,7 @@ class BudgetGovernor:
             return None
         return self._credit * elapsed / total
 
-    # ----------------------------------------------------------------- degrade ladder (§5.6/§11.2)
+    # ----------------------------------------------------------------- degrade ladder
     def degrade_tier(self, window: str | None = None) -> DegradeTier:
         """The PLATFORM tier for ``window`` (default: the live one).
 
@@ -397,7 +397,7 @@ class BudgetGovernor:
         return DegradeTier.DG0
 
     def agent_degraded(self, agent_id: str) -> bool:
-        """``agent_id`` is over its own DG1 share of its weekly allocation (§5.6).
+        """``agent_id`` is over its own DG1 share of its weekly allocation.
 
         The per-agent half of the old DG1 rule, decoupled from the platform tier: it throttles only the
         knobs that agent drives (its forward cap / batch cadence), never everyone else's.
@@ -410,11 +410,11 @@ class BudgetGovernor:
 
     # ----------------------------------------------------------------- call admission
     def can_invoke(self, agent_id: str) -> InvokeDecision:
-        """Whether ``agent_id`` may make a call now (§5.6).
+        """Whether ``agent_id`` may make a call now.
 
         The per-agent allocation is a hard window-long stop independent of the ladder: one runaway agent
-        must not be able to spend the other agents' week. The reserve is owner-assignable via ``/budget``
-        (§5.6) — until that lands it is simply unspent.
+        must not be able to spend the other agents' week. The reserve is owner-assignable via ``/budget`` — until that
+        lands it is simply unspent.
         """
         tier = self.degrade_tier()
         alloc = self._allocations.get(agent_id)
@@ -426,10 +426,10 @@ class BudgetGovernor:
             return InvokeDecision(allowed=False, tier=tier, reason="DG3_intraday_llm_off")
         return InvokeDecision(allowed=True, tier=tier)
 
-    # ----------------------------------------------------------------- behaviour knobs (§5.6)
+    # ----------------------------------------------------------------- behaviour knobs
     def prescreen_forward_cap(self) -> int:
         """Pre-screen candidates forwarded to the analyst per day (the scanners keep running — they are
-        deterministic and free; only the forwarding costs tokens, §5.6/§3.2.5).
+        deterministic and free; only the forwarding costs tokens).
 
         Full base at DG0 with the intraday analyst inside its share; otherwise a PROPORTIONAL cut to
         ``floor(base × degraded_forward_cap_frac)``, floored at 1 so a degraded platform still forwards
@@ -526,7 +526,7 @@ def _parse_cap_frac(raw: Any) -> Decimal:
 def _window_key(at: datetime, anchor: WindowAnchor) -> str:
     """ISO date of the anchor weekday whose reset time opened the quota window containing ``at``.
 
-    Wall-clock and calendar-BLIND by design (§5.6): the subscription refills on Thursday 14:00 IST
+    Wall-clock and calendar-BLIND by design: the subscription refills on Thursday 14:00 IST
     whether or not the NSE is open, so a holiday must not move the boundary. ``at`` is normalised to
     IST first — the key is an IST date and a UTC-stamped caller would otherwise key the wrong week.
     """
@@ -562,7 +562,7 @@ def _window_bounds(window: str, anchor: WindowAnchor) -> tuple[datetime, datetim
 def _month_key(at: datetime) -> str:
     """``budget_ledger.month`` — HISTORY ONLY since 2026-09-12: still written on every row so the
     pre-weekly ledger keeps one consistent column. No reader is left — the ladder ranges on ``at``,
-    ``ops/nightly_review.py`` slices ``at`` by day, and ``scripts/g2_evidence.py`` moved its C5 block
+    ``ops/nightly_review.py`` slices ``at`` by day, and ``scripts/g2_evidence.py`` moved its budget block
     onto the quota window on 2026-09-12 — so the column and ``idx_budget_month`` stay only as history;
     check those three before assuming a new query may key on it."""
     return at.strftime("%Y-%m")

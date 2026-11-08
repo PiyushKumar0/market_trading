@@ -1,11 +1,11 @@
-"""ValidationPipeline / fold_pass_min tests (E2 / §6.4 / §9.1).
+"""ValidationPipeline / fold_pass_min tests.
 
 Pure tier (no vectorbt): fold_pass_min exact boundaries, non-promotable without N, promotable iff
 the CPCV fold-pass fraction ≥ fold_pass_min(N), anchored walk-forward split determinism, honest
 negative-result rendering. The one skfolio-backed test (real CPCV purge/embargo no-overlap) is marked
 ``needs_heavy_deps``.
 
-WO-3 (2026-08-13) adds two things pinned here:
+The 2026-08-13 margin-floor change adds two things pinned here:
 
 * the **margin floor** — median PASSING-split expectancy ≥ ``cost_floor / MARGIN_FLOOR_DAYS`` per
   day, fail-closed when no cost floor is supplied — tested at the exact 12/15 = 80.0% boundary that
@@ -51,15 +51,15 @@ from engine.learning.validate import (
 
 FIXED_NOW = datetime(2026, 6, 17, 18, 0, tzinfo=IST)
 
-#: The CNC ₹20k round-trip friction after WO-2 = 0.2992% statutory fees + 0.0200% measured spread.
-#: The WO-3 margin floor is this / MARGIN_FLOOR_DAYS = 0.01596 %/day.
+#: The CNC ₹20k round-trip friction after the spread correction = 0.2992% statutory fees + 0.0200% measured spread.
+#: The margin floor is this / MARGIN_FLOOR_DAYS = 0.01596 %/day.
 CNC_COST_FLOOR_PCT = 0.3192
 #: A margin that clears the floor comfortably (used wherever the test is about a DIFFERENT rule).
 CLEARS = 0.05
 
 
 def _decide(n, fraction, **kw):
-    """promotion_decision with the WO-3 margin inputs defaulted to a clearly-clearing edge, so a
+    """promotion_decision with the margin inputs defaulted to a clearly-clearing edge, so a
     test about (say) the drawdown gate is not silently answered by the margin floor."""
     kw.setdefault("median_passing_expectancy_pct", CLEARS)
     kw.setdefault("cost_floor_pct", CNC_COST_FLOOR_PCT)
@@ -73,7 +73,7 @@ def clock() -> Clock:
 
 # --------------------------------------------------------------------------- fold_pass_min boundaries
 def test_fold_pass_min_exact_boundaries():
-    # §9.1: 60% for N ≤ 10, 70% for 11 ≤ N ≤ 30, 80% for N > 30 — boundaries at 10/11/30/31.
+    # 60% for N ≤ 10, 70% for 11 ≤ N ≤ 30, 80% for N > 30 — boundaries at 10/11/30/31.
     assert fold_pass_min(10) == 0.60
     assert fold_pass_min(11) == 0.70
     assert fold_pass_min(30) == 0.70
@@ -126,17 +126,17 @@ def test_promotion_boundary_at_n31():
 
 
 def test_promotion_drawdown_gate():
-    # Even a passing fold fraction is rejected when max DD exceeds 1.25× champion's (§6.4 step 2).
+    # Even a passing fold fraction is rejected when max DD exceeds 1.25× champion's.
     ok, reasons = _decide(5, 1.0, max_dd_pct=20.0, champion_max_dd_pct=10.0)
     assert ok is False
     assert any("drawdown" in r.lower() for r in reasons)
     assert _decide(5, 1.0, max_dd_pct=12.0, champion_max_dd_pct=10.0)[0] is True
 
 
-# --------------------------------------------------------------------------- WO-3 margin floor
+# --------------------------------------------------------------------------- margin floor
 def test_margin_floor_constant_and_derivation():
-    """floor = cost_floor / 20 sessions — the one round trip a position must earn over the §7.1
-    swing holding cap. On the post-WO-2 CNC surface that is 0.3192% / 20 = 0.01596 %/day."""
+    """floor = cost_floor / 20 sessions — the one round trip a position must earn over the risk-limits
+    swing holding cap. On the post-spread-correction CNC surface that is 0.3192% / 20 = 0.01596 %/day."""
     assert MARGIN_FLOOR_DAYS == 20
     assert margin_floor_pct_per_day(CNC_COST_FLOOR_PCT) == pytest.approx(0.01596)
     assert margin_floor_pct_per_day(None) is None
@@ -146,7 +146,7 @@ def test_margin_floor_constant_and_derivation():
 
 
 def test_promotion_rejects_the_recorded_rsi2_boundary_pass():
-    """THE case WO-3 exists for: 12/15 = exactly 80.0% (a strict-< pass at N>30) with the recorded
+    """THE case the margin floor exists for: 12/15 = exactly 80.0% (a strict-< pass at N>30) with the recorded
     rsi2 median passing split ~0.0006 %/day — positive, and ~27x below the cost floor."""
     n, fraction = 40, 12 / 15
     assert fraction == fold_pass_min(n)                       # sits EXACTLY on the bar
@@ -170,7 +170,7 @@ def test_promotion_accepts_the_same_boundary_with_a_cost_clearing_margin():
 
 def test_margin_floor_boundary_is_exact_and_inclusive():
     """>= the floor passes; a hair below fails (the floor itself is a PASS, unlike fold_pass_min's
-    strict-< comparison, which WO-3 deliberately left alone)."""
+    strict-< comparison, which the margin floor change deliberately left alone)."""
     floor = margin_floor_pct_per_day(CNC_COST_FLOOR_PCT)
     assert promotion_decision(
         40, 12 / 15, median_passing_expectancy_pct=floor, cost_floor_pct=CNC_COST_FLOOR_PCT
@@ -196,12 +196,12 @@ def test_promotion_fails_closed_without_any_passing_split():
 
 
 def test_fold_pass_fraction_comparison_stays_strict_less_than():
-    """WO-3 explicitly did NOT move this boundary: fraction == fold_pass_min(N) still PASSES."""
+    """The margin floor explicitly did NOT move this boundary: fraction == fold_pass_min(N) still PASSES."""
     for n in (10, 11, 31, 40):
         assert _decide(n, fold_pass_min(n))[0] is True
 
 
-# --------------------------------------------------------------------------- WO-3 winner stability
+# --------------------------------------------------------------------------- winner stability
 def test_winner_stability_flag_states():
     same = winner_stability({"a": 1.0, "b": 2.0}, {"a": 1.0, "b": 2.0},
                             grid_density="coarse", adjacent_density="medium")
@@ -224,7 +224,7 @@ def test_winner_stability_flag_states():
 
 
 def test_winner_instability_is_a_flag_not_an_auto_fail(clock):
-    """The report records the instability; the verdict is unaffected (WO-3 (b))."""
+    """The report records the instability; the verdict is unaffected."""
     pipe = _pipeline(clock)
     ps = ParamSet(
         strategy_id="rsi2", params={"rsi_entry": 3.0}, trial_count_n=10,
@@ -249,7 +249,7 @@ def test_walk_forward_anchored_and_deterministic():
     dates = _daily_dates(date(2024, 1, 1), 300)  # ~10 months
     a = walk_forward_splits(dates)
     b = walk_forward_splits(dates)
-    assert a == b  # deterministic (§9.6)
+    assert a == b  # deterministic
     assert a, "expected at least one fold over 10 months with 6m train / 1m test"
     first = dates[0]
     for tr_s, tr_e, te_s, te_e in a:
@@ -325,13 +325,13 @@ def test_pipeline_promotable_iff_fraction_meets_bar(clock):
 
 def _tiny_margin_series() -> pd.Series:
     """Same 3/5 fold-pass shape, but the winning folds earn ~0.0006%/day — the recorded rsi2
-    magnitude: positive after costs, ~27x below the WO-3 margin floor."""
+    magnitude: positive after costs, ~27x below the margin floor."""
     idx = [date(2024, 1, 1) + timedelta(days=i) for i in range(40)]
     return pd.Series([0.000006] * 20 + [-0.01] * 20, index=idx, dtype="float64")
 
 
 def test_pipeline_margin_floor_blocks_a_near_zero_margin_pass(clock):
-    """End-to-end: the fold-pass rule says yes, the margin floor says no (WO-3 (a))."""
+    """End-to-end: the fold-pass rule says yes, the margin floor says no."""
     pipe = ValidationPipeline(
         returns_provider=lambda sid, params: _tiny_margin_series(),
         clock=clock,
@@ -372,7 +372,7 @@ def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
     assert rows[0]["strategy_id"] == "rsi2"
     assert rows[0]["status"] == "candidate"
     stored = json.loads(rows[0]["validation_report"])
-    assert stored["trial_count_n"] == 10  # the report CITES N (§6.4 step 2)
+    assert stored["trial_count_n"] == 10  # the report CITES N
     # artifacts written
     md = tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.md"
     js = tmp_path / f"rsi2_{report.generated_at:%Y%m%dT%H%M%S}.json"
@@ -380,7 +380,7 @@ def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
 
 
 def test_report_artifacts_carry_the_wo3_flag_and_margin_floor(clock, tmp_path):
-    """WO-3 acceptance: the re-issued reports SHOW the winner-stability flag and the margin floor —
+    """Acceptance: the re-issued reports SHOW the winner-stability flag and the margin floor —
     as prose in the md (via notes) and as structured fields in the json."""
     pipe = _pipeline(clock, reports_dir=tmp_path)
     ps = ParamSet(
@@ -419,8 +419,8 @@ def _positional_pipeline(clock, *, margin_floor_days, reports_dir=None) -> Valid
 
 
 def test_report_records_the_margin_floor_denominator_it_used(clock, tmp_path):
-    """R2 (2026-09-12): the floor's DENOMINATOR is a protocol choice (20 sessions for a swing leg,
-    the §7.1 120 for a positional one), so %/day alone does not make the artifact reproducible —
+    """Realized-hold reporting (2026-09-12): the floor's DENOMINATOR is a protocol choice (20 sessions for a swing leg,
+    the risk-limits 120 for a positional one), so %/day alone does not make the artifact reproducible —
     the report must carry and PRINT the days. Same returns, two denominators, opposite verdicts."""
     ps = ParamSet(strategy_id="trend", params={}, trial_count_n=9)
 
@@ -489,7 +489,7 @@ def test_report_surfaces_negatives_prominently(tmp_path):
     report = _negative_report()
     md = reports.render_markdown(report)
     assert "NOT PROMOTABLE" in md
-    assert "NEGATIVE" in md.upper()  # the honest negative-expectancy banner (C9)
+    assert "NEGATIVE" in md.upper()  # the honest negative-expectancy banner
     assert "fold_pass_min(N=15)" in md
     art = reports.write_report(report, tmp_path)
     assert art.markdown.exists() and art.json.exists()
@@ -520,7 +520,7 @@ def test_cpcv_purge_embargo_no_overlap():
                 blocks.append((lo, prev))
                 lo = prev = x
         blocks.append((lo, prev))
-        # no train index may fall inside [block_lo - purge, block_hi + embargo] (§9.1)
+        # no train index may fall inside [block_lo - purge, block_hi + embargo]
         for b_lo, b_hi in blocks:
             forbidden = set(range(b_lo - purge, b_hi + embargo + 1))
             assert train_set.isdisjoint(forbidden)
@@ -528,10 +528,10 @@ def test_cpcv_purge_embargo_no_overlap():
         assert train_set.isdisjoint(set(int(x) for x in test_sorted))
 
 
-# ================================================== R2 (2026-09-12) realized-hold reporting cells
+# ================================================== 2026-09-12 realized-hold reporting cells
 #
-# The WO-3 floor is cost_floor / <sessions>, and the denominator is a HORIZON. Both registered
-# values are §7.1 CAPS (20 swing / 120 positional), and a CAP is an upper bound on the hold: the
+# The margin floor is cost_floor / <sessions>, and the denominator is a HORIZON. Both registered
+# values are risk-limits CAPS (20 swing / 120 positional), and a CAP is an upper bound on the hold: the
 # 2026-09-12 trend run passed at 3.89x the 120-session floor while its median trade was held 33
 # sessions, where the same edge clears by 1.07x. These cells put the measured horizon in the
 # artifact. They are REPORTING ONLY and the assertions below pin that: the verdict must not move.
@@ -562,7 +562,7 @@ def test_realized_hold_cells_rebase_the_same_cost_floor_on_the_measured_horizon(
     # and the headroom the manager reads the verdict against: ~1.07x at the median, ~1.6x at the mean
     assert median_all.headroom_x == pytest.approx(1.07, abs=0.01)
     assert mean_all.headroom_x == pytest.approx(1.58, abs=0.01)
-    # vs 3.89x at the 120-session §7.1 CAP the run was registered at
+    # vs 3.89x at the 120-session risk-limits CAP the run was registered at
     assert 0.010342 / margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=120) == (
         pytest.approx(3.89, abs=0.01)
     )
@@ -646,7 +646,7 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
     assert "MEASURED holding period" in md
     assert "realized MEDIAN hold (all trades)" in md
     assert "still open at the window edge: 30" in md
-    # WO-M: closed-only is the headline/ranked figure; all-trades is what is reported beside it
+    # Closed-only is the headline/ranked figure; all-trades is what is reported beside it
     assert "CLOSED round trips only (the sweep headline and ranking statistic" in md
     assert "SURVIVORSHIP" in md
     assert "120 sessions" in md          # the registered denominator is still what the verdict used
@@ -660,8 +660,8 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
 
 
 def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(clock, tmp_path):
-    """WO-M (2026-09-13): a verdict is only comparable with one produced under the same sweep
-    mechanics, so the stamp is rendered and persisted with the report — and, like every other R2/WO-M
+    """Sweep-mechanics fix (2026-09-13): a verdict is only comparable with one produced under the same sweep
+    mechanics, so the stamp is rendered and persisted with the report — and, like every other
     reporting field, it is not an input to the promotion rule."""
     def _report(**extra):
         pipe = ValidationPipeline(
@@ -699,10 +699,10 @@ def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(c
 def test_a_defaults_fallback_verdict_is_flagged_everywhere_and_still_moves_no_threshold(
     clock, tmp_path
 ):
-    """WO-M follow-up: ``_rank_best`` can now return None for a whole grid (nothing closed a round
-    trip), and the CLI then validates the §6.3 envelope DEFAULTS. That verdict must not RENDER like
+    """Sweep-mechanics follow-up: ``_rank_best`` can now return None for a whole grid (nothing closed a round
+    trip), and the CLI then validates the parameter-envelope DEFAULTS. That verdict must not RENDER like
     a grid-winner verdict — banner, note, and JSON — while changing no threshold, because gating on
-    it would move the §6.4 promotion rule and no work order registers that."""
+    it would move the promotion rule and no pre-registration covers that."""
     def _report(**extra):
         pipe = ValidationPipeline(
             returns_provider=lambda sid, params: _tiny_margin_series(),

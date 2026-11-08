@@ -1,9 +1,9 @@
-"""Scheduler (§3.2.12, R6).
+"""Scheduler.
 
 APScheduler ``AsyncIOScheduler`` (IST tz). EVERY trading job is wrapped by an ``NSECalendar`` guard so it
 runs only on trading days (without the calendar ~15 days/year misbehave and the LLM loop burns credit on
-closed markets, R6). APScheduler's own misfire/coalesce is a FAST-PATH only — the authoritative gap
-mechanism after an engine-off span is the ``CatchUpRunner`` driven by ``job_runs`` watermarks (§2.6),
+closed markets). APScheduler's own misfire/coalesce is a FAST-PATH only — the authoritative gap
+mechanism after an engine-off span is the ``CatchUpRunner`` driven by ``job_runs`` watermarks,
 because APScheduler cannot replay jobs whose fire-time fell while the process was down.
 """
 
@@ -24,7 +24,7 @@ JobFunc = Callable[[], Awaitable[None]]
 
 
 class Scheduler:
-    """Thin wrapper over AsyncIOScheduler with a trading-day calendar guard (R6)."""
+    """Thin wrapper over AsyncIOScheduler with a trading-day calendar guard."""
 
     def __init__(self, clock: Clock, calendar: NSECalendar) -> None:
         self._clock = clock
@@ -36,7 +36,7 @@ class Scheduler:
         _log.info("scheduler_started")
 
     def is_running(self) -> bool:
-        """Is the underlying APScheduler ACTUALLY running (WO-25c)?
+        """Is the underlying APScheduler ACTUALLY running?
 
         Deliberately reads ``AsyncIOScheduler.running`` rather than a flag this wrapper sets in
         :meth:`start`: the 2026-08-24 12:44:58 boot proved the failure mode is "``start()`` was never
@@ -57,19 +57,19 @@ class Scheduler:
         _log.info("scheduler_stopped")
 
     def add_trading_day_job(self, func: JobFunc, *, hour: int, minute: int, job_id: str) -> None:
-        """Schedule a daily job that runs ONLY on trading days (calendar-guarded, R6)."""
+        """Schedule a daily job that runs ONLY on trading days (calendar-guarded)."""
         self._sched.add_job(
             self._guarded(func, job_id),
             CronTrigger(hour=hour, minute=minute, timezone=IST),
             id=job_id,
             replace_existing=True,
-            misfire_grace_time=300,   # fast-path only; CatchUpRunner is the authoritative gap mechanism (§2.6)
+            misfire_grace_time=300,   # fast-path only; CatchUpRunner is the authoritative gap mechanism
             coalesce=True,
         )
         _log.info("job_scheduled", job_id=job_id, at=f"{hour:02d}:{minute:02d}", guarded=True)
 
     def add_job(self, func: JobFunc, *, trigger: CronTrigger, job_id: str, guard: bool = False) -> None:
-        """Schedule an arbitrary job. ``guard=True`` applies the trading-day calendar guard (R6)."""
+        """Schedule an arbitrary job. ``guard=True`` applies the trading-day calendar guard."""
         wrapped = self._guarded(func, job_id) if guard else func
         self._sched.add_job(wrapped, trigger, id=job_id, replace_existing=True,
                             misfire_grace_time=300, coalesce=True)

@@ -1,10 +1,10 @@
-"""IST clock + NTP skew check (§3.2.1, R6).
+"""IST clock + NTP skew check.
 
 ``Clock`` is the SINGLE source of "now". Every date/time value and arithmetic in the platform uses
 stdlib ``datetime``/``zoneinfo`` via ``Clock``/``NSECalendar`` — never a bare ``datetime.now()``
-scattered in modules, and NEVER the LLM (§3.2 convention). This is for IST correctness AND
+scattered in modules, and NEVER the LLM. This is for IST correctness AND
 deterministic replay: a replay run injects a controlled ``time_source`` so the golden decision log is
-byte-identical (§9.1). The only sanctioned non-Clock time source is ``core.log`` (logging must survive
+byte-identical. The only sanctioned non-Clock time source is ``core.log`` (logging must survive
 Clock failure).
 """
 
@@ -31,7 +31,7 @@ class Clock:
         Optional callable returning the current tz-aware IST datetime. Defaults to
         ``datetime.now(IST)``. Replay/tests inject a controlled source for determinism.
     ntp_servers:
-        Servers for :meth:`check_skew` (R6).
+        Servers for :meth:`check_skew`.
     """
 
     def __init__(
@@ -57,7 +57,7 @@ class Clock:
         return datetime.combine(d, t, tzinfo=IST)
 
     async def check_skew(self) -> timedelta:
-        """Return clock skew vs NTP (R6). >2 s ⇒ caller publishes a risk event / freezes entries.
+        """Return clock skew vs NTP. >2 s ⇒ caller publishes a risk event / freezes entries.
 
         Raises :class:`ClockSkewUnavailable` if no server can be reached — the gate then treats the
         inability to verify time conservatively (refuse new entries), never as "skew is fine".

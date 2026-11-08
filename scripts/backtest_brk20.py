@@ -1,10 +1,9 @@
 #!/usr/bin/env python
-"""``brk20`` ENTRY-MECHANISM backtest (IMPLEMENTATION_PLAN.md `brk20` entry-mechanism addendum, R1,
-pre-registered 2026-09-12).
+"""``brk20`` ENTRY-MECHANISM backtest (pre-registered 2026-09-12).
 
 ``brk20`` has never been backtested. Its LIMIT-AT-LEVEL entry (``entry = H20``, the broken level) was
-a 2026-08-13 fix for a sizing/render defect (WO-4 / audit F5), not an evidence-based choice of entry
-MECHANISM, and it costs live proposals: of 15 ``brk20`` proposals, 6 died on the §7.1
+a 2026-08-13 fix for a sizing/render defect, not an evidence-based choice of entry
+MECHANISM, and it costs live proposals: of 15 ``brk20`` proposals, 6 died on the risk gate's
 ``entry_sanity_band`` (level >2% below LTP) — the sole reject cause for 3, which are the top-3
 ``brk20`` scores. An external reviewer proposes entering AT MARKET on confirmation. This is the
 event study that decides between them; it is NOT a portfolio simulator and it WIRES NOTHING.
@@ -15,17 +14,17 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE — READ FIRST
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** The signal is the live
 rule at its frozen defaults — :data:`PRE_REGISTERED_PARAMS` is byte-identical to
 ``brk20.DEFAULT_PARAMS`` (``lookback_days`` 20, ``vol_mult`` 1.2, ``rr_target`` 2.0,
-``ex_skip_days`` 10) and :data:`PRE_REGISTERED_FLOOR_PARAMS` to ``brk20.FLOOR_PARAMS`` (the WO-19
+``ex_skip_days`` 10) and :data:`PRE_REGISTERED_FLOOR_PARAMS` to ``brk20.FLOOR_PARAMS`` (the stop-geometry
 owner-only floor knobs, never learnable); the assertions in the unit test make a silent drift between
 this study and the live rule impossible. What IS registered is exactly THREE ENTRY VARIANTS
-(:data:`VARIANTS`), fixed in the plan before this file ran:
+(:data:`VARIANTS`), fixed before this file ran:
 
 * ``V1_next_open``       — the next session's OPEN after the fresh cross (market-on-confirmation).
 * ``V2_limit_at_H20_N3`` — the SHIPPED mechanism: a resting limit at the candidate's own
   ``raw_levels.entry``, filled within 3 sessions.
 * ``V2_limit_at_H20_N5`` — the same at 5 sessions.
 
-The honest trial count cited to the §6.4 deflation machinery is therefore **N = 3**
+The honest trial count cited to the research-validation deflation machinery is therefore **N = 3**
 (:data:`TRIAL_COUNT_N`), ``fold_pass_min(3) = 60%``. There is no ``--vol-mult``, no ``--lookback``,
 no ``--fill-window`` and no "best of" selection anywhere in this module: adding a knob that changes
 the signal definition or the fill rule would silently convert N=3 into N=k and invalidate every
@@ -37,14 +36,14 @@ one.
 is CPCV-promotable at T+10; if no variant is CPCV-promotable at T+10 the outcome is ``neither`` and
 the shipped mechanism stands unchanged. Nothing here max-picks across horizons, and a variant winning
 the comparison is evidence about the MECHANISM only — ``brk20`` still carries no expectancy
-presumption and any wiring is a separate §8.6 owner decision.
+presumption and any wiring is a separate owner promotion decision.
 
 ===============================================================================================
 CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to state)
 ===============================================================================================
 * **Signal.** ``engine.strategy.scanners.brk20.scan_daily`` is IMPORTED and called on every eligible
-  session; the H20 arithmetic, the fresh-cross test, the volume confirmation, the A12 ex-date skip
-  and the WO-19 stop-geometry floor are never re-implemented here. Rows are ``brk20.DailyRow``,
+  session; the H20 arithmetic, the fresh-cross test, the volume confirmation, the ex-date skip
+  and the stop-geometry floor are never re-implemented here. Rows are ``brk20.DailyRow``,
   exactly as the live sweep builds them. The only thing this module decides about a signal is WHICH
   trailing window it hands ``scan_daily`` (:func:`_scan_window_rows` — an exact equivalence, not an
   approximation; see that function) and the 35-day unadjusted-history veto the live sweep applies
@@ -86,13 +85,13 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   earlier "one shared population … same event set" phrasing was wrong and is struck): a V2 limit
   fills only when price RETURNS to the broken level, i.e. conditional on the breakout not running
   away, so V2's trades are a pullback-SELECTED subset of the admitted signals (V1 8,292 / V2-3 4,230
-  / V2-5 4,898 on the R1 run) and any V1-vs-V2 number quoted pooled is a per-FILLED-TRADE comparison
+  / V2-5 4,898 on the registered run) and any V1-vs-V2 number quoted pooled is a per-FILLED-TRADE comparison
   across two different event sets. That is why :func:`matched_cohort_decomposition` exists and is
   reported next to every pooled cell: it re-quotes V1 on exactly the signals each V2 variant filled
   (the entry PRICE-and-timing effect) and on exactly the ones it never filled (the SELECTION effect).
 * **Costs.** ONE full round trip per trade, both legs, from the repo's single source of truth:
-  ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread
-  (WO-2) — charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
+  ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread —
+  charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
   size) = **0.3192%** on the shipped surface. CNC/delivery, never MIS: ``brk20`` is a swing rule and
   cash equities cannot be held overnight under MIS. ``breakeven_pct`` (not ``fee_breakeven_pct``) is
   deliberate — the fees-only view is the contract-note anchor, not a viability number.
@@ -111,11 +110,11 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   (skfolio ``CombinatorialPurgedCV``, 6 folds / 2 test folds) — over a per-FILL-DAY series of
   cost-adjusted returns: day *t*'s observation is the mean NET %-return of the trades FILLED on *t*,
   divided by the horizon in sessions, i.e. a per-session net return directly comparable with the
-  WO-3 margin floor. Keyed on the FILL day, not the signal day, because the holding window starts at
+  margin floor. Keyed on the FILL day, not the signal day, because the holding window starts at
   the fill: two trades overlap iff their fill days are within one horizon, so purge = embargo = the
   horizon covers the overlap exactly. (``hi52`` keys on the signal day because its fill is always
   signal+1 — a constant shift; here it is not.) Deflation/promotion is the repo's
-  ``promotion_decision`` at ``n = TRIAL_COUNT_N`` with the WO-3 margin floor, ``margin_floor_days``
+  ``promotion_decision`` at ``n = TRIAL_COUNT_N`` with the margin floor, ``margin_floor_days``
   set to the horizon. If skfolio is unavailable or the split is degenerate the script falls back to a
   self-implemented purged K-fold with embargo and says so in the report and the JSON (``cv_method``).
 * **The ORB-lesson arithmetic check runs FIRST.** Before any signal-quality statistic is printed, the
@@ -141,7 +140,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   trip). The two gates are built on different statistics and could disagree silently: the CPCV fold
   series is a per-fill-day MEAN (house convention, ``scripts/backtest_hi52.py``) while every geometry
   and decision statistic is a MEDIAN, so a tail-driven variant can read "promotable" while its
-  typical trade cannot pay the toll (V1 at T+10 on the R1 run: CPCV 60.0% pass, median net −0.3192%
+  typical trade cannot pay the toll (V1 at T+10 on the registered run: CPCV 60.0% pass, median net −0.3192%
   → reported NOT viable). The amendment can only WITHHOLD a promotable label, never grant one, so it
   cannot promote anything the original rule refused; the original rule's outcome is re-stated
   verbatim beside the tightened one and the report says whether the tightening changes it.
@@ -221,12 +220,12 @@ from engine.strategy.types import round_to_tick  # noqa: E402
 PRE_REGISTERED_PARAMS: dict[str, float] = dict(DEFAULT_PARAMS)
 PRE_REGISTERED_FLOOR_PARAMS: dict[str, float] = dict(FLOOR_PARAMS)
 
-#: Trial count cited to the §6.4 deflation machinery: THREE entry variants of one family, no sweep
+#: Trial count cited to the research-validation deflation machinery: THREE entry variants of one family, no sweep
 #: (see the module docstring). Not a knob.
 TRIAL_COUNT_N = 3
 
 HORIZONS: tuple[int, ...] = (5, 10, 20)           # trading sessions, counted FROM THE FILL
-REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size (§6.4/§7.1)
+REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 
 #: The horizon the pre-registered decision rule reads. One horizon, fixed before the run: reading
@@ -251,7 +250,7 @@ MAX_FILL_WINDOW = max(w for w in FILL_WINDOW.values() if w is not None)
 #: (engine/ops/main.py, the brk20 daily leg) — NOT hi52's 400, which spans its 252-session lookback.
 UNADJUSTED_LOOKBACK_DAYS = 35
 
-#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every §3.2.4
+#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every universe
 #: rule and lost only the top-N focus cut). Mirrors ``MarketStore.get_universe_eligible_symbols``.
 EXCL_WATCHLIST_CAP = "watchlist_cap"
 
@@ -264,7 +263,7 @@ MARGIN_CELLS: tuple[str, ...] = (CELL_MARGIN_LOW, CELL_MARGIN_MID, CELL_MARGIN_H
 _CV_SKFOLIO = "cpcv_skfolio_CombinatorialPurgedCV"
 _CV_FALLBACK = "purged_kfold_with_embargo_fallback"
 
-#: The decision rule, verbatim, as the plan registered it on 2026-09-12. Carried into every report
+#: The decision rule, verbatim, as registered on 2026-09-12. Carried into every report
 #: and JSON so the outcome can never be read without the rule that produced it.
 DECISION_RULE = (
     "Prefer the variant with the higher median NET return at T+10, PROVIDED that variant is "
@@ -274,7 +273,7 @@ DECISION_RULE = (
 DECISION_NEITHER = "neither"
 DECISION_TIE = "neither (exact tie on the decision metric)"
 
-#: The 2026-09-12 REPORTING amendment, carried into the plan paragraph, the JSON and both renderings.
+#: The 2026-09-12 REPORTING amendment, carried into the registration paragraph, the JSON and both renderings.
 #: A tightening of how a cell is LABELLED — it can only withhold a "promotable", never grant one — so
 #: it changes no registered selection and adds no trial.
 REPORTING_RULE_AMENDMENT = (
@@ -516,7 +515,7 @@ def _unadjusted_at(structural: Sequence[date], today: date) -> bool:
 
     ``structural`` must be ascending (:func:`load_structural_ex_dates` sorts). ``today`` itself is
     OUT of range: on the ex-date every bar the window holds is still pre-ex, in one unit — that day
-    is the A12 upcoming-ex skip's case, not this one. Mirrors the live sweep's
+    is the upcoming-ex skip's case, not this one. Mirrors the live sweep's
     ``ex_from=today - 35d, ex_to=yesterday`` inclusive window.
     """
     if not structural:
@@ -550,7 +549,7 @@ def signals_for(
     ``rows[:i+1]`` instead of the bounded window — the equality-check path for the unit test and
     ``--verify-window``.
 
-    ``veto_counts``, when supplied, accumulates the live rule's own WO-19 classes (``gap_floor`` /
+    ``veto_counts``, when supplied, accumulates the live rule's own stop-geometry-floor classes (``gap_floor`` /
     ``floor_unavailable``, threaded straight into ``scan_daily``) plus ``unadjusted_history``;
     ``None`` keeps this function pure.
     """
@@ -969,7 +968,7 @@ def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date],
     """Per-FILL-DAY cost-adjusted return series for one horizon.
 
     Day *t* = mean NET %-return of the trades FILLED on *t*, divided by ``horizon`` sessions, so the
-    value is a per-session net return in percent — the units the WO-3 margin floor is quoted in. The
+    value is a per-session net return in percent — the units the margin floor is quoted in. The
     FILL day, not the signal day: the holding window starts at the fill, so purge/embargo at the
     horizon covers the overlap between neighbouring trades exactly (module docstring).
     """
@@ -985,9 +984,9 @@ def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date],
 def cpcv_report(
     trades: Sequence[Trade], horizon: int, cost_pct: float, trial_count: int = TRIAL_COUNT_N
 ) -> dict[str, Any]:
-    """CPCV + the §6.4/WO-3 deflated promotion decision for one variant at one horizon.
+    """CPCV + the deflated promotion decision for one variant at one horizon.
 
-    Purge and embargo are the HORIZON, not the §6.4 default 5: at horizon N a trade overlaps the next
+    Purge and embargo are the HORIZON, not the default 5: at horizon N a trade overlaps the next
     N sessions of fills, so a 5-observation purge would leak a T+20 trade across the fold boundary.
     ``trial_count`` is the registration's honest N=3 — three entry variants of one family.
     """
@@ -1302,7 +1301,7 @@ def run_study(
             "population_is_survivorship_tainted_proxy": True,
             "unadjusted_lookback_calendar_days": UNADJUSTED_LOOKBACK_DAYS,
             "window_verified_symbols": verify_checked,
-            # POST-veto by construction: scan_daily counts its own WO-19 refusals internally and
+            # POST-veto by construction: scan_daily counts its own stop-geometry-floor refusals internally and
             # returns nothing for them, and the unadjusted-history veto is applied before a Signal
             # exists. Naming it "fired" would invite reading it as the raw fresh-cross count, which
             # it is not — the raw count is this plus every entry in `vetoes` below.
@@ -1375,7 +1374,7 @@ def run_study(
 
 
 # =============================================================================== rendering
-#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the §6.4
+#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the
 #: ``promotion_decision`` reasons use em dashes, the cost model quotes rupees). The JSON artifact
 #: keeps the original text verbatim; only the CONSOLE rendering is folded to ASCII, because a Windows
 #: console at cp1252 cannot print a rupee sign or an arrow and would kill the run on the last line.

@@ -1,4 +1,4 @@
-"""Reliable engine stop path (§2.6/§10.8, 2026-07-21 13:34 IST zombie).
+"""Reliable engine stop path (2026-07-21 13:34 IST zombie).
 
 The incident: Ctrl-C landed while ``lifecycle.startup`` was still running (no ``engine_ready`` yet).
 Signal handlers were installed only AFTER startup completed, so the press hit Python's default SIGINT

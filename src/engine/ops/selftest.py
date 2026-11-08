@@ -1,29 +1,29 @@
-"""Startup self-test (D11, §3.2.12). Runs on EVERY startup (process boot, scheduled or manual).
+"""Startup self-test. Runs on EVERY startup (process boot, scheduled or manual).
 
 Asserts the platform's preconditions before entries can open and surfaces what must FROZEN/kill/prompt:
-secrets present, ``ANTHROPIC_API_KEY`` absent (D2 trap), protected-store hashes verified (R4), kill-state
-honored (R10), clock skew < 2 s (R6), trade window present + valid (§7.1), and (when a session manager is
-wired) the daily token's validity (R6).
+secrets present, ``ANTHROPIC_API_KEY`` absent, protected-store hashes verified, kill-state
+honored, clock skew < 2 s, trade window present + valid, and (when a session manager is
+wired) the daily token's validity.
 
-Phase-1 addition — the §3.2.12 **data-freshness gate before entries**: today-dated
-instruments/surveillance/earnings (the safety/deadline-critical §2.6 step-5 jobs) must be recorded
+Addition — the **data-freshness gate before entries**: today-dated
+instruments/surveillance/earnings (the safety/deadline-critical startup jobs) must be recorded
 fresh in ``job_runs``; if stale, the catch-up job is triggered (idempotent watermarks); if still
 unsatisfiable ⇒ refuse to open entries (FROZEN-for-entries, applied by the lifecycle) + alert. The
-warm-up sufficiency check (§7.1 ``warmup_ready``) rides the same surface via the injected
+warm-up sufficiency check (``warmup_ready``) rides the same surface via the injected
 :class:`~engine.ops.warmup.WarmupGate`. ``SessionLifecycle.startup`` runs this self-test with
-``include_freshness=False`` because at §2.6 step 1c the backfill/catch-up have not run yet — the
-lifecycle enforces freshness after step 5 and warm-up at step 6; a standalone/pre-entries re-run
+``include_freshness=False`` because at the start of startup the backfill/catch-up have not run yet — the
+lifecycle enforces freshness after the catch-up and warm-up at the startup warm-up gate; a standalone/pre-entries re-run
 (``run()`` default) includes them.
 
-Phase-2 additions (§2.6 step 2 / D11): the day-scoped risk-counter rebuild, the startup re-evaluation
+Further additions: the day-scoped risk-counter rebuild, the startup re-evaluation
 and application of the equity halt ladder plus daily-loss rungs, and the one cheap SDK smoke call
 (non-trading-day starts skipped, deduped per trading day via ``job_runs``). risk_counters_rebuild and
 equity_halt_ladder SKIP only when ExposureTracker/LimitsEngine is unwired; sdk_smoke SKIPs when its
 callable is unwired, on a non-trading-day start, or once already verified that trading day.
 ``claude_login`` reads the CLI's stored claude.ai login on every start (WARN only, never FROZEN).
 
-This module REPORTS; the lifecycle applies the consequences (the §2.4 integrity rule: FROZEN-with-flat-book
-vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions (§2.6).
+This module REPORTS; the lifecycle applies the consequences (the integrity rule: FROZEN-with-flat-book
+vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ _SUBSCRIPTION_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
 
 
 def claude_credentials_path() -> Path:
-    """The stored claude.ai login the engine's CLI authenticates with (D2 as built): the CLI reads
+    """The stored claude.ai login the engine's CLI authenticates with: the CLI reads
     ``$CLAUDE_CONFIG_DIR`` when set, else ``~/.claude`` of the service user."""
     config = os.environ.get("CLAUDE_CONFIG_DIR")
     base = Path(config) if config else Path.home() / ".claude"
@@ -116,7 +116,7 @@ def claude_credentials_path() -> Path:
 
 def check_claude_login(now: datetime, path: Path, hint: str = CLAUDE_RELOGIN_HINT) -> SelfTestCheck:
     """Read-only health of the CLI's stored claude.ai login. WARN, never FROZEN — LLM availability is
-    not a safety input (D7). The detail carries days left, the IST expiry and ``subscriptionType``
+    not a safety input. The detail carries days left, the IST expiry and ``subscriptionType``
     only: token text never reaches a detail or a log line."""
     name = "claude_login"
 
@@ -172,7 +172,7 @@ async def alert_claude_login(
 
 
 class SelfTest:
-    """The every-startup self-test (D11)."""
+    """The every-startup self-test."""
 
     def __init__(
         self,
@@ -205,18 +205,18 @@ class SelfTest:
         self._kill = kill_switch
         self._mode = mode_manager
         self._session = session_manager
-        # §3.2.12 data-freshness seams (Phase 1): the CatchUpRunner (job_runs watermarks) and the
+        # Data-freshness seams: the CatchUpRunner (job_runs watermarks) and the
         # WarmupGate — both optional; unwired ⇒ the freshness checks surface as SKIP, never silently pass.
         self._catch_up = catch_up
         self._warmup_gate = warmup_gate
-        # §2.6 step-2 seams (Phase 2): ExposureTracker + LimitsEngine + RiskStateLatch drive the
+        # Risk-counter seams: ExposureTracker + LimitsEngine + RiskStateLatch drive the
         # day-counter rebuild and the startup floor-ladder re-evaluation; unwired ⇒ SKIP.
         self._exposure = exposure
         self._limits = limits_engine
         self._latch = latch
-        # D11 seam: an async callable performing ONE cheap SDK round-trip (composition wires it to
+        # SDK-smoke seam: an async callable performing ONE cheap SDK round-trip (composition wires it to
         # the AgentHarness). The self-test owns the trading-day gate + per-day dedupe; a failed call
-        # is WARN, never FROZEN — LLM availability is not a safety input (D7/R1).
+        # is WARN, never FROZEN — LLM availability is not a safety input.
         self._sdk_smoke = sdk_smoke
         self._calendar = calendar
         # Roster health (2026-08-03: a quarantined/unloadable roster used to surface only as an
@@ -294,7 +294,7 @@ class SelfTest:
         out: list[SelfTestCheck] = []
         for name in PROTECTED_NAMES:
             ok = self._store.verify(name)
-            # §2.4 single rule: mismatch consequence (FROZEN vs kill) depends on book state — decided by
+            # Single rule: mismatch consequence (FROZEN vs kill) depends on book state — decided by
             # the lifecycle. The self-test surfaces the integrity failure as FROZEN-implying by default.
             out.append(SelfTestCheck(
                 name=f"protected_store:{name}",
@@ -321,7 +321,7 @@ class SelfTest:
         try:
             skew = await self._clock.check_skew()
         except ClockSkewUnavailable as exc:
-            # Cannot verify time ⇒ treat conservatively (refuse new entries), never "skew is fine" (R6).
+            # Cannot verify time ⇒ treat conservatively (refuse new entries), never "skew is fine".
             return SelfTestCheck(name="clock_skew", status=CheckStatus.WARN,
                                  detail=f"NTP unavailable: {exc}; entries stay conservative", implies=Implies.FROZEN)
         if skew.total_seconds() > max_skew:
@@ -346,20 +346,20 @@ class SelfTest:
             return SelfTestCheck(name="token_valid", status=CheckStatus.SKIP, detail="no session manager wired")
         if self._session.token_valid():
             return SelfTestCheck(name="token_valid", status=CheckStatus.PASS)
-        # Non-fatal: owner may start before the daily login; entries stay FROZEN until re-login (R6).
+        # Non-fatal: owner may start before the daily login; entries stay FROZEN until re-login.
         return SelfTestCheck(name="token_valid", status=CheckStatus.WARN,
                              detail="daily token not valid — login required (R6)", implies=Implies.LOGIN_PROMPT)
 
-    # ----------------------------------------------------------------- data freshness (§3.2.12/§2.6)
+    # ----------------------------------------------------------------- data freshness
     async def data_freshness_checks(self) -> list[SelfTestCheck]:
-        """The §3.2.12 DATA-FRESHNESS gate before entries: today-dated instruments + surveillance +
+        """The DATA-FRESHNESS gate before entries: today-dated instruments + surveillance +
         earnings (+ ex-date GTT adjust) recorded fresh in ``job_runs``, and warm-up sufficient.
 
         Stale safety-critical jobs first TRIGGER the catch-up (idempotent ``job_runs`` watermarks —
-        re-running a fresh job is a no-op, §2.6 step 5); only what is STILL stale after that fails the
+        re-running a fresh job is a no-op); only what is STILL stale after that fails the
         check (⇒ FROZEN-for-entries, applied by the lifecycle) + alert. Unwired seams surface as SKIP —
         never a silent pass. The held-CNC ex-date GTT scan itself is the ``corp_actions_gtt_adjust``
-        job (TODO(Phase 3) wiring: needs the OMS GTT manager); its freshness rides the same watermark.
+        job (TODO(paper AUTO) wiring: needs the OMS GTT manager); its freshness rides the same watermark.
         """
         return [await self._check_safety_jobs_fresh(), await self._check_warmup_ready()]
 
@@ -371,7 +371,7 @@ class SelfTest:
             )
         stale = self._catch_up.stale_safety_jobs()
         if stale:
-            # Trigger the catch-up job (idempotent watermarks) — §3.2.12 "else run the catch-up job".
+            # Trigger the catch-up job (idempotent watermarks).
             _log.warning("data_freshness_stale_triggering_catchup", stale=stale)
             try:
                 await self._catch_up.catch_up()
@@ -389,15 +389,14 @@ class SelfTest:
                              detail="safety-critical jobs fresh (instruments/surveillance/earnings)")
 
     async def _check_warmup_ready(self) -> SelfTestCheck:
-        """§7.1 ``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17 (the
-        residue the 2026-09-13 addendum registered).
+        """``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17.
 
-        A raise still FAILs implying FROZEN (coverage that cannot be verified is missing, R6), and a
+        A raise still FAILs implying FROZEN (coverage that cannot be verified is missing), and a
         fully-ready gate still PASSes. In between, the check now follows the same rule as the
         lifecycle: only a REGIME shortfall (or an unattributable blocker, which ``ready_for`` folds
         into every class) is a GLOBAL condition and implies FROZEN; an INTRADAY or DAILY shortfall is
         per-symbol and refused at the gate, so it is a WARN that implies nothing — a self-test that
-        re-imposed the global freeze here would undo the addendum the moment a standalone ``run()``
+        re-imposed the global freeze here would undo that split the moment a standalone ``run()``
         or a dashboard/CLI ``selftest`` endpoint was wired. A status with no ``ready_for`` keeps
         today's FAIL+FROZEN (the flat fallback is never looser than the per-class answer)."""
         if self._warmup_gate is None:
@@ -444,7 +443,7 @@ class SelfTest:
         return SelfTestCheck(name=name, status=CheckStatus.SKIP, detail=detail)
 
     async def _check_risk_counters_rebuild(self) -> SelfTestCheck:
-        """§2.6 step 2: rebuild the day-scoped risk counters from the ledger/positions tables so a
+        """Rebuild the day-scoped risk counters from the ledger/positions tables so a
         same-day restart cannot reset exhausted entry capacity. The rebuild IS the read — the
         tracker recomputes from tables on every call; this check performs and reports it."""
         if self._exposure is None:
@@ -452,7 +451,7 @@ class SelfTest:
         try:
             d = self._clock.today()
             if self._latch is not None:
-                # §3.5.3 behavioural auto-clear: yesterday's day-scoped causes re-arm this session.
+                # Behavioural auto-clear: yesterday's day-scoped causes re-arm this session.
                 await self._latch.clear_stale_daily(d.isoformat(), Actor.RISK_GATE)
             losses = self._exposure.consecutive_losses(d)
             opened = self._exposure.trades_opened_today(d)
@@ -468,8 +467,8 @@ class SelfTest:
         )
 
     async def _check_equity_halt_ladder(self) -> SelfTestCheck:
-        """§2.6 step 2: re-evaluate the continuous equity halt ladder against reconciled equity and
-        APPLY each breached rung's full §7.1 action before entries reopen — a startup trip must be
+        """Re-evaluate the continuous equity halt ladder against reconciled equity and
+        APPLY each breached rung's full risk-limits action before entries reopen — a startup trip must be
         behaviorally identical to a live trip (state + downgrade + kill where specified)."""
         if self._exposure is None or self._limits is None:
             return self._stub("equity_halt_ladder", "ExposureTracker/LimitsEngine not wired")
@@ -484,8 +483,8 @@ class SelfTest:
                 await self._exposure.apply_floor_breaches(
                     breaches, self._mode, self._kill, latch=self._latch,
                 )
-            # §7.1 daily-loss rungs re-checked on startup too — an offline-realized loss past −5/−7%
-            # must trip exactly as a live one would (§2.6 step 2).
+            # Daily-loss rungs re-checked on startup too — an offline-realized loss past −5/−7%
+            # must trip exactly as a live one would.
             day_rungs = self._exposure.evaluate_day_loss(
                 Decimal(str(table.limits.daily_loss_soft.day_mtm_pct)),
                 Decimal(str(table.limits.daily_loss_hard.day_mtm_pct)),
@@ -506,7 +505,7 @@ class SelfTest:
                              detail=f"no rung breached (equity {self._exposure.equity()})")
 
     def _check_agent_roster(self) -> SelfTestCheck:
-        """Tier-1 roster health (D7): WARN — never FROZEN, the LLM is not load-bearing — when any
+        """Tier-1 roster health: WARN — never FROZEN, the LLM is not load-bearing — when any
         agent definition was quarantined or the roster is empty, so a config typo shows up as a
         named check instead of a day of silent no-op LLM jobs (2026-08-03 sonnet-5 incident)."""
         if self._roster_loaded is None and not self._roster_quarantined:
@@ -522,16 +521,16 @@ class SelfTest:
                              detail=f"{self._roster_loaded} agent defs loaded")
 
     def _check_claude_login(self) -> SelfTestCheck:
-        """D11 companion to sdk_smoke, on EVERY start (sdk_smoke is trading-day-only and deduped):
+        """Companion to sdk_smoke, on EVERY start (sdk_smoke is trading-day-only and deduped):
         the stored login's dead-clear and hard expiry, read from disk — no call, no quota."""
         if self._claude_credentials is None:
             return self._stub("claude_login", "credentials path not wired")
         return check_claude_login(self._clock.now(), self._claude_credentials, self._claude_relogin_hint)
 
     async def _check_sdk_smoke(self) -> SelfTestCheck:
-        """D11: one cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading
+        """One cheap SDK round-trip, skipped on non-trading-day starts and deduped per trading
         day via a ``job_runs`` watermark. WARN on failure — never FROZEN (LLM availability is not a
-        safety input, D7)."""
+        safety input)."""
         if self._sdk_smoke is None:
             return self._stub("sdk_smoke", "harness smoke callable not wired")
         d = self._clock.today()

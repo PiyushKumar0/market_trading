@@ -1,5 +1,4 @@
-"""Pre-registered forward verdicts: the brk20 and ins kill rules and the analyst-value verdict (review
-§9 #2/#5). The rules' text is quoted in ``scripts/forward_verdicts.py``.
+"""Pre-registered forward verdicts: the brk20 and ins kill rules and the analyst-value verdict. The rules' text is quoted in ``scripts/forward_verdicts.py``.
 
 HINDSIGHT: reads ``signal_outcomes``; only owner surfaces, verdict code and research call this module (the
 pipeline imports it transitively through ``ops.scorecard`` for the card's history line, its one pinned
@@ -19,11 +18,11 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import cast
 
-#: R, the first session of the registered populations (IMPLEMENTATION_PLAN section 3). Only a caller's default.
+#: R, the first session of the registered populations. Only a caller's default.
 REGISTERED_FROM: date | None = date(2026, 11, 2)
 
-#: Last journal session of each kill population; None while it accrues. Rolling back C2 sets brk20's to the
-#: last session the filter ran (IMPLEMENTATION_PLAN section 3, amendment 2026-10-30). Only a caller's default.
+#: Last journal session of each kill population; None while it accrues. Rolling back the regime gate sets brk20's to the
+#: last session the filter ran (amended 2026-10-30). Only a caller's default.
 KILL_POPULATION_UNTIL: dict[str, date | None] = {"brk20": None, "ins": None}
 
 KILL_RULES = ("brk20", "ins")
@@ -134,7 +133,7 @@ class Stats:
 class C2Arms:
     admitted: Stats
     blocked: Stats
-    neither: int           # blocked for an undefined regime or a missing index bar: in no C2 cohort
+    neither: int           # blocked for an undefined regime or a missing index bar: in no regime-gate cohort
 
 
 @dataclass(frozen=True)
@@ -466,7 +465,7 @@ def confidence_buckets(rows: Iterable[SignalRow]) -> list[Bucket]:
 
 
 def c2_arms(rule_rows: Iterable[SignalRow], blocked_rows: Sequence[SignalRow]) -> C2Arms:
-    """Closed net T+20 of C2's admitted crossings against those it blocked for a down regime; as in the
-    C2 study, a crossing blocked for any other reason is in neither arm, only counted."""
+    """Closed net T+20 of the regime gate's admitted crossings against those it blocked for a down regime; as in the
+    regime-filter study, a crossing blocked for any other reason is in neither arm, only counted."""
     down = [r for r in blocked_rows if r.reason == "down"]
     return C2Arms(stats(_nets(rule_rows, 20)), stats(_nets(down, 20)), len(blocked_rows) - len(down))

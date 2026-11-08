@@ -1,7 +1,7 @@
-"""Gate G2 evidence collector (IMPLEMENTATION_PLAN.md §8.3).
+"""Acceptance-gate evidence collector.
 
-Computes the machine-checkable half of the Phase-2 acceptance gate and prints one line per
-criterion with a MET / NOT-MET / N-A verdict against the §8.3 bars. The owner-only items
+Computes the machine-checkable half of the RECOMMEND-mode acceptance gate and prints one line per
+criterion with a MET / NOT-MET / N-A verdict against the gate's bars. The owner-only items
 (manual executions, watchlist-precision reviews, broker order-book audit) are surfaced as
 N-A rows so the checklist in ``runbooks/RUNBOOK.md`` stays 1:1 with the gate text.
 
@@ -25,7 +25,7 @@ SOURCES (stated again in the printed output, per criterion):
 * analyst validity    -> ``agent_calls`` (one row per SDK call, retries included)
 * recommendations     -> ``recommendations`` (delivered_at, human_action, payload JSON)
 * platform orders     -> ``orders`` (broker-side confirmation stays owner-manual)
-* budget              -> ``budget_ledger`` over ONE quota window (Thu 14:00 IST reset, §5.6) vs
+* budget              -> ``budget_ledger`` over ONE quota window (Thu 14:00 IST reset) vs
                          ``config/agents.yaml: budget_allocations_usd``, which are WEEKLY dollars
 * trading sessions    -> ``config/calendar/<year>.yaml`` holidays + weekday rule
 
@@ -52,7 +52,7 @@ from typing import Any
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
 REPO = Path(__file__).resolve().parent.parent
 
-# §8.3 bars.
+# Gate bars.
 BAR_DIGEST_PCT = 90.0        # catalyst digest before window-open on >=90% of sessions
 BAR_NEWS_SCHEMA_PCT = 95.0   # News Analyst batches schema-valid on >=95% of calls
 BAR_DELIVERY_PCT = 90.0      # >=90% of recommendations delivered before validity opens
@@ -61,7 +61,7 @@ BAR_SESSIONS_MIN = 20        # "4 weeks of daily recommendations" ~ 20 trading s
 
 MET, NOT_MET, NA = "MET", "NOT-MET", "N-A"
 
-# §5.6 quota window (owner-directed 2026-09-12): the budget period is the SUBSCRIPTION's week, not the
+# Quota window (owner-directed 2026-09-12): the budget period is the SUBSCRIPTION's week, not the
 # calendar month. These are fallbacks only — the live anchor is read out of config/agents.yaml below.
 WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
             "friday": 4, "saturday": 5, "sunday": 6}
@@ -78,7 +78,7 @@ def parse_ts(raw: str | None) -> datetime | None:
         dt = datetime.fromisoformat(str(raw))
     except ValueError:
         return None
-    if dt.tzinfo is None:                     # defensive: the platform never writes naive (§9.1)
+    if dt.tzinfo is None:                     # defensive: the platform never writes naive
         dt = dt.replace(tzinfo=IST)
     return dt.astimezone(IST)
 
@@ -308,7 +308,7 @@ def criterion_recs(conn, d_from: date, d_to: date) -> dict[str, Any]:
 
 
 def criterion_orders(conn) -> dict[str, Any]:
-    """§8.3 'zero API orders placed' - the platform-side half (broker side is owner-manual)."""
+    """The 'zero API orders placed' - the platform-side half (broker side is owner-manual)."""
     total = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
     live = conn.execute("SELECT COUNT(*) FROM orders WHERE is_paper=0").fetchone()[0]
     return {"order_rows": total, "live_order_rows": live,
@@ -617,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     d_from, d_to = date.fromisoformat(args.date_from), date.fromisoformat(args.date_to)
     if d_to < d_from:
         ap.error("--to is before --from")
-    # The budget block reports ONE quota window (§5.6), keyed off an instant, not a date range: the
+    # The budget block reports ONE quota window, keyed off an instant, not a date range: the
     # live window for a --to of today or later, otherwise the window that contained that evening. An
     # explicit --window is taken at its own 14:00 reset, which is inside the window it names.
     budget_at = min(datetime.now(IST), datetime.combine(d_to, time(23, 59, 59), tzinfo=IST))

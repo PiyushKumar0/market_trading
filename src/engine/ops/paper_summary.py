@@ -87,7 +87,7 @@ def _snapshots(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def _point_equity(row: sqlite3.Row, capital_base: Decimal | None) -> Any:
-    """A snapshot's equity at the live base (O19 §7: history in P&L space, so a capital change draws
+    """A snapshot's equity at the live base (history in P&L space, so a capital change draws
     no cliff); the stored equity when there is no live base or the row's P&L is NULL."""
     pnl = snapshot_pnl(row)
     if capital_base is None or pnl is None:
@@ -102,7 +102,7 @@ def _equity(row: sqlite3.Row | None, capital_base: Decimal | None) -> dict[str, 
         pnl = _dec(row["realized_pnl"]) + _dec(row["open_mtm"])
         base = _dec(row["equity"]) - pnl
     else:
-        # A NULL P&L column: equity − the live base, the brakes' own fallback (O19 §3.1).
+        # A NULL P&L column: equity − the live base, the brakes' own fallback.
         base = capital_base
         stored = snapshot_pnl(row)
         pnl = _dec(row["equity"]) - base if stored is None else stored

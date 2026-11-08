@@ -1,7 +1,7 @@
-"""Risk-domain event payloads published on the bus (§3.2.1 canonical topics).
+"""Risk-domain event payloads published on the bus (canonical topics).
 
-Consumed by ``notify``/``api`` for owner alerts + the dashboard (R8). Risk owns the *origination* of
-these; the I/O surfaces never originate orders/state, they only react (§3.2.11).
+Consumed by ``notify``/``api`` for owner alerts + the dashboard. Risk owns the *origination* of
+these; the I/O surfaces never originate orders/state, they only react.
 """
 
 from __future__ import annotations

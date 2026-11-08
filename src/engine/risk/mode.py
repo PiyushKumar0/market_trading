@@ -1,14 +1,14 @@
-"""Mode + risk-state machines (R5, §3.5.3). Tier-2-owned, sticky in SQLite.
+"""Mode + risk-state machines. Tier-2-owned, sticky in SQLite.
 
 Two orthogonal sticky machines plus a routing flag:
 - **Mode** (``OFF ↔ RECOMMEND ↔ AUTO``): owner-controlled; the gate may only DOWNGRADE
-  (:meth:`force_downgrade`). Upgrading to AUTO requires an owner two-step confirmation (R10).
+  (:meth:`force_downgrade`). Upgrading to AUTO requires an owner two-step confirmation.
 - **RiskState** (``NORMAL | FROZEN | CLOSE_ONLY | KILLED``): reached by per-cause edges; risk-forced
-  downgrades to CLOSE_ONLY/KILLED latch until explicit owner re-arm (never a timer; R3/R5).
+  downgrades to CLOSE_ONLY/KILLED latch until explicit owner re-arm (never a timer).
 
 The order-surface predicate (a) lives here as :meth:`opening_orders_allowed` — a position-OPENING call
-is permitted iff ``mode == AUTO ∧ risk_state == NORMAL ∧ in_window`` (§3.5.3). Risk-reducing actions
-(predicate b) are NEVER gated by this — they run in every mode/state (R3) and are not this class's
+is permitted iff ``mode == AUTO ∧ risk_state == NORMAL ∧ in_window``. Risk-reducing actions
+(predicate b) are NEVER gated by this — they run in every mode/state and are not this class's
 concern. Per-cause latching, most-restrictive-wins composition and recovery live in
 :class:`engine.risk.causes.RiskStateLatch` (the single writer of ``risk_state``); no production caller
 passes ``on_shrink_squareoff`` yet. This module owns the sticky persistence, the transition guards,
@@ -46,11 +46,11 @@ SquareOffCallback = Callable[[], Awaitable[None]]
 
 
 class ModeRefused(PermissionError):
-    """A transition to AUTO or live routing while ``feature_flags.paper_only`` (D8)."""
+    """A transition to AUTO or live routing while ``feature_flags.paper_only``."""
 
 
 class ModeManager:
-    """Sticky mode / routing / risk-state, plus the owner-set trade window (§3.2.7).
+    """Sticky mode / routing / risk-state, plus the owner-set trade window.
 
     ``paper_only`` defaults to True so a construction site that forgets it refuses AUTO; production
     passes ``feature_flags.paper_only``.
@@ -93,19 +93,19 @@ class ModeManager:
     # ----------------------------------------------------------------- order-surface predicate (a)
     def entries_allowed(self, in_window: bool) -> bool:
         """Entries/entry-recommendations require NORMAL risk state + inside the trade window, in AUTO
-        or RECOMMEND (§3.5.3). Does NOT consider the kill switch (checked separately) or per-§7.1
+        or RECOMMEND. Does NOT consider the kill switch (checked separately) or per-risk
         limits (the gate's job). No production caller: the gate's ``mode_risk_state``/``trade_window``
         rules evaluate this predicate themselves; only chaos case 13 asserts it."""
         return self.mode() in (Mode.AUTO, Mode.RECOMMEND) and self.risk_state() == RiskState.NORMAL and in_window
 
     def opening_orders_allowed(self, in_window: bool) -> bool:
-        """Position-OPENING broker order calls require AUTO + NORMAL + in-window (predicate a, §3.5.3).
-        Routing (paper/live) then selects the broker. Risk-reducing calls bypass this entirely (R3)."""
+        """Position-OPENING broker order calls require AUTO + NORMAL + in-window (predicate a).
+        Routing (paper/live) then selects the broker. Risk-reducing calls bypass this entirely."""
         return self.mode() == Mode.AUTO and self.risk_state() == RiskState.NORMAL and in_window
 
     # ----------------------------------------------------------------- transitions
     def check_allowed(self, to: Mode, routing: Routing | None = None) -> None:
-        """Raise :class:`ModeRefused` for AUTO or ``Routing.LIVE`` while ``paper_only`` (D8)."""
+        """Raise :class:`ModeRefused` for AUTO or ``Routing.LIVE`` while ``paper_only``."""
         if self._paper_only and (to == Mode.AUTO or routing == Routing.LIVE):
             raise ModeRefused("AUTO and live routing are refused while feature_flags.paper_only is set (D8)")
 
@@ -116,16 +116,16 @@ class ModeManager:
         confirmation: OwnerConfirmation | None = None,
         routing: Routing | None = None,
     ) -> bool:
-        """Owner-initiated mode change. →AUTO requires a two-step owner confirmation (R10)."""
+        """Owner-initiated mode change. →AUTO requires a two-step owner confirmation."""
         if who != Actor.OWNER:
             raise PermissionError("mode transitions are owner-only (R10)")
         self.check_allowed(to, routing)
         if to == Mode.AUTO:
             if confirmation is None or not confirmation.confirmed or confirmation.actor != Actor.OWNER:
                 raise PermissionError("→AUTO requires an authenticated OWNER two-step confirmation (R10)")
-            routing = routing or Routing.PAPER  # default safe routing; live gated elsewhere (§8.5)
+            routing = routing or Routing.PAPER  # default safe routing; live gated elsewhere
         else:
-            routing = None  # routing is valid ONLY with AUTO (§3.5.3)
+            routing = None  # routing is valid ONLY with AUTO
         return await self._apply_mode(to, who, reason="owner_request", routing=routing)
 
     async def force_downgrade(self, to: Mode, reason: str) -> None:
@@ -178,7 +178,7 @@ class ModeManager:
                 RiskStateChanged(old_state=old, new_state=to, actor=who, reason=reason, at=now),
             )
 
-    # ----------------------------------------------------------------- trade window (§3.2.7/§7.1)
+    # ----------------------------------------------------------------- trade window
     def get_trade_window(self) -> TradeWindow | None:
         row = self._conn.execute(
             "SELECT start_ist, end_ist, squareoff_buffer_min FROM trade_window_state WHERE id=1"
@@ -192,7 +192,7 @@ class ModeManager:
         )
 
     def seed_trade_window_if_absent(self, seed: TradeWindow) -> bool:
-        """Seed ``trade_window_state`` from the settings default on first run (lifecycle, §2.6).
+        """Seed ``trade_window_state`` from the settings default on first run (lifecycle).
         Returns True if a row was inserted."""
         if self.get_trade_window() is not None:
             return False
@@ -210,7 +210,7 @@ class ModeManager:
         return True
 
     def validate_window(self, window: TradeWindow) -> str | None:
-        """Return an error string if the window is invalid, else None (§7.1/§3.2.7).
+        """Return an error string if the window is invalid, else None.
 
         Checks: start<end; non-empty MIS sub-window after the buffer; within the day's session (if a
         calendar is available and today is a trading day)."""
@@ -237,9 +237,9 @@ class ModeManager:
         squareoff_buffer_min: int | None = None,
         on_shrink_squareoff: SquareOffCallback | None = None,
     ) -> bool:
-        """Owner-only single-step window setter (§3.2.7). Validate → persist sticky → audit → publish →
+        """Owner-only single-step window setter. Validate → persist sticky → audit → publish →
         apply. If the new ``end`` is at-or-before now, fire ``on_shrink_squareoff`` (risk-reducing,
-        Phase 3). Not learnable, never Tier-1-callable (R4)."""
+        not wired yet). Not learnable, never Tier-1-callable."""
         if who != Actor.OWNER:
             raise PermissionError("trade-window changes are owner-only (R10)")
         existing = self.get_trade_window()
@@ -280,7 +280,7 @@ class ModeManager:
                     squareoff_buffer_min=buffer, actor=who, at=now,
                 ),
             )
-        # If end <= now and an MIS is open, square it off at the new end (risk-reducing, §3.2.7).
+        # If end <= now and an MIS is open, square it off at the new end (risk-reducing).
         end_dt = self._clock.combine(self._clock.today(), end)
         if on_shrink_squareoff is not None and end_dt <= now:
             await on_shrink_squareoff()

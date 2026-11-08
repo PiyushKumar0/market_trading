@@ -1,9 +1,9 @@
-"""§9.4 chaos case 11 — a GTT fired and its leg was rejected or never filled, rewritten for paper (plan Q4.5).
+"""Chaos case 11 — a GTT fired and its leg was rejected or never filled, rewritten for paper.
 
 Must hold: the leg's failure (a reject, or no fill by ``paper.exit_working_timeout_min``) hands the open
 qty to the exit routine as ``gtt_failure_exit``; one exit is sent, the GTT is never re-placed, and the
 position closes. Real components: OrderManager, PositionBook, ProtectionManager and PaperBroker; the
-Q4.6 exit routine is the unit suite's stand-in.
+exit routine is the unit suite's stand-in.
 """
 
 from __future__ import annotations

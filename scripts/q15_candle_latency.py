@@ -1,8 +1,8 @@
-"""§14 Q15 measurement: how quickly is the just-closed minute's OFFICIAL candle available from the
+"""Measurement: how quickly is the just-closed minute's OFFICIAL candle available from the
 Kite historical API intraday?
 
-The answer bounds the §2.6 warm-up path on a cold start close to the trade window (official candles
-are canonical, §4.4 job 2) — if the candle for minute M is only served at M+~90 s, a start at
+The answer bounds the warm-up path on a cold start close to the trade window (official candles
+are canonical) — if the candle for minute M is only served at M+~90 s, a start at
 window-open minus one minute cannot warm ORB features from official data and must stay FROZEN.
 
 Run DURING A LIVE SESSION (needs a valid daily access token):
@@ -13,7 +13,7 @@ Method: for each observed minute boundary, poll ``historical_data`` for the just
 few liquid symbols every ``--poll-s`` seconds until that minute's candle appears (or ``--timeout-s``
 gives up); the sample is the delay from the minute close to first availability. Percentiles land in
 ``data/reports/q15_latency.json``. Pacing: with the default 3 symbols and 2 s poll interval the
-request rate stays ≤1.5 req/s, inside the ≤3 req/s historical budget (A2) — this script must not be
+request rate stays ≤1.5 req/s, inside the ≤3 req/s historical budget — this script must not be
 run concurrently with an engine that is backfilling.
 
 Standalone owner tool (like scripts/a11_check.py): talks to pykiteconnect directly and reads the

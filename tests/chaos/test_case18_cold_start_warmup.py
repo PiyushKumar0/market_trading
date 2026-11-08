@@ -1,19 +1,18 @@
-"""Plan §9.4 chaos case 18 — Cold start TOO CLOSE to the window (warm-up insufficient).
+"""Chaos case 18 — Cold start TOO CLOSE to the window (warm-up insufficient).
 
-Must hold (§9.4 row 18, verbatim): "`warmup_ready` FROZEN-for-entries + alert; backfill attempted from
-official candles; entries open only once lookbacks are covered — never trades on thin data (§2.6 risk;
-§14 intraday-candle-latency). **Per COVERAGE CLASS since 2026-09-13 (§2.6 step-6 addendum): a cold start
+Must hold (drill-catalog row 18, verbatim): "`warmup_ready` FROZEN-for-entries + alert; backfill attempted from
+official candles; entries open only once lookbacks are covered — never trades on thin data. **Per COVERAGE CLASS since 2026-09-13: a cold start
 whose only shortfall is today's 1-minute coverage refuses INTRADAY candidates per-candidate instead of
 freezing entries; a daily/regime shortfall (the offline-overnight case) still freezes**".
 
 Scenario: the engine was offline overnight (the 18:05 ``daily_bars`` job never ran for Tue 06-16) and
 cold-starts at 09:55 IST on Wed 2026-06-17, five minutes before the 10:00 trade window, with no live
-minute bars yet — and Kite's official historical candles are unavailable at boot (§14 candle latency /
-a 503). Composed as ``engine.ops.main`` wires it: the real ``SessionLifecycle.startup`` whose step-4
+minute bars yet — and Kite's official historical candles are unavailable at boot (candle latency /
+a 503). Composed as ``engine.ops.main`` wires it: the real ``SessionLifecycle.startup`` whose startup
 ``backfill_hook`` is the real ``regime_and_warmup_backfill`` over a real ``BackfillJob`` → real
-``KiteClient``; the real ``WarmupGate`` over a real temp ``MarketStore`` holding real bars; the §3.5.3
+``KiteClient``; the real ``WarmupGate`` over a real temp ``MarketStore`` holding real bars; the
 cause ledger; the 60 s ``warmup_status_refresh`` body (``refresh_and_lift_warmup`` +
-``maybe_repair_warmup_gaps``, both from ``engine.ops.main``); and the §7.1 entry gate reading the same
+``maybe_repair_warmup_gaps``, both from ``engine.ops.main``); and the risk-gate entry check reading the same
 warm-up snapshot. Faked: only pykiteconnect's ``historical_data`` (the Kite candle edge) and the
 Telegram sink.
 
@@ -25,11 +24,10 @@ Clauses (see "resolved ambiguity" for DAILY):
 * DAILY-only shortfall ⇒ per-symbol refusal of that symbol's swing candidates, no freeze —
   ``test_daily_only_shortfall_refuses_that_symbols_swing_candidates_without_freezing``.
 
-Phase-3-gated: none.
+Gated on the live order path (not built): none.
 
 Resolved ambiguity: the row text (written 2026-09-13) says "a daily/regime shortfall ... still
-freezes"; the later §2.6 per-SYMBOL addendum (owner-directed 2026-09-17, plan §2.6 step 6 and the
-§7.1 ``warmup_ready`` row) narrowed the freezing set to REGIME ∪ unattributable and moved DAILY to
+freezes"; the later per-SYMBOL change (owner-directed 2026-09-17) narrowed the freezing set to REGIME ∪ unattributable and moved DAILY to
 per-symbol refusal. The later owner directive wins: REGIME freezes, DAILY does not.
 """
 
@@ -87,9 +85,9 @@ class _Now:
 
 class _FakeKiteHistorical:
     """pykiteconnect ``KiteConnect.historical_data`` — the official-candle edge. ``down`` = Kite's
-    historical service 503s (or has not published yet, §14). Up, it serves one day candle per NSE
+    historical service 503s (or has not published yet). Up, it serves one day candle per NSE
     session strictly before today, and one minute candle per CLOSED session minute (never the
-    still-forming one — the §14 latency)."""
+    still-forming one — the publication latency)."""
 
     def __init__(self, clock: Clock, calendar: NSECalendar) -> None:
         self.clock, self.calendar = clock, calendar
@@ -159,7 +157,7 @@ def warm_rig(conn, tmp_path, monkeypatch):
 
     store = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
     kc = _FakeKiteHistorical(clock, calendar)
-    # A2 pacing is not this case's subject, and the scenario clock only moves when the test moves it,
+    # Request pacing is not this case's subject, and the scenario clock only moves when the test moves it,
     # so the 3-token historical bucket would never refill: widen the burst (pacing is unit-tested).
     monkeypatch.setattr(rate_limiter_mod, "_HISTORICAL_BURST", 10_000)
     kite = KiteClient(kc, RateLimiter(clock, burst=10_000), clock)
@@ -248,9 +246,9 @@ async def test_regime_shortfall_freezes_until_official_candles_cover_it(warm_rig
 
     report = await rig.boot()
 
-    # Backfill ATTEMPTED from official candles at boot (step 4) — regime daily + today's minutes.
+    # Backfill ATTEMPTED from official candles at boot — regime daily + today's minutes.
     assert {(INDEX_SYMBOL, "day"), (VIX_SYMBOL, "day"), ("RELIANCE", "minute"), ("TCS", "minute")} <= set(rig.kc.calls)
-    # warmup_ready FROZEN-for-entries through its own §3.5.3 cause ...
+    # warmup_ready FROZEN-for-entries through its own cause ...
     assert "warmup_ready" in report.frozen_reasons
     assert report.warmup_classes_short == ["intraday", "regime"]
     assert rig.mode.risk_state() == RiskState.FROZEN
@@ -272,7 +270,7 @@ async def test_regime_shortfall_freezes_until_official_candles_cover_it(warm_rig
         assert not checks["regime_data_ready"].passed
         assert not checks["warmup_ready"].passed
 
-    # Kite's candles become available; the shared step-4 / post-login official-candle backfill is
+    # Kite's candles become available; the shared startup / post-login official-candle backfill is
     # re-attempted, and the next 60 s refresh lifts — entries open only once coverage is complete.
     rig.kc.down = False
     rig.now.at = WINDOW_OPEN + timedelta(minutes=1)

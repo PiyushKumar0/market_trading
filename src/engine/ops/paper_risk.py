@@ -1,10 +1,10 @@
-"""Paper equity and halts (plan Q4.8).
+"""Paper equity and halts.
 
-:meth:`PaperRisk.tick` is ``paper_tick``'s equity step: it snapshots paper equity, evaluates the §7.1
+:meth:`PaperRisk.tick` is ``paper_tick``'s equity step: it snapshots paper equity, evaluates the risk-limit
 floor ladder and daily-loss rungs on the paper tracker, and latches ``paper_halts`` only. Paper never
-writes ``mode_state``, ``risk_state_causes`` or ``kill_state`` (§1.5) and never runs in ``equity_tick``.
+writes ``mode_state``, ``risk_state_causes`` or ``kill_state`` and never runs in ``equity_tick``.
 
-:meth:`PaperRisk.note_reject` is the paper broker-rejection storm detector (§3.5.1), fed by the paper
+:meth:`PaperRisk.note_reject` is the paper broker-rejection storm detector, fed by the paper
 OrderManager's ``on_reject`` seam.
 
 Daily causes clear on the next session; every other cause latches until a ``/paper reset``, which
@@ -48,13 +48,13 @@ HALTS: dict[str, tuple[RiskState, bool]] = {
 }
 FLATTEN_CAUSES = frozenset({"floor_equity_floor_rung", "floor_cumulative_floor", RESET_CAUSE})
 
-#: §3.5.1: this many broker rejects inside one window (span inclusive) is a rejection storm.
+#: This many broker rejects inside one window (span inclusive) is a rejection storm.
 STORM_REJECTS = 3
 STORM_WINDOW = timedelta(seconds=60)
 #: Reject times kept per session day: a memory bound only, far above any real day's count.
 _REJECTS_KEPT = 256
 
-#: ``flatten(basis)``: the Q4.6 exit routine for every held paper position (``ExitManager.flatten_all``).
+#: ``flatten(basis)``: the paper exit routine for every held paper position (``ExitManager.flatten_all``).
 FlattenFn = Callable[[str], Awaitable[int]]
 SessionFn = Callable[[date], Session | None]
 
@@ -75,7 +75,7 @@ def active_halts(conn: sqlite3.Connection) -> dict[str, RiskState]:
 
 
 def paper_effective_state(conn: sqlite3.Connection, real_state: Callable[[], RiskState]) -> Callable[[], RiskState]:
-    """The paper entry state: the worse of the real risk state and the active paper halts (§1.5)."""
+    """The paper entry state: the worse of the real risk state and the active paper halts."""
 
     def state() -> RiskState:
         return max([real_state(), *active_halts(conn).values()], key=_ORDER.index)
@@ -130,7 +130,7 @@ class PaperRisk:
 
     def note_reject(self, at: datetime) -> None:
         """Count one paper broker reject at its broker time ``at`` (tz-aware). ``STORM_REJECTS`` of
-        today's rejects inside any ``STORM_WINDOW`` latch the daily ``rejection_storm`` halt (§3.5.1).
+        today's rejects inside any ``STORM_WINDOW`` latch the daily ``rejection_storm`` halt.
 
         Decided on the sorted broker times, so arrival order neither creates nor hides a storm. A
         reject dated on another day than the clock's is not counted: a stale redelivery must not
@@ -241,7 +241,7 @@ class PaperRisk:
                 (now.isoformat(),),
             )
             self._conn.execute("UPDATE paper_halts SET cleared_at = ? WHERE cleared_at IS NULL", (now.isoformat(),))
-        base = self.tracker.capital_base           # the one base source (O19 §2); read once
+        base = self.tracker.capital_base           # the one base source; read once
         self._broker.reseed_margin(base)
         self.tracker.set_day_baseline(self.tracker.equity())
         self._flattened.clear()

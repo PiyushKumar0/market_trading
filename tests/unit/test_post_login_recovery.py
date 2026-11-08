@@ -1,4 +1,4 @@
-"""Post-login recovery — the §2.6 cold-start RE-TRIGGER (third cold-start-family defect, 2026-07-21).
+"""Post-login recovery — the cold-start RE-TRIGGER (third cold-start-family defect, 2026-07-21).
 
 Covers the three pieces the fix adds:
 
@@ -294,7 +294,7 @@ class _FakeHoldingsReconcile:
 async def test_holdings_step_reports_how_many_observations_were_journalled(
     market_store, clock, calendar
 ):
-    """WO-D2 residue: ``observed`` is how many §3.6 journal rows the run actually WROTE, and this
+    """``observed`` is how many journal rows the run actually WROTE, and this
     ladder calls the job unconditionally — only the hourly tick is window-gated. So checked=3 with
     observed=0 is a non-trading-day boot that grew no "sold outside the ledger" evidence, which
     ``checked`` alone cannot say."""
@@ -325,7 +325,7 @@ async def test_holdings_step_reports_how_many_observations_were_journalled(
     assert weekend.status == "ok" and weekend.detail == "checked=3 flagged=0 skipped_young=0 observed=0"
 
 
-# ------------------------------------ the ``completed`` gate (§2.6 early hydration, 2026-09-09)
+# ------------------------------------ the ``completed`` gate (early hydration, 2026-09-09)
 # Login hooks are fire-and-forget TASKS (``SessionManager._fire_login_hooks`` creates one task per
 # hook), so registration order gives the early-hydration chain NO ordering against this recovery.
 # This event is the real dependency: SET at construction (an engine that never runs a recovery must
@@ -541,7 +541,7 @@ async def test_backfill_minute_leg_confirms_upstream_empty_minutes_clamped_to_cl
     09-16) can be confirmed no-trade instead of holding the symbol out all session. It is clamped to
     ``min(session.close, now − 2 min)``: the −2 min keeps a minute Kite has not published yet out of
     the confirmation, and the session.close clamp keeps a POST-CLOSE boot from marking after-hours
-    minutes (the §2.6 gate clamps to the close — those were never holes)."""
+    minutes (the gate clamps to the close — those were never holes)."""
     import datetime as _dt
 
     from engine.core.clock import IST, Clock
@@ -567,7 +567,7 @@ async def test_backfill_minute_leg_confirms_upstream_empty_minutes_clamped_to_cl
 # --------------------------------------------------------------------------- warm-up gate reapply / lift
 @pytest.mark.asyncio
 async def test_reapply_lifts_warmup_freeze_when_ready(conn, clock, temp_config, monkeypatch):
-    """§2.6 step-6 reopen: after a warm-up freeze, once coverage is met the reapply lifts FROZEN→NORMAL
+    """Warm-up gate reopen: after a warm-up freeze, once coverage is met the reapply lifts FROZEN→NORMAL
     through the SAME risk-state seam startup uses (never a bypass). The boot blocker is a REGIME-class
     one since 2026-09-17 — only the freezing classes (REGIME ∪ unattributable) reach the risk state
     at all, DAILY having joined INTRADAY on the per-symbol side."""
@@ -603,7 +603,7 @@ async def test_reapply_holds_lift_when_another_freeze_stands(conn, clock, temp_c
 
 @pytest.mark.asyncio
 async def test_reapply_does_not_lift_when_killed(conn, clock, temp_config, monkeypatch):
-    """A latched kill is never overridden by a warm-up reopen (R3/R5)."""
+    """A latched kill is never overridden by a warm-up reopen."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _mode, kill, store, lifecycle = _build(conn, clock, temp_config)
     store.register_initial("limits.yaml", OWNER_OK)
@@ -618,7 +618,7 @@ async def test_reapply_does_not_lift_when_killed(conn, clock, temp_config, monke
 @pytest.mark.asyncio
 async def test_reapply_freezes_entries_when_not_ready(conn, clock, temp_config, monkeypatch):
     """A FREEZING class still short on re-evaluation ⇒ FROZEN-for-entries + a WARMUP_FROZEN alert
-    (same as startup step 6): never trade on thin data."""
+    (same as the startup warm-up gate): never trade on thin data."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 

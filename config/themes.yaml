@@ -1,13 +1,13 @@
-# config/themes.yaml — theme → keyword seed map (§2.7 / §4.3 theme_map / §4.4 job 13).
+# config/themes.yaml — theme → keyword seed map.
 #
 # NOT a protected store (owner-editable operational config, like agents.yaml). Themes are
 # cross-sector narratives that NSE sector indices don't capture; the EntityResolver tags a
 # news cluster with a theme on keyword match, and the theme fans out to `symbols` (universe-
-# intersected) at reduced weight (§2.7 scope levels).
+# intersected) at reduced weight (news scope levels).
 #
 # `symbols` lists start EMPTY and are filled ONLY via the owner-approval loop: the weekly
-# researcher SUGGESTS additions from unresolved-entity/theme logs (§5.5), the owner applies
-# (platform-suggests-owner-sets, §6.3). Keyword matching is case-insensitive whole-word.
+# researcher SUGGESTS additions from unresolved-entity/theme logs, the owner applies
+# (platform-suggests-owner-sets). Keyword matching is case-insensitive whole-word.
 
 schema_version: 1
 

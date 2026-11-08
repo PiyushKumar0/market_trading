@@ -95,7 +95,7 @@ __all__ = [
     "parse_intraday",
 ]
 
-# Notes recorded during the Phase-0 smoke test (§8.1): structured-output constraints to enforce
+# Notes recorded during the smoke test: structured-output constraints to enforce
 # client-side post-parse if the SDK schema layer rejects them in-schema. parse_and_stamp() re-validates
 # through Pydantic, so these are enforced there regardless of what the wire schema allows.
 STRUCTURED_OUTPUT_NOTES = {
@@ -147,12 +147,12 @@ def parse_and_stamp(
     )
     # RE-VALIDATE the fully-stamped model — model_copy(update=) does NOT run validators, so a naive
     # platform-supplied ``valid_until`` (or any bad stamped value) would otherwise slip past the
-    # AwareDatetime / no-naive-datetime invariant (§9.1). Round-tripping through the adapter re-checks
+    # AwareDatetime / no-naive-datetime invariant. Round-tripping through the adapter re-checks
     # every field and keeps the concrete discriminated subclass.
     return ActionProposalAdapter.validate_python(stamped.model_dump(mode="python"))
 
 
-# =========================================================================== Intraday Analyst (§5.2)
+# =========================================================================== Intraday Analyst
 class NoActionOutput(BaseModel):
     """The Intraday Analyst's second legal output: an explicit refusal to act (§5.2 output schema).
 
@@ -165,13 +165,13 @@ class NoActionOutput(BaseModel):
 
     action: Literal["no_action"]
     reason: str = Field(min_length=5)
-    # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (§8.1 — the CLI
+    # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (the CLI
     # degrades to text on unions, pinned 2026-07-29) advertises ``thesis``/``confidence`` for EVERY
     # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
     # 2026-08-12 (retries hit the same shape; one terminal). Accepted here, unused downstream;
-    # ``extra="forbid"`` still rejects genuinely foreign fields (R1 structural coherence intact).
+    # ``extra="forbid"`` still rejects genuinely foreign fields (structural coherence intact).
     #
-    # WO-21 (2026-08-20) GENERALISES this half-patch: two accepted fields only ever covered the two
+    # The 2026-08-20 change GENERALISES this half-patch: two accepted fields only ever covered the two
     # extras seen that day, and the same schema mismatch killed BOTH of the first-ever ``enter``
     # outputs (ICICIAMC + POLICYBZR brk20, all 3 retries burned on ``extra_forbidden``; 8 of 13
     # intraday calls failed that way). :func:`_sanitize_guidance_extras` now DROPS every
@@ -183,7 +183,7 @@ class NoActionOutput(BaseModel):
     thesis: str | None = None
 
 
-#: §5.2 output schema: the §3.3 action union PLUS ``no_action``, discriminated on ``action``.
+#: Intraday output schema: the action union PLUS ``no_action``, discriminated on ``action``.
 IntradayOutput = Annotated[
     EnterAction | ExitAction | ModifyStopAction | ModifyTargetAction | CancelAction | NoActionOutput,
     Field(discriminator="action"),
@@ -224,7 +224,7 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
             # schema on the StructuredOutput tool input and RE-PROMPTS on violation, each bounce
             # costing a turn, so a verbose thesis that the client-side clamp would truncate for free
             # instead burned 3-4x output tokens per call and, on 2026-09-03 09:51, exhausted the
-            # 4-turn budget — the FIRST-EVER intraday max-turns sdk_error (terminal: no D7 retry,
+            # 4-turn budget — the FIRST-EVER intraday max-turns sdk_error (terminal: no LLM-failure retry,
             # candidate re-armed, $0.33 gone). Post-deploy the clamp fired 0 times and
             # string_too_long vanished: overflow was being intercepted upstream at the worse layer.
             # The prose note in `numeric_constraints_client_side` stays; the clamp in
@@ -403,7 +403,7 @@ def parse_intraday(
     )
 
 
-# =========================================================================== Pre-open Planner (§5.3)
+# =========================================================================== Pre-open Planner
 class DayPlanFocus(BaseModel):
     """One focus symbol of the day plan. Advisory: the scanners still originate every signal."""
 
@@ -411,7 +411,7 @@ class DayPlanFocus(BaseModel):
 
     symbol: str
     bias: Literal["long", "short", "avoid"]
-    levels: str                 # free text — the planner NEVER emits binding numeric levels (§5.3)
+    levels: str                 # free text — the planner NEVER emits binding numeric levels
     why: str
 
 
@@ -441,13 +441,13 @@ class DayPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     regime: str
-    focus: list[DayPlanFocus] = Field(default_factory=list, max_length=8)     # §5.3: 3–8 symbols
+    focus: list[DayPlanFocus] = Field(default_factory=list, max_length=8)     # 3–8 symbols
     catalyst_focus: list[DayPlanCatalystFocus] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
-# =========================================================================== News Analyst (§5.4)
-#: The CLOSED event taxonomy (§5.4). Out-of-enum ⇒ the cluster is DROPPED at parse + logged (D7).
+# =========================================================================== News Analyst
+#: The CLOSED event taxonomy. Out-of-enum ⇒ the cluster is DROPPED at parse + logged.
 CLUSTER_EVENT_TYPES: tuple[str, ...] = (
     "earnings_result",
     "earnings_guidance",
@@ -545,7 +545,7 @@ def parse_cluster_scores(raw: dict[str, Any] | list[Any] | str) -> tuple[list[Cl
     return scores, dropped
 
 
-# =========================================================================== Nightly Reviewer (§5.5)
+# =========================================================================== Nightly Reviewer
 class ParamSuggestion(BaseModel):
     """ONE suggested envelope-parameter value (§5.5 output contract).
 

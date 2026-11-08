@@ -1,5 +1,4 @@
-"""Hindsight scoring of every published brk20/hi52/ins signal and every C2-blocked brk20 crossing
-(review §9 #5/#6). The constructs and what freezes when are migration 0020's.
+"""Hindsight scoring of every published brk20/hi52/ins signal and every regime-gate-blocked brk20 crossing. The constructs and what freezes when are migration 0020's.
 
 HINDSIGHT: no scanner, threshold, gate, prompt or promotion code may read ``signal_outcomes``. Writes
 only ``signal_outcomes``; reads ``universe_ew_returns``, whose only writer is ``RecOutcomesJob``.
@@ -415,7 +414,7 @@ class SignalOutcomesJob:
 
 
 def _sizing(table: LimitTable) -> Callable[[Decimal], Decimal]:
-    """``stop % -> notional``: the §7.1 swing size at the ``equity_floor_rung``, capped by the per-stock
+    """``stop % -> notional``: the per-trade risk swing size at the ``equity_floor_rung``, capped by the per-stock
     and deployed-capital caps. Raises ``ValueError`` on a table that can size no row, so the job fails
     rather than marking the night's rows unscorable."""
     lim = table.limits

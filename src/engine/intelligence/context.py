@@ -1,32 +1,32 @@
-"""ContextAssembler (§3.2.6, §5.2–§5.4): deterministic Python assembly of every Tier-1 prompt.
+"""ContextAssembler: deterministic Python assembly of every Tier-1 prompt.
 
-The LLM never fetches its own data (D5). Everything it sees is read here, from the store and the
+The LLM never fetches its own data. Everything it sees is read here, from the store and the
 state DB, and laid out in a fixed order:
 
     SYSTEM (byte-stable module constant, passed via SDK options)
     STABLE block   — trading date, day plan, regime line: identical for every call of the day
     VOLATILE block — market data, candidate, catalyst, exposure, cost: changes call to call
 
-That order is the D8 cache discipline: a prefix that changes bytes cannot be reused, so anything
+That order is the prompt-cache discipline: a prefix that changes bytes cannot be reused, so anything
 stable must precede anything volatile and the system prompt must never be interpolated. The unit
 tests assert the property directly — change only volatile inputs and ``stable_block`` must be
 byte-identical.
 
 Two conventions are load-bearing:
 
-* **No LLM-originated time (§3.2).** Every temporal value in a block is precomputed here from
+* **No LLM-originated time.** Every temporal value in a block is precomputed here from
   ``Clock``/``NSECalendar`` and rendered as text. The model is never asked to compute "now", an age,
   or a TTL.
-* **Fail to zero, never fail closed (D7).** Absent data renders as an explicit "unavailable" line —
+* **Fail to zero, never fail closed.** Absent data renders as an explicit "unavailable" line —
   a missing feature snapshot, a missing day plan, an un-run sentiment digest or a failed read must
   never raise and never block a call. What the model does with a thinner context is its problem; a
   crash here would be ours.
-* **Absent is not empty (A2).** A source that is missing renders ``unavailable (<reason>)``; a source
+* **Absent is not empty.** A source that is missing renders ``unavailable (<reason>)``; a source
   that ran and found nothing renders an explicit ``none``. Rule 14 reads absent news as neutral, so
   the two must never share wording.
 
 ``inputs_digest`` is the sha256 of the three blocks and is what gets stamped onto every proposal and
-persisted with the gzipped context (R8): the same digest means the same prompt bytes, so a decision
+persisted with the gzipped context: the same digest means the same prompt bytes, so a decision
 is replayable offline.
 """
 
@@ -56,7 +56,7 @@ from engine.strategy.types import SignalCandidate
 
 _log = get_logger("engine.intelligence.context")
 
-#: How many trailing 1m bars the intraday context carries (§5.2 "last 30 bars summary").
+#: How many trailing 1m bars the intraday context carries.
 BAR_TAIL = 30
 
 #: How many trailing COMPLETED daily bars a swing candidate carries (2026-08-17 finding). 20 is the
@@ -70,7 +70,7 @@ DAILY_LOOKBACK_DAYS = 45
 #: Sessions the core equal-weight return in the regime line compounds over.
 EW_SESSIONS = 20
 
-#: Watchlist columns the catalyst block shows — grade/event/materiality (§2.7 step 5(ii)); the v1
+#: Watchlist columns the catalyst block shows — grade/event/materiality; the v1
 #: price levels are persisted but deliberately not shown. A NULL column is omitted, not rendered null.
 _WATCHLIST_KEYS = (
     "grade", "event_type", "direction", "materiality", "source_domain_count",
@@ -93,7 +93,7 @@ def _no_bars_reason(bars: Sequence[Bar] | None) -> str:
 
 def has_scored_headlines(row: Mapping[str, Any]) -> bool:
     """False for a row that scored no cluster — the digest's every-run market marker (value 0.0,
-    ``n_clusters`` 0) is "none", not a neutral reading. A pre-WO-22 row (NULL count) has a value."""
+    ``n_clusters`` 0) is "none", not a neutral reading. A row digested before the measures existed (NULL count) has a value."""
     return row.get("value") is not None and row.get("n_clusters") != 0
 
 
@@ -104,11 +104,11 @@ def sentiment_as_of_text(as_of: datetime, d: date) -> str:
 
 
 def sentiment_rail_note(row: Mapping[str, Any]) -> str:
-    """The rail annotation for one ``sentiment_agg`` row — ``""`` off the rail (WO-20c / WO-22).
+    """The rail annotation for one ``sentiment_agg`` row — ``""`` off the rail.
 
     ``sentiment_agg.value`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
     bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. When the row
-    carries the WO-22 measures, the note reports the unclipped sum, the cluster count and — since
+    carries the digest's measures, the note reports the unclipped sum, the cluster count and — since
     2026-09-04 — the PER-CLUSTER MEAN, which is the number that says whether the flow is extreme or
     merely wide: on 2026-09-03 the market row read −1.000 from raw −9.48 across 759 clusters, about
     −0.01 per cluster (neutral), and both the planner and the analyst read the rail as a risk-off
@@ -145,7 +145,7 @@ def _digest(system_prompt: str, stable_block: str, volatile_block: str) -> str:
 
 
 class AssembledContext(BaseModel):
-    """One fully-assembled Tier-1 prompt (§3.2.6). Frozen: an assembled context is evidence (R8)."""
+    """One fully-assembled Tier-1 prompt. Frozen: an assembled context is evidence."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -171,21 +171,21 @@ class AssembledContext(BaseModel):
         )
 
     def prompt(self) -> str:
-        """The user-turn text: stable block first, volatile last (D8). System goes via SDK options."""
+        """The user-turn text: stable block first, volatile last. System goes via SDK options."""
         return f"{self.stable_block}\n\n{self.volatile_block}"
 
 
 class ContextAssembler:
-    """Assembles every Tier-1 prompt from the store + state DB. Deterministic; no LLM, no network (D5).
+    """Assembles every Tier-1 prompt from the store + state DB. Deterministic; no LLM, no network.
 
     Parameters
     ----------
     store:
         Open :class:`MarketStore` — bars, feature snapshots, catalyst watchlist, sentiment, sectors.
     conn:
-        The SQLite state connection — ``day_plans`` (§5.3) lives here, not in DuckDB.
+        The SQLite state connection — ``day_plans`` lives here, not in DuckDB.
     clock / calendar:
-        The only sources of "now" and of session/trading-day facts (§3.2 no-naive-datetime).
+        The only sources of "now" and of session/trading-day facts (no-naive-datetime).
     digest_ran_fn:
         Whether day ``d``'s catalyst digest has succeeded — the line between an empty watchlist
         ("none") and an absent one ("unavailable"). ``None`` keeps "none" (tests, replay).
@@ -215,7 +215,7 @@ class ContextAssembler:
         max_qty_by_risk: int,
         sector_exposure_line: str,
     ) -> AssembledContext:
-        """Context for a ``SignalCandidate`` (§5.2 trigger (a)) — the entry-proposal call."""
+        """Context for a ``SignalCandidate`` — the entry-proposal call."""
         d = self._clock.today()
         bars = self._bars(candidate.symbol, d)      # read ONCE: the bar tail and the LTP line share it
         parts: list[str] = ["== MARKET STATE (volatile) =="]
@@ -224,7 +224,7 @@ class ContextAssembler:
         parts.append(contract)
         parts.append(f"features: {self._features_text(candidate.features_snapshot_id)}")
         parts.append(self._bars_text(bars))
-        if candidate.style == "swing":       # batch legs brk20/hi52/ins/cat/cat_reversal + bar-driven rsi2/mom — daily-series rules (§6.1)
+        if candidate.style == "swing":       # batch legs brk20/hi52/ins/cat/cat_reversal + bar-driven rsi2/mom — daily-series rules
             parts.append(self._swing_daily_evidence_text(candidate.symbol, d, bars))
         parts.append(self._session_aggregates_text(d, bars))
         parts.append(self._catalyst_text(candidate.symbol, d))
@@ -254,13 +254,13 @@ class ContextAssembler:
         *,
         ltp_line: str,
     ) -> AssembledContext:
-        """Context for a position event (§5.2 trigger (b)) — risk-reducing outputs ONLY.
+        """Context for a position event — risk-reducing outputs ONLY.
 
         The restriction is enforced twice: stated here in the prompt so the model does not waste a
-        call, and structurally downstream where an entry from this trigger is dropped (R3). Prompt
+        call, and structurally downstream where an entry from this trigger is dropped. Prompt
         text is not a control — it is the polite half of a rule the gate enforces regardless.
 
-        The exit codes are named here, in VOLATILE, and not in the byte-stable system prompt (D8):
+        The exit codes are named here, in VOLATILE, and not in the byte-stable system prompt:
         they are per-call context for the one trigger that can emit an exit. Before 2026-09-11 they
         appeared in no prompt at all, so 47 of 47 exits since 09-03 failed validation on attempt 1.
         """
@@ -286,7 +286,7 @@ class ContextAssembler:
             call_class="position_event",
         )
 
-    # ------------------------------------------------------------------ pre-open planner (§5.3)
+    # ------------------------------------------------------------------ pre-open planner
     def for_planner(
         self,
         d: date,
@@ -302,7 +302,7 @@ class ContextAssembler:
         platform_health: str = "",
         breakout_lines: Sequence[str] = (),
     ) -> AssembledContext:
-        """Context for the 08:50 day-plan call (§5.3). Every input is caller-precomputed text.
+        """Context for the 08:50 day-plan call. Every input is caller-precomputed text.
 
         The planner's STABLE block is the trading-date line and the regime line: the day plan it is
         about to write does not exist yet. ``platform_health`` is the deterministic CURRENT harness
@@ -333,14 +333,14 @@ class ContextAssembler:
             call_class="schedule",
         )
 
-    # ------------------------------------------------------------------ news analyst (§5.4)
+    # ------------------------------------------------------------------ news analyst
     def for_news_batch(
         self, clusters: Sequence[Mapping[str, Any]], theme_vocabulary: Sequence[str]
     ) -> AssembledContext:
-        """Context for one batched cluster-scoring call (§5.4). Chunking to <=30 is the CALLER's job.
+        """Context for one batched cluster-scoring call. Chunking to <=30 is the CALLER's job.
 
         No date anywhere: this agent runs across the pre-open boundary and through the evening sweep,
-        and a date line would split its (already marginal, D8) stable prefix into several variants for
+        and a date line would split its (already marginal) stable prefix into several variants for
         no analytical gain — recency is expressed per cluster as precomputed first-seen text.
         """
         if len(clusters) > news_analyst.MAX_CLUSTERS_PER_CALL:
@@ -384,8 +384,8 @@ class ContextAssembler:
         """The NIFTY 50 regime and the core equal-weight 20-session return, over completed sessions.
 
         Cached under (d, last index bar date, last EW date): a corrected close under the same dates
-        leaves the stable block byte-identical through the day (D8), and a catch-up that writes the
-        missing row moves it once. Never raises (D7).
+        leaves the stable block byte-identical through the day, and a catch-up that writes the
+        missing row moves it once. Never raises.
         """
         index_key, index_text = self._index_regime_text(d)
         ew_key, ew_text = self._ew_return_text(d)
@@ -459,11 +459,11 @@ class ContextAssembler:
             _log.warning(event, d=d.isoformat(), error=f"{type(exc).__name__}: {exc}")
 
     def _date_line(self, d: date) -> str:
-        """Precomputed date text (§3.2: the model never computes a date)."""
+        """Precomputed date text (the model never computes a date)."""
         return f"trading date: {d.isoformat()} ({d.strftime('%A')})"
 
     def _day_plan_text(self, d: date) -> str:
-        """Today's ``DayPlan`` JSON from the state DB, or why it is unavailable (§5.3; absent is normal)."""
+        """Today's ``DayPlan`` JSON from the state DB, or why it is unavailable (absent is normal)."""
         try:
             row = self._conn.execute("SELECT payload FROM day_plans WHERE d = ?", (d.isoformat(),)).fetchone()
         except sqlite3.Error as exc:              # e.g. table absent (pre-migration) - never blocks a call
@@ -477,7 +477,7 @@ class ContextAssembler:
             _log.warning("day_plan_unparseable", d=d.isoformat())
             return f"{_UNAVAILABLE} (day plan unreadable)"
 
-    # ------------------------------------------------- WO-20a: the per-strategy evaluation contract
+    # ------------------------------------------------- the per-strategy evaluation contract
     def _strategy_contract_text(self, strategy_id: str) -> str:
         """The candidate's own evaluation frame (:mod:`engine.strategy.contracts`), indented as a block.
 
@@ -488,7 +488,7 @@ class ContextAssembler:
         exit mechanism, reward basis, evidence status, entry-anchor semantics and the leg's own
         disqualifier list.
 
-        NEVER RAISES (D7). An unregistered ``strategy_id`` renders the explicit UNKNOWN frame and
+        NEVER RAISES. An unregistered ``strategy_id`` renders the explicit UNKNOWN frame and
         warns, because a new scanner shipped without a contract is a deployment defect that must be
         visible in the log rather than a silently thinner prompt.
         """
@@ -503,16 +503,16 @@ class ContextAssembler:
         return f"strategy contract ({strategy_id}):\n{indented}"
 
     def _features_text(self, snapshot_id: str | None) -> str:
-        """The candidate's frozen feature vector (§4.3) with its as-of stamp (WO-6 ii), or
-        ``unavailable`` — never a fabricated timestamp on absent data (D7).
+        """The candidate's frozen feature vector with its as-of stamp, or
+        ``unavailable`` — never a fabricated timestamp on absent data.
 
-        WO-20c (2026-08-20): a present ``rel_volume`` carries its DENOMINATOR in the text. The number
+        2026-08-20: a present ``rel_volume`` carries its DENOMINATOR in the text. The number
         is cumulative session volume ÷ 20d median FULL-DAY volume with no time-of-day adjustment, so
         it is structurally tiny early in the session; read as time-adjusted participation it says
         "nobody is trading this" at 09:20 on a perfectly normal tape, and that misreading was cited
         in 44 of the 63 all-time analyst declines.
 
-        WO-22 (2026-08-21): the correct number now ships beside it — ``rel_volume_tod``, today's
+        2026-08-21: the correct number now ships beside it — ``rel_volume_tod``, today's
         cumulative volume ÷ the 20d median cumulative volume at the SAME elapsed time (1.0 = a
         typical pace for this time of day). The legend therefore names BOTH keys and points at the
         one to read; it renders when EITHER is present, because the reader needs the vocabulary
@@ -548,7 +548,7 @@ class ContextAssembler:
 
     def _bars(self, symbol: str, d: date) -> list[Bar] | None:
         """Today's completed 1m bars up to "now" (the end bound is exclusive in the store); ``None``
-        when the read fails (D7)."""
+        when the read fails."""
         try:
             return self._store.get_bars_1m(
                 symbol, self._session_start(d), self._clock.now() + timedelta(minutes=1)
@@ -558,7 +558,7 @@ class ContextAssembler:
             return None
 
     def _bars_text(self, bars: Sequence[Bar] | None) -> str:
-        """Trailing 1m bars, oldest first, one compact line each (§5.2 "last 30 bars summary")."""
+        """Trailing 1m bars, oldest first, one compact line each."""
         header = f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first):"
         if not bars:
             return f"{header} {_UNAVAILABLE} ({_no_bars_reason(bars)})"
@@ -587,7 +587,7 @@ class ContextAssembler:
         one way this block could make decisions worse rather than better.
 
         DELIBERATELY NOT CACHED (do not re-litigate): this is a single ~20-row point query per
-        FORWARDED swing candidate — at most ~12 a day under the §3.2.5 dedupe/caps — on a code path
+        FORWARDED swing candidate — at most ~12 a day under the prescreen dedupe/caps — on a code path
         whose very next act is an LLM call costing orders of magnitude more in both latency and money.
         A cache would buy nothing measurable and would add a staleness surface to evidence whose only
         job is to be exactly what the scanner saw.
@@ -650,12 +650,12 @@ class ContextAssembler:
         return "\n".join([header, *lines])
 
     def _catalyst_text(self, symbol: str, d: date) -> str:
-        """Watchlist entry for the symbol (if any) + symbol/sector/market sentiment (§2.7/§5.2).
+        """Watchlist entry for the symbol (if any) + symbol/sector/market sentiment.
 
         Present for every `cat` candidate and for any candidate whose symbol has an entry today. A
-        digest that never ran, or a failed read, is ``unavailable`` (D7); a digest that ran without
-        this symbol is ``none`` (A2) — never an error, never a zero standing in for "no signal". The
-        header carries the block's as-of stamp (WO-6 ii): the sentiment digest's last run time, the
+        digest that never ran, or a failed read, is ``unavailable``; a digest that ran without
+        this symbol is ``none`` — never an error, never a zero standing in for "no signal". The
+        header carries the block's as-of stamp: the sentiment digest's last run time, the
         only genuinely-timestamped input this block has.
         """
         as_of, sentiment = self._sentiment_lines(symbol, d)
@@ -689,7 +689,7 @@ class ContextAssembler:
             if as_of is None:
                 return None, [f"  sentiment: {_UNAVAILABLE} (no sentiment digest has run)"]
             # The FULL row, not just ``value``: the rail line renders raw_sum/n_clusters when the
-            # digest measured them (WO-22).
+            # digest measured them.
             agg = {(r["scope"], r["scope_key"]): r for r in self._store.get_sentiment_agg(as_of)}
             sector = self._sector_of(symbol, d)
         except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
@@ -704,7 +704,7 @@ class ContextAssembler:
         return as_of, lines
 
     def _sentiment_line(self, label: str, row: Mapping[str, Any] | None) -> str:
-        """One sentiment scope's line, with the RAIL labelled for what it is (WO-20c, 2026-08-20).
+        """One sentiment scope's line, with the RAIL labelled for what it is (2026-08-20).
 
         ``sentiment_agg`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
         bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. It railed
@@ -712,11 +712,11 @@ class ContextAssembler:
         regime evidence in 46 of the 63 all-time declines. The label states the semantics inline,
         where the number is, because a legend the model has to remember is a legend it will not use.
 
-        WO-22 (2026-08-21) replaces the guess with the digest's own measurement: when the row carries
+        The 2026-08-21 change replaces the guess with the digest's own measurement: when the row carries
         ``raw_sum``/``n_clusters``, the rail line reports how far past the clip the flow actually ran
         and how many clusters produced it — "raw -2.31 across 9 clusters" is a fact the model can
-        weigh, where the WO-20 prose was only a warning it had to take on trust. A row digested
-        BEFORE WO-22 has no measures (NULL), and keeps the WO-20 wording verbatim: an unmeasured rail
+        weigh, where the earlier prose was only a warning it had to take on trust. A row digested
+        BEFORE 2026-08-21 has no measures (NULL), and keeps the earlier wording verbatim: an unmeasured rail
         must not borrow the credibility of a measured one.
 
         The note itself is :func:`sentiment_rail_note` (2026-09-04) — shared with the pre-open
@@ -730,7 +730,7 @@ class ContextAssembler:
         return f"  sentiment {label}: {float(row['value']):+.3f}{sentiment_rail_note(row)}"
 
     def _ltp_line(self, bars: Sequence[Bar] | None) -> str:
-        """Precomputed as-of text: engine "now" plus the last completed bar (§3.2 — never the model's)."""
+        """Precomputed as-of text: engine "now" plus the last completed bar (never the model's)."""
         if not bars:
             return (
                 f"last price: {_UNAVAILABLE} ({_no_bars_reason(bars)}; context assembled at "
@@ -742,18 +742,18 @@ class ContextAssembler:
             f"context assembled at {self._clock.now().isoformat()})"
         )
 
-    # ------------------------------------------------------------------ WO-6: session-scale + staleness
+    # ------------------------------------------------------------------ session-scale + staleness
     def _session_aggregates_text(self, d: date, bars: Sequence[Bar] | None) -> str:
-        """Day H/L, %-from-open, %-from-VWAP, session elapsed minutes (WO-6 i) — VOLATILE only.
+        """Day H/L, %-from-open, %-from-VWAP, session elapsed minutes — VOLATILE only.
 
         Computed over EVERY bar of the session fetched so far (``bars``, not the display-capped
-        ``BAR_TAIL``), fixing the "session-blind by mid-day" gap (F7): the 30-bar tail alone cannot
+        ``BAR_TAIL``), fixing the "session-blind by mid-day" gap: the 30-bar tail alone cannot
         show a day's high/low once the day has more than 30 minutes on the clock. VWAP reuses
         :func:`engine.strategy.indicators.vwap` (typical price ``(H+L+C)/3`` weighted by volume) — the
-        same formula ``features.py`` uses for ``vwap_dist`` (§4.3), so this line and the features
+        same formula ``features.py`` uses for ``vwap_dist``, so this line and the features
         block cannot silently disagree; price*volume IS computable from the ``Bar`` model (OHLC +
         volume), so this is a real computation, not a fabrication of unavailable data. Elapsed minutes
-        needs no bars at all and is always rendered (D7 fail-to-zero applies only to the price stats).
+        needs no bars at all and is always rendered (fail-to-zero applies only to the price stats).
         """
         elapsed_min = max(int((self._clock.now() - self._session_start(d)).total_seconds() // 60), 0)
         if not bars:
@@ -778,8 +778,8 @@ class ContextAssembler:
         )
 
     def _day_plan_age_text(self, d: date) -> str:
-        """Day-plan staleness (WO-6 iii). Rendered in VOLATILE only: the day-plan TEXT itself is read
-        by :meth:`_day_plan_text` into the STABLE block, which must gain no bytes (D8) — so the age
+        """Day-plan staleness. Rendered in VOLATILE only: the day-plan TEXT itself is read
+        by :meth:`_day_plan_text` into the STABLE block, which must gain no bytes — so the age
         line lives here instead, computed fresh on every call from the same ``created_at`` row."""
         try:
             row = self._conn.execute(

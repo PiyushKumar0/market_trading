@@ -1,22 +1,22 @@
 #!/usr/bin/env python
-"""Replay one recorded trading day through the real bar path (WO-P3-3, §3.2.9/§8.4/§9.6).
+"""Replay one recorded trading day through the real bar path.
 
     python scripts/replay_day.py --day YYYY-MM-DD [--symbols A,B] [--parquet-root data/parquet] \
                                  [--scratch DIR] [--out report.json]
 
-**Safe to run beside the live engine.** It reads the §4.3 tick Parquet dataset through
+**Safe to run beside the live engine.** It reads the tick Parquet dataset through
 :class:`~engine.paper.replay.ReplayHarness`, which uses its OWN in-memory DuckDB — ``market.duckdb``
-is never opened, so the single-writer lock the trading session holds is never contended (§4.1). It
+is never opened, so the single-writer lock the trading session holds is never contended. It
 places no order, touches no broker and imports nothing from the RECOMMEND pipeline. Everything it
 writes goes into a scratch directory (a temp dir by default, deleted on exit) that the harness itself
 refuses to place inside the archive.
 
 Output is the :class:`~engine.paper.replay.ReplayReport`: tick counts (read / delivered / pre-open /
-post-close), bars built per day, the order-postback counts, wall time, and the §9.6 ``digest`` — the
+post-close), bars built per day, the order-postback counts, wall time, and the ``digest`` — the
 golden-day artefact. Two runs over the same partitions must print the same digest; that equality IS
 the regression test, so the digest is what to record when pinning a day.
 
-The postback/order/fill counts are 0 from this CLI: it attaches no broker (WO-P3-3 v1 has no order
+The postback/order/fill counts are 0 from this CLI: it attaches no broker (v1 has no order
 origination). They are printed anyway because a zero there is the honest statement that the digest
 covered bars only — the failure this replaces was a harness that reported a bars-only digest while
 looking as though it had checked orders.
@@ -82,7 +82,7 @@ def _print_report(report: ReplayReport) -> None:
     for day, count in report.bars_built.items():
         print(f"bars built {day}: {count:,}")
     # Zero across the board until a broker is attached (v1 has no order origination) - the counts are
-    # here so a wired-broker replay reports what the digest actually covers (WO-P3-3 fix, 2026-09-10).
+    # here so a wired-broker replay reports what the digest actually covers (2026-09-10 fix).
     print(f"postbacks         : {report.postbacks:,}  (order.update frames collected)")
     print(f"  orders          : {report.orders:,}")
     print(f"  fills           : {report.fills:,}")

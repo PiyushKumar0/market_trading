@@ -1,5 +1,5 @@
 # Research trial ledger: one entry per hypothesis family or variant the program has tested (engine.learning.multiplicity).
-# Invariant (IMPLEMENTATION_PLAN §2): a new expected_edge_pct or promotion cites an entry here and clears the bar at N = family_trials.
+# Invariant: a new expected_edge_pct or promotion cites an entry here and clears the bar at N = family_trials.
 trials:
   - id: "edge-orb-20260712"
     date: "2026-07-12"

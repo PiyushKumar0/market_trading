@@ -1,12 +1,12 @@
-"""Surveillance-list ingest — GSM/ASM/T2T/ESM + unsolicited-SMS lists (§3.2.4 / §4.4 job 5, A8).
+"""Surveillance-list ingest — GSM/ASM/T2T/ESM + unsolicited-SMS lists.
 
-``SurveillanceIngest.refresh()`` (08:20 daily, §10.1) pulls the exchange surveillance lists that the
-§3.2.4 universe rule excludes ("not in GSM/ASM/T2T/ESM") plus the unsolicited-SMS pump-suspect list
+``SurveillanceIngest.refresh()`` (08:20 daily) pulls the exchange surveillance lists that the
+universe rule excludes ("not in GSM/ASM/T2T/ESM") plus the unsolicited-SMS pump-suspect list
 (consumed by scanners/gate context, not the universe rule). All sources are best-effort scrapes of
-NSE pages/APIs with the plan's ``[likely]`` anti-bot caveat (E5): injected ``httpx.AsyncClient``,
+NSE pages/APIs with the ``[likely]`` anti-bot caveat: injected ``httpx.AsyncClient``,
 [VERIFY]-marked URLs, defensive parsing.
 
-Failure model (§4.4 job 5, pinned): on a per-source failure, REUSE yesterday's list for that source
+Failure model (pinned): on a per-source failure, REUSE yesterday's list for that source
 (runtime JSON cache under ``data/``, survives restarts) + alert + expose the affected symbols via
 ``SurveillanceLists.unconfirmed_symbols``. Unconfirmed symbols are refused new entries INDIRECTLY:
 the reused list keeps them flagged, so the 08:30 universe build excludes them and the Tier-2 gate
@@ -14,7 +14,7 @@ refuses anything outside the eligible universe. No production code reads ``uncon
 there is no direct gate seam. A failed source can therefore never *shrink* the exclusion set:
 yesterday's flagged symbols stay excluded, and they are additionally unconfirmed.
 
-Held-position migration (A8, plan §2.6 step 5 / §4.4 job 5): every refresh alerts the owner, through
+Held-position migration: every refresh alerts the owner, through
 ``notify``, for each OPEN real position (the injected ``held_positions``) whose symbol is on a list.
 The alert is state-driven, not diff-driven: it fires on the first refresh that finds a held symbol
 listed, and the catalog ``dedupe_key`` (position, list) makes it once-only across restarts. The
@@ -44,32 +44,32 @@ from engine.notify.catalog import CatalogMessage, MessageKind, surveillance_migr
 
 _log = get_logger("engine.universe.surveillance")
 
-# --------------------------------------------------------------------------- sources ([VERIFY Phase-1])
-# NSE JSON report endpoints ([likely] anti-bot: cookie/UA-gated — best-effort per plan §4.4 job 5).
-NSE_GSM_URL = "https://www.nseindia.com/api/reportGSM"                # [VERIFY Phase-1]
-NSE_ASM_URL = "https://www.nseindia.com/api/reportASM"                # [VERIFY Phase-1]
-NSE_ESM_URL = "https://www.nseindia.com/api/reportESM"                # [VERIFY Phase-1]
+# --------------------------------------------------------------------------- sources ([VERIFY])
+# NSE JSON report endpoints ([likely] anti-bot: cookie/UA-gated — best-effort).
+NSE_GSM_URL = "https://www.nseindia.com/api/reportGSM"                # [VERIFY]
+NSE_ASM_URL = "https://www.nseindia.com/api/reportASM"                # [VERIFY]
+NSE_ESM_URL = "https://www.nseindia.com/api/reportESM"                # [VERIFY]
 #: T2T from the listed-securities master (archives host, less bot-gated): SERIES BE/BZ = trade-to-trade.
-NSE_T2T_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"   # [VERIFY Phase-1]
+NSE_T2T_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"   # [VERIFY]
 #: Unsolicited-SMS watch list — RETIRED 2026-07-28: NSE removed /api/unsolicited-sms (hard 404 while
 #: the sibling report endpoints above still serve, so removal, not anti-bot; probed variants all 404).
 #: A permanently-dead fetch would re-flag "degraded" + critical-alert every refresh for a list the
-#: §3.2.4 universe rules never consumed. The ``sms`` field stays on the snapshot as the seam for a
+#: universe rules never consumed. The ``sms`` field stays on the snapshot as the seam for a
 #: replacement source, pinned empty until one exists.
 
 #: T2T series codes in the securities master (BE = rolling T2T, BZ = T2T + other restrictions).
 _T2T_SERIES = frozenset({"BE", "BZ"})
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
-#: OPEN real positions as ``(position_id, symbol, qty)`` — paper is never passed in (paper plan D4).
+#: OPEN real positions as ``(position_id, symbol, qty)`` — paper is never passed in.
 HeldFn = Callable[[], Sequence[tuple[str, str, int]]]
 
-#: Universe-rule sources (§3.2.4 pins these four) in canonical order; ``sms`` is carried separately.
+#: Universe-rule sources in canonical order; ``sms`` is carried separately.
 SURVEILLANCE_KEYS: tuple[str, ...] = ("gsm", "asm", "t2t", "esm")
 
 
 class SurveillanceLists(BaseModel):
-    """One refresh's surveillance snapshot (A8) — the §3.2.4 universe-rule exclusion input.
+    """One refresh's surveillance snapshot — the universe-rule exclusion input.
 
     ``unconfirmed_symbols``: symbols whose CURRENT status could not be confirmed because their
     source failed and yesterday's list was reused. They are already inside :meth:`flagged`, so the
@@ -88,28 +88,28 @@ class SurveillanceLists(BaseModel):
     degraded_sources: tuple[str, ...] = ()
     unconfirmed_symbols: frozenset[str] = Field(default_factory=frozenset)
     #: EQ-series rows of the same EQUITY_L.csv the T2T parse reads — the NSE listed-EQUITY master
-    #: (companies only; ETFs/SME series are absent). The §3.2.4 batch-universe extended leg
+    #: (companies only; ETFs/SME series are absent). The batch-universe extended leg
     #: (2026-09-01) intersects candidates with this set to keep ETFs/SME boards out. Informational —
     #: never part of ``flagged()``/``reasons_for``. Empty when the source AND cache are both
     #: unavailable (the extended leg then builds nothing — fail closed).
     equity_master: frozenset[str] = Field(default_factory=frozenset)
 
     def flagged(self) -> frozenset[str]:
-        """Union of the four universe-rule lists (GSM/ASM/T2T/ESM — not SMS, §3.2.4)."""
+        """Union of the four universe-rule lists (GSM/ASM/T2T/ESM — not SMS)."""
         return frozenset(self.gsm | self.asm | self.t2t | self.esm)
 
     def reasons_for(self, symbol: str) -> list[str]:
-        """Per-list exclusion reasons for ``symbol`` (auditable ``universe_daily`` strings, §4.3)."""
+        """Per-list exclusion reasons for ``symbol`` (auditable ``universe_daily`` strings)."""
         sym = symbol.upper()
         return [f"surveillance_{key}" for key in SURVEILLANCE_KEYS if sym in getattr(self, key)]
 
     def new_entries(self, previous: SurveillanceLists) -> frozenset[str]:
         """Symbols newly flagged vs ``previous`` on the UNION of the lists — a move from one list to
-        another (ASM→GSM) is not in it; the A8 alert uses :meth:`new_listings`."""
+        another (ASM→GSM) is not in it; the held-position alert uses :meth:`new_listings`."""
         return frozenset(self.flagged() - previous.flagged())
 
     def new_listings(self, previous: SurveillanceLists) -> dict[str, frozenset[str]]:
-        """Per list, symbols on it now and not on ``previous``'s copy (A8 wording input)."""
+        """Per list, symbols on it now and not on ``previous``'s copy (held-position alert wording input)."""
         return {key: frozenset(getattr(self, key) - getattr(previous, key)) for key in SURVEILLANCE_KEYS}
 
 
@@ -118,7 +118,7 @@ def _symbols_from_json(payload: Any) -> set[str]:
 
     The NSE report endpoints wrap rows differently per list (``{"data": [...]}``,
     ``{"longterm": {"data": [...]}, "shortterm": {...}}``, plain arrays…) — walking the whole tree
-    for ``symbol`` keys is robust to all of them (parse-defensively, E5).
+    for ``symbol`` keys is robust to all of them (parse-defensively).
     """
     found: set[str] = set()
 
@@ -140,7 +140,7 @@ def _symbols_from_json(payload: Any) -> set[str]:
 def _parse_equity_master(text: str) -> tuple[set[str], set[str]]:
     """One pass over EQUITY_L.csv → ``(t2t_symbols, eq_master)`` (defensive column lookup).
 
-    T2T = rows whose SERIES is BE/BZ (the §3.2.4 exclusion input, unchanged). ``eq_master`` = rows
+    T2T = rows whose SERIES is BE/BZ (the universe-rule exclusion input, unchanged). ``eq_master`` = rows
     whose SERIES is EQ — the listed-equity master the batch-universe extended leg intersects with
     (2026-09-01): ETFs and SME-board series never appear in it, so it doubles as the
     keep-companies-only filter without a second download."""
@@ -164,21 +164,21 @@ def _parse_equity_master(text: str) -> tuple[set[str], set[str]]:
 
 
 class SurveillanceIngest:
-    """§3.2.4 ``SurveillanceIngest`` — best-effort surveillance-list refresh with reuse-yesterday (E5).
+    """``SurveillanceIngest`` — best-effort surveillance-list refresh with reuse-yesterday.
 
     Parameters
     ----------
     clock:
-        Single source of "now" (§3.2) — stamps ``as_of`` and the cache entries.
+        Single source of "now" — stamps ``as_of`` and the cache entries.
     http:
-        Injected ``httpx.AsyncClient`` (convention 11). Owned by the caller; never closed here.
+        Injected ``httpx.AsyncClient``. Owned by the caller; never closed here.
     cache_path:
         Runtime last-good JSON cache (e.g. ``data/universe/surveillance.json``), one entry per
         source — the "yesterday's lists" reused per-source on failure, surviving restarts.
     notify:
-        Optional owner-alert sink; any degraded source alerts through it (critical — A8 safety).
+        Optional owner-alert sink; any degraded source alerts through it (critical — safety).
     held_positions:
-        Optional OPEN real positions reader; each refresh alerts per held symbol on a list (A8, see
+        Optional OPEN real positions reader; each refresh alerts per held symbol on a list (see
         the module docstring). ``None`` = no held-position alert.
     """
 
@@ -204,15 +204,15 @@ class SurveillanceIngest:
         self._current_used_as_of: dict[str, str | None] = {}
 
     async def current(self) -> SurveillanceLists:
-        """The latest refreshed lists, refreshing once if never refreshed this process (§2.6)."""
+        """The latest refreshed lists, refreshing once if never refreshed this process."""
         if self._current is None:
             return await self.refresh()
         return self._current
 
     async def refresh(self) -> SurveillanceLists:
-        """Fetch every source under its own guard; failed sources reuse yesterday + alert (§4.4 job 5).
+        """Fetch every source under its own guard; failed sources reuse yesterday + alert.
 
-        Never raises into the caller's loop (E5). Returns (and retains for :meth:`current`) the
+        Never raises into the caller's loop. Returns (and retains for :meth:`current`) the
         snapshot with per-source results, degraded-source names, and the unconfirmed-symbol set.
         """
         today = self._clock.today()
@@ -328,7 +328,7 @@ class SurveillanceIngest:
         self, lists: SurveillanceLists, previous: SurveillanceLists, previous_as_of: dict[str, str | None],
         used_as_of: dict[str, str | None],
     ) -> None:
-        """One critical alert per (held position, list it is on) — A8. Repeats every refresh by
+        """One critical alert per (held position, list it is on). Repeats every refresh by
         design; the journal's ``dedupe_key`` index delivers each (position, list) once."""
         if self._held_positions is None:
             return
@@ -365,17 +365,17 @@ class SurveillanceIngest:
 
     # ------------------------------------------------------------------ fetchers
     async def _fetch_json_symbols(self, url: str) -> set[str]:
-        # www.nseindia.com API host: cookie priming + browser headers + bounded retry (A3, E5).
+        # www.nseindia.com API host: cookie priming + browser headers + bounded retry.
         resp = await nse_get(self._http, url, timeout=self._timeout)
         return _symbols_from_json(json.loads(resp.content))
 
     async def _fetch_t2t(self) -> tuple[set[str], set[str]]:
-        # nsearchives host: browser headers + retry, no priming (no cookie gate on archives, A4).
+        # nsearchives host: browser headers + retry, no priming (no cookie gate on archives).
         # Returns (t2t_symbols, eq_master) from one EQUITY_L.csv pass — see _parse_equity_master.
         resp = await nse_get(self._http, NSE_T2T_URL, timeout=self._timeout)
         return _parse_equity_master(resp.text)
 
-    # ------------------------------------------------------------------ cache (reuse-yesterday, E5)
+    # ------------------------------------------------------------------ cache (reuse-yesterday)
     def _load_cache(self) -> dict[str, dict[str, Any]]:
         if not self._cache_path.exists():
             return {}
@@ -397,7 +397,7 @@ class SurveillanceIngest:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Closest catalog kind for "safety-critical daily list not fresh" (§2.6 step 5 names
+            # Closest catalog kind for "safety-critical daily list not fresh" (the catch-up names
             # surveillance in the safety set); the freeze itself is the gate/catch-up's decision.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Surveillance lists degraded — reusing yesterday",

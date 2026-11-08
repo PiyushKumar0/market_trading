@@ -1,4 +1,4 @@
-"""Hold map and exit-session arithmetic (plan Q1.1, §1.10)."""
+"""Hold map and exit-session arithmetic."""
 
 from __future__ import annotations
 

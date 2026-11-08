@@ -1,4 +1,4 @@
-"""scripts/watchdog.py decision logic (§2.2 pinned algorithm) — PURE, everything injected.
+"""scripts/watchdog.py decision logic — PURE, everything injected.
 
 Covers: crash vs wedged vs STOPPING-not-a-crash vs STOPPED-silent, the catchup-grace wedge
 suppression, debounce (one alert per outage) + retry-on-send-failure + re-arm-by-fresh-boot,
@@ -63,12 +63,11 @@ def test_running_pid_dead_is_crash():
 def test_running_alive_stale_past_grace_is_wedged_and_killed():
     d = _decide(_snap("RUNNING", alive_ago_s=120, started_ago_s=7200))
     assert d.down_reason == "wedged"
-    assert d.kill_pid == 4242                     # force-kill so NSSM restart takes over (§2.2)
+    assert d.kill_pid == 4242                     # force-kill so NSSM restart takes over
 
 
 def test_wedge_suppressed_inside_catchup_grace():
-    """A legitimately busy multi-day catch-up right after boot must not be shot (§2.2:
-    now − started_at must exceed catchup_grace_s before a wedge alarm)."""
+    """A legitimately busy multi-day catch-up right after boot must not be shot (now − started_at must exceed catchup_grace_s before a wedge alarm)."""
     d = _decide(_snap("RUNNING", alive_ago_s=120, started_ago_s=600))
     assert d.down_reason is None
 
@@ -80,7 +79,7 @@ def test_running_alive_fresh_heartbeat_is_silent():
 
 def test_stopping_pid_alive_is_not_a_crash():
     """STOPPING = intentional teardown in progress — even a stale heartbeat is not wedge-alarmed
-    (the §2.2 wedge branch requires state==RUNNING)."""
+    (the wedge branch requires state==RUNNING)."""
     d = _decide(_snap("STOPPING", alive_ago_s=500))
     assert d.down_reason is None
 
@@ -92,7 +91,7 @@ def test_stopping_pid_dead_is_crash():
 
 
 def test_stopped_is_silent_even_with_dead_pid_and_stale_beat():
-    """Intentional off is NORMAL (§2.6) — chaos case 22(c): killed while intend_to_run false."""
+    """Intentional off is NORMAL — chaos case 22(c): killed while intend_to_run false."""
     d = _decide(_snap("STOPPED", alive_ago_s=86400), pid_alive=DEAD)
     assert d.down_reason is None and d.engine_down_alert is False
 
@@ -113,7 +112,7 @@ def test_debounced_after_alert_no_repeat():
 
 
 def test_fresh_boot_heartbeat_rearms():
-    """last_down_alert_at < last_alive_at (fresh boot) ⇒ armed again for the NEXT outage (§2.2)."""
+    """last_down_alert_at < last_alive_at (fresh boot) ⇒ armed again for the NEXT outage."""
     snap = _snap("RUNNING", alive_ago_s=10)       # rebooted engine wrote a fresh beat…
     stamped = wd.DebounceState(last_down_alert_at=NOW - timedelta(seconds=600))
     d = _decide(snap, debounce=stamped, pid_alive=DEAD)   # …then crashed again
@@ -141,7 +140,7 @@ def test_missed_start_satisfied_by_actual_start():
 
 def test_missed_start_suppressed_while_engine_is_up():
     """An engine already running across the fire-time covers the active period — no false alarm
-    (mirrors §2.2: ENGINE_STARTED is not re-emitted for a later period either)."""
+    (likewise, ENGINE_STARTED is not re-emitted for a later period either)."""
     snap = wd.LifecycleSnapshot(state="RUNNING", pid=4242,
                                 last_alive_at=NOW - timedelta(seconds=10),
                                 started_at=NOW - timedelta(days=1))
@@ -185,7 +184,7 @@ def _tick(snap, debounce, *, send_ok, pid_alive=ALIVE, trading=HOLIDAY):
 
 def test_tick_send_failure_keeps_retrying_and_defers_kill():
     """Correlated outage (router down → wedged engine → Telegram unreachable): the debounce is NOT
-    stamped on a failed send, so every tick retries — the one real-time alert is never lost (§2.2).
+    stamped on a failed send, so every tick retries — the one real-time alert is never lost.
     The wedge kill waits for a confirmed send (alert-FIRST is the pinned order)."""
     snap = _snap("RUNNING", alive_ago_s=300, started_ago_s=7200)
     db0 = wd.DebounceState()
@@ -269,7 +268,7 @@ def test_trading_day_predicate_tolerates_null_and_absent_special_sessions(tmp_pa
 
 def test_read_snapshot_missing_db_is_silent(tmp_path):
     """No state.db yet (fresh install) ⇒ empty snapshot ⇒ silent tick — and CRUCIALLY the read-only
-    open must not have created the file (the watchdog is never a writer, §2.2)."""
+    open must not have created the file (the watchdog is never a writer)."""
     db = tmp_path / "state.db"
     snap = wd.read_snapshot(db)
     assert snap == wd.LifecycleSnapshot()

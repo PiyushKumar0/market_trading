@@ -1,4 +1,4 @@
-"""Paper broker construction and the market-data bridge (plan Q4.1).
+"""Paper broker construction and the market-data bridge.
 
 Construction runs once at boot, before the scheduler arms: seed the id counters, close stranded
 orders, restore the GTT book, mark session prep due. A failed step leaves the runtime degraded:
@@ -6,9 +6,9 @@ nothing is forwarded and prep never completes, so paper stays deaf until a resta
 restart's prep covers the unobserved time.
 
 The bridge forwards in-session ticks and finalized bars to the PaperBroker only while this
-session's prep has completed and none is due or running (plan §1.7).
+session's prep has completed and none is due or running.
 
-Session prep and the Reconciler (Q4.7) plug in through :meth:`PaperRuntime.attach`. A reconcile pass
+Session prep and the Reconciler plug in through :meth:`PaperRuntime.attach`. A reconcile pass
 follows the first forwarded tick of each held paper symbol after every prep, and runs once a session
 from close - 5 min.
 """
@@ -56,9 +56,9 @@ _log = get_logger("engine.ops.paper_runtime")
 TICK_TOPIC = "tick"
 BAR_TOPIC = "bar.1m"
 
-#: More unobserved session time than this before a tick runs session prep first (plan §1.7).
+#: More unobserved session time than this before a tick runs session prep first.
 GAP_TOLERANCE = timedelta(minutes=5)
-#: A backstop only: prep keeps its own 120 s deadline and voids what it did not finish (Q4.7).
+#: A backstop only: prep keeps its own 120 s deadline and voids what it did not finish.
 PREP_BACKSTOP_S = 180.0
 
 #: ``prep(since, until)``: catch up the unobserved window (``since`` is None if never observed).
@@ -69,7 +69,7 @@ PaperAlert = Callable[[str, str], Awaitable[None]]
 TickStep = Callable[[], Awaitable[Any]]
 
 PAPER_TICK_S = 30
-#: The close reconcile (Q4.7) runs once a session from this long before the close.
+#: The close reconcile runs once a session from this long before the close.
 CLOSE_RECONCILE_LEAD = timedelta(minutes=5)
 #: How far back a stored mark is looked for; none found prices a void at ``avg_entry``.
 PRE_EX_LOOKBACK = timedelta(days=10)
@@ -98,7 +98,7 @@ _RESTART_PAYLOAD = {"platform_intent": "restart_close", "reject_reason": "strand
 
 
 async def no_prep(since: datetime | None, until: datetime) -> None:
-    """Session prep until Q4.7 replaces it."""
+    """Session prep until the real session prep replaces it."""
 
 
 async def no_step() -> None:
@@ -130,7 +130,7 @@ _CLOSES = (
 
 
 class PaperNotifier:
-    """Owner messages from the paper path (plan Q4.10), through the owner sink and never the real alert
+    """Owner messages from the paper path, through the owner sink and never the real alert
     sink: PAPER_ALERT for protection and construction failures, FILL for entry completions and closes.
     Halts, reconcile mismatches, voids and late corporate actions are only logged.
 
@@ -188,7 +188,7 @@ class PaperNotifier:
 
 
 def seeded_counters(conn: sqlite3.Connection) -> tuple[int, int]:
-    """``(order_seq, gtt_seq)`` past every paper id ever stored, whatever its state (Q4.2a)."""
+    """``(order_seq, gtt_seq)`` past every paper id ever stored, whatever its state."""
     order_max = conn.execute(
         f"SELECT MAX(CAST(broker_order_id AS INTEGER)) FROM orders WHERE {scope_sql('paper')}"
     ).fetchone()[0]
@@ -520,7 +520,7 @@ class PaperRuntime:
         equity: TickStep = no_step,
     ) -> None:
         """Wire the managers built on :attr:`broker`: ProtectionManager.tick, ExitManager.tick and the
-        Q4.8 equity snapshot and halts. The close reconcile comes with :meth:`attach`."""
+        paper equity snapshot and halts. The close reconcile comes with :meth:`attach`."""
         self._steps = (("protection", protection), ("exits", exits), ("equity", equity),
                        ("entries", self._cancel_blocked_entries))
 

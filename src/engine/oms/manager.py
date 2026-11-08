@@ -1,6 +1,6 @@
-"""Paper OrderManager (plan Q4.3): submits paper orders and applies paper postbacks.
+"""Paper OrderManager: submits paper orders and applies paper postbacks.
 
-* Paper only (D8): the broker must be a ``PaperBroker`` publishing on ``PAPER_ORDER_UPDATE_TOPIC``.
+* Paper only: the broker must be a ``PaperBroker`` publishing on ``PAPER_ORDER_UPDATE_TOPIC``.
 * SQLite runs on the event-loop thread and no write spans an ``await``; callbacks run after commit.
 * One consumer task applies every postback in arrival order and awaits its callbacks before the next,
   so a callback never sees a later fill's state and two fills never race into two protections.
@@ -159,7 +159,7 @@ class OrderManager:
     * ``on_reject(order, at)``: each broker rejection, after commit — a ``place_order`` that raised
       (``at`` = now) or a REJECTED postback (``at`` = its broker time, so a redelivered postback counts
       when it happened). Never for a guard abandon, a guard refusal at the broker, or any other ending:
-      a frozen book must not feed its own rejection storm (§3.5.1).
+      a frozen book must not feed its own rejection storm.
     """
 
     def __init__(
@@ -381,7 +381,7 @@ class OrderManager:
         self.redeliver(frame.data)
 
     def redeliver(self, data: dict[str, Any]) -> None:
-        """Queue a postback-shaped broker row behind the frames already queued: how the Reconciler (R5)
+        """Queue a postback-shaped broker row behind the frames already queued: how the Reconciler
         re-applies a lost postback or adopts an unseen leg."""
         self._queue.put_nowait(_Frame(dict(data), self._clock.now()))
 

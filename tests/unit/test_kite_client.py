@@ -1,6 +1,6 @@
-"""KiteClient market-data passthrough coverage: instruments() (§3.2.2, A10) + the TokenException
+"""KiteClient market-data passthrough coverage: instruments() + the TokenException
 circuit breaker (2026-07-21 fix): a rejected-token broker call fires ``on_token_rejected`` exactly
-once and ALWAYS re-raises (R5/R8 — never swallow); a non-token error leaves the hook untouched; a
+once and ALWAYS re-raises (never swallow); a non-token error leaves the hook untouched; a
 hook that itself raises never masks the original TokenException."""
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ async def test_instruments_forwards_exchange(clock: Clock, rate_limiter: RateLim
     assert fake_kc.last_exchange == "NSE"
 
 
-# --------------------------------------------------------------------------- order-class reads (§7.1)
+# --------------------------------------------------------------------------- order-class reads
 class _ReadKC:
     """pykiteconnect stand-in for the non-placing order-class reads plus one entry placement."""
 

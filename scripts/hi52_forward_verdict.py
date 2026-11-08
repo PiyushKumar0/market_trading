@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """``hi52`` FORWARD-TEST VERDICT — the mechanical kill criterion for the 2026-09-12 promotion.
 
-``hi52`` v2 left SHADOW on 2026-09-12 (IMPLEMENTATION_PLAN.md, "hi52 v2 promotion" §8.6 addendum):
-an expected edge is registered, the §7.1 C3 check has a basis, and its candidates can reach
+``hi52`` v2 left SHADOW on 2026-09-12:
+an expected edge is registered, the risk gate's cost check has a basis, and its candidates can reach
 RECOMMEND. The v2 backtest that justified that is CPCV-promotable (n=1,794; T+20 median net +1.71%,
 58.2% hit; fold pass 86.7% under N=2) but its edge lives in an INDEX cell labelled by CURRENT
 membership applied backwards — a survivorship-tainted proxy. So RECOMMEND mode **is** the forward
@@ -43,13 +43,13 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   positions in THAT symbol's own ``bars_1d`` series, so weekends, exchange holidays and a symbol's
   own trading halts are handled by construction and never by calendar arithmetic.
 * **Costs — one full CNC round trip from the repo's own ``CostModel``**, spread included
-  (``breakeven_pct``, never the fees-only view), charged at the notional **§7.1 sizing actually
+  (``breakeven_pct``, never the fees-only view), charged at the notional **per-trade risk sizing actually
   produces for this rule** — never a round number chosen by hand. A swing position is capped by
   ``per_trade_risk``: ``swing_position_pct`` (2.0%) of equity, charged at ``overnight_gap_mult``
-  (2.0× since O17; 2.5× at registration) the stop distance, and ``hi52``'s stop is 6% — so
+  (2.0× since owner decision 2026-09-24; 2.5× at registration) the stop distance, and ``hi52``'s stop is 6% — so
   ``notional <= equity × 2% / (2.0 × 6%)`` = ``equity / 6`` (:func:`sizing_notional`). It matters:
   at ₹8,000 the round trip is 0.4343% and at the ≈₹6,543 the rule gets at the 2026-09-11 equity it
-  is 0.4769%, and under-charging by ~0.04 pp (0.1 pp pre-O17) biases BOTH demote
+  is 0.4769%, and under-charging by ~0.04 pp (0.1 pp at the earlier 2.5×) biases BOTH demote
   clauses toward keeping an unvalidated rule trading. The equity is the SMALLEST snapshot in the
   measured window (``state.db``), i.e. the tightest capital base any measured signal was sized
   under — the conservative reading, so a shrinking book raises the floor rather than hiding behind
@@ -59,10 +59,10 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   outright for a what-if and the report says ``OVERRIDE`` when it was used.
   **ONE derivation, two readings:** :func:`registered_edge_pct` computes ``settings.hi52
   .expected_edge_pct`` from the SAME :func:`sizing_notional` + :func:`cost_floor_pct` pair, at the
-  smallest equity the §7.1 table still lets the book open a position at (the ``equity_floor_rung``,
+  smallest equity the risk table still lets the book open a position at (the ``equity_floor_rung``,
   −10% of the ₹40,000 base ⇒ ₹36,000 ⇒ ₹6,000 ⇒ 0.4982% ⇒ 2.0336 − 0.4982 = **1.53**, rounded
-  DOWN; pre-O17 at 2.5×: ₹4,800 ⇒ 1.47). The registered edge and this script's floor therefore
-  cannot drift apart: since O19 the unit tests (``test_hi52_edge.py``, ``test_hi52_forward_verdict.py``)
+  DOWN; at the earlier 2.5×: ₹4,800 ⇒ 1.47). The registered edge and this script's floor therefore
+  cannot drift apart: since the owner's dashboard capital change (2026-10-17) the unit tests (``test_hi52_edge.py``, ``test_hi52_forward_verdict.py``)
   pin the registration INPUTS (the registered base, rung, stop and cost tables), so a change to any
   of them fails a test instead of silently leaving a stale edge registered.
 * **Horizons are measured on their OWN event sets.** A signal old enough for T+10 but not yet for
@@ -135,12 +135,12 @@ from engine.strategy.hi52_edge import (  # noqa: E402,F401 - re-exported; ONE de
 from engine.strategy.scanners.hi52 import STRATEGY_ID  # noqa: E402
 
 # =============================================================================== pinned constants
-#: Printed with every verdict, because the boundary is a PREDICTION about when the tranche deploys
+#: Printed with every verdict, because the boundary is a PREDICTION about when the change deploys
 #: and nothing in either store records the deploy. If the engine runs a window_open sweep on or after
 #: 2026-09-14 on code that still has ``hi52`` in ``NO_EDGE_SHADOW_STRATEGIES`` (the v1 rule: smooth
 #: and gap were diagnostics, not gates), those rows land in ``prescreen_day_slots`` looking exactly
 #: like promoted ones and the kill rule would measure a rule the engine was not running. Confirm the
-#: first promoted session against the deploy (``git log`` on the tranche, the engine's boot line) and
+#: first promoted session against the deploy (``git log`` on the change, the engine's boot line) and
 #: pass ``--from`` explicitly whenever it differs.
 PROMOTION_DATE_PROVENANCE = (
     "ASSUMED = first session after the 2026-09-12 promotion commit; confirm against the deploy date "
@@ -150,8 +150,8 @@ PROMOTION_DATE_PROVENANCE = (
 #: Everything else is labelled "diagnostic" in the report, so no one can quote it as an outcome.
 DIAGNOSTIC_HORIZONS: tuple[int, ...] = tuple(k for k in HORIZONS if k != VERDICT_HORIZON)
 
-#: §7.1 ``per_trade_risk`` inputs of the notional derivation, as ``config/limits.yaml`` carries them
-#: after O17. FALLBACKS only: :func:`load_sizing_limits` reads the live file, so an owner change
+#: ``per_trade_risk`` inputs of the notional derivation, as ``config/limits.yaml`` carries them
+#: after owner decision 2026-09-24. FALLBACKS only: :func:`load_sizing_limits` reads the live file, so an owner change
 #: to either number moves this script's cost floor without a code edit; these values are what it
 #: charges when that file cannot be read (a report never fails on a missing input, it states it).
 SWING_POSITION_PCT = Decimal("2.0")
@@ -162,7 +162,7 @@ OVERNIGHT_GAP_MULT = Decimal("2.0")
 #: ``--equity``, which is also how a "what if the book were X" run is done.
 REFERENCE_EQUITY_INR = Decimal("39256.65")
 
-#: §7.1 capital anchor and the go-flat rung, as ``config/limits.yaml`` carries them on 2026-09-12.
+#: Capital anchor and the go-flat rung, as ``config/limits.yaml`` carries them on 2026-09-12.
 #: FALLBACKS only (:func:`load_registration_equity` reads the live file). ₹40,000 × (1 − 10%) =
 #: ₹36,000 is the SMALLEST equity at which the risk table still lets a new position be opened: at or
 #: below the rung the platform goes flat and CLOSE_ONLY, so no hi52 entry is sized under it, ever.
@@ -173,7 +173,7 @@ _HUNDRED = Decimal("100")
 
 
 #: The notional at the registration equity — what the report charges when the store shows nothing.
-#: ≈₹6,543 at ₹39,256.65 equity, a 2% swing budget, the 2.0× (O17) overnight gap multiplier and a 6% stop.
+#: ≈₹6,543 at ₹39,256.65 equity, a 2% swing budget, the 2.0× (owner decision) overnight gap multiplier and a 6% stop.
 REFERENCE_NOTIONAL = sizing_notional(
     REFERENCE_EQUITY_INR, position_pct=SWING_POSITION_PCT,
     gap_mult=OVERNIGHT_GAP_MULT, stop_pct=STOP_PCT,
@@ -193,9 +193,9 @@ def cost_floor_pct(notional: Decimal) -> Decimal:
 def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
     """The number ``config/settings.yaml`` registers as ``hi52.expected_edge_pct`` — DERIVED here.
 
-    ``measured T+20 median GROSS − one CNC round trip at the §7.1-sized notional``, rounded DOWN to
+    ``measured T+20 median GROSS − one CNC round trip at the risk-sized notional``, rounded DOWN to
     two decimals (``ROUND_FLOOR``, never nearest: rounding an edge UP is the one direction that can
-    buy a candidate a C3 pass it did not earn — and FLOOR rather than DOWN so a negative result, a
+    buy a candidate a cost-gate pass it did not earn — and FLOOR rather than DOWN so a negative result, a
     rule that cannot clear its own costs, rounds away from zero too instead of toward it).
 
     The equity is the **``equity_floor_rung``**, not today's book: ``capital_base_inr`` × (1 +
@@ -203,8 +203,8 @@ def registered_edge_pct(limits_path: Path | None = None) -> Decimal:
     opened at. A registered edge is a constant in a protected config file, read on every candidate
     for months; the cost floor it must clear RISES as the book shrinks. Deriving it at the largest
     permitted book would register the edge that flatters the rule at exactly the moment the book is
-    smallest — the drawdown — so it is derived at the worst one instead. Under O17 (2.0× gap mult):
-    ₹6,000 ⇒ 0.4982% at the rung, 2.0336 − 0.4982 = 1.5354 ⇒ **1.53** (pre-O17 at 2.5×: ₹4,800 ⇒
+    smallest — the drawdown — so it is derived at the worst one instead. Under owner decision 2026-09-24 (2.0× gap mult):
+    ₹6,000 ⇒ 0.4982% at the rung, 2.0336 − 0.4982 = 1.5354 ⇒ **1.53** (at the earlier 2.5×: ₹4,800 ⇒
     0.5619%, 1.47).
 
     The arithmetic lives in :func:`engine.strategy.hi52_edge.edge_at` (the engine's live cap,
@@ -223,7 +223,7 @@ VERDICT_HOLD = "HOLD"
 VERDICT_INSUFFICIENT = "INSUFFICIENT"
 VERDICT_UNAVAILABLE = "UNAVAILABLE"
 
-#: Review cadence the plan addendum fixes: run this at 20 and at 40 signals.
+#: Review cadence: run this at 20 and at 40 signals.
 REVIEW_AT_SIGNALS: tuple[int, ...] = (20, 40)
 
 
@@ -570,7 +570,7 @@ def resolve_cost_floor(
     fallback names itself in ``derivation``, which the report prints — an unexplained cost floor on a
     kill criterion is worse than a stated approximate one.
 
-    ``notional_override`` (``--notional``) bypasses the §7.1 derivation entirely. It exists for
+    ``notional_override`` (``--notional``) bypasses the sizing derivation entirely. It exists for
     what-ifs ("what would this verdict have been at ₹8,000?") and it SHOUTS: the derivation string
     starts with ``OVERRIDE`` and the report prints it, because a hand-picked notional is exactly the
     defect the derivation was introduced to remove and a quoted number must never hide it.

@@ -1,20 +1,20 @@
-"""Pre-open Planner job (§5.3, plan lines 1155-1163) — the 08:50 daily day-plan run.
+"""Pre-open Planner job — the 08:50 daily day-plan run.
 
-Same shape as :class:`~engine.ops.news_scoring.NewsScoringJob` (§5.4): a thin deterministic shell
+Same shape as :class:`~engine.ops.news_scoring.NewsScoringJob`: a thin deterministic shell
 that decides WHETHER to call (governor), assembles every input in Python, calls the one Tier-1
 agent, and persists the result. The plan is advisory only — it never originates a symbol, a level
-or a trade; deterministic scanners and the risk gate keep doing that (§5.3 catalyst_focus note).
+or a trade; deterministic scanners and the risk gate keep doing that.
 
-**Planner death never blocks anything (§2.7).** The scanner path is planner-independent: a blocked
+**Planner death never blocks anything.** The scanner path is planner-independent: a blocked
 governor, a harness failure, or thin/empty upstream tables all resolve to a non-``RAN``
 :class:`~engine.ops.jobs.AdvisoryOutcome` and no ``day_plans`` row — never an exception. The
 intraday context assembler already renders an absent plan as ``unavailable``
 (``ContextAssembler._day_plan_text``), so a missing plan degrades the day's intraday prompts, not
-the engine. WO-14 (c) is why the return is a tri-state rather than the original ``bool``: the
+the engine. The return is a tri-state rather than the original ``bool``: the
 watermark must retry a harness failure and must NOT retry a governor block.
 
-Deterministic inputs, all best-effort, each degrading independently (D7 fail-to-zero). Absent is
-not empty (A2): a missing source renders ``unavailable (<reason>)``, a source that ran and found
+Deterministic inputs, all best-effort, each degrading independently (fail-to-zero). Absent is
+not empty: a missing source renders ``unavailable (<reason>)``, a source that ran and found
 nothing renders ``none``, and a failed read renders ``unavailable`` without raising.
 
 - **movers** — top 10 by ``|1-day return|`` across the PRIOR trading day's included universe, from
@@ -32,16 +32,16 @@ nothing renders ``none``, and a failed read renders ``unavailable`` without rais
   ``unavailable`` only when the universe build never ran for ``d`` (zero rows at all); an empty
   EXCLUSION set with rows present is a real "no changes today" zero.
 - **open positions** — the ``positions`` table, ``state='OPEN'``. Zero open positions is routine
-  platform state, not an outage: renders "none", never "unavailable". Since WO-D2 a position the
-  §3.6 holdings journal has seen UNHELD on two consecutive observation days is excluded from this
+  platform state, not an outage: renders "none", never "unavailable". A position the
+  holdings journal has seen UNHELD on two consecutive observation days is excluded from this
   line and rendered in its own "SOLD OUTSIDE THE LEDGER" block instead — the plan must not reason
   about the overnight risk of a position the owner already sold (eleven plans did, 08-26 → 09-11).
 - **yesterday_review_summary** — latest ``nightly_reviews.payload["summary"]``; ``unavailable`` when
   no review has been recorded yet (a fresh DB, or every prior review failed or was governor-blocked).
 
-**No pre-open gap-scan (decision).** The plan row (§5.3) still lists "gap scan vs prior close" as a
+**No pre-open gap-scan (decision).** The plan row still lists "gap scan vs prior close" as a
 context input and :meth:`ContextAssembler.for_planner` still accepts a ``gap_lines`` parameter, but
-A14 established that indicative pre-open prices are auction artifacts, not traded prices — there is
+it was established that indicative pre-open prices are auction artifacts, not traded prices — there is
 no trustworthy PRE-OPEN price to gap against. The real auction grounding lives in the planner's
 system prompt (``engine.intelligence.agents.preopen.SYSTEM_PROMPT``), not in a number this job could
 compute. ``gap_lines`` therefore always carries one explanatory line, never a silent "none" (which
@@ -98,7 +98,7 @@ SECTOR_TOP_N = 5
 #: last successful refresh is no older than the 3rd session before ``d``.
 EARNINGS_FRESH_SESSIONS = 3
 
-#: Heading for the WO-D2 "sold outside the ledger" block. The whole positions summary is rendered as
+#: Heading for the "sold outside the ledger" block. The whole positions summary is rendered as
 #: ONE prompt item by the assembler, so this line is the only thing separating the two groups inside
 #: it — it must read as a header AND state that what follows is not the overnight book, because the
 #: failure it was written for is a planner folding those names back into its risk paragraph (eleven
@@ -134,7 +134,7 @@ def _read_failed(section: str) -> str:
 
 
 class PreopenPlannerJob:
-    """§5.3: assemble the pre-open context, call the planner agent, persist one ``day_plans`` row.
+    """Assemble the pre-open context, call the planner agent, persist one ``day_plans`` row.
 
     Parameters
     ----------
@@ -142,13 +142,13 @@ class PreopenPlannerJob:
         DuckDB market data (movers, sentiment, watchlist, earnings, universe) and the SQLite state
         db (``positions``, ``nightly_reviews``, ``day_plans``) respectively.
     assembler / harness / agent_defs:
-        The §3.2.6 context assembler, the sole SDK caller, and the loaded ``agents.yaml`` roster.
+        The context assembler, the sole SDK caller, and the loaded ``agents.yaml`` roster.
     governor:
-        §5.6 admission — checked here, up front, so a blocked planner never even builds a context.
+        Budget-governor admission — checked here, up front, so a blocked planner never even builds a context.
     clock / calendar:
-        The single "now"/"today" and the trading-day/session facts (§3.2 — no naive datetimes).
+        The single "now"/"today" and the trading-day/session facts (no naive datetimes).
     notify:
-        Optional owner-alert callback for a failed run (§5.3 step 3). The scanner path never waits
+        Optional owner-alert callback for a failed run. The scanner path never waits
         on it — a `None` notify simply means the failure is logged, not additionally alerted.
     last_success:
         ``job_id -> last successful run_for date`` (the catch-up watermark): decides whether an
@@ -186,13 +186,13 @@ class PreopenPlannerJob:
         self._notify = notify
         self._last_success = last_success
 
-    # ------------------------------------------------------------------ run (§5.3)
+    # ------------------------------------------------------------------ run
     async def run(self, d: date) -> AdvisoryOutcome:
         """Produce and persist the day plan for ``d``. ``RAN`` iff a ``day_plans`` row was written.
 
-        Never raises — the planner is advisory-only and its death must never block the scanner path
-        (§2.7). WO-14 (c) splits the two non-``RAN`` cases the old ``bool`` conflated, because they
-        want opposite watermark treatment: ``BLOCKED`` (the §5.6 governor declined) is a CORRECT
+        Never raises — the planner is advisory-only and its death must never block the scanner path.
+        It splits the two non-``RAN`` cases the old ``bool`` conflated, because they
+        want opposite watermark treatment: ``BLOCKED`` (the budget governor declined) is a CORRECT
         outcome that must NOT be retried — retrying spends LLM budget re-asking a governor that is
         deliberately saying no — while ``FAILED`` (harness failure) is retryable, and its retry is
         governor-gated by the very check above. The composition-root wrapper translates.
@@ -251,7 +251,7 @@ class PreopenPlannerJob:
                          error=f"{type(exc).__name__}: {str(exc)[:200]}")
             return failed
 
-    # ------------------------------------------------------------------ movers (§5.3 "overnight movers")
+    # ------------------------------------------------------------------ movers ("overnight movers")
     def _movers_lines(self, d: date) -> list[str]:
         """Top-|return| movers, prior trading day vs the one before it — never ``d`` (unopened)."""
         d1 = self._prior_trading_day(d)
@@ -276,7 +276,7 @@ class PreopenPlannerJob:
 
     def _prior_trading_day(self, d: date) -> date | None:
         """The trading day strictly before ``d``, or ``None`` if the calendar horizon can't supply
-        one within a bounded walk (R6 — no calendar, no trading)."""
+        one within a bounded walk (no calendar, no trading)."""
         probe = d - timedelta(days=1)
         for _ in range(400):
             if self._calendar.is_trading_day(probe):
@@ -284,15 +284,14 @@ class PreopenPlannerJob:
             probe -= timedelta(days=1)
         return None
 
-    # ------------------------------------------------------------------ brk20 (§6.1 addendum, 2026-08-04)
+    # ------------------------------------------------------------------ brk20 (2026-08-04)
     def _breakout_lines(self, d: date) -> list[str]:
         """Yesterday's 20d-high daily-close breakouts over the BATCH universe (brk20 rule).
 
-        Advisory context only (§5.3: the planner never originates) — the ACTIONABLE candidates are
+        Advisory context only (the planner never originates) — the ACTIONABLE candidates are
         admitted by the window-open sweep through the prescreen caps. Full-universe by design:
         watchlist_cap symbols are invisible to the per-bar scanners (the BPCL 2026-08-03 miss),
-        and this section is exactly where the planner learns about them. 2026-09-01 (§3.2.4
-        extended-leg addendum): widened from the eligible set to the BATCH universe — the morning
+        and this section is exactly where the planner learns about them. 2026-09-01: widened from the eligible set to the BATCH universe — the morning
         plan now also surfaces criteria-passing non-index breakouts (the JINDALSAW/WELCORP class);
         those lines are advisory-only by construction since the gate never approves non-included
         symbols. Predicate centralized in the store method (was an inline duplicate).
@@ -328,11 +327,11 @@ class PreopenPlannerJob:
         ):
             if row.get("ex_date") is not None:
                 ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
-        # No WO-19 veto accumulator here: this path is ADVISORY context, and the actionable run of
+        # No stop-geometry veto accumulator here: this path is ADVISORY context, and the actionable run of
         # the same rule is the window-open sweep, which logs the counts. A second set from a second
         # run of the rule over the same universe would double-count the day's vetoes in the log.
         cands = brk20.sweep_daily(histories, today=d, ex_dates_by_symbol=ex_map)
-        # WO-4 semantics: entry = the broken 20d-high LEVEL, stop = 2*level - close(y), so
+        # Entry semantics: entry = the broken 20d-high LEVEL, stop = 2*level - close(y), so
         # close(y) is recovered as 2*entry - stop; the summary names the close and the level.
         return [
             f"{c.symbol} closed {c.raw_levels.entry * 2 - c.raw_levels.stop} above its 20d high "
@@ -341,7 +340,7 @@ class PreopenPlannerJob:
             for c in cands
         ] or ["none"]
 
-    # ------------------------------------------------------------------ catalyst digest (§2.7 step 5)
+    # ------------------------------------------------------------------ catalyst digest
     def _digest_lines(self, d: date) -> list[str]:
         """The digest's as-of stamp, then market + top-5 sector sentiment rows from the latest digest
         run; ``unavailable`` only when the digest has never run (mirrors
@@ -374,7 +373,7 @@ class PreopenPlannerJob:
             *(lines or ["none (the latest digest scored no market or sector headlines)"]),
         ]
 
-    # ------------------------------------------------------------------ watchlist (§2.7 step 5(ii))
+    # ------------------------------------------------------------------ watchlist
     def _watchlist_lines(self, d: date) -> list[str]:
         """Graded watchlist rows for ``d``: symbol, grade, event_type (no price levels: the v1 cat
         levels are retired). Empty renders "none" via ``ContextAssembler._section`` only once ``d``'s
@@ -407,7 +406,7 @@ class PreopenPlannerJob:
             return []
         return [f"{_UNAVAILABLE} (earnings calendar not refreshed since {last.isoformat() if last else 'never'})"]
 
-    # ------------------------------------------------------------------ surveillance changes (A8)
+    # ------------------------------------------------------------------ surveillance changes
     def _surveillance_lines(self, d: date) -> list[str]:
         """Today's EXCHANGE surveillance exclusions from ``universe_daily``. ``unavailable`` only
         when the universe build never ran for ``d`` (zero rows); no flagged symbols is "none".
@@ -433,9 +432,9 @@ class PreopenPlannerJob:
 
         Zero open positions is routine, not an outage: "none", never "unavailable".
 
-        WO-D2 (2026-09-12). Two positions the owner sold outside the ledger on 08-26 were still
+        2026-09-12. Two positions the owner sold outside the ledger on 08-26 were still
         rendered as open — and reasoned about as overnight risk — in eleven consecutive day plans.
-        A position with two consecutive short broker observations (§3.6 journal,
+        A position with two consecutive short broker observations (holdings journal,
         :func:`~engine.ops.holdings_reconcile.positions_missing_from_holdings`) is therefore pulled
         OUT of this line and re-stated underneath it as its own block, naming the exact ``/closed``
         reply that ends the ambiguity. The planner then reasons about the book the owner actually
@@ -445,9 +444,8 @@ class PreopenPlannerJob:
         ``position_id -> MissingHolding`` mapping directly, so the per-position streak/quantities the
         block prints come from the SAME dict that decided which positions leave the risk line — no
         second query, and no "missing position" case to fall back on. An unreadable journal (a
-        database that has not taken migration 0013 yet, a locked file) degrades to the pre-WO-D2
-        rendering — every open position on the risk line — because the planner may never raise (§2.7:
-        its death must not block the scanner path).
+        database that has not taken migration 0013 yet, a locked file) degrades to the earlier
+        rendering — every open position on the risk line — because the planner may never raise (its death must not block the scanner path).
         """
         rows = self._conn.execute(
             "SELECT position_id, symbol, side, qty, avg_entry, stop, product "
@@ -473,7 +471,7 @@ class PreopenPlannerJob:
         # The assembler renders this whole string as ONE prompt item ("open positions and overnight
         # risk: ...", intelligence/context.py). Without a heading of its own the sold block is just
         # unlabelled continuation lines UNDER that label, and a planner reading it can fold them back
-        # into exactly the overnight-risk reasoning WO-D2 removes them from — the per-line marker
+        # into exactly the overnight-risk reasoning this block removes them from — the per-line marker
         # alone was carrying the distinction. The heading is the separator, and it states the
         # negative ("not open risk") before the model reaches the position lines.
         return "\n".join(
@@ -482,7 +480,7 @@ class PreopenPlannerJob:
 
     def _sold_outside_line(self, row: Any, missing: Mapping[str, MissingHolding]) -> str:
         """One "sold outside the ledger" line: what the platform tracks, what the broker showed, and
-        the literal reply that settles it — the same ``entry_rec_id`` the §3.6 alert names.
+        the literal reply that settles it — the same ``entry_rec_id`` the holdings-reconcile alert names.
 
         ``held_qty`` is the quantity the LATEST observation actually saw, not a hardcoded zero: a
         partial exit reads short with a non-zero holding, and the plan must not assert a number the
@@ -504,7 +502,7 @@ class PreopenPlannerJob:
             f"on {sessions} sessions): reply {reply}"
         )
 
-    # ------------------------------------------------------------------ yesterday's review (§5.5)
+    # ------------------------------------------------------------------ yesterday's review
     def _yesterday_review_summary(self) -> str:
         """Latest ``nightly_reviews.payload["summary"]`` prefixed with ITS session date. No review
         recorded yet (a fresh DB, or every prior review failed or was governor-blocked) is
@@ -547,9 +545,9 @@ class PreopenPlannerJob:
             "historical review text says."
         )
 
-    # ------------------------------------------------------------------ persistence (§2.6 run-latest)
+    # ------------------------------------------------------------------ persistence (run-latest)
     def _persist(self, d: date, plan: DayPlan) -> None:
-        """``INSERT OR REPLACE`` — a re-run for the same ``d`` replaces the row (§2.6 idempotent
+        """``INSERT OR REPLACE`` — a re-run for the same ``d`` replaces the row (idempotent
         run-latest), never duplicates it (``day_plans.d`` is the primary key)."""
         with transaction(self._conn):
             self._conn.execute(

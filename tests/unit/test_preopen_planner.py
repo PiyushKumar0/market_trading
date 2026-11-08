@@ -1,4 +1,4 @@
-"""PreopenPlannerJob (§5.3, plan lines 1155-1163): governor gate, deterministic inputs, persistence.
+"""PreopenPlannerJob: governor gate, deterministic inputs, persistence.
 
 A fake governor and a fake harness (recording the real ``ContextAssembler``-built context) stand in
 for the SDK boundary — same style as ``test_agent_harness.py``'s fakes, but here the harness itself
@@ -71,7 +71,7 @@ def agent_defs():
 
 # --------------------------------------------------------------------------- fakes
 class FakeGovernor:
-    """Records every ``can_invoke`` call; answers a fixed decision (§5.6 admission, faked)."""
+    """Records every ``can_invoke`` call; answers a fixed decision (admission, faked)."""
 
     def __init__(self, allowed: bool = True, reason: str | None = None) -> None:
         self.allowed = allowed
@@ -159,7 +159,7 @@ async def test_governor_blocked_skips_harness_and_persists_nothing(store, conn, 
 
     ok = await job.run(TODAY)
 
-    assert ok is AdvisoryOutcome.BLOCKED          # WO-14 (c): a correct outcome, not a failure
+    assert ok is AdvisoryOutcome.BLOCKED          # a correct outcome, not a failure
     assert harness.calls == []                                        # planner death never calls the SDK
     assert governor.calls == [preopen.AGENT_ID]
     row = conn.execute("SELECT 1 FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
@@ -179,7 +179,7 @@ async def test_harness_failure_returns_failed_and_persists_nothing(store, conn, 
 
     ok = await job.run(TODAY)
 
-    assert ok is AdvisoryOutcome.FAILED           # WO-14 (c): retryable, unlike a governor block
+    assert ok is AdvisoryOutcome.FAILED           # retryable, unlike a governor block
     assert len(harness.calls) == 1                                     # the call WAS attempted
     row = conn.execute("SELECT 1 FROM day_plans WHERE d = ?", (TODAY.isoformat(),)).fetchone()
     assert row is None
@@ -205,7 +205,7 @@ async def test_a_dead_login_is_left_to_the_harness_alert(store, conn, assembler,
 
 
 async def test_harness_failure_with_no_notify_still_returns_failed(store, conn, assembler, agent_defs, clock, calendar):
-    """``notify`` is optional (§5.3 step 3) — its absence must not raise."""
+    """``notify`` is optional — its absence must not raise."""
     harness = FakeHarness(AgentResult.Failed("timeout", "no complete response within 60s", call_id="c3"))
     governor = FakeGovernor(allowed=True)
     job = _job(store, conn, assembler, harness, agent_defs, governor, clock, calendar)
@@ -247,7 +247,7 @@ async def test_movers_ranked_by_absolute_return_descending(store, conn, assemble
 async def test_a_railed_market_digest_reaches_the_planner_with_its_measure(
     store, conn, assembler, agent_defs, clock, calendar
 ):
-    """2026-09-03: the planner's digest lines rendered a bare ``market: -1.000`` (no WO-22 measure),
+    """2026-09-03: the planner's digest lines rendered a bare ``market: -1.000`` (no measure),
     read it as "pinned at its floor", and wrote a risk-off day plan that every intraday verdict then
     cited — from raw -9.48 across 759 clusters, i.e. neutral flow. The planner gets the same measured
     rail line the analyst context already carries; an unrailed sector line is unchanged."""
@@ -284,7 +284,7 @@ async def test_empty_tables_render_without_raising(store, conn, assembler, agent
     volatile = harness.calls[0]["context"].volatile_block
     # The health line renders even on an empty store (never-run is honest, not an outage claim).
     assert "platform health (current, authoritative): LLM self-test never-run" in volatile
-    # The A14 gap-scan decision: never silently "none".
+    # The gap-scan decision: never silently "none".
     assert "gap scan vs prior close:\n  - not computed: no trustworthy pre-open price source (A14" in volatile
 
 
@@ -354,7 +354,7 @@ async def test_context_filters_platform_bookkeeping_and_dates_the_review(
             "[review of the 2026-06-16 session] 25 consecutive analyst failures") in volatile
 
 
-# --------------------------------------------------------------------------- idempotent run-latest (§2.6)
+# --------------------------------------------------------------------------- idempotent run-latest
 async def test_rerun_same_day_replaces_the_row(store, conn, assembler, agent_defs, clock, calendar):
     governor = FakeGovernor(allowed=True)
     harness1 = FakeHarness(AgentResult.Ok(call_id="c6", payload=_plan(regime="first run")))
@@ -378,7 +378,7 @@ def test_construction_rejects_a_roster_missing_the_planner(store, conn, assemble
         _job(store, conn, assembler, harness, {}, governor, clock, calendar)
 
 
-# ------------------------------------------------- WO-D2: positions the owner sold outside the ledger
+# ------------------------------------------------- positions the owner sold outside the ledger
 # 2026-09-11: HDFCAMC and HINDZINC were sold on 08-26 and stayed OPEN until 09-11. Eleven consecutive
 # day plans therefore reasoned about the "overnight risk" of two positions that did not exist, while
 # the one thing that would have ended it -- a /closed reply -- was never put in front of the owner
@@ -506,7 +506,7 @@ async def test_a_sold_position_with_no_ledger_row_still_gets_an_actionable_line(
     store, conn, assembler, agent_defs, clock, calendar
 ):
     """No ledger row => no rec id to type. The block says so and names the position id, exactly as
-    the §3.6 alert does: an explicit un-actionable line beats a silent omission."""
+    the reconcile alert does: an explicit un-actionable line beats a silent omission."""
     _position(conn, "pos-orphan", "HINDZINC", 5)
     _observe(conn, "pos-orphan", PRIOR, tracked=5)
     _observe(conn, "pos-orphan", TODAY, tracked=5)

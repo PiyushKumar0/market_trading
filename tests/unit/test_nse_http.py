@@ -1,4 +1,4 @@
-"""engine.core.nse_http (A3/A4): cookie priming, anti-bot re-prime, and bounded backoff retry.
+"""engine.core.nse_http: cookie priming, anti-bot re-prime, and bounded backoff retry.
 
 Every case drives :func:`nse_get` through an ``httpx.MockTransport`` that records the exact request
 sequence, so the priming/re-prime/backoff contract is asserted on observed traffic — not internals.

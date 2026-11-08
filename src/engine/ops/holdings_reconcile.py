@@ -1,20 +1,20 @@
-"""Holdings reconcile for tracked CNC positions (§3.6, owner-directed 2026-09-07).
+"""Holdings reconcile for tracked CNC positions (owner-directed 2026-09-07).
 
-The §3.2.8 fill-side reconciler (``REC_FILL_SUSPECTED``) is still a Phase-3 item, so until now the
+The fill-side reconciler (``REC_FILL_SUSPECTED``) is still not built, so until now the
 platform could not tell whether a tracked position still EXISTED in the owner's account. HDFCAMC and
 HINDZINC carried 39 expired exit recommendations across eleven sessions with no way to distinguish
 "the owner is ignoring the exit" from "the owner sold and never sent ``/closed``" — and a position
-the platform wrongly believes is open keeps consuming the O16 per-name cap.
+the platform wrongly believes is open keeps consuming the per-name cap (owner decision 2026-09-07).
 
 This job closes that hole with the cheapest possible question: does the broker still hold it? One
 ``holdings()`` call, compared against every OPEN CNC position with ``origin in
 ('platform','recommended')`` that is old enough to have settled, and one owner alert naming the exact
 ``/closed <entry_rec_id> <price>`` reply.
 
-**Alert-only, never load-bearing (§3.6).** The platform never auto-closes a human-owned position (the
-close price is the owner's fact, §6.5 outcome labelling), never touches risk state or the prescreen,
+**Alert-only, never load-bearing.** The platform never auto-closes a human-owned position (the
+close price is the owner's fact, outcome labelling), never touches risk state or the prescreen,
 and a broker/token failure degrades to a WARNING log plus ``error`` on the result — the check itself
-is diagnostic; its only gate input is the two-day journal below, which releases §7.1 count capacity
+is diagnostic; its only gate input is the two-day journal below, which releases risk-limit count capacity
 and never blocks anything. Every design choice here is biased against the FALSE positive
 "you sold this", because an owner who stops believing these alerts is worse off than one who never
 got them:
@@ -37,24 +37,24 @@ on every run it holds, so the log stays the evidence trail while the phone buzze
 re-alerts once — accepted, because the alternative (persisting the dedupe) buys nothing the owner's
 own ``/closed`` would not settle.
 
-**The observation journal (WO-D2, 2026-09-12).** Every CHECKED position also writes one
+**The observation journal (2026-09-12).** Every CHECKED position also writes one
 ``holdings_observations`` row per trading day (upsert, last write of the day wins — see migration
 0013). That turns a per-run in-memory answer into a durable series, and
 :func:`positions_missing_from_holdings` reads it as "the two most recent observation days both read
-SHORT". Every caller uses that set to STOP DOING THINGS — the §5.2(b) position-event path and the
-analyst positions summary stop treating the position as held, the §5.3 pre-open planner moves it out
+SHORT". Every caller uses that set to STOP DOING THINGS — the position-event path and the
+analyst positions summary stop treating the position as held, the pre-open planner moves it out
 of the overnight-risk line into its own "sold outside the ledger" block, protection reminders stop
-nagging, and the gate drops it from the §7.1 position/sector counts (``gate._gone_symbols``, a
-deliberate capacity release). None of them closes anything: §3.6 stays alert-only for CLOSING, and
-only the owner's ``/closed`` ends a human-owned position (§6.5). The authority this table grants is
+nagging, and the gate drops it from the risk-limit position/sector counts (``gate._gone_symbols``, a
+deliberate capacity release). None of them closes anything: the job stays alert-only for CLOSING, and
+only the owner's ``/closed`` ends a human-owned position. The authority this table grants is
 silence plus that count release, never a position-state change — which is also why the missing rule
 needs TWO days: one bad observation (a settlement edge, a symbol rename, a partial broker payload)
 must never be enough to silence the platform about a real position.
 
-Two guards on that silence, both added by the WO-D2 fix pass (2026-09-12):
+Two guards on that silence, both added by the journal's fix pass (2026-09-12):
 
 - **Only TRADING days are journalled.** ``run`` is window-gated when the hourly scheduler calls it,
-  but the §2.6 post-login ladder calls it unconditionally — so a Saturday deploy used to be able to
+  but the post-login ladder calls it unconditionally — so a Saturday deploy used to be able to
   write the second "day" of a two-day streak on a single trading session's worth of evidence. The
   observation is now skipped (the ALERT still fires) when ``today`` is not a trading day, so every
   row in the table is a session and ``MissingHolding.sessions`` counts what its name says.
@@ -105,9 +105,9 @@ RECONCILE_WINDOW: tuple[time, time] = (time(9, 20), time(15, 30))
 #: cannot turn the counter into an unbounded loop. Any position older than this is trivially eligible.
 _MAX_AGE_SCAN_DAYS = 400
 
-#: The tracked-position scope (§3.6): the platform's own and the owner's confirmed recommendations.
-#: ``external`` positions are the owner's alone (R5), MIS never reaches holdings at all, and a PAPER
-#: position (§3.2.9, Phase 3) exists only in the simulator — it can never be in real holdings, so
+#: The tracked-position scope: the platform's own and the owner's confirmed recommendations.
+#: ``external`` positions are the owner's alone, MIS never reaches holdings at all, and a PAPER
+#: position exists only in the simulator — it can never be in real holdings, so
 #: including it would page the owner about every paper trade the day paper trading goes live.
 _TRACKED_SQL = (
     "SELECT position_id, symbol, qty, opened_at FROM positions "
@@ -136,7 +136,7 @@ _ALL_SHORT_MIN_POSITIONS = 2
 
 
 class HoldingsReconcileResult(BaseModel):
-    """One :meth:`HoldingsReconcileJob.run` outcome (evidence, R8).
+    """One :meth:`HoldingsReconcileJob.run` outcome (evidence).
 
     ``flagged`` carries POSITION IDs, not symbols: the position id is the identity the alert, the log
     line and the ledger lookup all key on, and two OPEN positions can share a symbol.
@@ -147,7 +147,7 @@ class HoldingsReconcileResult(BaseModel):
     checked: int = 0
     flagged: list[str] = Field(default_factory=list)
     skipped_young: int = 0
-    #: ``holdings_observations`` rows written by this run (WO-D2) — equal to ``checked`` unless the
+    #: ``holdings_observations`` rows written by this run — equal to ``checked`` unless the
     #: journal write itself failed, which is logged and swallowed (the reconcile is diagnostic).
     observed: int = 0
     error: str | None = None
@@ -163,18 +163,17 @@ def in_reconcile_window(now: datetime, calendar: NSECalendar) -> bool:
 
 
 class HoldingsReconcileJob:
-    """Compare tracked OPEN CNC positions against the broker's holdings (§3.6). See module docstring.
+    """Compare tracked OPEN CNC positions against the broker's holdings. See module docstring.
 
     Parameters
     ----------
     conn:
         SQLite state connection. The ONLY table this job writes is ``holdings_observations`` (its own
-        evidence journal, WO-D2): it never writes a position, a ledger row, a recommendation or a risk
-        state — the owner's ``/closed`` is the only thing allowed to close a human-owned position
-        (§6.5).
+        evidence journal): it never writes a position, a ledger row, a recommendation or a risk
+        state — the owner's ``/closed`` is the only thing allowed to close a human-owned position.
     kite:
         The :class:`~engine.broker.kite_client.KiteClient` facade; only ``holdings()`` is called. It
-        routes through ``KiteClient._call``, so a ``TokenException`` also fires the existing R6
+        routes through ``KiteClient._call``, so a ``TokenException`` also fires the existing token
         circuit breaker — this job additionally swallows it (see :meth:`run`).
     clock, calendar:
         The single "now" and the trading-day facts behind the T+1 age gate and the per-day dedupe.
@@ -220,7 +219,7 @@ class HoldingsReconcileJob:
 
         held = _held_quantities(rows)
         today = self._clock.today()
-        # The §2.6 post-login ladder runs this job unconditionally (``post_login._step_holdings``);
+        # The post-login ladder runs this job unconditionally (``post_login._step_holdings``);
         # only the hourly scheduler tick applies ``in_reconcile_window``. A weekend/holiday boot must
         # therefore not contribute an observation DAY: two rows, one of them a Saturday deploy, would
         # satisfy the two-session missing rule on a single session's evidence. The comparison, the
@@ -252,7 +251,7 @@ class HoldingsReconcileJob:
                 continue
             position_id = str(position["position_id"])
             flagged.append(position_id)
-            # Named ``rec_id`` rather than ``entry_rec_id``: since WO-D2 the latter is a MODULE-LEVEL
+            # Named ``rec_id`` rather than ``entry_rec_id``: since the observation journal the latter is a MODULE-LEVEL
             # function, and a local of that name would shadow it for the whole of this method.
             rec_id = entry_rec_id(self._conn, position_id)
             _log.warning(
@@ -272,7 +271,7 @@ class HoldingsReconcileJob:
             # The systemic signature a per-position alert cannot show: a SUCCESSFUL holdings call
             # that returned nothing useful (an API shape change, a truncated page, a fresh token on
             # the wrong account) is indistinguishable, position by position, from "the owner sold
-            # everything" — and since WO-D2 two such runs silence the §5.2(b) exit path on the whole
+            # everything" — and since the observation journal two such runs silence the position-event exit path on the whole
             # tracked book at once. Not a behaviour change: the journal is still written and the
             # owner is still alerted per position (loudly — one message each, plus a day-plan block
             # naming every one of them). This is the one line that says "look at the FEED, not at
@@ -296,7 +295,7 @@ class HoldingsReconcileJob:
 
     # ------------------------------------------------------------------ the observation journal
     def _journal(self, observations: list[tuple[str, str, int, int, str]]) -> int:
-        """Upsert this run's observations (WO-D2). Returns how many rows were written.
+        """Upsert this run's observations. Returns how many rows were written.
 
         Swallows its own failure: the journal exists to let OTHER code stay quiet, so a write that
         fails costs a day of evidence, never the reconcile's alert (which has already been sent by
@@ -369,7 +368,7 @@ def entry_rec_id(conn: sqlite3.Connection, position_id: str) -> str | None:
     uses); a position whose only ledger rows are exit/adjust recs falls back to any of them, since
     ``/closed`` accepts an exit rec's id too.
 
-    Module-level since WO-D2: the owner alert and the pre-open day plan both name the id the owner
+    Module-level since the observation journal was added: the owner alert and the pre-open day plan both name the id the owner
     must type, and two lookups that could disagree about WHICH id that is would be worse than none.
     """
     row = conn.execute(
@@ -390,7 +389,7 @@ def entry_rec_id(conn: sqlite3.Connection, position_id: str) -> str | None:
 # --------------------------------------------------------------------------- "sold outside the ledger"
 @dataclass(frozen=True)
 class MissingHolding:
-    """One position's standing in the observation journal (WO-D2).
+    """One position's standing in the observation journal.
 
     ``sessions`` is the length of the UNBROKEN run of SHORT (``held < tracked``) observation days
     ending at the most recent one inside the lookback — the moment a day reads fully held the run is
@@ -484,20 +483,20 @@ def positions_missing_from_holdings(
     """``position_id -> MissingHolding`` for every position whose ``sessions`` most recent observation
     days inside the lookback ALL read short.
 
-    The platform's "the owner sold this outside the ledger" predicate (WO-D2) — a filtered VIEW of
+    The platform's "the owner sold this outside the ledger" predicate — a filtered VIEW of
     :func:`missing_holdings_observations`, returning the same :class:`MissingHolding` values so a
-    caller that needs the streak/quantities behind the filter (the §5.2 positions summary, the §5.3
+    caller that needs the streak/quantities behind the filter (the positions summary, the
     day-plan block) never has to read the journal a second time to get them. Two days rather than one because
     a single short reading has innocent explanations (a settlement edge, a symbol rename, a truncated
     holdings payload) and the consequences here are all forms of going quiet about a position —
     silence about a position that really is open is the expensive error.
 
     ``require_zero=True`` narrows "short" to "the broker holds NOTHING" on every day of the run
-    (:attr:`MissingHolding.zero_sessions`). A caller whose consequence is INFORMATION — the §5.3
-    day-plan block (the §3.6 alert applies its own held-vs-tracked check and never calls this) —
+    (:attr:`MissingHolding.zero_sessions`). A caller whose consequence is INFORMATION — the
+    day-plan block (the owner alert applies its own held-vs-tracked check and never calls this) —
     wants the wide reading: held 3 of a tracked 7 is a real
     unreported exit and the owner should hear about it. The caller whose consequence is SILENCE ON A
-    RISK-REDUCING PATH — the §5.2(b) position-event screen — must use the narrow one, because a
+    RISK-REDUCING PATH — the position-event screen — must use the narrow one, because a
     position with residual exposure (a partial exit) still needs its stop watched. Withholding an
     exit recommendation from a position that exists is the failure mode this flag exists to prevent.
     (A holding pledged for margin is counted as held via ``collateral_quantity`` and never enters

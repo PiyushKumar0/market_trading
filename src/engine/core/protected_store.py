@@ -1,13 +1,13 @@
-"""Protected store: integrity-verified limits / envelope config (R4, §2.4).
+"""Protected store: integrity-verified limits / envelope config.
 
-``config/limits.yaml`` (§7.1) and ``config/envelope.yaml`` (§6.3) are loaded by the risk gate ONLY if
+``config/limits.yaml`` and ``config/envelope.yaml`` are loaded by the risk gate ONLY if
 their SHA-256 matches the signature recorded in the SQLite ``protected_config`` table — which is
 written SOLELY by the owner-confirmed change flow (Telegram two-step / dashboard with token). The
-learning system has read-only logical access and NO code path that writes these files (R4).
+learning system has read-only logical access and NO code path that writes these files.
 
 This module raises :class:`IntegrityError` on any mismatch; it does NOT decide the consequence. The
-single integrity-failure rule (§2.4) — startup-with-flat-book ⇒ FROZEN+alert, runtime-or-with-live-book
-⇒ kill — is applied by the caller (self-test / gate), tested in §9.1.
+single integrity-failure rule — startup-with-flat-book ⇒ FROZEN+alert, runtime-or-with-live-book
+⇒ kill — is applied by the caller (self-test / gate).
 """
 
 from __future__ import annotations
@@ -32,11 +32,11 @@ _log = get_logger(__name__)
 
 
 class IntegrityError(RuntimeError):
-    """Raised when a protected config's on-disk hash does not match its signature record (R4)."""
+    """Raised when a protected config's on-disk hash does not match its signature record."""
 
 
 class UnauthorizedUpdate(PermissionError):
-    """Raised when a protected-config update is attempted without an owner confirmation (R4/R10)."""
+    """Raised when a protected-config update is attempted without an owner confirmation."""
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -119,7 +119,7 @@ class ProtectedStore:
         return self._signature(name) is not None
 
     def verify(self, name: str) -> bool:
-        """Non-raising integrity check (used by the startup self-test, D11)."""
+        """Non-raising integrity check (used by the startup self-test)."""
         try:
             self.load_verified(name)
             return True
@@ -145,7 +145,7 @@ class ProtectedStore:
         return raw, actual
 
     def load_verified(self, name: str) -> dict:
-        """Load ``name`` only if its SHA-256 matches the recorded signature; else raise (R4)."""
+        """Load ``name`` only if its SHA-256 matches the recorded signature; else raise."""
         raw, _ = self.read_verified_bytes(name)
         return yaml.safe_load(raw.decode("utf-8")) or {}
 
@@ -158,10 +158,10 @@ class ProtectedStore:
         *,
         expected_sha256: str | None = None,
     ) -> None:
-        """Owner-confirmed change flow: write ``content`` to ``name`` and re-sign it (R4/R10).
+        """Owner-confirmed change flow: write ``content`` to ``name`` and re-sign it.
 
         The ONLY path that writes ``protected_config``. Requires an authenticated owner confirmation;
-        the learner/Tier-1 can never produce one (R4). Appends a ``config_audit`` row.
+        the learner/Tier-1 can never produce one. Appends a ``config_audit`` row.
 
         With ``expected_sha256`` (the hash :meth:`read_verified_bytes` returned) the re-sign is a
         compare-and-swap: if the signature or the on-disk bytes changed since that read, raise
@@ -170,7 +170,7 @@ class ProtectedStore:
         back if still open and the file is set to match the recorded signature (see :meth:`_restore`),
         so every exit leaves the file and its signature matched, except two cases: a hard crash
         between the move and COMMIT, and a failed restore (logged CRITICAL). Both fail closed at the
-        next load (§2.4).
+        next load.
         """
         if not confirmation.confirmed or confirmation.actor != Actor.OWNER:
             raise UnauthorizedUpdate(

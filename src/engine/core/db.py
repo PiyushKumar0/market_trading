@@ -1,9 +1,8 @@
-"""SQLite connection helper for the transactional state store (E4, §4.1).
+"""SQLite connection helper for the transactional state store.
 
 One writer (the engine), WAL mode for crash-safe single-box durability. This is a thin helper, not
 an ORM — the platform's SQL is hand-written and lives next to each owner (migrations, mode, kill, ...).
-A private addition to ``core`` per the plan's "implementing agent may add private helpers" allowance
-(§3.2).
+A private addition to ``core``.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection in WAL mode with sane pragmas and a Row factory.
 
     ``check_same_thread=False`` because the asyncio engine touches the connection from the loop
-    thread and (rarely) executor threads; the engine serialises writes itself (single writer, §4.1).
+    thread and (rarely) executor threads; the engine serialises writes itself (single writer).
     """
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +40,7 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """Explicit transaction (``isolation_level=None`` means autocommit otherwise).
 
     Used where a state change must be persisted atomically BEFORE any side effect (the kill switch
-    persists ``KILLED`` before acting, R10; the OMS persists every transition before side effects).
+    persists ``KILLED`` before acting; the OMS persists every transition before side effects).
 
     A COMMIT that fails while SQLite keeps the transaction open (a deferred constraint, statements
     still in progress; under WAL a lock surfaces at the block's first write instead) rolls back too

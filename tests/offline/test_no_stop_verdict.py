@@ -1,4 +1,4 @@
-"""scripts/no_stop_verdict.py — the C5 no-stop forward-test decision rule and its diagnostics."""
+"""scripts/no_stop_verdict.py — the no-stop forward-test decision rule and its diagnostics."""
 
 from __future__ import annotations
 

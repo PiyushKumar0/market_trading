@@ -1,4 +1,4 @@
-"""Notification journal + Telegram retry outbox + the notifications page (WO-24d, 2026-08-21).
+"""Notification journal + Telegram retry outbox + the notifications page (2026-08-21).
 
 Before this, ``TelegramBot._send_text`` DROPPED on failure: logged, never queued, never stored. With
 223 ConnectTimeouts on 08-20 and 186 on 08-19 that is a recommendation silently lost, and nothing on
@@ -242,7 +242,7 @@ async def test_send_before_the_transport_starts_is_queued_not_dropped(conn, cloc
 
 @pytest.mark.asyncio
 async def test_split_message_is_one_notification_not_five(conn, clock):
-    """WO-22's 4096-char split is unchanged and stays a TRANSPORT detail: five parts on the wire,
+    """The 4096-char split is unchanged and stays a TRANSPORT detail: five parts on the wire,
     ONE journal row, and the row holds the whole un-split body."""
     bot, sender = _bot(conn, clock)
     body = "X" * 30000
@@ -298,7 +298,7 @@ async def test_an_oversized_button_ships_the_text_alone_and_the_row_is_delivered
 
 @pytest.mark.asyncio
 async def test_a_broken_journal_never_blocks_the_send(conn, clock, caplog):
-    """R8, applied to the journal itself: the mechanism that exists to stop messages being lost must
+    """Owner alerting, applied to the journal itself: the mechanism that exists to stop messages being lost must
     never become the thing that loses them. A dropped table costs a WARNING, not the notification."""
     conn.execute("DROP TABLE notifications")
     bot, sender = _bot(conn, clock)
@@ -312,7 +312,7 @@ async def test_a_broken_journal_never_blocks_the_send(conn, clock, caplog):
 
 @pytest.mark.asyncio
 async def test_an_unwired_state_store_sends_exactly_as_before(clock):
-    """No conn ⇒ no journal ⇒ the pre-WO-24d behaviour, verbatim (the ``wired_bot`` fixture in
+    """No conn ⇒ no journal ⇒ the pre-journal behaviour, verbatim (the ``wired_bot`` fixture in
     ``test_telegram_commands`` is exactly this shape, so this guards those tests too)."""
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
     sender = _ScriptedBot()
@@ -454,7 +454,7 @@ async def test_surveillance_migration_dedupes_across_bot_instances(conn, moving)
 
 def test_critical_kinds_covers_recommendation_and_the_login_freeze_kinds():
     """The set exists for kinds whose catalog severity understates the cost of losing them; a kind
-    dropped from it silently becomes expirable, which is the WO-24d failure mode returning."""
+    dropped from it silently becomes expirable, which is the lost-notification failure mode returning."""
     assert MessageKind.RECOMMENDATION.value in CRITICAL_KINDS
     assert MessageKind.REC_FILL_SUSPECTED.value in CRITICAL_KINDS
     assert MessageKind.LOGIN_PROMPT.value in CRITICAL_KINDS
@@ -550,7 +550,7 @@ async def test_drain_loop_survives_a_bad_pass(conn, clock, monkeypatch):
     assert len(passes) >= 2                            # it kept going after the first explosion
 
 
-# ------------------------------------------------- head-of-line blocking (WO-25b, 2026-08-24)
+# ------------------------------------------------- head-of-line blocking (2026-08-24)
 # The 08-24 incident: 203 rows queued, almost all of them stale alert spam at 46 attempts each (so
 # backing off the full five minutes), and the drainer took the FIVE OLDEST every pass and skipped the
 # ones inside their window — spending the whole pass on rows it was never going to send. A fresh
@@ -647,7 +647,7 @@ def test_the_scan_window_is_wider_than_the_batch():
     assert _DRAIN_SCAN > _DRAIN_BATCH and _DRAIN_BATCH == 5
 
 
-# ------------------------------------------------- the HTTP transport (WO-25b, 2026-08-24)
+# ------------------------------------------------- the HTTP transport (2026-08-24)
 def test_the_transport_timeouts_clear_the_measured_connect_times():
     """The whole 08-24 finding in one assertion: first connects to api.telegram.org were MEASURED at
     4.25 s and 4.84 s, against python-telegram-bot's stock 5.0 s connect timeout. The budget must sit
@@ -821,7 +821,7 @@ def test_notifications_page_is_self_contained_and_calls_the_route():
     it is needed. No off-box URL of any kind may appear in it."""
     html = UI_HTML.read_text(encoding="utf-8")
     assert "/notifications?d=" in html                       # it reads the real route
-    assert 'Authorization": "Bearer ' in html                # bearer-authed, per R10
+    assert 'Authorization": "Bearer ' in html                # bearer-authed
     assert "localStorage" in html and "MT Notifications" in html
     external = re.findall(r"https?://[^\s\"'<>]+", html)
     assert external == [], f"external resource reference(s): {external}"

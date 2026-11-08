@@ -1,9 +1,9 @@
-"""§9.4 chaos case 19 — Scheduled active-period start FAILS to fire (PC asleep / task disabled / power
+"""Chaos case 19 — Scheduled active-period start FAILS to fire (PC asleep / task disabled / power
 loss).
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 19), "Must hold":
+Drill-catalog row (case 19), "Must hold":
 
-    "watchdog detects no readiness report at expected start (§10.3/§10.4) + alerts owner; an open MIS
+    "watchdog detects no readiness report at expected start + alerts owner; an open MIS
     rides to the broker 15:25 backstop; on eventual manual start, full reconcile adopts the broker
     square-off"
 
@@ -23,12 +23,12 @@ Clauses covered:
   holiday (2026-06-26 Muharram) — no expectation, no alert.
 
 "Readiness report" resolution: the shipped watchdog keys the check on ``engine_lifecycle.started_at``
-(committed at §2.6 step 0, before recovery) — a boot that has started covers the period; a boot that
-started but wedged is the separate ``ENGINE_DOWN(reason=wedged)`` path (§2.2).
+(committed at the very start of boot, before recovery) — a boot that has started covers the period; a boot that
+started but wedged is the separate ``ENGINE_DOWN(reason=wedged)`` path.
 
 Skipped (``test_case19_open_mis_rides_backstop_and_reconcile_adopts``): "an open MIS rides to the broker
 15:25 backstop; on eventual manual start, full reconcile adopts the broker square-off" — MIS is out of
-paper scope (plan §1.3), and the broker square-off it adopts exists only for MIS.
+paper scope, and the broker square-off it adopts exists only for MIS.
 """
 
 from __future__ import annotations

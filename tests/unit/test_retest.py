@@ -1,10 +1,10 @@
-"""``brk20`` RETEST re-arm — the durable resting-level book (WO-R, 2026-09-12).
+"""``brk20`` RETEST re-arm — the durable resting-level book (2026-09-12).
 
 The 2026-09-12 pre-registered entry-mechanism backtest selected ``V2_limit_at_H20_N5`` (a limit
 resting at the broken level for five sessions) and the live rule shipped N=1 — the level published
 once, on the session after the crossing. These tests pin the mechanism that closes that gap AND, just
 as load-bearing, the four ways it must stay narrow: it re-offers the SAME levels, only inside the
-§7.1 ``entry_sanity_band``, only inside the ``(signal_d, expires_d]`` window, and at most once a day.
+``entry_sanity_band``, only inside the ``(signal_d, expires_d]`` window, and at most once a day.
 
 The window arithmetic is asserted against the REAL NSE calendar rather than a stub, because the one
 thing a calendar-blind ``+4 days`` gets wrong is exactly the case that matters: 2026-06-17 + 4
@@ -200,7 +200,7 @@ def test_the_republished_candidate_is_the_same_trade_with_a_fresh_identity(book,
 
 # --------------------------------------------------------------------------- due(): the band
 def test_the_band_edge_publishes_and_a_hair_beyond_it_does_not(book, rclock, caplog) -> None:
-    """The §7.1 ``entry_sanity_band`` formula and its ``<=`` edge, verbatim: ``dev == band`` is a
+    """The ``entry_sanity_band`` formula and its ``<=`` edge, verbatim: ``dev == band`` is a
     PASS in the gate, so it is a pass here. AAA's level sits EXACTLY 2.00% from the live price and
     BBB's 2.05% — the band is a NARROWING, and nothing in this book may loosen it."""
     book.record(_cand("AAA", entry="102.00"))     # |102-100|/100*100 == 2.00 exactly
@@ -211,7 +211,7 @@ def test_the_band_edge_publishes_and_a_hair_beyond_it_does_not(book, rclock, cap
         due = book.due(_ltp(AAA="100.00", BBB="100.00"), BAND, FIRST_RETEST_D)
     assert [c.symbol for c in due] == ["AAA"]
     # `_offered`, never `_republished`: the caller emits the publication line off `offers` AFTER
-    # `prescreen.admit` has ruled, so the two funnel stages stay separately greppable (WO-9).
+    # `prescreen.admit` has ruled, so the two funnel stages stay separately greppable.
     assert "brk20_retest_offered" in caplog.text
     assert "brk20_retest_republished" not in caplog.text
 
@@ -223,7 +223,7 @@ def test_the_band_edge_publishes_and_a_hair_beyond_it_does_not(book, rclock, cap
 @pytest.mark.parametrize("price", [None, "0", "-5.00", "0.00"])
 def test_an_unpriceable_symbol_publishes_nothing(book, rclock, price) -> None:
     """No tick, or a non-positive one, is the one case where the band CANNOT be evaluated. A
-    mechanism that spends a scarce analyst slot stays silent there rather than guessing (D7)."""
+    mechanism that spends a scarce analyst slot stays silent there rather than guessing."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
     ltp = (lambda _s: None) if price is None else (lambda _s: Decimal(price))
@@ -252,7 +252,7 @@ def test_a_level_is_offered_once_a_day_and_again_the_next_session(book, rclock) 
     """The row STAYS resting: a re-publication that expires unactioned (declined, capped out,
     re-armed by a freeze) may fire again on the next session inside the window. What bounds it is
     per-day — the 60 s cadence must not hand ``prescreen.admit`` the same row 375 times, because
-    admit counts every candidate as RAW and the WO-9 funnel would become unreadable."""
+    admit counts every candidate as RAW and the funnel would become unreadable."""
     book.record(_cand("AAA", entry="100.00"))
     ltp = _ltp(AAA="100.00")
 
@@ -308,9 +308,9 @@ def test_one_symbol_yields_one_candidate_even_with_two_resting_levels(book, rclo
 # --------------------------------------------------------------------------- due(): tick freshness
 def test_a_stale_trigger_price_offers_nothing(book, rclock, caplog) -> None:
     """The tick cache has NO upper bound on age and ``mark_price`` cannot say so, so without this the
-    TRIGGER can be a price from hours ago — while the §7.1 gate that judges the resulting proposal
+    TRIGGER can be a price from hours ago — while the risk gate that judges the resulting proposal
     rejects anything past ``stale_data_guard.max_tick_age_s``. Originating on a stale print spends a
-    §3.2.5 day slot, the symbol's one offer of the day and one of the day's analyst calls on a
+    prescreen day slot, the symbol's one offer of the day and one of the day's analyst calls on a
     certain reject. Worst exactly for the population ``resting_symbols`` exists to reach: sub-cap
     eligible names that go minutes between prints."""
     book.record(_cand("AAA", entry="100.00"))

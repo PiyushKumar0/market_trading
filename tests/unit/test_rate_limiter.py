@@ -1,4 +1,4 @@
-"""Order-rate split (R3 / §7.1 ``order_rate``): entry hard-capped, risk-reducing never starved."""
+"""Order-rate split (``order_rate``): entry hard-capped, risk-reducing never starved."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ async def test_entry_budget_hard_capped(monkeypatch):
         await rl.acquire("orders", intent="entry")
     assert rl.orders_today() == (3, 0)
 
-    # 4th entry call is rejected — the entry budget is exhausted (B3 / §7.1).
+    # 4th entry call is rejected — the entry budget is exhausted.
     with pytest.raises(EntryBudgetExhausted):
         await rl.acquire("orders", intent="entry")
 
@@ -49,7 +49,7 @@ async def test_risk_reducing_never_rejected_even_when_entry_exhausted():
     with pytest.raises(EntryBudgetExhausted):
         await rl.acquire("orders", intent="entry")
 
-    # The flatten lane keeps working with the entry budget fully exhausted (R3 — never starved).
+    # The flatten lane keeps working with the entry budget fully exhausted (never starved).
     for _ in range(10):
         await rl.acquire("orders", intent="risk_reducing")
     assert rl.orders_today() == (2, 10)

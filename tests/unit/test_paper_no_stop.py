@@ -1,4 +1,4 @@
-"""D14 paper no-stop test (plan 2026-10-15): listed strategies open with no stop or target and exit on time."""
+"""Paper no-stop test: listed strategies open with no stop or target and exit on time."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ async def test_a_listed_strategy_without_a_known_hold_keeps_its_stop(conn, make_
 
 async def test_a_listed_strategy_whose_exit_date_is_beyond_the_calendar_keeps_its_stop(conn, make_rig) -> None:
     """From 2026-12-04 the 20th session is past the loaded 2026 calendar: a time-only position would have
-    no exit date, so it opens on the shipped levels instead (and is outside the C5 population)."""
+    no exit date, so it opens on the shipped levels instead (and is outside the no-stop population)."""
     rig = make_rig(no_stop={"hi52"})
 
     def beyond_calendar(_d: dt.date, _n: int) -> dt.date:

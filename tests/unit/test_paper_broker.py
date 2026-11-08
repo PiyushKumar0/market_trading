@@ -1,25 +1,24 @@
-"""PaperBroker v1 fill rules + postback contract (WO-P3-2, 2026-09-10; plan 3.2.9, 8.4 addendum,
-9.3 conservatism cases).
+"""PaperBroker v1 fill rules + postback contract (2026-09-10).
 
 Every rule asserted here is a CONSERVATISM rule -- the paper tier exists to produce a number the
-live tier can only beat, never a number it has to live up to (R9). The load-bearing cases:
+live tier can only beat, never a number it has to live up to. The load-bearing cases:
 
 * market orders wait out the 700 ms simulated latency and then pay half-spread + k*sigma;
 * limit orders need a TRADE-THROUGH, never a touch; one through on its first eligible tick is
   marketable and fills at market capped at its limit, any other rests and fills at its limit
-  (the 9.3 conservatism case, plan Q4.2d);
+  (the conservatism case);
 * SL-M is gap-aware: a session-open print through a stop fills at the PRINT, not at the stop
-  (the 9.3 "results-day gap through a stop" case -- the loss is allowed to exceed per-trade risk);
+  (the "results-day gap through a stop" case -- the loss is allowed to exceed per-trade risk);
 * partials are budgeted at 10% of the MINUTE's volume -- per (order, minute), not per tick -- and
   ``filled_quantity`` is monotone to COMPLETE;
-* a cumulative-volume reset (A13) yields ZERO available volume, never an uncapped fill -- and a
+* a cumulative-volume reset yields ZERO available volume, never an uncapped fill -- and a
   counter that re-baselines and never climbs back blacks the symbol out for the REST of the session;
 * resting DAY orders lapse at the session roll (Kite cancels them at the close) while GTTs persist;
 * injected rejections come from a SEEDED rng so a replay reproduces them exactly;
-* the order guard (3.5.3 order-surface predicate) runs BEFORE any book mutation;
+* the order guard (the order-surface predicate) runs BEFORE any book mutation;
 * every state change emits exactly one ``OrderUpdateFrame`` carrying the Kite field names the OMS
-  parser reads -- live and paper share ONE parser (plan 8.4 WO-P3-1);
-* nothing raises out of ``on_tick``: it is the market-data hot path (plan 3.2). That holds for all
+  parser reads -- live and paper share ONE parser;
+* nothing raises out of ``on_tick``: it is the market-data hot path. That holds for all
   THREE loops in it -- the session-lapse sweep, the match loop and the GTT loop -- and for the
   publish inside each: a postback that raises is logged and dropped, never allowed to unwind the
   book change it was reporting.
@@ -447,7 +446,7 @@ async def test_a_cumulative_volume_reset_fills_nothing(
 async def test_a_restatement_on_a_minute_boundary_cannot_inflate_the_participation_base(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """A13, the half-fix this round closes: a restatement landing on the FIRST tick of a minute took
+    """The half-fix this round closes: a restatement landing on the FIRST tick of a minute took
     the minute-roll branch instead of the reset branch, so it re-baselined the minute at the restated
     (tiny) cumulative and was never flagged. The correction back UP then read as a delta of the whole
     day's volume -- 100x the minute's real tape -- and the participation cap sized a fill off it.
@@ -477,14 +476,14 @@ async def test_a_restatement_on_a_minute_boundary_cannot_inflate_the_participati
 async def test_a_rebaselined_counter_that_never_recovers_blacks_the_symbol_out_for_the_session(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The documented consequence of the A13 high-water rule, pinned so nobody "fixes" it later.
+    """The documented consequence of the high-water rule, pinned so nobody "fixes" it later.
 
     ``volume_traded`` is compared against the per-symbol HIGH-WATER cumulative, so a feed that
     re-baselines low and never climbs back over the mark (a resubscribe on a thin name late in the
     day) offers zero available volume on EVERY remaining tick of the session -- not just the reset
     tick -- and not even a closed bar can back the cap while the flag is set. That is the intended
     conservative outcome, and it is the same one ``engine.marketdata.bar_builder`` produces from the
-    same rule: a broker that under-fills costs the 8.5 gate nothing, while one that sizes fills off
+    same rule: a broker that under-fills costs the gate nothing, while one that sizes fills off
     a phantom delta lies to it. The blackout is SESSION-scoped: the roll clears the baseline.
     """
     now.set(at(10, 0, 0))
@@ -901,11 +900,11 @@ async def test_a_raising_publish_in_the_lapse_sweep_never_escapes_on_tick(now: _
     It is also the worst place for an escape: it runs on the FIRST tick of a session, broker-wide,
     so one raising publish there kills the market-data feed for every symbol before the day has
     started -- and it takes the rest of the sweep with it, leaving the untouched symbols' orders
-    resting forever, which 3.2.8 keeps reading as live protection.
+    resting forever, still read as live protection.
 
     The book change is applied BEFORE the postback is attempted, so a publish that raises loses the
     NOTIFICATION and nothing else: the order really is CANCELLED, the sweep carries on, and the
-    reconciler's orderbook re-read (R5) is what closes the gap.
+    reconciler's orderbook re-read is what closes the gap.
     """
     published: list[dict] = []
 
@@ -1061,7 +1060,7 @@ async def test_positions_day_is_the_current_session_while_net_is_lifetime(
 async def test_orders_reports_each_row_last_update_not_the_read_time(
     broker: PaperBroker, now: _Now
 ) -> None:
-    """The reconciler (R5) reads the orderbook and compares broker timestamps against platform
+    """The reconciler reads the orderbook and compares broker timestamps against platform
     rows. Restamping every row with ``now`` on each read makes every order look freshly updated and
     destroys exactly the signal the reconciler needs.
     """
@@ -1312,7 +1311,7 @@ async def test_a_raising_publish_never_leaves_a_resting_leg_with_a_gtt_that_did_
     assert len([o for o in await br.orders() if o["status"] == "OPEN"]) == 1
 
 
-# =========================================================================== (h2) plan Q4.2
+# =========================================================================== (h2) paper-broker fill rules
 def _make(now: _Now, publish, **kw) -> PaperBroker:
     return PaperBroker(
         clock=Clock(time_source=now), publish=publish, fill_model=FillModelConfig(),
@@ -1398,7 +1397,7 @@ async def test_restore_books_nothing_when_any_row_is_invalid(broker: PaperBroker
 async def test_a_fired_leg_is_tagged_and_fills_near_the_market(
     broker: PaperBroker, bus: _Bus, now: _Now, leg: int, fire: str, fill: str
 ) -> None:
-    """Before Q4.2d the stop leg booked its 94.00 limit, ~1% worse than live and than exit_sim."""
+    """Before the marketable-limit rule the stop leg booked its 94.00 limit, ~1% worse than live and than exit_sim."""
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(_stop_target())
     bus.clear()

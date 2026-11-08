@@ -1,4 +1,4 @@
-"""Paper ProtectionManager (plan Q4.5): GTT placement, the trigger and its leg, failures, exit retries, R3."""
+"""Paper ProtectionManager: GTT placement, the trigger and its leg, failures, exit retries, broker-resident protection."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ class Now:
 
 class Rig:
     """OrderManager -> ProtectionManager (PositionBook first) over one PaperBroker; ``exit_routine``
-    stands in for the Q4.6 routine."""
+    stands in for the real exit routine."""
 
     def __init__(self, conn, bus, *, broker: PaperBroker | None = None, now: Now | None = None,
                  transitions: bool = True, no_stop: frozenset[str] = frozenset(), hold: int | None = 20) -> None:
@@ -512,7 +512,7 @@ async def test_a_same_symbol_real_position_and_its_rows_stay_byte_identical(conn
     assert position(conn, pid)["state"] == "CLOSED" and real() == before
 
 
-# ------------------------------------------------------------------------------------- R3 property
+# ------------------------------------------------------------------------------------- broker-resident-protection property
 N_TICKS = 3
 
 

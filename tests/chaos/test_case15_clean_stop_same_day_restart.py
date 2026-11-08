@@ -1,6 +1,6 @@
-"""§9.4 chaos case 15 — Intentional clean stop + restart same day (§2.6).
+"""Chaos case 15 — Intentional clean stop + restart same day.
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 15), "Must hold":
+Drill-catalog row (case 15), "Must hold":
 
     "clean stop honored (not auto-restarted as a crash); off-window raises no fault alarm; restart runs
     reconcile + catch-up cleanly; no spurious FEED_STALE/incident alerts; resumes correctly"
@@ -32,8 +32,8 @@ Clauses covered here:
 * resumes correctly — sticky RECOMMEND mode and NORMAL risk state carried over, heartbeat beating,
   every registry job re-armed on a running scheduler, ticker resumed into WARMING, watchdog silent.
 
-Skipped: "restart runs RECONCILE" — the §2.6 step-2 ``reconcile_hook`` is reserved for Phase 4; the
-paper reconcile is its own pass (plan Q4.7). The lifecycle reports the step as deferred (asserted below
+Skipped: "restart runs RECONCILE" — the startup reconcile step's ``reconcile_hook`` is reserved for live AUTO; the
+paper reconcile is its own pass. The lifecycle reports the step as deferred (asserted below
 so the gap stays visible) and ``test_case15_restart_reconcile_vs_broker`` skips.
 """
 
@@ -98,7 +98,7 @@ async def test_case15_nssm_stop_with_repeat_signals_then_same_day_restart(tmp_pa
     assert report_a.crash_recovered is False
     assert env.calls(since=calls_a) == []                      # nothing due yet at 08:00
     env.at(_t(WED, 8, 5))
-    await a.arm_recommend()                                    # owner arms RECOMMEND (sticky, R10)
+    await a.arm_recommend()                                    # owner arms RECOMMEND (sticky)
     for spec in fired_while_up:                                # (instruments, surveillance, news chain)
         env.at(_at(WED, spec.at))
         await a.fire_scheduled(spec.job_id)                    # the live scheduler's own fires
@@ -170,7 +170,7 @@ async def test_case15_nssm_stop_with_repeat_signals_then_same_day_restart(tmp_pa
     boot_pass = sorted(f"{j}:{WED.isoformat()}" for j in due_in_off_window - set(opsmain.POST_ARM_JOB_IDS))
     assert sorted(report_b.jobs_caught_up) == boot_pass         # the load-bearing boot pass
     assert report_b.jobs_failed == [] and report_b.frozen_reasons == []
-    # §2.6 step 2 reconcile is a Phase-4 hook: visibly deferred, never silently skipped.
+    # The startup reconcile step is a live-AUTO hook: visibly deferred, never silently skipped.
     assert "reconcile" in report_b.deferred_steps
 
     # no spurious FEED_STALE / incident alerts
@@ -207,6 +207,6 @@ async def test_case15_nssm_stop_with_repeat_signals_then_same_day_restart(tmp_pa
 
 
 def test_case15_restart_reconcile_vs_broker() -> None:
-    """'restart runs reconcile' — §2.6 step 2 reconcile vs broker = truth (R5); ``SessionLifecycle``
+    """'restart runs reconcile' — startup reconcile vs broker = truth; ``SessionLifecycle``
     carries it as an unwired ``reconcile_hook``."""
     pytest.skip(f"case 15 reconcile clause: {PHASE4_LIFECYCLE_HOOKS}")

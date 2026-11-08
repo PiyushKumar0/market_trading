@@ -1,4 +1,4 @@
-"""Paper ExitManager (plan Q4.6): the exit routine, the D2 time exit, corporate actions, flatten, scope."""
+"""Paper ExitManager: the exit routine, the time exit, corporate actions, flatten, scope."""
 
 from __future__ import annotations
 
@@ -402,7 +402,7 @@ async def test_a_close_made_on_a_late_found_ex_date_is_relabelled_void_at_the_pr
     assert (rig.em.counters.voids, rig.em.counters.late_corp_actions) == (1, 1)
 
 
-# ------------------------------------------------------------------------------------- flatten and step 6
+# ------------------------------------------------------------------------------------- flatten
 async def test_flatten_exits_every_held_position_once_and_leaves_a_working_exit_alone(conn, rig) -> None:
     p1 = await rig.enter(n=1)
     p2 = await rig.enter(n=2, ts=at(10, 0, 3))

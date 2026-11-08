@@ -1,9 +1,9 @@
 """``hi52`` — 52-week-high-proximity continuation, v2, a FORWARD TEST (promoted 2026-09-12).
 
-Promoted out of SHADOW on 2026-09-12 (plan §8.6 addendum; owner-directed "proceed with the changes
+Promoted out of SHADOW on 2026-09-12 (owner-directed "proceed with the changes
 you deem will improve the engine's performance"). ``settings.yaml`` registers
 ``hi52.expected_edge_pct`` and the composition root feeds it to the gate's
-``strategy_expected_edge_pct`` map exactly as it does ``ins``'s, so the §7.1 C3 cost check now has
+``strategy_expected_edge_pct`` map exactly as it does ``ins``'s, so the risk gate's cost check now has
 an edge basis and a candidate can reach RECOMMEND. The promotion is NOT a claim of a validated
 edge: the v2 backtest is CPCV-promotable (1,794 trades, T+20 median net +1.71% / 58.2% hit, fold
 pass 86.7% under N=2) but its edge lives in the INDEX cell of a survivorship-tainted population
@@ -21,12 +21,12 @@ and owner-only — never learnable, never retuned without a new pre-registration
 **Architecture — a pure batch rule over the CORE (NIFTY 500) eligible subset, unlike ``brk20``, which
 scans the full eligible set** (scoped down from the batch universe on 2026-09-09: the 09-03 full-market backtest measured the edge as index-class
 only, extended names −0.26% net at T+20). It is deliberately NOT
-a :class:`~engine.strategy.scanners.base.Scanner`: the §3.2.5 scanner protocol is (1m bar,
+a :class:`~engine.strategy.scanners.base.Scanner`: the scanner protocol is (1m bar,
 ScanContext)-driven and only watched symbols ever produce bars, but a swing-horizon 52wk-proximity
 read has nothing per-bar to key off. This module scans COMPLETED daily bars (bhavcopy-final
 ``bars_1d``) for every CORE-eligible symbol — watchlist membership is irrelevant. The composition
 root runs it from the window-open/``scan_now`` sweep and admits its candidates through
-``SignalPreScreen.admit`` so the §3.2.5 dedupe/caps bind exactly as for bar-driven candidates.
+``SignalPreScreen.admit`` so the prescreen's dedupe/caps bind exactly as for bar-driven candidates.
 
 **Thesis.** George & Hwang (2004) find proximity to the 52-week high is a stronger continuation
 predictor than conventional price momentum: the high acts as an anchor investors under-react to, so
@@ -68,12 +68,12 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   to an infinite ceiling (:data:`V1_PARAMS`, the backtest's v1 path only) is not in the registration
   at all and so refuses nothing — an absent filter and an unfailable one are different things.
 * The third v2 filter — population = the CORE (NIFTY 500) eligible subset — is NOT enforced here:
-  the composition root feeds this sweep ``MarketStore.get_core_eligible_symbols`` (since O18,
+  the composition root feeds this sweep ``MarketStore.get_core_eligible_symbols`` (since the owner's NIFTY Total Market widening,
   2026-10-08; the full eligible set 2026-09-10..10-08), and a scanner that
   re-derived universe membership from its own rows would be a second, drifting definition of it.
-* The ex-date skip mirrors ``brk20``'s A12 calendar-horizon check, with one deliberate difference:
+* The ex-date skip mirrors ``brk20``'s calendar-horizon check, with one deliberate difference:
   it is COUNTED here as :data:`VETO_EX_DATE_SKIP`. ``brk20`` itself does NOT count its own ex-date
-  refusal (only its WO-19 stop-geometry-floor vetoes are counted, on the theory that an ordinary
+  refusal (only its stop-geometry-floor vetoes are counted, on the theory that an ordinary
   universe-shape refusal isn't worth a counter) — but a brand-new SHADOW's veto classes need to be
   observable from day one, not bolted on after a starvation scare the way ``cat``'s visibility line
   was, so ``hi52`` counts it. This is a deliberate divergence from ``brk20``'s literal pattern, not
@@ -86,7 +86,7 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
 * Levels: ``entry = round_to_tick(close(y))`` — the trigger session's own close. Unlike ``brk20``
   there is no "broken level" to retest (a proximity read isn't a level break), so the close IS the
   reference. ``stop = round_to_tick(entry × (1 − stop_pct/100))``, default **6%** — a disaster stop
-  sized the same way as ``cat``'s (§7.1 ``per_trade_risk.overnight_gap_mult`` applies to a swing
+  sized the same way as ``cat``'s (``per_trade_risk.overnight_gap_mult`` applies to a swing
   entry). ``target = None``: no ATR/RR level is fabricated onto an unvalidated shadow rule — identical
   reasoning to ``cat``. That reasoning SURVIVES the promotion inverted: the drift this rule captures
   was MEASURED over a fixed horizon, never predicted to a level, so the gate consumes the REGISTERED
@@ -94,21 +94,21 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   Degenerate tick-rounding (``stop >= entry``) emits nothing, as for ``brk20``/``cat``.
 * Score = ``prox``, clamped to ``[0, 1]``: the proximity margin is the strength signal. The scale
   does not agree with any other scanner's and is not meant to — cross-strategy STANDING is read as a
-  per-strategy quantile at the analyst forward slot (§5.2(a), ``pipeline._quantile_band``). The one
+  per-strategy quantile at the analyst forward slot (``pipeline._quantile_band``). The one
   place a raw score IS compared across strategies is ``prescreen._rank`` inside one batch admission,
   where (its own docstring) the per-strategy sub-caps and not the sort are what bound a strategy's
   share of the day; the ordering consequence of a high scale there is handled at the composition
   root (``ops.main._publication_order``), not by rescaling here. Rescaling is therefore NOT free:
   it would move this rule's own quantile history and its place in that batch sort.
 * Exit is TIME, not price, exactly as for ``cat``: :data:`DEFAULT_PARAMS` ``hold_sessions`` is the
-  hold the hold map (``ops.holds``) gives hi52, and the D2 time exit
+  hold the hold map (``ops.holds``) gives hi52, and the time exit
   (``RecommendationPipeline.time_exit_check``) is the exit path; no exit code lives here.
 * Diagnostics (Frog-in-the-Pan path-smoothness — the v2 GATE's own inputs since 2026-09-12, and
   logged per surviving candidate by the composition root's ``hi52_sweep`` line):
   ``up_day_frac`` = fraction of the last 20 sessions with ``close > prev close``; ``max_day_move`` =
   the largest single-session ``|close/prev − 1|`` over the same 20 sessions. **Not attached to**
   :class:`~engine.strategy.types.SignalCandidate` — that type's own docstring pins it to EXACTLY its
-  §3.2.5 field set (no metadata/notes field exists there, and neither ``brk20`` nor ``cat`` attach
+  pinned field set (no metadata/notes field exists there, and neither ``brk20`` nor ``cat`` attach
   one), and ``engine/strategy/types.py`` is outside this module's edit scope. They are exposed
   instead through the standalone :func:`diagnostics_for` helper, computable on the same rows
   :func:`scan_daily` scans, so the Frog-in-the-Pan analysis (and this module's own tests) can read
@@ -116,7 +116,7 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
   numbers, and it is called only AFTER every v1 test has passed, so the "don't cost every universe
   symbol for an unused stat" discipline still holds: the cost is paid per CANDIDATE, not per symbol.
 
-Evidence caveat rides along (§6.1): the forward test is the measurement. The v2 edge was measured on
+Evidence caveat rides along: the forward test is the measurement. The v2 edge was measured on
 a population labelled by CURRENT index membership applied backwards — a survivorship-tainted proxy
 (09-03 and 09-09 runs both carry the label) — so a live candidate carries the registered edge for
 the gate's arithmetic and no presumption of expectancy for the analyst's judgement.
@@ -137,7 +137,7 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 STRATEGY_ID = "hi52"
 
-DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped envelope, frozen for the forward-test window
+DEFAULT_PARAMS: dict[str, float] = {   # parameter-envelope-shaped, frozen for the forward-test window
     "proximity_min": 0.95,
     "lookback_sessions": 252,
     "min_sessions": 126,
@@ -146,7 +146,7 @@ DEFAULT_PARAMS: dict[str, float] = {   # §6.3-shaped envelope, frozen for the f
     "hold_sessions": 20,          # the live hold, read by engine.ops.holds; not read below
     "stop_pct": 6.0,
     # v2 signal-time filters (pre-registered 2026-09-09, gating since the 2026-09-12 promotion).
-    # OWNER-ONLY and NEVER learnable — not now, not when §6.3 learning lands: these three numbers
+    # OWNER-ONLY and NEVER learnable — not now, not when parameter-envelope learning lands: these three numbers
     # DEFINE the measured v2 population, so moving one re-opens multiplicity, invalidates the
     # backtest that justified the promotion and restarts the forward clock. A change here is a NEW
     # pre-registration, never a tuning.
@@ -180,7 +180,7 @@ V1_PARAMS: dict[str, float] = {
     "gap_day_max": math.inf,
 }
 
-#: Veto class surfaced through the optional accumulator (§6.1 observability). See the module
+#: Veto class surfaced through the optional accumulator (observability). See the module
 #: docstring for why hi52 counts this where brk20 does not.
 VETO_EX_DATE_SKIP = "ex_date_skip"
 
@@ -194,7 +194,7 @@ VETO_GAP = "gap"
 
 #: Corp-action kinds that RESCALE the price series: after a bonus/split/rights/demerger ex-date every
 #: earlier bar is in a different unit. Neither ``bars_1d`` source re-adjusts STORED history — Kite
-#: candles are adjusted at fetch time (A11) but the series is seeded once and then extended one
+#: candles are adjusted at fetch time but the series is seeded once and then extended one
 #: session at a time, and bhavcopy rows are raw — so ANY symbol with one of these inside its
 #: lookback carries phantom pre-ex highs until the window rolls past (2026-09-03 review).
 UNADJUSTED_KINDS = frozenset({"bonus", "split", "rights", "demerger"})
@@ -300,7 +300,7 @@ def scan_daily(
     ``rows[-1]`` must be the last COMPLETED session (never today's forming bar). Fails to ``None`` on
     thin history, sub-threshold proximity, a stale (non-fresh) crossing, unconfirmed volume, ex-date
     proximity, a v2 filter refusal, or degenerate tick-rounded levels — never raises on ordinary OR
-    malformed data (§3.2.5 fail-to-zero posture).
+    malformed data (fail-to-zero posture).
 
     ``veto_counts``, when supplied, is incremented in place with :data:`VETO_EX_DATE_SKIP`,
     :data:`VETO_SMOOTH` or :data:`VETO_GAP`; the other refusals above are this rule's ordinary
@@ -339,7 +339,7 @@ def scan_daily(
     if not (math.isfinite(y_volume) and math.isfinite(avg_vol)) or avg_vol < 0.0 or y_volume < vol_mult * avg_vol:
         return None
 
-    # ---- ex-date skip (mirrors brk20's A12 calendar horizon); COUNTED here (see module docstring).
+    # ---- ex-date skip (mirrors brk20's calendar horizon); COUNTED here (see module docstring).
     horizon = today + timedelta(days=int(p["ex_skip_days"]))
     if any(today <= xd <= horizon for xd in upcoming_ex_dates):
         _bump(veto_counts, VETO_EX_DATE_SKIP)
@@ -410,12 +410,12 @@ def sweep_daily(
     params: Mapping[str, float] | None = None,
     veto_counts: dict[str, int] | None = None,
 ) -> list[SignalCandidate]:
-    """Run :func:`scan_daily` over every symbol; deterministic order (§9.6): score desc, symbol asc.
+    """Run :func:`scan_daily` over every symbol; deterministic order: score desc, symbol asc.
 
     ``unadjusted_symbols`` (see :func:`unadjusted_history`) are not read at all — their window
     contains bars in two units — and each is counted as :data:`VETO_UNADJUSTED_HISTORY`.
     ``veto_counts`` is threaded straight through — the caller owns the accumulator and reads the
-    veto classes off it after the sweep returns (§6.1 observability)."""
+    veto classes off it after the sweep returns (observability)."""
     ex_map = ex_dates_by_symbol or {}
     out: list[SignalCandidate] = []
     for symbol in sorted(histories):

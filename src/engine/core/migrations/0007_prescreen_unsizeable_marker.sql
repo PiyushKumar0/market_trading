@@ -1,6 +1,6 @@
--- ------------------------------------------------------- §3.2.5/§5.2(a) day-slot journal: unsizeable
+-- ------------------------------------------------------- day-slot journal: unsizeable
 -- 2026-08-14: a structurally-unforwardable candidate (no stop level ⇒ max_qty_by_risk is 0 ⇒ a
--- guaranteed no_action, §7.1 — today: `mom` until ledger-driven rebalance state lands) is journalled
+-- guaranteed no_action — today: `mom` until ledger-driven rebalance state lands) is journalled
 -- by ``_journal_slot`` at the TOP of ``on_signal_candidate``, before the stopless short-circuit a few
 -- lines later ever runs. Until this column existed that row was indistinguishable from a candidate
 -- that was genuinely refused a forward slot (starvation) — the funnel rendered both as "unforwarded",

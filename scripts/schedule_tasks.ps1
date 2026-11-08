@@ -1,18 +1,18 @@
-# scripts/schedule_tasks.ps1 — idempotent Windows Scheduled Task registration (§10.7, E7).
+# scripts/schedule_tasks.ps1 — idempotent Windows Scheduled Task registration.
 #
 # Registers:
 #   1. mt-watchdog        — the NON-wake out-of-band watchdog (scripts/watchdog.py) on a 1-minute
 #                           repetition (~lifecycle.watchdog_poll_s). Deliberately non-wake: waking
-#                           the PC would defeat sleep-between-active-periods (§2.6); it covers
-#                           engine-death-while-the-PC-is-awake, not total power loss (§2.2 limitation).
+#                           the PC would defeat sleep-between-active-periods; it covers
+#                           engine-death-while-the-PC-is-awake, not total power loss.
 #   2. mt-engine-start-*  — OPTIONAL (-WithEngineStarts) wake-capable tasks, one per
 #                           lifecycle.active_period_starts time in config/settings.yaml, that wake
-#                           the PC and start the engine for each active period (§2.6/§10.1). Default
+#                           the PC and start the engine for each active period. Default
 #                           start command is `nssm start mt-engine` (install via nssm_install.ps1).
 #
 # Idempotent: re-running replaces existing tasks of the same name (Register-ScheduledTask -Force).
 # Run elevated (Task Scheduler writes) AS THE mt-engine service account, or pass -TaskUser: the
-# watchdog must run-as that account so the per-user DPAPI bot token decrypts (§2.2/§10.7).
+# watchdog must run-as that account so the per-user DPAPI bot token decrypts.
 #
 # Usage (elevated PowerShell, from the repo root):
 #   .\scripts\schedule_tasks.ps1                        # watchdog only
@@ -69,7 +69,7 @@ function Register-IdempotentTask {
     Write-Host "registered task '$Name' (wake=$WakeToRun, user=$TaskUser)"
 }
 
-# ---------------------------------------------------------------- 1) the non-wake watchdog (§2.2)
+# ---------------------------------------------------------------- 1) the non-wake watchdog
 $watchdogAction = New-ScheduledTaskAction `
     -Execute $PythonExe `
     -Argument "`"$WatchdogScript`"" `
@@ -80,7 +80,7 @@ $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date `
     -RepetitionDuration ([TimeSpan]::MaxValue)
 Register-IdempotentTask -Name "mt-watchdog" -Action $watchdogAction -Trigger $watchdogTrigger -WakeToRun $false
 
-# ------------------------------------------- 2) optional wake-capable engine-start tasks (§2.6/§10.7)
+# ------------------------------------------- 2) optional wake-capable engine-start tasks
 if ($WithEngineStarts) {
     # Parse lifecycle.active_period_starts from config/settings.yaml (flow-style list of "HH:MM").
     $settingsYaml = Join-Path $RepoRoot "config\settings.yaml"
@@ -105,7 +105,7 @@ if ($WithEngineStarts) {
             -WorkingDirectory $RepoRoot
         $trigger = New-ScheduledTaskTrigger -Daily -At $hhmm
         # Wake-capable: "wake the computer to run this task" so a sleeping PC still starts the
-        # engine for the active period (§2.6). The engine's own §2.6 startup sequence + NSECalendar
+        # engine for the active period. The engine's own startup sequence + NSECalendar
         # guard make a holiday/weekend fire harmless (it recovers, finds no session, idles/stops).
         Register-IdempotentTask -Name "mt-engine-start-$safe" -Action $action -Trigger $trigger -WakeToRun $true
     }

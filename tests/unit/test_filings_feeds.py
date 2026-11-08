@@ -1,12 +1,12 @@
-"""§2.8 corporate-filings layer (stage 1, O14, E5): defensive parsers over probe-verified NSE shapes,
+"""Corporate-filings layer (stage 1): defensive parsers over probe-verified NSE shapes,
 the BSE ``error_Bse.html``-as-200 quirk, content-hash id stability, watermark windowing, store
 round-trips, and the per-source/per-symbol degrade-never-raise contract.
 
-Fixtures are lifted VERBATIM from the Phase-1 probe result files where a real capture exists (PIT,
+Fixtures are lifted VERBATIM from the probe result files where a real capture exists (PIT,
 results, SHP-master, the Integrated Filing listing and XBRL). The BSE SHP DETAIL stack (``shp_quarter_index.json`` /
 ``shp_detail.json``) is REPRESENTATIVE, not probe-verified: those endpoints returned ``error_Bse.html``
 during probing (see the ``filings_shp`` module docstring) — the parsers key off BSE's
-structurally-verified Table/Table1 envelope with [VERIFY Phase-1] field aliases.
+structurally-verified Table/Table1 envelope with [VERIFY] field aliases.
 """
 
 from __future__ import annotations
@@ -139,21 +139,21 @@ def routed_client(routes: dict, recorder: list | None = None) -> httpx.AsyncClie
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
 
 
-# =========================================================================== bse_http (§2.8 quirk)
+# =========================================================================== bse_http (quirk)
 async def test_bse_get_success_returns_response():
     resp = await bse_get(client_serving(httpx.Response(200, json={"Table": []})), "https://api.bseindia.com/x", timeout=5)
     assert resp.status_code == 200 and json.loads(resp.content) == {"Table": []}
 
 
 async def test_bse_get_error_page_body_is_a_failure():
-    """A 200 whose body is the error_Bse.html HTML (fails json.loads) raises BseError (§2.8)."""
+    """A 200 whose body is the error_Bse.html HTML (fails json.loads) raises BseError."""
     client = client_serving(httpx.Response(200, text=BSE_ERROR_HTML))
     with pytest.raises(BseError):
         await bse_get(client, "https://api.bseindia.com/BseIndiaAPI/api/ShareholdingPattern/w", timeout=5)
 
 
 async def test_bse_get_error_url_is_a_failure():
-    """A 200 whose FINAL URL is error_Bse.html raises BseError even with a JSON body (§2.8)."""
+    """A 200 whose FINAL URL is error_Bse.html raises BseError even with a JSON body."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("error_Bse.html"):
@@ -360,7 +360,7 @@ def test_store_insider_source_predicate_matches_the_feeds_tags():
 
 
 async def test_latest_insider_broadcast_partitions_by_id_prefix(store):
-    # §2.8.5 (2026-09-13): insider_trades has no source column — the id prefix IS the partition.
+    # 2026-09-13: insider_trades has no source column — the id prefix IS the partition.
     # Timestamps mirror the live store on 2026-09-12: NSE ceiling 2026-05-02 16:46, BSE writing today.
     nse_dt = datetime(2026, 5, 2, 16, 46, tzinfo=IST)
     bse_dt = datetime(2026, 6, 17, 19, 3, tzinfo=IST)
@@ -458,7 +458,7 @@ def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
 
 
 async def test_filings_pit_window_ignores_the_bse_watermark(store, clock, monkeypatch):
-    # The regression §2.8.5 records: a BSE fresh row stamped the run day pinned the whole-table
+    # The regression: a BSE fresh row stamped the run day pinned the whole-table
     # watermark to today and collapsed this job's window to [d-1, d].
     store.upsert_insider_trades([
         {"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)},
@@ -475,7 +475,7 @@ async def test_filings_pit_window_ignores_the_bse_watermark(store, clock, monkey
 
 async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch, caplog):
     # A watermark older than the floor becomes neither ONE wide request nor an unbounded number of
-    # them: exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS (§2.8.5).
+    # them: exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS.
     store.upsert_insider_trades(
         [{"id": "ancient", "symbol": "X", "broadcast_dt": datetime(2024, 1, 5, 10, 0, tzinfo=IST)}]
     )
@@ -511,7 +511,7 @@ async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch,
 
 async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monkeypatch):
     # A chunked run that dies part-way must leave the watermark INSIDE the covered prefix, so the
-    # next run re-opens AT the hole rather than stepping over it (§2.8.5).
+    # next run re-opens AT the hole rather than stepping over it.
     store.upsert_insider_trades(
         [{"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)}]
     )
@@ -533,7 +533,7 @@ async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monke
     spans = pit_spans(seen)
     assert spans[0] == (date(2026, 4, 25), date(2026, 5, 25))  # window 1 served, upserted
     assert set(spans[1:]) == {(date(2026, 5, 26), D)}          # window 2 retried by nse_get, then out
-    assert result.ok is False and result.degraded is True     # never raises (E5)
+    assert result.ok is False and result.degraded is True     # never raises
     assert result.rows_parsed == 4 and result.rows_written == 4  # the partial ingest is durable
     assert msgs and msgs[0].data["job_id"] == "filings_pit"
     # The watermark sits behind the hole, not past it: the retry re-opens at 03-05 (10-05 less the
@@ -566,9 +566,9 @@ async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock,
 async def test_filings_pit_failure_degrades_and_warns(store, clock, monkeypatch):
     msgs, sink = collect_alerts()
     result = await _pit_job(store, clock, monkeypatch, failing_client(), notify=sink).run(D)
-    assert result.ok is False and result.degraded is True    # never raises (E5)
+    assert result.ok is False and result.degraded is True    # never raises
     assert msgs and msgs[0].data["job_id"] == "filings_pit"
-    assert msgs[0].severity == "warning"                     # filings are NOT safety-critical (§2.8 rule iii)
+    assert msgs[0].severity == "warning"                     # filings are NOT safety-critical
     assert fpit.NSE_PIT_GG_URL.startswith("https://www.nseindia.com/")
 
 
@@ -813,7 +813,7 @@ def test_parse_shp_detail_verified_shape():
 
 
 def test_parse_shp_detail_falls_back_to_declaration_authorise_date():
-    # §2.8 rule i: the backfill path passes broadcast_dt=None (quarter loops carry no NSE-master
+    # The backfill path passes broadcast_dt=None (quarter loops carry no NSE-master
     # timestamp); the payload's OWN declaration-row Fld_AuthoriseDate must land on every category
     # row — this was the defect that NULLed all 13k backfilled rows and faked pledge-leg n=0.
     rows = parse_shp_detail(
@@ -826,7 +826,7 @@ def test_parse_shp_detail_falls_back_to_declaration_authorise_date():
 
 
 def test_parse_shp_detail_missing_authorise_date_stays_null():
-    # No declaration timestamp anywhere ⇒ NULL broadcast_dt (never invented, §2.8 rule i).
+    # No declaration timestamp anywhere ⇒ NULL broadcast_dt (never invented).
     payload = {
         "Table": [{"Fld_TransactionId": 1, "Qtr_Id": 130.0}],           # no Fld_AuthoriseDate
         "Table1": SHP_DETAIL_JSON["Table1"],
@@ -900,7 +900,7 @@ async def test_filings_shp_bse_error_page_degrades_without_raising(store, clock)
         "SHPQNewFormat": httpx.Response(200, text=BSE_ERROR_HTML),   # the documented 200+error page
         "CorporatesSHPSecuritybeta": httpx.Response(200, json=SHP_DETAIL_JSON),
     })
-    result = await FilingsShpJob(store, clock, client).run()     # must not raise (E5)
+    result = await FilingsShpJob(store, clock, client).run()     # must not raise
     assert result.ok is True and result.degraded is True
     assert result.failed_symbols == 2 and result.rows_written == 0
 

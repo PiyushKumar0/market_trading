@@ -1,4 +1,4 @@
-"""Shared scenario rig for the §9.4 lifecycle / stop-start chaos cases (15, 16, 17, 19, 22, 23).
+"""Shared scenario rig for the lifecycle / stop-start chaos cases (15, 16, 17, 19, 22, 23).
 
 Not a test module (no ``test_`` prefix, so pytest does not collect it). It composes the REAL engine
 components the way ``engine.ops.main.run`` wires them — ``SessionLifecycle`` + ``SelfTest`` + the
@@ -91,7 +91,7 @@ HEARTBEAT_INTERVAL_S = 0.02
 #: Bound on every "wait for a background thing" loop in the rig — a regression fails, never hangs.
 WAIT_BOUND_S = 5.0
 
-#: Kinds that would be FALSE alarms on a clean stop/restart (§9.4 case 15 "no spurious FEED_STALE/
+#: Kinds that would be FALSE alarms on a clean stop/restart (case 15 "no spurious FEED_STALE/
 #: incident alerts", case 22 (a) "no false alarm across the idle gap").
 INCIDENT_KINDS = frozenset({
     MessageKind.FEED_STALE, MessageKind.FEED_DEGRADED, MessageKind.FEED_WEDGED,
@@ -183,7 +183,7 @@ class FakeTicker:
     def health(self) -> SimpleNamespace:
         return SimpleNamespace(state=self.state, last_tick_age_s=None)
 
-    async def resume(self) -> None:   # ticker_resume_hook: a fresh spawn enters WARMING (§3.2.12)
+    async def resume(self) -> None:   # ticker_resume_hook: a fresh spawn enters WARMING
         self.state = "WARMING"
 
     async def stop(self) -> None:
@@ -282,7 +282,7 @@ class RigEnv:
 
     # ---- job bodies (Kite / NSE / LLM boundary): recorded, not performed
     def job_fns(self) -> dict[str, Callable[..., Awaitable[object]]]:
-        """A runner for every Phase-1 + Phase-2 registry id. DATE_KEYED runs receive ``run_for``;
+        """A runner for every registry id. DATE_KEYED runs receive ``run_for``;
         the others take no argument — ``*args`` serves both call shapes."""
 
         def recorder(job_id: str) -> Callable[..., Awaitable[None]]:
@@ -457,7 +457,7 @@ class EngineProcess:
             if self.ticker is not None:
                 await self.ticker.resume()
 
-        #: §2.6 step-4 hook; kept on the process because the post-login re-trigger re-runs the SAME one.
+        #: The startup backfill hook; kept on the process because the post-login re-trigger re-runs the SAME one.
         self.backfill_hook = backfill_hook_factory(self) if backfill_hook_factory is not None else None
         self.lifecycle = SessionLifecycle(
             conn=self.conn, clock=clock, calendar=self.calendar, settings=s,
@@ -566,7 +566,7 @@ class EngineProcess:
 
     # ------------------------------------------------------------------ helpers
     async def arm_recommend(self) -> None:
-        """Owner arms RECOMMEND (sticky mode, R10) — a restart must resume it."""
+        """Owner arms RECOMMEND (sticky mode) — a restart must resume it."""
         from engine.core.enums import Mode
 
         await self.mode.request_transition(Mode.RECOMMEND, Actor.OWNER)

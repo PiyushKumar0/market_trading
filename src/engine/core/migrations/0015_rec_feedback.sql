@@ -1,4 +1,4 @@
--- ------------------------- durable recommendation-feedback state (plan Q0.3)
+-- ------------------------- durable recommendation-feedback state
 -- In-memory dedupes re-fire after a restart; these columns/tables make the skip-reason prompt, the
 -- reminders, the outcome scorecard and the outbox dedupe survive one. Prices are TEXT like
 -- positions/recommendations; pct columns are REAL.

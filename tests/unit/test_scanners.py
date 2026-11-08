@@ -1,6 +1,6 @@
-"""Hand-computed expected signals for the four §6.1 price-baseline scanners.
+"""Hand-computed expected signals for the four price-baseline scanners.
 
-Every expected level below is derived BY HAND from the pinned rule sketches (§6.1), the §6.3
+Every expected level below is derived BY HAND from the pinned rule sketches, the
 envelope defaults, and the smoothing conventions pinned in ``engine.strategy.indicators`` (Wilder
 SMA-seeded recursions; EMA seeded at the first value). Synthetic bar sequences are built so the
 intermediate indicator values are exact (uniform true ranges ⇒ ATR is a closed-form number).
@@ -33,11 +33,11 @@ def _window(start: tuple[int, int], end: tuple[int, int]) -> tuple[datetime, dat
     )
 
 
-# ============================================================================ orb (§6.1 row 1)
+# ============================================================================ orb
 #
-# Session built for orb_minutes=15 (inside the §6.3 range 15–45, small enough to hand-verify):
+# Session built for orb_minutes=15 (inside the envelope range 15–45, small enough to hand-verify):
 #   * range bars 09:15–09:29 — uniform O=100 H=100.50 L=99.50 C=100 V=1000; the 09:15 seed bar
-#     carries auction_open=102 (A14) ⇒ effective range = [99.50, 102.00]. §6.1 v2 (2026-07-12)
+#     carries auction_open=102 ⇒ effective range = [99.50, 102.00]. v2 (2026-07-12)
 #     anchors the stop/target at the OPPOSITE range edge, so only these two edges — not any
 #     TR/ATR path — drive the levels; the bar shape need only pin the range and the volume median.
 #   * filler bars 09:30..trigger−1 — same uniform shape.
@@ -96,7 +96,7 @@ def _buy_trigger(ts: datetime, *, close: str = "102.05", high: str = "102.10",
 
 
 def test_signal_candidate_pinned_field_set():
-    # §3.2.5 PINNED — a drift here is a plan change, not a refactor.
+    # PINNED — a drift here is a contract change, not a refactor.
     assert set(SignalCandidate.model_fields) == {
         "signal_id", "strategy_id", "symbol", "side", "style", "raw_levels", "score",
         "features_snapshot_id", "catalyst_ref",
@@ -105,7 +105,7 @@ def test_signal_candidate_pinned_field_set():
 
 def test_orb_buy_breakout_hand_computed_levels():
     # Trigger 09:35, close 102.05 > 102.00 (auction-seeded range high). vol 1500 = 1.5 × median(1000).
-    # §6.1 v2 (2026-07-12): risk anchored at the OPPOSITE range edge — the range low 99.50:
+    # v2 (2026-07-12): risk anchored at the OPPOSITE range edge — the range low 99.50:
     #   risk   = stop_range_frac(1.0) × (102.05 − 99.50) = 2.55
     #   stop   = 102.05 − 2.55 = 99.50            → round_to_tick 99.50
     #   target = 102.05 + 1.5 × 2.55 = 105.875    → round_to_tick 105.90
@@ -126,12 +126,12 @@ def test_orb_buy_breakout_hand_computed_levels():
     assert c.raw_levels.target == Decimal("105.90")
     assert c.score == pytest.approx(1.0 / 3.0)
     assert c.features_snapshot_id == "fs-001"
-    assert c.catalyst_ref is None            # price baseline — never a catalyst link (§3.2.5)
-    assert len(c.signal_id) == 26            # ULID (§3.2 convention 6)
+    assert c.catalyst_ref is None            # price baseline — never a catalyst link
+    assert len(c.signal_id) == 26            # ULID
 
 
 def test_orb_sell_breakout_hand_computed_levels():
-    # close 99.40 < 99.50 range low. §6.1 v2: risk anchored at the OPPOSITE (upper) range edge 102.00:
+    # close 99.40 < 99.50 range low. v2: risk anchored at the OPPOSITE (upper) range edge 102.00:
     #   risk   = stop_range_frac(1.0) × (102.00 − 99.40) = 2.60
     #   stop   = 99.40 + 2.60 = 102.00            → round_to_tick 102.00
     #   target = 99.40 − 1.5 × 2.60 = 95.50       → round_to_tick 95.50
@@ -171,7 +171,7 @@ def test_orb_close_exactly_at_range_edge_does_not_trigger():
 
 
 def test_orb_auction_open_seeds_the_range():
-    # close 101.55 clears the tick-derived high (100.50) but NOT the auction-seeded 102.00 (A14).
+    # close 101.55 clears the tick-derived high (100.50) but NOT the auction-seeded 102.00.
     trigger = _buy_trigger(_dt(9, 35), close="101.55", high="101.60", low="100.60")
     assert _orb().scan(trigger, _orb_ctx(_orb_session(trigger))) == []
     # Without the auction print the same close IS a breakout — proves the seed changed the range.
@@ -195,7 +195,7 @@ def test_orb_zero_volume_baseline_fails_to_zero():
 
 
 def test_orb_flagged_day_suppressed():
-    # Bulk/block-deal day (§4.4 job 9): the volume breakout is untrustworthy — suppressed (§6.1).
+    # Bulk/block-deal day: the volume breakout is untrustworthy — suppressed.
     trigger = _buy_trigger(_dt(9, 35))
     assert _orb().scan(trigger, _orb_ctx(_orb_session(trigger), flagged=True)) == []
 
@@ -210,7 +210,7 @@ def test_orb_window_intersection_lower_edge():
 
 
 def test_orb_window_intersection_upper_edge_base_1430_binds():
-    # Owner window extends to 15:00 but the §6.1 base window ends 14:30 — most restrictive wins.
+    # Owner window extends to 15:00 but the base window ends 14:30 — most restrictive wins.
     # Trigger bar 14:29 closes AT 14:30 (inclusive edge) ⇒ admitted; 14:30 closes 14:31 ⇒ rejected.
     at_edge = _buy_trigger(_dt(14, 29))
     bars = _orb_session(at_edge)
@@ -233,7 +233,7 @@ def test_orb_missing_context_fails_to_zero():
     assert _orb().scan(trigger, _orb_ctx([])) == []
 
 
-# ============================================================================ rsi2 (§6.1 row 2)
+# ============================================================================ rsi2
 #
 # Stock series: 198 closes rising +0.50 (100 → 198.50), a −2.00 daily close (196.50), then the
 # provisional bar close 194.50 (another −2.00). Wilder RSI(2) by hand: the constant-gain block pins
@@ -270,7 +270,7 @@ def test_rsi2_hand_computed_signal():
     assert len(out) == 1
     c = out[0]
     assert c.strategy_id == "rsi2"
-    assert c.side == "BUY"                       # long-only mean reversion (C5)
+    assert c.side == "BUY"                       # long-only mean reversion
     assert c.style == "swing"
     assert c.raw_levels.entry == Decimal("194.50")
     # stop = 194.50 × (1 − 4%) = 186.72 → tick 186.70 (3734.4 steps rounds half-up to 3734).
@@ -301,7 +301,7 @@ def test_rsi2_index_not_uptrending_rejected():
 
 def test_rsi2_insufficient_history_fails_to_zero():
     bar = _swing_bar("194.50")
-    # 150 stock dailies: no 200-DMA yet (warm-up, §7.1 warmup_ready).
+    # 150 stock dailies: no 200-DMA yet (warm-up, warmup_ready).
     ctx = ScanContext(daily_bars=_dailies([100.0 + 0.5 * i for i in range(150)]),
                       index_daily_closes=UPTREND_INDEX)
     assert Rsi2Scanner().scan(bar, ctx) == []
@@ -382,7 +382,7 @@ def test_rsi2_passing_regime_logs_nothing(caplog):
 
 
 def test_rsi2_warmup_shortfall_is_not_a_regime_block(caplog):
-    """Too few index closes is a warm-up condition (§7.1), not a shut regime — the filter was never
+    """Too few index closes is a warm-up condition, not a shut regime — the filter was never
     evaluated, so naming a failing leg would be an invention."""
     ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX[:69])
     with caplog.at_level("INFO"):
@@ -390,9 +390,9 @@ def test_rsi2_warmup_shortfall_is_not_a_regime_block(caplog):
     assert _regime_records(caplog) == []
 
 
-# ============================================================================ trend (§6.1 row 3)
+# ============================================================================ trend
 #
-# 150 dailies (WO-11 floor, F10) with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-
+# 150 dailies (the floor) with CONSTANT close 100 pin EMA20 == EMA50 == 100 (seeded-at-
 # first-value EMAs of a constant series), so an up provisional close makes the golden cross fire
 # TODAY by construction. Highs/lows creep +0.001/day (+DM=0.001, −DM=0) — small enough that the
 # cumulative offset never reaches 1.0 across the full 150-bar fixture, keeping TR=1.0 uniform (so
@@ -420,11 +420,11 @@ def test_trend_golden_cross_hand_computed():
     assert len(out) == 1
     c = out[0]
     assert c.strategy_id == "trend"
-    assert c.side == "BUY"                        # golden cross only — no CNC shorts (C5)
+    assert c.side == "BUY"                        # golden cross only — no CNC shorts
     assert c.style == "position"
     assert c.raw_levels.entry == Decimal("101")
     assert c.raw_levels.stop == Decimal("98.50")  # 101 − 2.5 × ATR(1.0) — the initial trail level
-    assert c.raw_levels.target is None            # trail-managed (§6.1)
+    assert c.raw_levels.target is None            # trail-managed
     assert c.score == pytest.approx(1.0)          # ADX 100 ≥ the 50 score ceiling
 
 
@@ -461,8 +461,8 @@ def test_trend_death_cross_not_emitted():
 
 
 def test_trend_warmup_floor_149_150_boundary():
-    # WO-11 (F10): the floor is 150 completed dailies (raised from 60) — the boundary is the test.
-    # 149 fails to zero (warm-up, §7.1 warmup_ready); 150 is a live golden cross, hand-computed
+    # The floor is 150 completed dailies (raised from 60) — the boundary is the test.
+    # 149 fails to zero (warm-up, warmup_ready); 150 is a live golden cross, hand-computed
     # identically to test_trend_golden_cross_hand_computed above.
     assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(149))) == []
     out = TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(150)))
@@ -472,13 +472,13 @@ def test_trend_warmup_floor_149_150_boundary():
 
 
 def test_trend_young_listing_emits_nothing_at_60_bars():
-    # WO-11 acceptance: a young-listing fixture at the OLD 60-bar floor must now emit nothing — the
+    # Acceptance: a young-listing fixture at the OLD 60-bar floor must now emit nothing — the
     # exact gap WarmupGate's young-listing exemption previously let through with material EMA-seed
-    # noise (F10).
+    # noise.
     assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(60))) == []
 
 
-# ============================================================================ mom (§6.1 row 4)
+# ============================================================================ mom
 
 MOMENTUM = {"AAA": 0.30, "BBB": 0.20, "CCC": 0.10, "DDD": float("nan")}
 
@@ -489,7 +489,7 @@ def _mom_ctx(*, since: int | None = None, ex_dates: list[date] | None = None) ->
 
 
 def test_mom_rank_within_top_n():
-    # top_n=2 (§6.3 default): AAA rank 1 (score 1.0), BBB rank 2 (score 0.5), CCC rank 3 — out.
+    # top_n=2 (envelope default): AAA rank 1 (score 1.0), BBB rank 2 (score 0.5), CCC rank 3 — out.
     scanner = MomentumScanner()
     out = scanner.scan(_swing_bar("100", symbol="AAA"), _mom_ctx())
     assert len(out) == 1

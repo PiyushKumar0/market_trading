@@ -1,17 +1,17 @@
-"""Tier-1 <-> Tier-2 data contracts (R1): the action-object union (§3.3), GateVerdict (§3.4),
-Recommendation (§3.6), and the broker order-postback wire contract (§3.2.1/§3.5.1).
+"""Tier-1 <-> Tier-2 data contracts: the action-object union, GateVerdict,
+Recommendation, and the broker order-postback wire contract.
 
 Placed in ``engine.core`` (not ``engine.intelligence``) so ``engine.risk`` / ``engine.oms`` can
 construct and consume these — ``GateVerdict`` above all — WITHOUT importing ``engine.intelligence``.
-The deterministic tiers must never import the LLM tier (R1 import-graph guard, §9.1); the AST scan in
+The deterministic tiers must never import the LLM tier (the import-graph guard); the AST scan in
 ``tests/unit/test_import_graph.py`` enforces this structurally. ``engine.intelligence.schemas``
-re-exports every name defined here unchanged (§8.1 locked conventions below still apply verbatim).
+re-exports every name defined here unchanged (the locked conventions below still apply verbatim).
 
 These are the ONLY shape in which Tier-1 (Claude) output crosses into the deterministic tiers. The SDK
-call uses :data:`ActionProposal` as its structured-output schema (D5/D7); anything that fails validation
-after retries is dropped with an alert — NEVER parsed from prose (D7).
+call uses :data:`ActionProposal` as its structured-output schema; anything that fails validation
+after retries is dropped with an alert — NEVER parsed from prose.
 
-Three locked conventions (Phase-0 deliverables, §8.1):
+Three locked conventions:
 
 1. **Decimal prices round-trip as STRINGS.** JSON Schema has no decimal type; serialising prices/ticks
    as floats corrupts them. :data:`DecimalStr` validates from str|int|float (via ``str()`` for floats,
@@ -20,7 +20,7 @@ Three locked conventions (Phase-0 deliverables, §8.1):
 2. **Temporal + identity fields are PLATFORM-STAMPED, never LLM-emitted.** ``proposal_id``, ``agent_id``,
    ``valid_until``, ``inputs_digest`` are overwritten post-parse by
    ``engine.intelligence.schemas.parse_and_stamp`` using ``Clock``-derived values — any value the model supplies is DISCARDED. The LLM never produces a
-   date/time (§3.2 convention).
+   date/time.
 3. **Constraints the SDK structured-output layer may reject** (``Field(gt=0)`` / ``min_length`` /
    mandatory ``additionalProperties:false`` / no recursive schemas) are enforced CLIENT-SIDE by
    re-validating the model after parse — which is exactly what :func:`parse_and_stamp` does. See
@@ -64,12 +64,12 @@ DecimalStr = Annotated[
     # LOCK the WIRE schema to "string" in BOTH modes (WithJsonSchema overrides pydantic's default
     # anyOf[number,string] for a BeforeValidator-annotated Decimal). Without this the exported SDK
     # structured-output schema would invite the model to emit a JSON number and corrupt a price/tick
-    # (§8.1 decimal-as-string convention). The validator still accepts str|int|float defensively.
+    # (decimal-as-string convention). The validator still accepts str|int|float defensively.
     WithJsonSchema({"type": "string", "description": "decimal price as a string (no float corruption)"}),
 ]
 
 
-# --------------------------------------------------------------------------- action union (§3.3)
+# --------------------------------------------------------------------------- action union
 class ActionBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -78,10 +78,10 @@ class ActionBase(BaseModel):
     agent_id: str = ""           # PLATFORM-STAMPED: which Tier-1 agent produced it.
     thesis: str = Field(min_length=20, max_length=600)        # 3–5 lines
     confidence: float = Field(ge=0.0, le=1.0)
-    # PLATFORM-STAMPED: Clock.now() + per-style TTL (§3.2.1). The LLM never emits a date/time; any value
+    # PLATFORM-STAMPED: Clock.now() + per-style TTL. The LLM never emits a date/time; any value
     # it supplies is overwritten by parse_and_stamp(). Optional on the wire so the model may omit it.
-    valid_until: AwareDatetime | None = None     # tz-aware IST only (§9.1 no-naive-datetime invariant)
-    inputs_digest: str = ""      # PLATFORM-STAMPED: hash of AssembledContext for audit/replay (R8)
+    valid_until: AwareDatetime | None = None     # tz-aware IST only (no-naive-datetime invariant)
+    inputs_digest: str = ""      # PLATFORM-STAMPED: hash of AssembledContext for audit/replay
 
 
 class EnterAction(ActionBase):
@@ -94,7 +94,7 @@ class EnterAction(ActionBase):
     entry_price: DecimalStr | None = None                     # required if LIMIT; gate checks sanity band
     stop_price: DecimalStr                                    # MANDATORY — no stopless proposals exist
     target_price: DecimalStr | None = None
-    quantity: int = Field(gt=0)                               # gate may only shrink (R1)
+    quantity: int = Field(gt=0)                               # gate may only shrink
     signal_id: str                                            # links to a live SignalPreScreen candidate
     strategy_id: str
     features_snapshot_id: str
@@ -122,7 +122,7 @@ class ModifyTargetAction(ActionBase):
 
 class CancelAction(ActionBase):
     action: Literal["cancel"]
-    order_id: str                                            # NON-PROTECTIVE orders only (R1/R3)
+    order_id: str                                            # NON-PROTECTIVE orders only
 
 
 ActionProposal = Annotated[
@@ -142,16 +142,16 @@ ACTION_MODELS = {
 }
 
 
-# --------------------------------------------------------------------------- GateVerdict (§3.4)
+# --------------------------------------------------------------------------- GateVerdict
 class CheckResult(BaseModel):
-    rule_id: str            # §7.1 id, e.g. "per_trade_risk", "circuit_proximity", "margin_buffer"
+    rule_id: str            # risk-limit id, e.g. "per_trade_risk", "circuit_proximity", "margin_buffer"
     passed: bool
     value: str
     limit: str
-    headroom: str           # human-readable; ships in recommendations (R1)
+    headroom: str           # human-readable; ships in recommendations
 
 
-class CostBreakdown(BaseModel):     # from CostModel (C2/C3)
+class CostBreakdown(BaseModel):     # from CostModel
     notional: DecimalStr
     total_cost: DecimalStr
     breakeven_pct: DecimalStr
@@ -165,20 +165,20 @@ class GateVerdict(BaseModel):
     proposal_id: str
     verdict: Literal["approve", "shrink", "reject", "owner_approval_required"]
     original_qty: int | None = None
-    approved_qty: int | None = None     # shrink: cost model re-run on approved_qty (R1)
-    checks: list[CheckResult]           # every rule evaluated, pass or fail — full audit (R8)
+    approved_qty: int | None = None     # shrink: cost model re-run on approved_qty
+    checks: list[CheckResult]           # every rule evaluated, pass or fail — full audit
     cost: CostBreakdown | None = None
     reasons: list[str] = Field(default_factory=list)
     mode: Mode
     risk_state: RiskState
     degrade_tier: str
-    evaluated_at: AwareDatetime         # platform-stamped (Clock); tz-aware IST only (§9.1)
+    evaluated_at: AwareDatetime         # platform-stamped (Clock); tz-aware IST only
 
 
-# --------------------------------------------------------------------------- Recommendation (§3.6)
+# --------------------------------------------------------------------------- Recommendation
 class Recommendation(BaseModel):
     rec_id: str
-    created_at: AwareDatetime           # tz-aware IST only (§9.1)
+    created_at: AwareDatetime           # tz-aware IST only
     valid_until: AwareDatetime
     kind: Literal["entry", "exit", "adjust"]
     instrument: str
@@ -189,14 +189,14 @@ class Recommendation(BaseModel):
     stop: DecimalStr
     targets: list[DecimalStr]
     qty: int
-    notional: DecimalStr                # gate-approved size (R1)
+    notional: DecimalStr                # gate-approved size
     thesis: str
     confidence: float
-    short_flag_higher_tail_risk: bool = False     # shorts marked per shorting policy (C8)
-    gate: GateVerdict                   # verdict + per-rule headroom ship in payload (R1)
-    cost: CostBreakdown                 # this trade's specific breakeven math (C3)
-    manual_checklist: list[str]         # B7/R3 protective-order checklist for the human
-    # Plan Q1.1 — optional so stored payloads still parse; set on entry recs only.
+    short_flag_higher_tail_risk: bool = False     # shorts marked per shorting policy
+    gate: GateVerdict                   # verdict + per-rule headroom ship in payload
+    cost: CostBreakdown                 # this trade's specific breakeven math
+    manual_checklist: list[str]         # protective-order checklist for the human
+    # Optional so stored payloads still parse; set on entry recs only.
     strategy_id: str | None = None
     proposal_id: str | None = None
     entry_type: Literal["LIMIT", "MARKET"] | None = None
@@ -213,28 +213,28 @@ class Recommendation(BaseModel):
     registered_edge_pct: DecimalStr | None = None
 
 
-# ------------------------------------------------------------------- order postback wire (§3.5.1)
-# WO-P3-2 fix round, 2026-09-10 (§8.4 addendum). WHY this lives in ``core`` and not in
+# ------------------------------------------------------------------- order postback wire
+# 2026-09-10 fix round. WHY this lives in ``core`` and not in
 # ``engine.broker.ticker_supervisor``, where it was defined until now: it is a WIRE CONTRACT, and
 # TWO brokers emit it — the mt-ticker child forwards Kite's ``on_order_update`` payload for live
 # orders, and ``engine.paper.broker.PaperBroker`` publishes the identical shape for simulated ones,
-# so live and paper share ONE OMS parser (§3.5.1). Leaving it in ``engine.broker`` forced
-# ``engine.paper`` to import the live-broker package, contradicting §3.2.9's "depends on ``core``"
+# so live and paper share ONE OMS parser. Leaving it in ``engine.broker`` forced
+# ``engine.paper`` to import the live-broker package, contradicting the paper tier's "depends on ``core``"
 # and dragging the pykiteconnect import chain into the paper tier. ``ticker_supervisor`` re-exports
 # both names unchanged, so every existing importer keeps working.
 
-#: Canonical event bus topic for broker order postbacks (§3.2.1, A3) — drives the OMS (§3.5.1).
+#: Canonical event bus topic for broker order postbacks — drives the OMS.
 ORDER_UPDATE_TOPIC = "order.update"
-#: Paper postbacks travel apart from real ones (plan §1.2), so no real-order consumer can see one.
+#: Paper postbacks travel apart from real ones, so no real-order consumer can see one.
 PAPER_ORDER_UPDATE_TOPIC = "paper.order.update"
 
 
 class OrderUpdateFrame(BaseModel):
-    """A verbatim Kite order postback (A3), as forwarded by the mt-ticker child or emitted by the
+    """A verbatim Kite order postback, as forwarded by the mt-ticker child or emitted by the
     PaperBroker.
 
     ``data`` is the raw ``on_order_update`` payload, untouched — the OMS correlates it against
-    platform orders on the broker's own field names (§3.5.1). Published on ``order.update``.
+    platform orders on the broker's own field names. Published on ``order.update``.
     """
 
     data: dict[str, Any] = Field(default_factory=dict)

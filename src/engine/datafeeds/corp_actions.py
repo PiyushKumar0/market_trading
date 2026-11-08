@@ -1,18 +1,18 @@
-"""NSE corporate-actions feed → ``corp_actions`` (§4.4 job 7, settings.jobs.corp_actions_ist — 20:15 since 2026-07-24 — A12, E5 best-effort).
+"""NSE corporate-actions feed → ``corp_actions`` (settings.jobs.corp_actions_ist — 20:15 since 2026-07-24, best-effort).
 
 Pulls upcoming/recent corporate actions (ex-dates for dividends, splits, bonuses, rights, …) from
-the NSE corporates API and persists them to the DuckDB ``corp_actions`` table (§4.3). Consumers:
+the NSE corporates API and persists them to the DuckDB ``corp_actions`` table. Consumers:
 brk20/hi52 ex-date and unadjusted-history vetoes (ops.main), ``ScanContext`` upcoming ex-dates, the
 features engine, the pre-open planner, rec_outcomes / learning benchmark, the paper ExitManager.
-Still to land (Phase 4, real orders): ``GTTManager.adjust_for_ex_date`` and the §2.6 startup scan via
+Still to land (live AUTO): ``GTTManager.adjust_for_ex_date`` and the startup scan via
 ``NSECalendar.ex_dates``.
 
-Parsing is defensive (E5): the row list is located under common wrapper keys, per-row field names
+Parsing is defensive: the row list is located under common wrapper keys, per-row field names
 are matched case-insensitively, the free-text ``purpose`` ("Dividend - Rs 5 Per Share",
 "Bonus 1:1", "Face Value Split…") is classified by keyword with ratio/amount extracted by regex —
 an unclassifiable purpose is kept as ``kind='other'`` (recorded, never guessed into a GTT
 adjustment). On fetch failure: alert + reuse yesterday's rows (the table simply keeps what it has;
-the §2.6 catch-up retries). Never raises into the scheduler.
+the catch-up retries). Never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class CorpActionsResult(BaseModel):
-    """One run's outcome (never an exception, E5)."""
+    """One run's outcome (never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -129,7 +129,7 @@ def classify_purpose(purpose: str) -> tuple[str, str | None, Decimal | None]:
 
     ``ratio`` is the first ``a:b`` in the text (bonus/split/rights terms); ``amount`` is the first
     rupee figure and only kept for dividends (a split's "Rs 10/- to Rs 2/-" is a face value, not a
-    payout). Unrecognized ⇒ ``('other', None, None)`` — recorded for the audit trail (A12).
+    payout). Unrecognized ⇒ ``('other', None, None)`` — recorded for the audit trail.
     """
     lowered = purpose.lower()
     kind = "other"
@@ -180,7 +180,7 @@ def parse_corp_actions(payload: Any) -> list[dict[str, Any]]:
 
 
 class CorpActionsJob:
-    """§4.4 job 7 — NSE corporate actions → ``corp_actions`` (A12 data)."""
+    """NSE corporate actions → ``corp_actions`` ."""
 
     def __init__(
         self,
@@ -203,7 +203,7 @@ class CorpActionsJob:
 
     async def run(self, d: date) -> CorpActionsResult:
         """Fetch + upsert corporate actions (idempotent on (symbol, ex_date, kind)). ``d`` is the
-        run day (audit only — the feed is forward-looking). Never raises into the scheduler (E5)."""
+        run day (audit only — the feed is forward-looking). Never raises into the scheduler."""
         try:
             resp = await nse_get(self._http, corp_actions_url(d), timeout=self._timeout)
             rows = parse_corp_actions(json.loads(resp.content))
@@ -226,7 +226,7 @@ class CorpActionsJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Corp actions are in the §2.6 safety/deadline-critical set (GTT ex-date adjustment, A12).
+            # Corp actions are in the safety/deadline-critical set (GTT ex-date adjustment).
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Corporate-actions feed degraded",
             body=(

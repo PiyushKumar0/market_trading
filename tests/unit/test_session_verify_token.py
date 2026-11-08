@@ -2,7 +2,7 @@
 2026-07-21 lockout). Behavioural ``token_valid()`` cannot tell a still-honoured token from an expired
 one no live call has yet hit, so a boot on yesterday's token passed the self-test and ground the
 warm-up backfill on a dead token. The probe makes one authenticated ``kc.profile()`` call and pins
-``token_valid()`` to the broker's live verdict BEFORE hydrate/warm-up run — see R6/A5.
+``token_valid()`` to the broker's live verdict BEFORE hydrate/warm-up run.
 
 ``_connect`` is monkeypatched to a fake pykiteconnect (mirrors test_post_login_recovery) so no network
 checksum exchange or real credential store is touched; the fake Secrets follows the seams used by the
@@ -158,7 +158,7 @@ async def test_verify_token_no_api_key_on_fresh_install(clock) -> None:
     assert await session.verify_token() == "no_api_key"
 
 
-# ===================================================================== WO-23: breaker-vs-probe split
+# ===================================================================== breaker-vs-probe split
 # 2026-08-20 live incident: the 11:26:40 LIVE TokenException produced ZERO owner notifications. The
 # mid-day circuit breaker (``on_token_rejected`` → freeze entries + critical alert + login prompt)
 # deduped against ``_rejected``, which the boot probe ALSO sets (deliberately silently) — so the

@@ -1,8 +1,8 @@
-"""NewsIngest (§3.2.4 / §2.7 step 1 / §4.4 job 10): offline fixture parses of the config-driven RSS
+"""NewsIngest: offline fixture parses of the config-driven RSS
 feed set + GDELT DOC 2.0 artlist + the NSE corporate-announcements feed, URL dedupe (within a batch,
 across feeds, across polls), tz-correctness (RFC-2822 / GDELT seendate / exchange timestamp →
 tz-aware IST; unparsable ⇒ Clock ingest time), the GDELT domain allowlist + timespan windows
-(routine vs §4.4 job-10 backfill), and E5 degradation (a dead feed contributes zero headlines and
+(routine vs backfill), and degradation (a dead feed contributes zero headlines and
 never raises).
 
 ``fixtures/news/nse_announcements.json`` is a 7-row trim of the LIVE ``corporate-announcements?index=
@@ -120,8 +120,8 @@ async def test_poll_parses_all_feeds_dedupes_by_url_and_persists(store, clock):
 
     rows = store.get_news()
     assert {r["url"] for r in rows} == ALL_UNIQUE_URLS
-    assert all(r["untrusted"] for r in rows)            # §2.4: forced TRUE, always
-    assert all(r["cluster_id"] is None for r in rows)   # clustering is step 2, not ingest
+    assert all(r["untrusted"] for r in rows)            # forced TRUE, always
+    assert all(r["cluster_id"] is None for r in rows)   # clustering is a later stage, not ingest
     # source_domain is the normalized registrable host (www. stripped).
     by_url = {r["url"]: r for r in rows}
     assert by_url["https://www.moneycontrol.com/news/business/markets/shared-story.html"][
@@ -175,7 +175,7 @@ async def test_published_at_is_tz_aware_ist(store, clock):
 
 async def test_titles_are_html_unescaped_and_fo_talk_series_dropped(store, clock):
     """ET double-escapes entities ('F&amp;amp;O' survives XML parsing as 'F&amp;O') — stored titles
-    must hold the human form or drop-pattern/alias matching silently miss (G1 seed-6 row 23)."""
+    must hold the human form or drop-pattern/alias matching silently miss."""
     cfg = NewsCfg()
     xml = b"""<?xml version="1.0"?><rss><channel>
       <item><title>M&amp;amp;M Q1 profit beats  estimates on tractor demand</title>
@@ -218,7 +218,7 @@ def test_headline_rejects_naive_published_at():
             title="t",
             source_domain="x.com",
             url="https://x.com/1",
-            published_at=datetime(2026, 6, 17, 9, 0),  # naive ⇒ a bug (§3.2)
+            published_at=datetime(2026, 6, 17, 9, 0),  # naive ⇒ a bug
         )
 
 
@@ -244,7 +244,7 @@ async def test_gdelt_timespan_routine_vs_backfill_windows(store, clock):
     async with client:
         await ingest.poll(feeds=("gdelt",))                       # routine: 2× 3600 s cadence = 2 h
         await ingest.poll(feeds=("gdelt",), lookback_h=48)        # widened poll window
-        await ingest.backfill()                                   # §4.4 job 10 default = 72 h
+        await ingest.backfill()                                   # backfill default = 72 h
         await ingest.backfill(lookback_h=30 * 24)                 # sized to a long off period
         await ingest.backfill(lookback_h=365 * 24)                # capped at the ~3-month DOC window
 
@@ -252,7 +252,7 @@ async def test_gdelt_timespan_routine_vs_backfill_windows(store, clock):
     assert spans == ["2h", "48h", "72h", "30d", "90d"]
 
 
-# --------------------------------------------------------------------------- E5 degradation + selection
+# --------------------------------------------------------------------------- degradation + selection
 async def test_dead_feeds_degrade_to_zero_headlines_never_raise(store, clock):
     cfg = NewsCfg()
     overrides: dict[str, httpx.Response | Exception] = {
@@ -262,7 +262,7 @@ async def test_dead_feeds_degrade_to_zero_headlines_never_raise(store, clock):
     ingest, client = _make_ingest(store, clock, overrides=overrides)
     async with client:
         got = await ingest.poll()
-    # Both RSS feeds contribute nothing; GDELT still lands (feeds fail independently, E5).
+    # Both RSS feeds contribute nothing; GDELT still lands (feeds fail independently).
     assert {h.url for h in got} == GDELT_URLS
 
 
@@ -310,7 +310,7 @@ async def test_gdelt_payload_is_headline_level_only(store, clock):
 
 
 async def test_live_blog_page_titles_are_dropped_at_ingest(store, clock):
-    """news.drop_title_patterns (2026-08-03 G1 finding): auto-generated "<Company> Share Price Live
+    """news.drop_title_patterns (2026-08-03 finding): auto-generated "<Company> Share Price Live
     Updates: ..." ticker-page titles are not news — dropped before dedupe/persist so they can never
     reach the clusterer or burn scorer budget. Real headlines pass untouched."""
     cfg = NewsCfg()
@@ -380,7 +380,7 @@ async def test_nse_announcements_become_token_prefixed_headlines(store, clock):
     )
     rows = store.get_news()
     assert {r["url"] for r in rows} == {h.url for h in got}
-    assert all(r["untrusted"] for r in rows)                             # §2.4: forced TRUE, always
+    assert all(r["untrusted"] for r in rows)                             # forced TRUE, always
 
 
 async def test_nse_announcements_drop_subjects_are_filtered(store, clock):
@@ -456,7 +456,7 @@ async def test_nse_announcement_title_is_capped(store, clock):
 
 
 async def test_nse_announcements_fetch_primes_cookies_through_nse_get(store, clock):
-    """The endpoint is cookie-gated (an un-cookied /api GET returns a misleading 404, §A3), so the
+    """The endpoint is cookie-gated (an un-cookied /api GET returns a misleading 404), so the
     feed must go through the repo's `nse_get` client — pinned by the homepage prime."""
     record: list[httpx.Request] = []
     ingest, client = _ann_ingest(store, clock, record=record)

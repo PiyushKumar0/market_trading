@@ -1,13 +1,13 @@
-"""WO-17 — PRE-REGISTERED diagnostic: stop geometry / adverse-excursion recovery on intraday longs.
+"""PRE-REGISTERED diagnostic: stop geometry / adverse-excursion recovery on intraday longs.
 
 **C-alpha-experiment (diagnostic). STOPS FOR OWNER REVIEW. Promotion is NOT sought.** This module is
 research machinery only: nothing here is imported by a scanner, the gate, the OMS or any scheduled
 job; it writes NO ``param_sets`` row and — unlike :mod:`engine.learning.vwap_reversion` — it does not
-call :class:`engine.learning.validate.ValidationPipeline` **at all**. WO-17: *"Promotion is NOT sought
+call :class:`engine.learning.validate.ValidationPipeline` **at all**. Pre-registration: *"Promotion is NOT sought
 — the deliverable is the stop-policy evidence table; any live stop-guidance change that follows is a
-separate owner-approved change (analyst prompt / plan §6.1), never automatic."*
+separate owner-approved change (analyst prompt), never automatic."*
 
-THE PRE-REGISTRATION (IMPROVEMENT_SPEC.md WO-17, quoted — this module may not deviate from it)
+THE PRE-REGISTRATION (quoted — this module may not deviate from it)
 -----------------------------------------------------------------------------------------------
     Evidence: owner hypothesis — allowing a deeper adverse dip on an intraday buy may let noise-hit
     positions recover to a positive sell, vs the current tight stop realizing the dip as a loss.
@@ -18,9 +18,9 @@ THE PRE-REGISTRATION (IMPROVEMENT_SPEC.md WO-17, quoted — this module may not 
     of post-dip CONDITIONAL drift (genuine recovery tendency after adverse excursion), which is
     exactly what the owner's hypothesis asserts and what this study measures.
     Pre-registration: population = the orb entry-signal stream (the highest-volume recorded
-    intraday long family) over the full 1m window, entries next-1m-bar-open per WO-2; per entry,
-    simulate a FIXED axis of stop widths {1.0, 1.5, 2.5, 4.0} x ATR_10m (WO-10's stop unit,
-    prior-session-seeded per WO-10b so morning entries are stoppable) plus NO-STOP
+    intraday long family) over the full 1m window, entries next-1m-bar-open per the next-open fill correction; per entry,
+    simulate a FIXED axis of stop widths {1.0, 1.5, 2.5, 4.0} x ATR_10m (the vwap_reversion study's stop unit,
+    prior-session-seeded so morning entries are stoppable) plus NO-STOP
     (session-end square-off only); TWO exit ladders per width, both fixed: (a) orb's own
     1.5R target + stop, (b) no target — exit at session end or stop. 10 configs total; per
     config report net expectancy at Rs20k MIS incl. spread, win rate, and the two diagnostic
@@ -31,7 +31,7 @@ THE PRE-REGISTRATION (IMPROVEMENT_SPEC.md WO-17, quoted — this module may not 
 The axes are **FIXED, never swept**: 5 stop widths x 2 exit ladders = exactly 10 configurations. That
 is what contains the multiplicity, together with the no-promotion rule.
 
-DESIGN REQUIREMENTS (manager-specified, beyond the WO text)
+DESIGN REQUIREMENTS (manager-specified, beyond the pre-registration text)
 -----------------------------------------------------------
 1. **The SAME entries orb would have taken.** The population is not a re-derivation of the breakout
    rule: :func:`orb_signal_stream` calls :func:`engine.learning.sweep._signals_orb` — *the sweep's own
@@ -40,15 +40,15 @@ DESIGN REQUIREMENTS (manager-specified, beyond the WO text)
    breakout), which is also why "one position per symbol at a time" is satisfied by construction and
    why the entry set is **identical across all 10 configurations**: the geometry changes the EXIT,
    never the entry. A study whose populations differed per config would be comparing different trades.
-2. **Fills: next-1m-bar OPEN, never the signal bar** (WO-2). The breakout is read from bar *t*'s
+2. **Fills: next-1m-bar OPEN, never the signal bar**. The breakout is read from bar *t*'s
    COMPLETED close and the entry fills at bar *t+1*'s **open**; a stop or target trigger observed on
    bar *i* fills at bar *i+1*'s open. A signal on a session's last usable bar is DROPPED.
 3. **Costs.** ``product = MIS``, per-trade notional Rs20,000, charge =
-   ``CostModel.breakeven_pct(20000, "MIS")`` — WO-2's corrected surface **INCLUDING spread** — levied
-   in full on EVERY simulated trade, including the ones the stop cut short (WO-17's own words: "each
+   ``CostModel.breakeven_pct(20000, "MIS")`` — the corrected surface **INCLUDING spread** — levied
+   in full on EVERY simulated trade, including the ones the stop cut short (the pre-registration's own words: "each
    stop-out realizes the full round-trip cost floor"). Reused from
    :func:`engine.learning.vwap_reversion.cost_floor_pct_for`, not re-derived.
-4. **The stop unit is WO-10's, prior-session-seeded per WO-10b.**
+4. **The stop unit is the vwap_reversion study's, prior-session-seeded.**
    :func:`engine.learning.vwap_reversion.session_atr_10m` and the seeding chain are IMPORTED, not
    copied — the two experiments must measure the same ATR or the shared-unit claim is false. See
    :data:`SEED_ATR_PRIOR_SESSION` for the single switch point.
@@ -58,7 +58,7 @@ DESIGN REQUIREMENTS (manager-specified, beyond the WO text)
 6. **Unit-tested on synthetic 1m fixtures only** (``tests/offline/test_stop_geometry.py``); nothing here
    opens the store.
 
-INTERPRETATIONS — where the WO text was under-determined
+INTERPRETATIONS — where the pre-registration text was under-determined
 --------------------------------------------------------
 Recorded in :data:`PRE_REGISTRATION_INTERPRETATIONS` and reprinted in the report so a reader can audit
 them. They are named constants, not inline literals, so changing one is a visible diff.
@@ -67,8 +67,8 @@ them. They are named constants, not inline literals, so changing one is a visibl
   pairs a target with a NO-STOP width where "R" has no stop to be measured against. Two readings:
   (i) R = orb's OWN risk unit — ``stop_range_frac x (signal close - opening-range low)``, the number
   orb's builder already stamps as its ``tp_stop`` fraction (``rr_target x risk/price``, rr_target =
-  1.5 by §6.3 default); (ii) R = the WO-17 stop width being tested. **This module implements (i)**,
-  for three reasons: the WO says "orb's OWN 1.5R target" (orb's R, not the study's); reading (ii) is
+  1.5 by the envelope default); (ii) R = the stop width being tested. **This module implements (i)**,
+  for three reasons: the pre-registration says "orb's OWN 1.5R target" (orb's R, not the study's); reading (ii) is
   undefined for the NO-STOP row, i.e. it cannot produce the pre-registered 10 configs at all; and
   reading (ii) would move the TARGET whenever the STOP moves, confounding the exact comparison the
   owner asked for. Under (i) the target is one fixed level per entry and the stop axis varies alone.
@@ -87,16 +87,16 @@ them. They are named constants, not inline literals, so changing one is a visibl
 * **Simultaneous stop and target inside one 1m bar** — 1m bars carry no intrabar path, so the ADVERSE
   event is assumed first: the stop wins the tie. The house convention (vwap_reversion, sweep).
 * **Session-end square-off** — at the session's LAST bar's OPEN (MIS obligation), matching
-  vwap_reversion's ``session_end`` handling; there is no timeout rung in WO-17's ladders.
+  vwap_reversion's ``session_end`` handling; there is no timeout rung in the ladders.
 * **Entries with no defined ATR_10m are dropped for EVERY config, including NO-STOP.** The stop unit
   is also the reporting unit (MAE in ATR multiples), and — decisively — an entry admitted to the
-  NO-STOP config but not to the stopped ones would break requirement 1's common population. WO-10b's
+  NO-STOP config but not to the stopped ones would break requirement 1's common population. The prior-session
   seeding is what makes this cheap: with a prior-session seed the ATR exists from 09:25, so ordinary
   orb morning breakouts are stoppable; only a symbol's FIRST session in the window falls back to the
   unseeded 140-minute warm-up and loses its entry.
-* **orb parameters** — the §6.3 envelope DEFAULTS (``config/envelope.yaml``), read through
+* **orb parameters** — the envelope DEFAULTS (``config/envelope.yaml``), read through
   :func:`engine.learning.sweep.load_envelope` rather than hardcoded: orb_minutes 30, vol_mult 1.5,
-  stop_range_frac 1.0, rr_target 1.5. WO-17 says "the orb entry-signal stream", not "the best orb grid
+  stop_range_frac 1.0, rr_target 1.5. The pre-registration says "the orb entry-signal stream", not "the best orb grid
   point", and the default IS the champion baseline the sweep always unions in.
 * **Status-quo reference row** — orb's own geometry (its range-anchored stop + its 1.5R target) is
   simulated as ONE extra clearly-labelled row so "beat the current tight stop margins" has a
@@ -141,7 +141,7 @@ from engine.learning.sweep import (
     load_envelope,
 )
 
-# The stop unit and the cost charge are WO-10's, imported so the two experiments cannot diverge.
+# The stop unit and the cost charge are the vwap_reversion study's, imported so the two experiments cannot diverge.
 from engine.learning.vwap_reversion import (
     ATR_PERIOD,
     ATR_RESAMPLE_MINUTES,
@@ -166,7 +166,7 @@ EXPERIMENT_ID = "stop_geometry"
 #: The banner every report leads with (design requirement 5).
 BANNER = "C-CATEGORY: STOPS FOR OWNER REVIEW - no live wiring, promotion NOT sought"
 
-#: WO-17 costs: MIS, Rs20,000 per trade, WO-2's corrected surface INCLUDING spread.
+#: Costs: MIS, Rs20,000 per trade, the corrected surface INCLUDING spread.
 PRODUCT = "MIS"
 REFERENCE_NOTIONAL: Decimal = Decimal("20000")
 
@@ -181,7 +181,7 @@ LADDERS: tuple[bool, ...] = (True, False)
 #: 5 widths x 2 ladders = the pre-registered configuration count.
 N_CONFIGS = len(STOP_AXIS) * len(LADDERS)
 
-#: WO-17's null hypothesis, VERBATIM from IMPROVEMENT_SPEC.md. Reprinted at the top of every report:
+#: The pre-registered null hypothesis, VERBATIM. Reprinted at the top of every report:
 #: the study measures a departure from THIS, and a reader must see it before any number.
 NULL_HYPOTHESIS = (
     "Null hypothesis (stated up front): on a driftless path, ALL stop geometries have equal pre-cost "
@@ -196,9 +196,9 @@ OWNER_QUESTION = (
     "positions recover to a positive sell, beat the current tight stop margins?"
 )
 
-#: WO-10b: the stop unit's ATR seeds from the PRIOR session, so morning orb entries are stoppable.
-#: THE SWITCH POINT for the seeded-vs-unseeded stop unit (WO-17 depends on WO-10b's shared unit).
-#: ``False`` reproduces WO-10's unseeded 140-minute warm-up, which would drop nearly every orb entry
+#: The stop unit's ATR seeds from the PRIOR session, so morning orb entries are stoppable.
+#: THE SWITCH POINT for the seeded-vs-unseeded stop unit (the study depends on the shared seeded unit).
+#: ``False`` reproduces the vwap_reversion study's unseeded 140-minute warm-up, which would drop nearly every orb entry
 #: (orb enters just after its 30-minute opening range, i.e. ~09:45 — long before an unseeded 11:35).
 SEED_ATR_PRIOR_SESSION = True
 
@@ -212,10 +212,10 @@ TARGET_SOURCE = "orb_rr_target"
 #: NOT one of the pre-registered 10; excluded from the 10-config table. ``False`` removes it entirely.
 INCLUDE_STATUS_QUO_REFERENCE = True
 
-#: WO-2: what the report's ``fill_mechanics`` field declares.
+#: What the report's ``fill_mechanics`` field declares.
 FILL_MECHANICS = "next_bar_open"
 
-#: The reported MAE quantiles (design requirement 5 / WO-17 "the MAE distribution").
+#: The reported MAE quantiles (design requirement 5).
 MAE_QUANTILES: tuple[float, ...] = (25.0, 50.0, 75.0, 90.0)
 
 #: Where a config's stop level comes from.
@@ -355,7 +355,7 @@ REFERENCE_CONFIG = StopConfig(stop_source=STOP_SOURCE_NONE, stop_atr_mult=None, 
 
 
 def orb_default_params(envelope: Mapping[str, dict[str, Any]] | None = None) -> dict[str, float]:
-    """orb's §6.3 envelope DEFAULTS, read from ``config/envelope.yaml`` (never hardcoded here).
+    """orb's envelope DEFAULTS, read from ``config/envelope.yaml`` (never hardcoded here).
 
     Returns the bare (un-namespaced) parameter names ``_signals_orb`` consumes: ``orb_minutes``,
     ``vol_mult``, ``stop_range_frac``, ``rr_target``. Reading them through
@@ -374,7 +374,7 @@ def orb_per_side_fee(cost_model: CostModel) -> float:
     """½ x round-trip STATUTORY-fee breakeven at Rs20,000 MIS, as a fraction — orb's ``fee`` input.
 
     Mirrors ``SweepRunner._per_side_fee`` (sweep.py) exactly: FEES ONLY
-    (``fee_breakeven_pct``), because ``_signals_orb`` consumes it solely to compute its C3
+    (``fee_breakeven_pct``), because ``_signals_orb`` consumes it solely to compute its
     sub-cost-floor suppression (``min_risk_frac = 4 x fee``). Passing the spread-inclusive
     ``breakeven_pct`` here would silently tighten orb's entry filter and change the population.
     """
@@ -396,7 +396,7 @@ def orb_signal_stream(
     * ``stop_frac``  — orb's own ``sl_stop`` fraction: ``stop_range_frac x (close - range_low)/close``;
     * ``target_frac`` — orb's own ``tp_stop`` fraction: ``rr_target x`` that, i.e. THE 1.5R TARGET.
 
-    Nothing about the breakout rule (opening range, volume multiple, entry window, the C3
+    Nothing about the breakout rule (opening range, volume multiple, entry window, the
     sub-cost-floor skip, the one-entry-per-session ``break``) is re-implemented here:
     :func:`engine.learning.sweep._signals_orb` is called directly, so this study's population is the
     sweep's population by construction (design requirement 1).
@@ -556,7 +556,7 @@ class StopTrade:
 def stop_level(ctx: EntryContext, config: StopConfig) -> float | None:
     """The stop PRICE for ``config`` on ``ctx``, or ``None`` for the NO-STOP rung.
 
-    Anchored at the entry FILL, matching the house ``stop_entry_price='fillprice'`` convention WO-2
+    Anchored at the entry FILL, matching the house ``stop_entry_price='fillprice'`` convention the next-open fill correction
     pinned (``stop_entry_price="fillprice"`` in the ``SweepRunner`` portfolio build, sweep.py): the signal bar's close is no longer the price paid once fills moved to
     the next bar's open.
     """
@@ -587,7 +587,7 @@ def target_level(ctx: EntryContext, config: StopConfig) -> float | None:
 
 
 def simulate_entry(ctx: EntryContext, config: StopConfig, *, cost_floor_pct: float) -> StopTrade:
-    """Walk ONE entry under ONE geometry. Pure and deterministic (§9.6).
+    """Walk ONE entry under ONE geometry. Pure and deterministic.
 
     * the stop/target trigger is looked for on bars ``e .. hard-1`` and the exit fills at the NEXT
       bar's OPEN (requirement 2);
@@ -655,7 +655,7 @@ def entry_contexts_for_symbol(
 ) -> tuple[list[EntryContext], list[date]]:
     """Every bookable orb entry for one symbol, plus the sessions that had bars.
 
-    The WO-10b seeding chain is order-dependent, so sessions are walked in date order and each seeds
+    The prior-session seeding chain is order-dependent, so sessions are walked in date order and each seeds
     the next from :attr:`SessionFeatures.atr_10m_final` — the same chain
     ``vwap_reversion.simulate_symbol`` drives, using the same public entry points (a session that
     yields no ATR leaves the carry untouched; a symbol's first session has no seed and falls back to
@@ -700,7 +700,7 @@ def entry_contexts_for_symbol(
 
 # --------------------------------------------------------------------------- accumulation
 def _is_dodged_winner(trade: StopTrade) -> bool:
-    """THE DODGED-WINNER TEST (WO-17's first diagnostic) — one definition, in one place.
+    """THE DODGED-WINNER TEST (the study's first diagnostic) — one definition, in one place.
 
     A trade is a DODGED WINNER when the geometry **stopped it out** and the SAME entry, held with NO
     STOP and NO TARGET to the session-end square-off, would have ended **NET-positive after the full
@@ -782,7 +782,7 @@ def _quantiles(values: Sequence[float]) -> dict[str, float] | None:
 
 # --------------------------------------------------------------------------- report models
 class MaeDistribution(BaseModel):
-    """The MAE distribution of ONE population slice, in both units (WO-17's second diagnostic)."""
+    """The MAE distribution of ONE population slice, in both units (the study's second diagnostic)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -818,7 +818,7 @@ class ConfigResult(BaseModel):
 
 
 class StopGeometryReport(BaseModel):
-    """The single self-contained WO-17 deliverable (json + md). Nothing else is written."""
+    """The single self-contained stop-geometry deliverable (json + md). Nothing else is written."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -907,7 +907,7 @@ def modelling_notes(cost_floor_pct: float, *, spread_pct: float | None = None) -
 def plain_language_answer(
     configs: Sequence[ConfigResult], mae: Sequence[MaeDistribution], *, cost_floor_pct: float
 ) -> list[str]:
-    """WO-17's acceptance item: "a plain-language answer to the owner's question".
+    """The acceptance item: "a plain-language answer to the owner's question".
 
     Derived mechanically from the measured rows so it cannot drift from the table above it. It answers
     the question that was asked - wider vs tighter - and says plainly when the answer is "no
@@ -993,7 +993,7 @@ FrameLoader = Callable[[str], "pd.DataFrame | None"]
 
 
 class StopGeometryExperiment:
-    """Runs the WO-17 diagnostic and returns the report. Blocking/standalone by design.
+    """Runs the stop-geometry diagnostic and returns the report. Blocking/standalone by design.
 
     Parameters
     ----------
@@ -1001,12 +1001,12 @@ class StopGeometryExperiment:
         ``symbol -> 1m OHLCV frame`` (tz-aware IST index, columns open/high/low/close/volume, plus
         ``auction_open`` when the store supplies it). :meth:`from_store` builds the production loader
         over ``MarketStore.get_bars_1m_frame`` — the same read path ``SweepRunner``'s intraday branch
-        and WO-10's harness use (read-only).
+        and the vwap_reversion harness use (read-only).
     cost_floor_pct:
         The FULL round-trip friction at Rs20,000 MIS, in percent (fees + spread) — from
         :func:`engine.learning.vwap_reversion.cost_floor_pct_for`.
     orb_fee:
-        orb's per-side STATUTORY fee fraction, the ``fee`` argument its builder consumes for the C3
+        orb's per-side STATUTORY fee fraction, the ``fee`` argument its builder consumes for the
         sub-cost-floor suppression — from :func:`orb_per_side_fee`.
     """
 
@@ -1187,7 +1187,7 @@ def _q(row: dict[str, float] | None, key: str, dp: int = 3) -> str:
 
 
 def render_markdown(report: StopGeometryReport) -> str:
-    """Render the WO-17 evidence table — banner, null hypothesis, table, diagnostics, answer (C9)."""
+    """Render the evidence table — banner, null hypothesis, table, diagnostics, answer."""
     r = report
     lines: list[str] = []
     lines.append(f"# WO-17 diagnostic — stop geometry / adverse-excursion recovery (`{r.experiment_id}`)")

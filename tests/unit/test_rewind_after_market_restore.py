@@ -1,4 +1,4 @@
-"""scripts/rewind_after_market_restore.py: rewinding state.db after a market.duckdb restore (§10.5).
+"""scripts/rewind_after_market_restore.py: rewinding state.db after a market.duckdb restore.
 
 Scratch ``state.db`` built with the repo's migrations (the ``conn`` fixture's recipe); the script is
 loaded with the loose-script mechanism of tests/unit/test_backfill_bhavcopy.py.

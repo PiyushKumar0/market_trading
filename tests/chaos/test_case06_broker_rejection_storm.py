@@ -1,47 +1,47 @@
-"""§9.4 chaos case 6 — broker rejection storm (incl. 429s).
+"""Chaos case 6 — broker rejection storm (incl. 429s).
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 6), "Must hold", verbatim:
+"Must hold" for case 6:
 
-    retry/backoff inside rate budget (A2); ≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1); no order spam
-    (B3); with the 70/day entry budget exhausted, a triggered kill-flatten/square-off/exit still places
-    from the uncapped-but-paced risk-reducing lane — never starved (R3, §7.1)
+    retry/backoff inside rate budget; ≥3 rejects/60 s ⇒ FROZEN + alert; no order spam;
+    with the 70/day entry budget exhausted, a triggered kill-flatten/square-off/exit still places
+    from the uncapped-but-paced risk-reducing lane — never starved
 
 Composition (as ``engine.ops.main`` wires it, main.py:601-626): the REAL ``RateLimiter(clock)`` with
 its shipped defaults (1 order call/s, burst 2, 70 entry calls/day), the REAL ``KiteClient`` facade,
 the REAL ``ModeManager`` / ``KillSwitch`` / ``RiskStateLatch`` (incl. the main.py:524-530 kill→latch
 bridge) and the composition root's own ``make_order_guard``. The client is built with
-``orders_enabled=True``, which production never passes (D8). The ONLY fake is the pykiteconnect ``KiteConnect``
+``orders_enabled=True``, which production never passes. The ONLY fake is the pykiteconnect ``KiteConnect``
 object — the broker HTTP boundary — which answers from a script (429s, rejections, order ids).
 Time is a ticking controllable clock; ``asyncio.sleep`` advances it (the ``test_rate_limiter``
 idiom), so pacing is asserted on simulated time without real waits.
 
 Clauses asserted here:
 
-* **no order spam (B3) / "inside rate budget" (A2)** — a caller hammering through a 429 storm
+* **no order spam / "inside rate budget"** — a caller hammering through a 429 storm
   reaches the broker exactly once per attempt (KiteClient never retries or amplifies internally),
   every attempt is admitted by the order bucket (≤ burst 2, then ≥ 1 s apart) and counted against
   the entry budget: ``test_429_storm_every_attempt_is_paced_and_never_amplified``.
-* **entry budget exhausted ⇒ the risk-reducing lane is never starved (R3, §7.1)** — 70 entries
+* **entry budget exhausted ⇒ the risk-reducing lane is never starved** — 70 entries
   spend the budget, the 71st is budget-rejected before the broker is touched, the kill switch is
   thrown, and exit / square-off / cancel / GTT calls still reach the broker, paced behind the SAME
   1/s bucket, including a retry after a 429: ``test_entry_budget_exhausted_flatten_lane_never_starved``.
-* **≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1), paper path** — the real ``PaperBroker`` rejects three
+* **≥3 rejects/60 s ⇒ FROZEN + alert, paper path** — the real ``PaperBroker`` rejects three
   entries inside 60 s, the real paper ``OrderManager`` reports each broker rejection to the real
   ``PaperRisk``, which latches the daily ``rejection_storm`` paper halt (FROZEN; the alert is the
-  ``paper_halt_set`` WARNING, paper plan D4); the next entry is refused by ``paper_order_guard``
+  ``paper_halt_set`` WARNING); the next entry is refused by ``paper_order_guard``
   before the broker while an exit still places, and the real risk latch is untouched:
   ``test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place``.
 
 Clauses skipped (with the reason printed by ``-rs``):
 
-* **≥3 rejects/60 s ⇒ FROZEN + alert (§3.5.1), real path** — lands with the Phase-4 live OMS:
+* **≥3 rejects/60 s ⇒ FROZEN + alert, real path** — lands with the live AUTO OMS:
   ``CAUSE_REJECTION_STORM`` on the real ``RiskStateLatch``, its owner ``/resume_entries`` clear, and the
   ≥3-storms-per-session kill (see ``test_three_rejects_in_60s_freeze_entries_and_alert``).
 * **retry/backoff policy** — UNBUILT: ``KiteClient`` re-raises every broker error and nothing above
   it retries; the pacing half of the clause is asserted above.
 
-Phase-2 reality: RECOMMEND mode places zero broker orders (B7), so the KiteClient scenarios run the
-order surface in AUTO(paper routing) exactly as the Phase-3 OMS will drive it; nothing here depends on
+Current reality: RECOMMEND mode places zero broker orders, so the KiteClient scenarios run the
+order surface in AUTO(paper routing) exactly as the AUTO-mode OMS will drive it; nothing here depends on
 an unbuilt component except the two skipped clauses.
 """
 
@@ -85,7 +85,7 @@ ENTRY_REQ = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "transaction_type":
              "order_type": "LIMIT", "product": "MIS", "price": 1420.5}
 EXIT_REQ = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "transaction_type": "SELL", "quantity": 1,
             "order_type": "MARKET", "product": "MIS", "market_protection": -1}
-#: The shipped §7.1 ``order_rate`` numbers the default ``RateLimiter(clock)`` carries (main.py:625).
+#: The shipped ``order_rate`` numbers the default ``RateLimiter(clock)`` carries (main.py:625).
 ENTRY_BUDGET = 70
 BURST = 2
 ONE_S = timedelta(seconds=1)
@@ -161,7 +161,7 @@ class _World:
                 await self.latch.clear_cause("kill", evt.actor)
 
         self.bus.subscribe(TOPIC_KILL_STATE, _kill_to_latch)
-        self.limiter = RateLimiter(self.clock)          # main.py:625 — shipped §7.1 defaults
+        self.limiter = RateLimiter(self.clock)          # main.py:625 — shipped risk-limit defaults
         self.kc = _ScriptedKiteConnect(ticker, script)
         self.client = KiteClient(
             self.kc, self.limiter, self.clock,
@@ -190,8 +190,8 @@ def _broker_times(kc: _ScriptedKiteConnect, *ops: str) -> list[datetime]:
 
 
 def _assert_paced(times: list[datetime], *, already_drained: bool = False) -> None:
-    """Order-bucket pacing (A2/B3): after the burst, consecutive broker hits are ≥ 1 s apart, and
-    no rolling 1-s window ever holds more than the burst — far under the B3 10-ops/s ceiling."""
+    """Order-bucket pacing: after the burst, consecutive broker hits are ≥ 1 s apart, and
+    no rolling 1-s window ever holds more than the burst — far under the 10-ops/s ceiling."""
     slack = timedelta(milliseconds=1)             # float refill arithmetic, never a real gap
     first_paced = 1 if already_drained else BURST
     for i in range(first_paced, len(times)):
@@ -203,7 +203,7 @@ def _assert_paced(times: list[datetime], *, already_drained: bool = False) -> No
 
 # --------------------------------------------------------------------------- clauses
 async def test_429_storm_every_attempt_is_paced_and_never_amplified(conn, ticker) -> None:
-    """A2/B3: a caller that keeps retrying through a solid wall of HTTP 429s produces exactly one
+    """A caller that keeps retrying through a solid wall of HTTP 429s produces exactly one
     broker hit per attempt, each one admitted by the shared 1/s order bucket and charged to the entry
     budget — the storm can never turn into spam, whatever the caller's retry loop does."""
     attempts = 12
@@ -213,7 +213,7 @@ async def test_429_storm_every_attempt_is_paced_and_never_amplified(conn, ticker
     for _ in range(attempts):
         with pytest.raises(NetworkException) as exc_info:
             await world.client.place_order(ENTRY_REQ, intent="entry")
-        assert exc_info.value.code == 429           # re-raised verbatim, never swallowed (R5/R8)
+        assert exc_info.value.code == 429           # re-raised verbatim, never swallowed
 
     times = _broker_times(world.kc)
     assert len(world.kc.calls) == attempts          # one broker hit per attempt — no hidden retry
@@ -224,7 +224,7 @@ async def test_429_storm_every_attempt_is_paced_and_never_amplified(conn, ticker
 
 
 async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -> None:
-    """R3/§7.1: a churny day spends the 70/day entry budget; the owner then kills. Every
+    """A churny day spends the 70/day entry budget; the owner then kills. Every
     risk-reducing broker call — the square-off/exit orders, the cancels of resting entries and the
     GTT protection — still places (a 429 on the way is retried and admitted), paced behind the same
     1/s bucket, never budget-rejected, never blocked by the kill switch that blocks entries."""
@@ -238,7 +238,7 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
     assert entry_hits == ENTRY_BUDGET
     _assert_paced(_broker_times(world.kc))
 
-    # The 71st entry is refused BY THE BUDGET, before the broker is touched (B3).
+    # The 71st entry is refused BY THE BUDGET, before the broker is touched.
     with pytest.raises(EntryBudgetExhausted):
         await world.client.place_order(ENTRY_REQ, intent="entry")
     assert len(world.kc.calls) == entry_hits
@@ -265,14 +265,14 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
     assert [op for op, _ in lane] == ["place_order"] * 5 + ["cancel_order"] * 3 + ["place_gtt"]
     assert world.limiter.orders_today() == (ENTRY_BUDGET, 9)      # uncapped lane, still counted
     # Paced behind the SAME bucket the entries drained: no burst left, so ≥ 1 s between every hit,
-    # including the 429-then-retry pair (the retry stays inside the rate budget, A2).
+    # including the 429-then-retry pair (the retry stays inside the rate budget).
     lane_times = [at for _, at in lane]
     assert lane_times[0] >= flatten_started
     _assert_paced(lane_times, already_drained=True)
     assert lane_times[1] - lane_times[0] >= ONE_S - timedelta(milliseconds=1)
 
 
-# --------------------------------------------------------------------------- the paper path (§3.5.1)
+# --------------------------------------------------------------------------- the paper path
 #: High enough that a short search finds a seed rejecting exactly the first ``STORM_REJECTS`` placements.
 _RATE = 0.9
 
@@ -322,9 +322,9 @@ def _never(*_args: Any) -> Any:
 async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place(
     conn, bus, caplog
 ) -> None:
-    """§3.5.1 on the paper OMS: three broker rejects inside 60 s ⇒ the daily ``rejection_storm`` paper
+    """On the paper OMS: three broker rejects inside 60 s ⇒ the daily ``rejection_storm`` paper
     halt (FROZEN) + its WARNING; the next entry never reaches the broker, an exit still places, and
-    the real risk latch never moves (paper never writes it, §1.5)."""
+    the real risk latch never moves (paper never writes it)."""
     ticker = _Ticker(START)
     clock = Clock(time_source=ticker)
     mode = ModeManager(conn, clock, paper_only=False)
@@ -387,7 +387,7 @@ async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_
     "test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place."
 ))
 async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
-    """§3.5.1 real path: ≥3 broker rejects inside 60 s latch CAUSE_REJECTION_STORM (FROZEN) + owner alert;
+    """Real path: ≥3 broker rejects inside 60 s latch CAUSE_REJECTION_STORM (FROZEN) + owner alert;
     ≥3 storms in a session ⇒ kill."""
 
 

@@ -1,12 +1,11 @@
-"""CostModel (§3.2.5, C1-C4): the C3 worked examples asserted TO THE PAISA, parameterized from
-``config/costs.yaml``; the DP multi-scrip case (C4); min_viable_qty shrink/reject boundaries; banded
-tick rounding via ``InstrumentStore.round_to_tick`` (A10); the measured bid-ask spread component
-(WO-2); and the zero-hardcoded-rates guarantee (rates flow from the yaml, §9.1).
+"""CostModel: the worked examples asserted TO THE PAISA, parameterized from
+``config/costs.yaml``; the DP multi-scrip case; min_viable_qty shrink/reject boundaries; banded
+tick rounding via ``InstrumentStore.round_to_tick``; the measured bid-ask spread component; and the zero-hardcoded-rates guarantee (rates flow from the yaml).
 
-Spread convention under test (WO-2, 2026-08-13): the C3 worked examples remain **fees only** and
+Spread convention under test (2026-08-13): the worked examples remain **fees only** and
 paisa-exact — they are the contract-note anchor, and the broker never bills a spread. ``round_trip``
 adds ONE extra component, ``spread`` = ``spread_pct`` x notional (half the quoted spread on each of
-the two legs), so ``total_cost`` = fees + spread and ``breakeven_pct`` is the full friction the §7.1
+the two legs), so ``total_cost`` = fees + spread and ``breakeven_pct`` is the full friction the risk gate's
 viability check must clear. ``fee_breakeven_pct`` is the fees-only view.
 """
 
@@ -45,27 +44,27 @@ def instruments(clock) -> InstrumentStore:
         Instrument(tradingsymbol="ABC", instrument_token=1, exchange="NSE", segment="NSE",
                    tick_size=Decimal("0.05"), lot_size=1, instrument_type="EQ"),
         Instrument(tradingsymbol="XYZ", instrument_token=2, exchange="NSE", segment="NSE",
-                   tick_size=Decimal("0.10"), lot_size=1, instrument_type="EQ"),  # banded tick (A10)
+                   tick_size=Decimal("0.10"), lot_size=1, instrument_type="EQ"),  # banded tick
     ])
     return store
 
 
 @pytest.fixture
 def sizing_model(rates, instruments) -> CostModel:
-    return CostModel(rates, instruments)   # edge_multiple_min default 2.0 (§7.1 min_viable_size)
+    return CostModel(rates, instruments)   # edge_multiple_min default 2.0 (risk-limits min_viable_size)
 
 
-# ------------------------------------------------------------------ C3 worked examples, to the paisa
+# ------------------------------------------------------------------ worked examples, to the paisa
 # Hand-derived from the 2026-06-11 config/costs.yaml rates (contract-note rounding: each component
 # exact-then-paisa-quantized, GST on the RAW brokerage+txn+SEBI bases, total = sum of quantized
 # components). If a re-scrape changes costs.yaml these literals MUST be re-derived alongside it.
 #
-# These are the STATUTORY FEE components ONLY and are UNCHANGED by WO-2 — the spread is asserted
+# These are the STATUTORY FEE components ONLY and are UNCHANGED by the spread addition — the spread is asserted
 # separately below (SPREAD_COMPONENT / WORKED_TOTALS_WITH_SPREAD), because the contract note the
 # ~Rs21/Rs60/Rs83 anchors were verified against contains fees and no spread.
 WORKED_EXAMPLES = {
     # (product, notional, n_scrips): {component: paisa-exact Decimal}
-    ("MIS", Decimal("20000"), 1): {           # intraday Rs 20k round trip ~= Rs 21 (C3)
+    ("MIS", Decimal("20000"), 1): {           # intraday Rs 20k round trip ~= Rs 21
         "brokerage": Decimal("12.00"),        # 2 x min(20000 x 0.03%, 20)
         "stt": Decimal("5.00"),               # 20000 x 0.025% sell-side only
         "txn": Decimal("1.23"),               # 2 x 20000 x 0.00307% = 1.228
@@ -74,7 +73,7 @@ WORKED_EXAMPLES = {
         "gst": Decimal("2.39"),               # 18% x (12 + 1.228 + 0.04) = 2.38824
         "dp": Decimal("0.00"),                # MIS: no delivery, no DP
     },
-    ("CNC", Decimal("20000"), 1): {           # delivery Rs 20k ~= Rs 60 (STT + DP dominated, C3)
+    ("CNC", Decimal("20000"), 1): {           # delivery Rs 20k ~= Rs 60 (STT + DP dominated)
         "brokerage": Decimal("0.00"),
         "stt": Decimal("40.00"),              # 0.1% buy + 0.1% sell
         "txn": Decimal("1.23"),
@@ -83,7 +82,7 @@ WORKED_EXAMPLES = {
         "gst": Decimal("0.23"),               # 18% x (0 + 1.228 + 0.04)
         "dp": Decimal("15.34"),               # per scrip per SELL day
     },
-    ("MIS", Decimal("100000"), 1): {          # 5x-leveraged MIS Rs 1L notional ~= Rs 83 (C3)
+    ("MIS", Decimal("100000"), 1): {          # 5x-leveraged MIS Rs 1L notional ~= Rs 83
         "brokerage": Decimal("40.00"),        # per-order cap binds: 2 x min(30, 20)
         "stt": Decimal("25.00"),
         "txn": Decimal("6.14"),
@@ -93,13 +92,13 @@ WORKED_EXAMPLES = {
         "dp": Decimal("0.00"),
     },
 }
-#: FEES-only totals (spread excluded) — the contract-note anchor, unchanged by WO-2.
+#: FEES-only totals (spread excluded) — the contract-note anchor, unchanged by the spread addition.
 WORKED_TOTALS = {
     ("MIS", Decimal("20000"), 1): (Decimal("21.26"), Decimal("0.106300")),
     ("CNC", Decimal("20000"), 1): (Decimal("59.84"), Decimal("0.299200")),
     ("MIS", Decimal("100000"), 1): (Decimal("82.68"), Decimal("0.082680")),
 }
-#: spread component = spread_pct (0.02%) x notional — proportional, product-independent (WO-2).
+#: spread component = spread_pct (0.02%) x notional — proportional, product-independent.
 SPREAD_COMPONENT = {
     ("MIS", Decimal("20000"), 1): Decimal("4.00"),
     ("CNC", Decimal("20000"), 1): Decimal("4.00"),
@@ -130,7 +129,7 @@ def test_c3_worked_examples_to_the_paisa(model, key):
 
 @pytest.mark.parametrize("key", sorted(WORKED_EXAMPLES, key=str))
 def test_spread_component_and_full_friction_totals(model, key):
-    """WO-2: round_trip/breakeven_pct = fees + the measured spread (half per leg, both legs)."""
+    """round_trip/breakeven_pct = fees + the measured spread (half per leg, both legs)."""
     product, notional, n = key
     bd = model.round_trip(notional, product, n_scrips_sell_day=n)
     assert bd.components["spread"] == SPREAD_COMPONENT[key]
@@ -177,7 +176,7 @@ def test_missing_spread_pct_is_a_hard_error(raw_yaml):
 
 def test_zero_spread_reproduces_the_pre_wo2_surface(raw_yaml):
     """spread_pct: 0 collapses round_trip back onto the fees-only numbers — proof the spread leg is
-    the ONLY thing WO-2 added to the cost surface."""
+    the ONLY thing the spread change added to the cost surface."""
     mutated = copy.deepcopy(raw_yaml)
     mutated["spread_pct"] = 0.0
     m0 = CostModel(CostRates.from_dict(mutated))
@@ -211,7 +210,7 @@ def test_c3_reference_roundtrips_parameterized_from_yaml(model, raw_yaml):
 def test_breakeven_pct_matches_round_trip(model):
     for product, notional in (("MIS", Decimal("20000")), ("CNC", Decimal("50000"))):
         assert model.breakeven_pct(notional, product) == model.round_trip(notional, product).breakeven_pct
-        # fees-only is strictly cheaper — never let a caller confuse the two (WO-2)
+        # fees-only is strictly cheaper — never let a caller confuse the two
         assert model.fee_breakeven_pct(notional, product) < model.breakeven_pct(notional, product)
 
 
@@ -222,7 +221,7 @@ def test_breakeven_non_increasing_in_notional(model):
         assert all(x >= y for x, y in zip(b, b[1:], strict=False))
 
 
-# ------------------------------------------------------------------ C4 multi-scrip DP + brokerage cap
+# ------------------------------------------------------------------ multi-scrip DP + brokerage cap
 def test_dp_charged_per_scrip_per_sell_day(model):
     """C4: splitting a small delivery book across scrips multiplies the flat DP charge."""
     one = model.round_trip(Decimal("20000"), "CNC", n_scrips_sell_day=1)
@@ -230,7 +229,7 @@ def test_dp_charged_per_scrip_per_sell_day(model):
     assert one.components["dp"] == Decimal("15.34")
     assert two.components["dp"] == Decimal("30.68")
     # Proportional charges are unaffected by the split; only DP moves for zero-brokerage CNC.
-    # (spread is proportional too — WO-2 — so splitting scrips must not change it.)
+    # (spread is proportional too, so splitting scrips must not change it.)
     for k in ("brokerage", "stt", "txn", "sebi", "stamp", "gst", "spread"):
         assert one.components[k] == two.components[k]
     assert two.total_cost == Decimal("79.18")            # 75.18 fees + 4.00 spread
@@ -246,7 +245,7 @@ def test_mis_brokerage_cap_applies_per_order_per_slice(model):
     assert whole.components["dp"] == split.components["dp"] == Decimal("0.00")
 
 
-# ------------------------------------------------------------------ min_viable_qty (§7.1, R1/C3)
+# ------------------------------------------------------------------ min_viable_qty
 def test_min_viable_qty_small_edge_needs_size_and_boundary_is_exact(sizing_model, model):
     """CNC with a 0.5% edge: the flat DP charge forces size; result is the EXACT boundary qty."""
     qty = sizing_model.min_viable_qty("ABC", Decimal("100.00"), Decimal("99.00"), Decimal("100.50"), "CNC")
@@ -257,7 +256,7 @@ def test_min_viable_qty_small_edge_needs_size_and_boundary_is_exact(sizing_model
     assert edge < required * model.breakeven_pct(Decimal(qty - 1) * Decimal("100.00"), "CNC")
     # Sanity band: the 0.5% edge must cover 2x (proportional CNC costs + spread) = 2 x 0.2425%,
     # leaving only ~0.0075% of notional for the flat DP 15.34 -> around Rs 2.0-2.2 lakh.
-    # PRE-WO-2 this band was Rs 51-62k: the 0.02% spread does NOT amortize with size, so it eats
+    # BEFORE the spread component this band was Rs 51-62k: the 0.02% spread does NOT amortize with size, so it eats
     # most of the headroom the flat DP charge used to be shrunk into. Intended (gate tightens).
     assert 195_000 < qty * 100 < 215_000
 
@@ -270,7 +269,7 @@ def test_min_viable_qty_generous_edge_is_qty_one(sizing_model):
 
 def test_min_viable_qty_rejects_below_proportional_floor(sizing_model):
     """CNC proportional costs alone are ~0.2225% -> a 0.4% edge < 2x floor is unviable at ANY size
-    (the §7.1 shrink-then-recheck path must end in reject, R1/C3)."""
+    (the shrink-then-recheck path must end in reject)."""
     assert sizing_model.min_viable_qty(
         "ABC", Decimal("100.00"), Decimal("99.00"), Decimal("100.40"), "CNC") == 0
 
@@ -300,7 +299,7 @@ def test_min_viable_qty_requires_instrument_store(model):
         model.min_viable_qty("ABC", Decimal("100.00"), Decimal("99.00"), Decimal("101.00"), "MIS")
 
 
-# ------------------------------------------------------------------ banded tick rounding (A10)
+# ------------------------------------------------------------------ banded tick rounding
 def test_min_viable_qty_snaps_levels_to_the_instrument_tick(sizing_model):
     """Off-grid levels are snapped via InstrumentStore.round_to_tick BEFORE the edge math — the
     result equals the on-grid call exactly (never inline tick assumptions)."""
@@ -313,7 +312,7 @@ def test_min_viable_qty_snaps_levels_to_the_instrument_tick(sizing_model):
 
 def test_banded_tick_instrument_uses_its_own_tick(sizing_model, instruments):
     """XYZ trades on a Rs 0.10 band: 100.52 snaps to 100.50 there, but to 100.50 vs 100.55
-    differently than ABC's 0.05 band would (A10 — per-instrument, price-banded)."""
+    differently than ABC's 0.05 band would (per-instrument, price-banded)."""
     assert instruments.round_to_tick("XYZ", Decimal("100.54")) == Decimal("100.50")
     assert instruments.round_to_tick("ABC", Decimal("100.54")) == Decimal("100.55")
     q_xyz = sizing_model.min_viable_qty("XYZ", Decimal("100.04"), Decimal("99.04"), Decimal("100.54"), "CNC")
@@ -321,10 +320,10 @@ def test_banded_tick_instrument_uses_its_own_tick(sizing_model, instruments):
     assert q_xyz == q_ref
 
 
-# ------------------------------------------------------------------ zero hardcoded rates (C2)
+# ------------------------------------------------------------------ zero hardcoded rates
 def test_rates_flow_from_yaml_not_code(raw_yaml):
     """Doubling the intraday sell STT in a modified rates dict shifts stt (and total) EXACTLY by
-    the delta — proof every rate is read from config/costs.yaml, none hardcoded (C2)."""
+    the delta — proof every rate is read from config/costs.yaml, none hardcoded."""
     base = CostModel(CostRates.from_dict(raw_yaml)).round_trip(Decimal("20000"), "MIS")
     mutated = copy.deepcopy(raw_yaml)
     mutated["stt"]["intraday"]["sell_pct"] = 2 * float(raw_yaml["stt"]["intraday"]["sell_pct"])
@@ -345,7 +344,7 @@ def test_unknown_gst_base_is_a_hard_error(raw_yaml):
 # ------------------------------------------------------------------ validation + edge helpers
 def test_money_convention_rejects_floats(model):
     with pytest.raises(TypeError):
-        model.round_trip(20000.0, "MIS")            # float notional is never money (§3.2)
+        model.round_trip(20000.0, "MIS")            # float notional is never money
 
 
 def test_product_and_n_scrips_validation(model):

@@ -1,4 +1,4 @@
-"""``/why SYMBOL`` (plan Q1.10): a deterministic, read-only account of where one symbol stands.
+"""``/why SYMBOL``: a deterministic, read-only account of where one symbol stands.
 
 No LLM, no sweep, nothing enqueued. A section whose read fails or times out says so and the rest of
 the reply still goes out. Telegram caps a message at 4096 chars and ``_reply`` does not split, so every
@@ -72,7 +72,7 @@ async def _universe(c: _Ctx) -> str:
 
 
 async def _surveillance(c: _Ctx) -> str:
-    # The universe build is the A8 authority; instruments_daily.surveillance is never written.
+    # The universe build is the authority; instruments_daily.surveillance is never written.
     d, rows, tried = await _universe_snapshot(c)
     if d is None:
         return f"surveillance: no universe snapshot for {' or '.join(tried)}"

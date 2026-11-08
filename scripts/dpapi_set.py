@@ -1,13 +1,13 @@
-"""Interactive secret-seeding CLI into the Windows Credential Manager (R10, §2.4).
+"""Interactive secret-seeding CLI into the Windows Credential Manager.
 
 Seeds secrets ONCE into the DPAPI-backed keyring via ``engine.core.secrets.Secrets``. Nothing secret
-ever lives in the repo, in YAML, or in plaintext on disk (§2.4); this script is the sanctioned way to
+ever lives in the repo, in YAML, or in plaintext on disk; this script is the sanctioned way to
 populate the credential store. Secret VALUES are read with ``getpass`` (never echoed) and are NEVER
 logged or printed back -- the sole exception is ``--generate-dashboard-token``, which prints a freshly
 minted token exactly once so the owner can copy it.
 
 The daily ``kite_access_token`` is intentionally NOT seedable here: it is minted by the Kite login flow
-(~06:00 IST, A5) and rotated automatically, so offering it interactively would be misleading.
+(~06:00 IST) and rotated automatically, so offering it interactively would be misleading.
 
 Usage::
 

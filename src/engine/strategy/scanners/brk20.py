@@ -1,13 +1,13 @@
 """``brk20`` — 20-day-high daily-close breakout over the FULL eligible universe (swing, long-only).
 
-Owner-directed 2026-08-04 (plan-amended, §6.1 addendum) after the BPCL 2026-08-03 miss: the
+Owner-directed 2026-08-04 after the BPCL 2026-08-03 miss: the
 intraday watchlist cap makes sub-cap symbols structurally invisible to the per-bar scanners, so
 this rule scans COMPLETED daily bars (bhavcopy-final ``bars_1d``) for every ELIGIBLE universe
 symbol — watchlist membership is irrelevant. It is deliberately NOT a :class:`Scanner` subclass:
-the §3.2.5 scanner protocol is (1m bar, ScanContext)-driven and only watched symbols ever produce
+the scanner protocol is (1m bar, ScanContext)-driven and only watched symbols ever produce
 bars. This module is a pure batch rule; the composition root runs it from the window-open//scan_now
-sweep and the §5.3 pre-open planner context, and admits its candidates through
-``SignalPreScreen.admit`` so the §3.2.5 dedupe/caps bind exactly as for bar-driven candidates.
+sweep and the pre-open planner context, and admits its candidates through
+``SignalPreScreen.admit`` so the prescreen dedupe/caps bind exactly as for bar-driven candidates.
 
 PINNED rule (long-only — NSE cash equities cannot be shorted overnight, so a 20d-LOW leg cannot
 produce an actionable swing recommendation):
@@ -17,13 +17,13 @@ produce an actionable swing recommendation):
 * FRESH-CROSS only: the previous session must NOT already have been a breakout by the same rule
   (``close(y-1) <= H20'`` for its own window) — a price riding above the band re-fires nothing.
   Same-day refire is separately impossible (prescreen (symbol, strategy) day-dedupe).
-* VOLUME confirmation: ``volume(y) >= vol_mult × mean(volume of the lookback window)`` — the §6.1
+* VOLUME confirmation: ``volume(y) >= vol_mult × mean(volume of the lookback window)`` — the volume-confirmation
   posture; the platform's backtests found unconfirmed momentum entries net-negative at retail
   costs. (BPCL 2026-08-03 broke out at 0.80× average volume — this rule would REFUSE it; that is
   a deliberate default, a frozen code constant: ``envelope.yaml`` has no ``brk20`` rows today, and
-  plan §6.1 lists them as future §6.3 rows.)
-* A12 ex-date skip: any known ex-date within ``ex_skip_days`` CALENDAR days of ``today``.
-* Levels — LIMIT-AT-LEVEL (WO-4, 2026-08-13). ``raw_levels.entry`` is the BROKEN LEVEL ``H20``
+  any would be future envelope rows.)
+* Ex-date skip: any known ex-date within ``ex_skip_days`` CALENDAR days of ``today``.
+* Levels — LIMIT-AT-LEVEL (2026-08-13). ``raw_levels.entry`` is the BROKEN LEVEL ``H20``
   itself, never ``close(y)``: the level is the only price still actionable when the candidate is
   read (``close(y)`` is a yesterday-print that nobody can transact at, and sizing off it computes
   risk from a price better than obtainable). The trade plan keeps the rule's OWN risk unit —
@@ -37,18 +37,18 @@ produce an actionable swing recommendation):
 
   Rounding order is pinned: ``entry``/``stop`` are tick-rounded FIRST and ``target`` is derived
   from the rounded pair, so the shipped levels are internally coherent (``stop < entry < target``,
-  the §7.1 ``levels_coherent`` shape) rather than coherent-before-rounding only. A breakout margin
+  the gate's ``levels_coherent`` shape) rather than coherent-before-rounding only. A breakout margin
   that vanishes under tick rounding leaves ``entry <= stop`` ⇒ no candidate. Sub-cost-floor risk is
-  still the §7.1 cost gate's job (C3), not this rule's.
+  still the cost gate's job, not this rule's.
 * Score = ``min(1.0, 0.5 + 5 × (close(y)/H20 − 1))`` — +2% breakout margin ⇒ 0.6, ≥+10% ⇒ 1.0.
   Deliberately still scored off ``close(y)/H20``: the breakout MARGIN is the strength signal, and
   it is unaffected by where the trade plan is anchored.
-* STOP-GEOMETRY FLOOR (WO-19, 2026-08-19 — the IDEA/LENSKART degeneracy). A MARGINAL breakout ships
+* STOP-GEOMETRY FLOOR (2026-08-19 — the IDEA/LENSKART degeneracy). A MARGINAL breakout ships
   a tiny ``R``: live IDEA 2026-08-17 (₹0.10, two ticks) and 2026-08-19 MFSL 0.61% / MCX 0.54% /
   LENSKART 0.17% of entry — three of that day's four candidates. A swing stop thinner than the
   symbol's ROUTINE overnight gap is noise-level: it is taken out at the very next open with high
-  probability while paying the full round trip, and §7.1 sizing INVERTS on it (notional ≈
-  risk_budget ÷ (overnight_gap_mult × stop%), so the thinnest stops request the largest notionals). The §7.1
+  probability while paying the full round trip, and per-trade risk sizing INVERTS on it (notional ≈
+  risk_budget ÷ (overnight_gap_mult × stop%), so the thinnest stops request the largest notionals). The
   ``entry_sanity_band`` is a backstop, not a fix — it rejects unfillable ENTRIES at evaluation
   time, never an unsurvivable STOP. So: ``gaps = |open_t/close_{t−1} − 1|`` over the last
   ``gap_lookback_sessions`` completed session-pairs ending at ``y`` (pairs with a non-finite or ≤0
@@ -57,9 +57,9 @@ produce an actionable swing recommendation):
   a multi-night plan; the conservative young-listing posture), and a tick-exact ``R`` below
   ``gap_floor_mult × median(gaps) × entry`` ⇒ NO candidate (``gap_floor``; equality passes).
   VETO, never widen: widening would re-shape the geometry the rule was pinned with and convert a
-  marginal breakout into a different trade (§3.2.5 fail-to-zero).
+  marginal breakout into a different trade (fail-to-zero).
 
-Evidence caveat rides along (§6.1): this rule ORIGINATES candidates for Tier-1 judgement and the
+Evidence caveat rides along: this rule ORIGINATES candidates for Tier-1 judgement and the
 owner's decision; it carries no presumption of positive expectancy.
 """
 
@@ -78,15 +78,15 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 STRATEGY_ID = "brk20"
 
-DEFAULT_PARAMS: dict[str, float] = {   # frozen rule defaults; no envelope.yaml rows (future §6.3)
+DEFAULT_PARAMS: dict[str, float] = {   # frozen rule defaults; no envelope.yaml rows
     "lookback_days": 20,
     "vol_mult": 1.2,
     "rr_target": 2.0,
     "ex_skip_days": 10,
 }
 
-# WO-19 stop-geometry floor knobs — a SEPARATE mapping from DEFAULT_PARAMS on purpose. That dict is
-# the future §6.3 learnable envelope; these are owner-only and NEVER learnable, because a learner shrinking
+# Stop-geometry floor knobs — a SEPARATE mapping from DEFAULT_PARAMS on purpose. That dict is
+# the future learnable envelope; these are owner-only and NEVER learnable, because a learner shrinking
 # the floor re-opens exactly the degeneracy the floor exists to close. Keeping them out of the
 # envelope's dict makes the never-learnability structural rather than conventional — the learning
 # path cannot address a key it has no dict entry for. `gap_floor_mult` = 2.0 is a DESIGN constant,
@@ -98,7 +98,7 @@ FLOOR_PARAMS: dict[str, float] = {
     "gap_min_sessions": 10,
 }
 
-# Veto classes surfaced through the optional accumulator (§6.1 observability: a silent veto class is
+# Veto classes surfaced through the optional accumulator (observability: a silent veto class is
 # undiagnosable). Named constants so the sweep call sites read the same keys scan_daily writes.
 VETO_GAP_FLOOR = "gap_floor"
 VETO_FLOOR_UNAVAILABLE = "floor_unavailable"
@@ -111,7 +111,7 @@ VETO_UNADJUSTED_HISTORY = "unadjusted_history"
 class DailyRow(NamedTuple):
     """One completed session, ascending order — the float analytical read path (bars_1d_frame).
 
-    Field order is APPEND-ONLY and deliberately not OHLC-ordered: ``open`` joined last (WO-19) as a
+    Field order is APPEND-ONLY and deliberately not OHLC-ordered: ``open`` joined last as a
     REQUIRED field so every pre-existing construction — positional or keyword — fails LOUDLY at its
     call site rather than silently defaulting into a gap statistic that would veto real candidates.
     """
@@ -125,13 +125,13 @@ class DailyRow(NamedTuple):
 def _bump(counts: dict[str, int] | None, key: str) -> None:
     """Record one veto on the CALLER's accumulator. ``None`` — the default — keeps :func:`scan_daily`
     a pure function of its arguments: the observability seam must never become module state, which
-    would make the sweep's counts order-dependent and the §9.6 replay non-reproducible."""
+    would make the sweep's counts order-dependent and the replay non-reproducible."""
     if counts is not None:
         counts[key] = counts.get(key, 0) + 1
 
 
 def _gap_floor_frac(rows: Sequence[DailyRow], *, lookback: int, min_sessions: int, mult: float) -> float | None:
-    """WO-19 floor as a FRACTION of price: ``mult × median(|open_t/close_{t−1} − 1|)``, or ``None``
+    """Stop-geometry floor as a FRACTION of price: ``mult × median(|open_t/close_{t−1} − 1|)``, or ``None``
     when fewer than ``min_sessions`` valid pairs exist in the window (``floor_unavailable``).
 
     The window is the LAST ``lookback`` pairs ENDING AT ``rows[-1]`` — not all history: the floor
@@ -168,10 +168,10 @@ def scan_daily(
 
     ``rows[-1]`` must be the last COMPLETED session (never today's forming bar). Fails to None on
     thin history, non-breakout, stale (non-fresh) breakout, unconfirmed volume, ex-date proximity,
-    degenerate levels, or the WO-19 stop-geometry floor — never raises on ordinary data (§3.2.5
-    fail-to-zero posture).
+    degenerate levels, or the stop-geometry floor — never raises on ordinary data (fail-to-zero
+    posture).
 
-    ``veto_counts``, when supplied, is incremented in place with the WO-19 veto classes
+    ``veto_counts``, when supplied, is incremented in place with the stop-geometry-floor veto classes
     (:data:`VETO_GAP_FLOOR` / :data:`VETO_FLOOR_UNAVAILABLE`) so the sweep's call sites can log
     them; the other refusals above are the rule's ordinary silence and are not counted.
     """
@@ -203,14 +203,14 @@ def scan_daily(
     if any(today <= xd <= horizon for xd in upcoming_ex_dates):
         return None
 
-    # ---- LIMIT-AT-LEVEL plan (WO-4): anchor on the broken level, keep the rule's own risk unit.
+    # ---- LIMIT-AT-LEVEL plan: anchor on the broken level, keep the rule's own risk unit.
     entry = round_to_tick(h20)                       # the actionable trigger, never close(y)
     risk = round_to_tick(y.close) - entry            # R = breakout extension (tick-exact)
     stop = round_to_tick(entry - risk)
     if entry <= stop:
         return None  # tick-rounding degenerate — no structural risk distance
 
-    # ---- WO-19 stop-geometry floor. Ordering is PINNED here, last: after every other refusal and
+    # ---- Stop-geometry floor. Ordering is PINNED here, last: after every other refusal and
     #      after the tick-exact R exists. The median is the rule's only O(lookback) statistic, so
     #      nothing pays for it on a non-breakout; more importantly the veto counters must count
     #      SHIPPABLE plans the floor stopped, not every universe symbol with a thin history — a
@@ -253,11 +253,11 @@ def sweep_daily(
     unadjusted_symbols: Collection[str] = (),
     veto_counts: dict[str, int] | None = None,
 ) -> list[SignalCandidate]:
-    """Run :func:`scan_daily` over every symbol; deterministic order (§9.6): score desc, symbol asc.
+    """Run :func:`scan_daily` over every symbol; deterministic order: score desc, symbol asc.
 
     ``unadjusted_symbols`` sit out (:data:`VETO_UNADJUSTED_HISTORY`); ``veto_counts`` is threaded
-    straight through — the caller owns the accumulator and reads the WO-19 counts off it after
-    the sweep returns (§6.1 observability)."""
+    straight through — the caller owns the accumulator and reads the stop-geometry-floor counts off it after
+    the sweep returns."""
     ex_map = ex_dates_by_symbol or {}
     out: list[SignalCandidate] = []
     for symbol in sorted(histories):

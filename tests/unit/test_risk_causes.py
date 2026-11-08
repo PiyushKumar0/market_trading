@@ -1,4 +1,4 @@
-"""Per-cause risk-state latch (§3.5.3): most-restrictive-wins composition and re-arm ONLY when every
+"""Per-cause risk-state latch: most-restrictive-wins composition and re-arm ONLY when every
 latching cause has cleared. The property that matters operationally is the negative one — clearing one
 cause while another is live must NOT reopen entries."""
 
@@ -149,7 +149,7 @@ async def test_a_cleared_cause_re_raised_starts_a_fresh_episode(conn, clock, lat
     assert row["set_at"] == clock.now().isoformat()      # fresh episode, Clock-stamped (never naive)
 
 
-# --------------------------------------------------------------------------- stickiness (§2.6)
+# --------------------------------------------------------------------------- stickiness
 @pytest.mark.asyncio
 async def test_latch_survives_a_restart(conn, clock, db_path, latch):
     await latch.set_cause(CAUSE_REJECTION_STORM, RiskState.FROZEN, "3 rejects/60s", Actor.RISK_GATE)
@@ -165,7 +165,7 @@ async def test_latch_survives_a_restart(conn, clock, db_path, latch):
 
 @pytest.mark.asyncio
 async def test_state_changes_are_published_and_audited(conn, clock, bus):
-    """The latch delegates persistence/publish to ModeManager, so the §3.2.1 ``risk.state`` event and
+    """The latch delegates persistence/publish to ModeManager, so the ``risk.state`` event and
     the config_audit row come for free — assert they actually do."""
     seen = []
 

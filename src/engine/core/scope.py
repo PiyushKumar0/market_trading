@@ -1,4 +1,4 @@
-"""Real/paper row scope (plan §1.4, Q3.2): the ONLY source of the scope predicate.
+"""Real/paper row scope: the ONLY source of the scope predicate.
 
 Paper rows live in the real tables with ``is_paper=1`` and, on ``positions``, ``origin='platform'``.
 Every reader of a mixed table states its scope through :func:`scope_sql`; a test fails on the literal
@@ -11,7 +11,7 @@ from typing import Literal
 
 Scope = Literal["real", "paper"]
 
-#: Position states that still hold exposure. A paper exit works in ``PENDING_EXIT`` (Q4.6); a real
+#: Position states that still hold exposure. A paper exit works in ``PENDING_EXIT``; a real
 #: position in RECOMMEND is only ever ``OPEN``.
 HELD_STATES_SQL: dict[Scope, str] = {
     "real": "state='OPEN'",
@@ -19,13 +19,13 @@ HELD_STATES_SQL: dict[Scope, str] = {
 }
 
 
-#: The paper book counts only its current epoch (Q3.2); no epoch yet ⇒ every paper row.
+#: The paper book counts only its current epoch; no epoch yet ⇒ every paper row.
 PAPER_EPOCH_SQL = "COALESCE((SELECT epoch_started_at FROM paper_state WHERE id = 1), '')"
 
 
 def scope_sql(scope: Scope, alias: str | None = None, *, has_origin: bool = False) -> str:
     """SQL predicate selecting ``scope``'s rows. ``has_origin`` adds the ``positions.origin`` leg:
-    real = the platform's and the owner's confirmed recommendations (O5 excludes ``external``)."""
+    real = the platform's and the owner's confirmed recommendations (owner decision: ``external`` is excluded)."""
     col = f"{alias}." if alias else ""
     if scope == "real":
         sql = f"COALESCE({col}is_paper, 0) = 0"

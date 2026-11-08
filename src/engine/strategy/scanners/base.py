@@ -1,7 +1,7 @@
-"""Scanner base class + registry (§3.2.5/§6.1) — the seam every per-bar baseline plugs into.
+"""Scanner base class + registry — the seam every per-bar baseline plugs into.
 
 A ``Scanner`` is a PURE function of ``(bar, ScanContext, params)``: no Clock, no I/O, no mutable
-state — same inputs ⇒ same candidates (§9.6 determinism, modulo the platform-minted ``signal_id``
+state — same inputs ⇒ same candidates (determinism, modulo the platform-minted ``signal_id``
 ULID). ONE carve-out (2026-09-12): LOG-ONLY state that cannot reach the returned candidates — a
 once-per-session latch so a shut filter says so without one line per bar per symbol. It must be
 keyed on ``bar.ts_minute.date()``, never a Clock, so a replay logs once per replayed session too;
@@ -9,18 +9,17 @@ keyed on ``bar.ts_minute.date()``, never a Clock, so a replay logs once per repl
 that a ``scan``/``pending`` RESULT depends on is still forbidden outright.
 Anything a scanner needs beyond the bar arrives via :class:`~engine.strategy.types.ScanContext`
 (assembled by the pre-screen's context provider); missing/thin context means FAIL TO ZERO (return
-``[]``), never raise — thin data is a warm-up condition (§7.1 ``warmup_ready``), not an error.
+``[]``), never raise — thin data is a warm-up condition (the risk gate's ``warmup_ready``), not an error.
 
-Params are injected as a plain dict whose keys mirror the §6.3 envelope rows for the scanner's
+Params are injected as a plain dict whose keys mirror the envelope rows for the scanner's
 ``strategy_id`` (bare, un-namespaced: ``orb.vol_mult`` → ``vol_mult``); ``DEFAULT_PARAMS`` carries the
-§6.3 defaults so a scanner built with no params trades the envelope defaults. Unknown keys are a hard
+envelope defaults so a scanner built with no params trades the envelope defaults. Unknown keys are a hard
 ``ValueError`` (typo guard — a silently-ignored param would quietly detune a strategy).
 
 Registry: modules self-register via :func:`register` at import time; ``SCANNER_REGISTRY`` maps
 ``strategy_id`` → class. The four per-bar price baselines (orb/rsi2/trend/mom) self-register here.
 The EOD-batch rules (brk20, ins, hi52, cat, cat_reversal) are deliberately NOT Scanners; they enter
-via ``SignalPreScreen.admit``, where the catalyst cap for ``catalyst_ref`` candidates is enforced
-(§3.2.5).
+via ``SignalPreScreen.admit``, where the catalyst cap for ``catalyst_ref`` candidates is enforced.
 """
 
 from __future__ import annotations
@@ -37,12 +36,12 @@ from engine.strategy.types import PendingSetup, RawLevels, ScanContext, Side, Si
 
 
 class Scanner(abc.ABC):
-    """One §6.1 baseline rule. Subclasses pin ``strategy_id``/``style`` and implement :meth:`scan`."""
+    """One baseline rule. Subclasses pin ``strategy_id``/``style`` and implement :meth:`scan`."""
 
     strategy_id: ClassVar[str]
     style: ClassVar[Style]
 
-    #: §6.3 envelope defaults for this scanner (bare keys). Overridden per-key via the constructor.
+    #: envelope defaults for this scanner (bare keys). Overridden per-key via the constructor.
     DEFAULT_PARAMS: ClassVar[Mapping[str, float]] = {}
 
     def __init__(self, params: Mapping[str, float] | None = None) -> None:
@@ -62,8 +61,7 @@ class Scanner(abc.ABC):
         """Return 0..n candidates for this bar. Pure; fail to zero on missing context."""
 
     def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
-        """Setups NOT currently true, with the deterministic level that would arm them (§3.2.5 sweep
-        addendum, 2026-07-29). Same purity/fail-to-zero rules as :meth:`scan`; informational only —
+        """Setups NOT currently true, with the deterministic level that would arm them (2026-07-29). Same purity/fail-to-zero rules as :meth:`scan`; informational only —
         pendings never enter the pipeline. Default: a scanner that cannot cheaply invert its
         condition reports nothing."""
         return []
@@ -81,11 +79,11 @@ class Scanner(abc.ABC):
         score: float,
         catalyst_ref: str | None = None,
     ) -> SignalCandidate:
-        """Mint a §3.2.5 candidate (ULID ``signal_id``; score clamped to [0, 1]).
+        """Mint a candidate (ULID ``signal_id``; score clamped to [0, 1]).
 
         ``catalyst_ref`` is unused by every registered scanner (always ``None``); the batch rules
         that carry a watchlist entry id build their candidates in ``_shadow_catalyst.build_candidate``
-        (§2.7 audit chain).
+        (catalyst audit chain).
         """
         return SignalCandidate(
             signal_id=str(ULID()),
@@ -116,9 +114,9 @@ def register(cls: type[Scanner]) -> type[Scanner]:
 
 
 def params_from_envelope(strategy_id: str, envelope: Mapping[str, float]) -> dict[str, float]:
-    """Strip a namespaced §6.3 envelope mapping (``orb.vol_mult`` …) down to one scanner's bare params.
+    """Strip a namespaced envelope mapping (``orb.vol_mult`` …) down to one scanner's bare params.
 
-    The intended Phase-5 seam for feeding SQLite ``envelope_state`` (§6.5, keyed like
+    The intended online-learning seam for feeding SQLite ``envelope_state`` (keyed like
     ``config/envelope.yaml``) to each scanner; NOT wired today: ``engine.ops.main`` builds
     orb/rsi2/trend/mom on code ``DEFAULT_PARAMS`` and ``envelope_state`` rows for those keys are
     not read (see ``scan_context.py``).

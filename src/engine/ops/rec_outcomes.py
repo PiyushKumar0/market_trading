@@ -1,4 +1,4 @@
-"""Hindsight scoring of delivered entry recs on official bars (plan Q2.3).
+"""Hindsight scoring of delivered entry recs on official bars.
 
 HINDSIGHT: no scanner, threshold or promotion code may read ``rec_outcomes``. The owner's action
 and skip reason are joined at read time, never copied here. Writes only ``rec_outcomes`` and

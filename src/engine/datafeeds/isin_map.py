@@ -1,6 +1,6 @@
-"""Symbol → ISIN → BSE scrip-code map → ``symbol_isin`` (§2.8 utility; O14, E5).
+"""Symbol → ISIN → BSE scrip-code map → ``symbol_isin`` (utility).
 
-Builds the stable cross-exchange join key (§2.8.1: symbols change, ISINs survive renames). Three
+Builds the stable cross-exchange join key (symbols change, ISINs survive renames). Three
 layers, cheapest/most-authoritative first:
 
 1. **NIFTY-constituents ISIN (offline, authoritative).** The universe CSV the repo already caches
@@ -14,7 +14,7 @@ layers, cheapest/most-authoritative first:
    Active-Equity ISIN→scrip-code list in ONE request, parsed by :func:`parse_scrip_master`. It
    reproduced all 199 codes the old per-symbol ``PeerSmartSearch`` resolver had found (2026-09-12);
    an ISIN it lacks is NSE-only or not a live BSE scrip. BSE 404s masquerade as 200 +
-   ``error_Bse.html`` ⇒ fetched through :func:`engine.core.bse_http.bse_get`. The §2.8 fresh-insider
+   ``error_Bse.html`` ⇒ fetched through :func:`engine.core.bse_http.bse_get`. The fresh-insider
    feed reads the same master to build its own scrip→symbol map every run.
 
 The job runs daily (``isin_map``, before ``filings_shp``, which fetches only mapped symbols): run by
@@ -44,7 +44,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.isin_map")
 
-#: NSE announcements page carrying ``symbol`` + ``sm_isin`` (probe-verified). [VERIFY Phase-1].
+#: NSE announcements page carrying ``symbol`` + ``sm_isin`` (probe-verified). [VERIFY].
 NSE_ANNOUNCEMENTS_URL = "https://www.nseindia.com/api/corporate-announcements?index=equities"
 
 #: BSE BULK scrip master — the whole Active-Equity list (``SCRIP_CD`` + ``ISIN_NUMBER``) in ONE
@@ -63,7 +63,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class IsinMapResult(BaseModel):
-    """One build's outcome (never an exception, E5)."""
+    """One build's outcome (never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -80,7 +80,7 @@ class IsinMapResult(BaseModel):
 def parse_constituents_isin(text: str) -> dict[str, str]:
     """NIFTY index-constituents CSV → ``{symbol: isin}`` (the ISIN column ``builder.py`` drops).
 
-    Defensive (E5): ``#``-comment lines skipped, ``Symbol`` + ``ISIN Code`` columns located
+    Defensive: ``#``-comment lines skipped, ``Symbol`` + ``ISIN Code`` columns located
     case-insensitively, ``Series`` (if present) filtered to EQ. Uppercased symbols, deduped.
     """
     lines = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
@@ -153,7 +153,7 @@ def parse_scrip_master(payload: Any) -> dict[str, str]:
 def load_constituents_isin(settings: Settings) -> dict[str, str]:
     """Read the cached index-constituents CSV (download-cache → committed seed ladder) for ISINs.
 
-    Mirrors ``UniverseBuilder``'s cache/seed paths (``builder.py`` untouched) — both renamed by O15
+    Mirrors ``UniverseBuilder``'s cache/seed paths (``builder.py`` untouched) — both renamed by the owner decision
     (2026-09-04) when the index became config (NIFTY 500); returns ``{}`` if neither is readable
     (the caller then relies on the announcements fallback)."""
     cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
@@ -183,7 +183,7 @@ def follow_renames(isin_by_symbol: Mapping[str, str], renames: Iterable[SymbolRe
 
 
 class IsinMapJob:
-    """§2.8 — build/refresh ``symbol_isin`` (CSV ISIN + announcements fallback + BSE bulk master)."""
+    """Build/refresh ``symbol_isin`` (CSV ISIN + announcements fallback + BSE bulk master)."""
 
     def __init__(
         self,
@@ -207,7 +207,7 @@ class IsinMapJob:
     async def run(self, symbols: list[str] | None = None) -> IsinMapResult:
         """Build ``symbol_isin`` for ``symbols`` (uppercased), default every index constituent.
         ``ok`` is False — and the owner alerted once per streak — when a symbol still lacks a BSE
-        scrip code because the master could not be read. Never raises (E5)."""
+        scrip code because the master could not be read. Never raises."""
         try:
             result = await self._run(symbols)
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise

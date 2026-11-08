@@ -1,4 +1,4 @@
-"""Startup self-test + lifecycle recovery (§2.6/§3.2.12, R4/R6/R10).
+"""Startup self-test + lifecycle recovery.
 
 Hermetic: a temp config dir for the protected store (never touches the real repo files) and a fake
 secrets store (never touches the Windows Credential Manager). Clock-skew check disabled (no network).
@@ -95,7 +95,7 @@ async def test_selftest_risk_counters_and_ladder_skip_when_unwired(conn, clock, 
     _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
     report = await lifecycle.startup(check_skew=False)
     del report
-    # Direct selftest run: the two §2.6 step-2 checks surface as SKIP, never silently pass.
+    # Direct selftest run: the two startup checks surface as SKIP, never silently pass.
     calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
     st = SelfTest(conn=conn, clock=clock, settings=FakeSettings(), secrets=FakeSecrets(REQUIRED_AT_STARTUP),
                   protected_store=ProtectedStore(temp_config, conn, clock),
@@ -108,7 +108,7 @@ async def test_selftest_risk_counters_and_ladder_skip_when_unwired(conn, clock, 
 
 @pytest.mark.asyncio
 async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clock, temp_config, monkeypatch):
-    """§2.6 step 2: an offline-realized loss below the −10% rung trips CLOSE_ONLY on startup —
+    """Startup self-test: an offline-realized loss below the −10% rung trips CLOSE_ONLY on startup —
     behaviorally identical to a live trip (state applied, not merely reported)."""
     from decimal import Decimal
 
@@ -120,7 +120,7 @@ async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clo
     mode = ModeManager(conn, clock, None, calendar)
     kill = KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mode)
-    # O16 2026-09-07: base 40000 / caps 6-2-4
+    # Owner decision 2026-09-07: base 40000 / caps 6-2-4
     # A closed platform position realizing −₹4,100 net ⇒ equity 35,900 ≤ 36,000 (−10% of 40k).
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, state, origin,"
@@ -158,7 +158,7 @@ async def test_startup_frozen_when_protected_store_unregistered(conn, clock, tem
     mode, kill, store, lifecycle = _build(conn, clock, temp_config)
     report = await lifecycle.startup(check_skew=False)
     assert report.integrity_ok is False
-    assert mode.risk_state() == RiskState.FROZEN          # flat book ⇒ FROZEN, not kill (§2.4)
+    assert mode.risk_state() == RiskState.FROZEN          # flat book ⇒ FROZEN, not kill
     assert mode.mode() == Mode.OFF
     assert "trade_window_seeded" in report.notes
 
@@ -198,7 +198,7 @@ async def test_startup_frozen_when_secret_missing(conn, clock, temp_config, monk
 @pytest.mark.asyncio
 async def test_lifecycle_signals_and_state_writes(conn, clock, temp_config, monkeypatch):
     """ENGINE_STARTED on boot, ENGINE_STOPPED on clean stop, and engine_lifecycle state transitions
-    RUNNING → STOPPED with last_clean_stop_at set (§2.2/§8.1 Phase-0 lifecycle deliverable)."""
+    RUNNING → STOPPED with last_clean_stop_at set."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -224,7 +224,7 @@ async def test_lifecycle_signals_and_state_writes(conn, clock, temp_config, monk
 
 @pytest.mark.asyncio
 async def test_lifecycle_detects_unclean_prior_exit(conn, clock, temp_config, monkeypatch):
-    """A prior run left in RUNNING (crash, no clean stop) ⇒ next startup reports crash_recovered (§2.6 step 0)."""
+    """A prior run left in RUNNING (crash, no clean stop) ⇒ next startup reports crash_recovered."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -248,7 +248,7 @@ async def test_lifecycle_detects_unclean_prior_exit(conn, clock, temp_config, mo
 
 @pytest.mark.asyncio
 async def test_selftest_frozen_on_stray_anthropic_key(conn, clock, temp_config, monkeypatch):
-    """D2 trap (§3.2.12): a stray ANTHROPIC_API_KEY (overflow disabled in the repo agents.yaml) FROZENs
+    """Stray-key trap: a stray ANTHROPIC_API_KEY (overflow disabled in the repo agents.yaml) FROZENs
     entries — it silently outranks the Max OAuth token. This exercises the enforcing branch."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-here")
     mode, kill, store, lifecycle = _build(conn, clock, temp_config)
@@ -262,8 +262,8 @@ async def test_selftest_frozen_on_stray_anthropic_key(conn, clock, temp_config, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["sdk_smoke", "claude_login"], ids=["sdk-smoke", "claude-login"])
 async def test_an_unwired_check_surfaces_as_skip(conn, clock, temp_config, monkeypatch, name: str):
-    """An UNWIRED D11 smoke seam (no harness) surfaces as a visible SKIP so the gate sequence stays
-    honest (§3.2.12), never silently omitted; chaos case 13 asserts the non-trading-day SKIP and the
+    """An UNWIRED smoke seam (no harness) surfaces as a visible SKIP so the gate sequence stays
+    honest, never silently omitted; chaos case 13 asserts the non-trading-day SKIP and the
     trading-day PASS. An unwired claude_login check is a SKIP too: the hermetic tier never reads
     ~/.claude."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -323,7 +323,7 @@ async def test_warmup_lift_preserves_standing_owner_pause(conn, clock, temp_conf
 
 
 def _build_with_latch(conn, clock, temp_config, *, catch_up=None):
-    """Latch-wired lifecycle with clean protected stores (§2.6 step-5 tests)."""
+    """Latch-wired lifecycle with clean protected stores (catch-up safety latch tests)."""
     from engine.risk.causes import RiskStateLatch
 
     calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
@@ -346,12 +346,12 @@ def _build_with_latch(conn, clock, temp_config, *, catch_up=None):
 
 @pytest.mark.asyncio
 async def test_startup_clears_stale_catchup_safety_latch(conn, clock, temp_config, monkeypatch):
-    """§2.6 step-5 inverse: a CLEAN catch-up pass clears a prior boot's catchup_safety_jobs latch.
-    2026-09-01: the cause had a set site (step-5 freeze) but no clear site anywhere, so one transient
+    """Catch-up safety latch inverse: a CLEAN catch-up pass clears a prior boot's catchup_safety_jobs latch.
+    2026-09-01: the cause had a set site (startup catch-up freeze) but no clear site anywhere, so one transient
     08-31 boot failure kept entries FROZEN for two full sessions after the catch-up had recovered."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, latch, lifecycle = _build_with_latch(conn, clock, temp_config)
-    # The stale latch a prior boot left behind (set path: lifecycle step 5 on frozen_reasons).
+    # The stale latch a prior boot left behind (set path: the startup catch-up freeze on frozen_reasons).
     await latch.set_cause("catchup_safety_jobs", RiskState.FROZEN,
                           "data_freshness:instruments", Actor.RISK_GATE)
     assert mode.risk_state() == RiskState.FROZEN
@@ -365,8 +365,8 @@ async def test_startup_clears_stale_catchup_safety_latch(conn, clock, temp_confi
 
 @pytest.mark.asyncio
 async def test_startup_catchup_clear_respects_other_causes(conn, clock, temp_config, monkeypatch):
-    """The step-5 clear is cause-scoped: a standing owner_pause survives it (same clear-only-what-
-    was-re-verified rule as the warm-up lift, 2026-07-28 review F0)."""
+    """The catch-up clear is cause-scoped: a standing owner_pause survives it (same clear-only-what-
+    was-re-verified rule as the warm-up lift, 2026-07-28 review)."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -384,7 +384,7 @@ async def test_startup_catchup_clear_respects_other_causes(conn, clock, temp_con
 
 @pytest.mark.asyncio
 async def test_startup_freezes_on_catchup_safety_failure(conn, clock, temp_config, monkeypatch):
-    """Pin the existing freeze side (§2.6 step 5): safety-critical catch-up failures still latch
+    """Pin the existing freeze side: safety-critical catch-up failures still latch
     catchup_safety_jobs — the new clear branch must never weaken the fail-closed path."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
@@ -404,7 +404,7 @@ async def test_startup_freezes_on_catchup_safety_failure(conn, clock, temp_confi
 
 @pytest.mark.asyncio
 async def test_startup_clears_integrity_latch_once_stores_verify(conn, clock, temp_config, monkeypatch):
-    """§2.4 inverse: a boot whose protected stores all verify clears a prior boot's
+    """Inverse: a boot whose protected stores all verify clears a prior boot's
     protected_store_integrity latch (2026-10-11: the cause had a set site and no clear site, so a
     botched owner reseed would have kept entries FROZEN across restarts until a hand DB edit)."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE
@@ -437,7 +437,7 @@ async def test_startup_still_freezes_on_integrity_failure(conn, clock, temp_conf
     assert mode.risk_state() == RiskState.FROZEN
 
 
-# --------------------------------------------------------------------------- claude_login (D2/D11)
+# --------------------------------------------------------------------------- claude_login
 SENTINEL = "sk-ant-SENTINEL-TOKEN-must-never-surface"
 
 

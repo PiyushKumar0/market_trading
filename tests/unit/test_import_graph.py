@@ -1,4 +1,4 @@
-"""Import-graph guard (R1, §2.3/§9.1): the deterministic tiers never import the LLM tier, and the
+"""Import-graph guard: the deterministic tiers never import the LLM tier, and the
 paper tier never imports the live-broker package.
 
 ``engine.risk`` and ``engine.oms`` must contain NO import of ``engine.intelligence`` — the three-tier
@@ -6,23 +6,23 @@ separation is structural, not conventional. Proposals reach the gate only as sch
 test parses the AST of every module under those packages (no runtime import needed, so it does not pull
 the heavy deps) and fails if any ``import engine.intelligence...`` appears.
 
-``engine.paper`` (WO-P3-2, 2026-09-10, §8.4 addendum) carries a SECOND forbidden prefix,
-``engine.broker``: §3.2.9 pins the paper tier's dependency to ``core`` alone. That is not cosmetic —
+``engine.paper`` (2026-09-10) carries a SECOND forbidden prefix,
+``engine.broker``: the paper tier's dependency is pinned to ``core`` alone. That is not cosmetic —
 ``engine.broker.kite_client`` pulls the pykiteconnect import chain, and a paper simulation that can
 reach the live broker package is one refactor away from being able to reach the live broker. The wire
 contract the two brokers share (``ORDER_UPDATE_TOPIC`` / ``OrderUpdateFrame``) therefore lives in
 ``engine.core.contracts``, which is what makes this guard satisfiable.
 
 ``engine.paper`` additionally carries a PER-MODULE budget (round 3, 2026-09-10): the tier-wide "depends
-on ``core`` alone" claim is not true of every module in it, because §8.4's WO-P3-3 replay harness is
+on ``core`` alone" claim is not true of every module in it, because the paper replay harness is
 sanctioned to drive the real ``BarBuilder``/``MarketStore``. Relaxing the tier-wide guard to admit that
 would have handed ``engine.marketdata`` to ``broker``/``fill_model``/``surface`` as well, so the guard is
 split: ``PAPER_MODULE_ALLOWED`` states each module's budget, and the modules' own docstrings state the
 same thing in prose. A module added to the package with no entry there fails the coverage test.
 
-``engine.ops`` is exempt: it is the composition root, the only module allowed to import everything (§3.2.12).
+``engine.ops`` is exempt: it is the composition root, the only module allowed to import everything.
 
-D8 (plan Q3.1 (c)): ``engine.oms`` may import only ``core``, ``oms`` and ``paper``, and the transitive
+Additionally, ``engine.oms`` may import only ``core``, ``oms`` and ``paper``, and the transitive
 runtime closure of ``engine.oms`` + ``engine.paper`` never reaches ``engine.broker``.
 """
 
@@ -79,7 +79,7 @@ def _resolve_relative(pkg: str, level: int, module: str | None) -> str:
 def _imports_in_source(source: str, pkg: str, filename: str = "<test>") -> set[str]:
     """Every imported module name in ``source``, with RELATIVE imports resolved absolutely against
     ``pkg`` — so ``from ..intelligence import x`` in engine.risk is caught as ``engine.intelligence``
-    (the pre-fix version silently skipped level>0 imports, a structural-guard blind spot, §2.3)."""
+    (the pre-fix version silently skipped level>0 imports, a structural-guard blind spot)."""
     tree = ast.parse(source, filename=filename)
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -113,8 +113,8 @@ def test_tier_does_not_import_the_forbidden_packages(pkg: str, forbidden: tuple[
 
 
 # --------------------------------------------------------------------------- per-module (paper)
-#: ``engine.paper`` module -> the ``engine.*`` prefixes THAT MODULE may import (§3.2.9 + the §8.4
-#: WO-P3-3 harness exception). The package-level guard above only says what the tier may never
+#: ``engine.paper`` module -> the ``engine.*`` prefixes THAT MODULE may import (the paper tier's core-only rule plus the
+#: replay-harness exception). The package-level guard above only says what the tier may never
 #: touch; this says what each module may, which is the claim the module docstrings make:
 #:
 #: * ``broker`` / ``fill_model`` / ``surface`` / ``__init__`` depend on ``engine.core`` ALONE. That
@@ -122,8 +122,8 @@ def test_tier_does_not_import_the_forbidden_packages(pkg: str, forbidden: tuple[
 #:   or live-broker import chains, and it is why the order-postback wire contract had to move to
 #:   ``engine.core.contracts`` (both brokers emit it).
 #: * ``replay`` additionally depends on ``engine.marketdata``: the harness drives the REAL
-#:   ``BarBuilder`` into a scratch ``MarketStore`` (§8.4 WO-P3-3, "one code path"), which is the
-#:   whole point of it and the one plan-sanctioned exception. Nothing else in the tier gets it --
+#:   ``BarBuilder`` into a scratch ``MarketStore`` ("one code path"), which is the
+#:   whole point of it and the one sanctioned exception. Nothing else in the tier gets it --
 #:   without this per-module split the tier-wide guard would have to be relaxed for everyone.
 #:
 #: ``engine.paper`` itself is always allowed (intra-package imports); stdlib/third-party is out of
@@ -173,7 +173,7 @@ def test_paper_module_imports_only_its_declared_engine_dependencies(
 def test_no_paper_module_may_reach_the_llm_tier_or_the_live_broker(module: str) -> None:
     # Restated per module rather than left to the package guard: the allowlist above is a positive
     # list, and a positive list is one careless edit away from admitting the two prefixes that
-    # actually matter (R1's LLM ban and §3.2.9's pykiteconnect ban).
+    # actually matter (the LLM ban and the pykiteconnect ban).
     path = _SRC / "engine" / "paper" / f"{module}.py"
     banned = [
         imported

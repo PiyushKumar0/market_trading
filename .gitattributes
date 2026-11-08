@@ -1,4 +1,4 @@
-# Protected config (R4): the ProtectedStore registers the SHA-256 of the LF bytes it writes
+# Protected config: the ProtectedStore registers the SHA-256 of the LF bytes it writes
 # (protected_store.owner_update rewrites CRLF -> LF). Pin LF here so a future checkout on a
 # core.autocrlf=true box cannot re-materialize CRLF and re-trigger a hash mismatch / FROZEN boot.
 config/*.yaml text eol=lf

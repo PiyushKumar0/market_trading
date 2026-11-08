@@ -1,6 +1,6 @@
-﻿"""MarketStore (§4.1/§4.3/§4.5, E4): idempotent schema init for the full §4.3 table set, Decimal-exact
-bar/tick round-trips (incl. ``src`` provenance + the A14 ``auction_open``), partitioned tick Parquet
-batches, the §2.6 contiguous-coverage warm-up check, retention purges, and the Phase-1 additive
+﻿"""MarketStore: idempotent schema init for the full table set, Decimal-exact
+bar/tick round-trips (incl. ``src`` provenance + the ``auction_open``), partitioned tick Parquet
+batches, the contiguous-coverage warm-up check, retention purges, and the additive
 settings keys + notify-catalog messages."""
 
 from __future__ import annotations
@@ -39,14 +39,14 @@ from engine.notify.catalog import (
 )
 from tests.conftest import FIXED_NOW
 
-# The complete §4.3 DuckDB table inventory. Adding a table to the schema without adding it here fails
+# The complete DuckDB table inventory. Adding a table to the schema without adding it here fails
 # CI and vice-versa (the same lockstep guard as test_migrations for SQLite).
 PLAN_TABLES = {
     "bars_1m", "bars_1m_no_trade", "corrections_log", "bars_1d", "reconcile_log", "instruments_daily",
     "universe_daily", "features_daily", "feature_snapshots", "news", "news_clusters",
     "entity_aliases", "unresolved_entities", "theme_map", "sentiment_agg", "catalyst_watchlist",
     "calendar", "corp_actions", "earnings_calendar", "flagged_instrument_days", "sector_map",
-    # §2.8 corporate-filings layer (O14)
+    # corporate-filings layer
     "symbol_isin", "insider_trades", "shp_quarterly", "results_filings",
 }
 
@@ -105,7 +105,7 @@ def test_bar_roundtrip_decimal_fidelity_src_auction_open(store, clock):
     got = store.get_bars_1m("RELIANCE", open_915, open_915 + timedelta(minutes=2))
     assert len(got) == 2
     b0, b1 = got
-    # Decimal-exact round-trip (§3.2 money convention; DECIMAL(12,2) documented choice).
+    # Decimal-exact round-trip (money convention; DECIMAL(12,2) documented choice).
     assert isinstance(b0.open, Decimal) and b0.open == Decimal("2338.55")
     assert b0.close == Decimal("2339.90") and b0.volume == 12500
     assert b0.auction_open == Decimal("2338.10") and b1.auction_open is None
@@ -120,12 +120,12 @@ def test_bars_1m_upsert_official_replaces_self(store, clock):
     store.insert_bars_1m([_bar(minute, src="self")])
     store.insert_bars_1m([_bar(minute, src="kite_official", close=Decimal("2341.15"))])
     got = store.get_bars_1m("RELIANCE", minute, minute + timedelta(minutes=1))
-    assert len(got) == 1                               # upsert, not duplicate (§4.4 job 2 canonical)
+    assert len(got) == 1                               # upsert, not duplicate (canonical)
     assert got[0].src == "kite_official" and got[0].close == Decimal("2341.15")
 
 
 def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monkeypatch):
-    """The §3.2.3 late-tick amendment seam (WO-5): only ``src='self'`` rows are amendable, only
+    """The late-tick amendment seam: only ``src='self'`` rows are amendable, only
     high/low ever move, and a decision taken against a STALE row loses the CAS instead of writing."""
     minute = clock.combine(clock.today(), time(11, 0))
     window = (minute, minute + timedelta(minutes=1))
@@ -140,7 +140,7 @@ def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monke
     assert (got.open, got.low, got.close, got.volume, got.src) == (                 # nothing else moved
         Decimal("2338.55"), Decimal("2337.05"), Decimal("2339.90"), 12500, "self")
 
-    # Official/backfilled rows are canonical (§4.4 job 2) — refused, byte-intact.
+    # Official/backfilled rows are canonical — refused, byte-intact.
     store.insert_bars_1m([_bar(minute, src="kite_official")])
     before = store.get_bars_1m("RELIANCE", *window)[0]
     assert store.amend_bar_1m_extremes("RELIANCE", minute, Decimal("9999.00")) == AMEND_FOREIGN_SRC
@@ -165,7 +165,7 @@ def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
     db = tmp_path / "legacy.duckdb"
     con = duckdb.connect(str(db))
     con.execute("SET TimeZone='Asia/Kolkata'")
-    con.execute(                                               # the pre-WO-5 shape, verbatim
+    con.execute(                                               # the shape before the amendment seam, verbatim
         "CREATE TABLE corrections_log (symbol TEXT NOT NULL, minute TIMESTAMPTZ NOT NULL, "
         "tick_ts TIMESTAMPTZ NOT NULL, value DECIMAL(12,2), cumulative_volume BIGINT, "
         "amended BOOLEAN NOT NULL DEFAULT FALSE, logged_at TIMESTAMPTZ NOT NULL)"
@@ -218,13 +218,13 @@ def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
 
 
 def test_universe_daily_legacy_db_gains_core_index_and_null_reads_as_core(tmp_path, clock):
-    """O18 (2026-10-08): a pre-O18 ``universe_daily`` gets ``core_index`` on open. Legacy rows
-    (NULL) count as CORE — every pre-O18 index was a subset of NIFTY 500 — so hi52/ins/cat keep
+    """Owner decision 2026-10-08: a pre-widening ``universe_daily`` gets ``core_index`` on open. Legacy rows
+    (NULL) count as CORE — every pre-widening index was a subset of NIFTY 500 — so hi52/ins/cat keep
     their population across the migration; an explicit False is non-core; the eligible predicate
     (included or watchlist_cap alone) still applies on top."""
     db = tmp_path / "legacy.duckdb"
     con = duckdb.connect(str(db))
-    con.execute(                                               # the pre-O18 shape, verbatim
+    con.execute(                                               # the pre-widening shape, verbatim
         "CREATE TABLE universe_daily (d DATE NOT NULL, symbol TEXT NOT NULL, included BOOLEAN NOT NULL, "
         "mis_candidate BOOLEAN NOT NULL DEFAULT FALSE, exclusion_reasons TEXT[], "
         "median_traded_value DECIMAL(18,2), PRIMARY KEY (d, symbol))"
@@ -271,9 +271,9 @@ def test_bar_src_is_constrained(store, clock):
 
 def test_naive_datetime_rejected_by_models():
     with pytest.raises(ValidationError):
-        _bar(datetime(2026, 6, 17, 9, 15))             # naive ts_minute is a bug (§3.2)
+        _bar(datetime(2026, 6, 17, 9, 15))             # naive ts_minute is a bug
     with pytest.raises(ValidationError):
-        _tick(datetime(2026, 6, 17, 9, 15))            # naive exchange_ts is a bug (§3.2)
+        _tick(datetime(2026, 6, 17, 9, 15))            # naive exchange_ts is a bug
 
 
 def test_last_bar_time_and_coverage_gap_check(store, clock):
@@ -286,7 +286,7 @@ def test_last_bar_time_and_coverage_gap_check(store, clock):
 
     end = start + timedelta(minutes=5)
     assert store.coverage_gaps("RELIANCE", start, end) == [start + timedelta(minutes=2)]
-    assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # §2.6 step-6 warm-up gate
+    assert store.has_contiguous_coverage("RELIANCE", start, end) is False  # the startup warm-up gate
     store.insert_bars_1m([_bar(start + timedelta(minutes=2))])
     assert store.has_contiguous_coverage("RELIANCE", start, end) is True
 
@@ -345,7 +345,7 @@ def test_bars_1d_upsert_and_query(store):
     assert got[0].close == Decimal("4121.00") and got[0].src == "bhavcopy"
 
 
-# --------------------------------------------------------------------------- ticks -> parquet (§4.3)
+# --------------------------------------------------------------------------- ticks -> parquet
 def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
     ts = clock.now()
     d = clock.today().isoformat()
@@ -356,12 +356,12 @@ def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
 
     files = store.flush_ticks()
     assert store.pending_tick_count == 0
-    # Partition layout: <root>/ticks/date=YYYY-MM-DD/symbol=X/<ulid>.parquet (§4.3).
+    # Partition layout: <root>/ticks/date=YYYY-MM-DD/symbol=X/<ulid>.parquet.
     rel_dirs = {f.parent.relative_to(tmp_path / "parquet").as_posix() for f in files}
     assert rel_dirs == {f"ticks/date={d}/symbol=RELIANCE", f"ticks/date={d}/symbol=TCS"}
     assert all(f.suffix == ".parquet" and f.exists() for f in files)
 
-    # Decimal + cumulative-volume + tz fidelity through the parquet round-trip (A13).
+    # Decimal + cumulative-volume + tz fidelity through the parquet round-trip.
     back = store.get_ticks("RELIANCE", clock.today())
     assert [t.volume_traded for t in back] == [100, 101, 102]      # cumulative day volume preserved
     assert back[0].ltp == Decimal("2338.55") and isinstance(back[0].ltp, Decimal)
@@ -372,18 +372,18 @@ def test_tick_flush_writes_partitioned_parquet(store, tmp_path, clock):
 
 # --------------------------------------------------------------------------- slow-statement telemetry
 def _slow_events(caplog) -> list:
-    """The ``store_slow_statement`` records captured so far (§2.6 hardening (iii))."""
+    """The ``store_slow_statement`` records captured so far."""
     return [r for r in caplog.records if r.getMessage() == "store_slow_statement"]
 
 
 def test_slow_statement_default_threshold_is_5s():
-    """The plan pins the threshold at 5 s (§2.6 hardening (iii)); the telemetry tests below force it
+    """The threshold is pinned at 5 s; the telemetry tests below force it
     to 0.0/1e9 to be deterministic, so the shipped default needs its own assertion."""
     assert store_module._SLOW_STATEMENT_S == 5.0
 
 
 def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplog):
-    """§2.6 'Store slow-statement telemetry' (WO-24b follow-up): the 2026-09-08 11:47 stall's
+    """Store slow-statement telemetry: the 2026-09-08 11:47 stall's
     thread-by-thread dump could not tell whether a feature_snapshot INSERT (_execute) or a tick-flush
     COPY (_flush_locked) held ``_lock`` for 59 s. Every ``_lock`` hold is now timed and a hold >=
     _SLOW_STATEMENT_S logs ``store_slow_statement``.
@@ -420,7 +420,7 @@ def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplo
 
     for r in fetchall_events + fetch_dicts_events + upsert_events:
         assert isinstance(r.elapsed_s, float) and r.elapsed_s >= 0.0
-        # "thread" collides with logging.LogRecord's own reserved attribute, so _safe_extra (§log.py)
+        # "thread" collides with logging.LogRecord's own reserved attribute, so _safe_extra (log.py)
         # stores our field as "thread_" on the record -- the warning() call itself still passes "thread".
         assert r.thread_ == threading.current_thread().name
         assert not hasattr(r, "failed")                  # the statement returned — no failure marker
@@ -549,14 +549,14 @@ def test_tick_autoflush_on_interval(tmp_path):
     s.open()
     try:
         assert s.buffer_tick(_tick(FIXED_NOW)) == []           # 0s elapsed — buffered
-        current["now"] = FIXED_NOW + timedelta(seconds=6)      # past the ~5s batch window (§4.3)
+        current["now"] = FIXED_NOW + timedelta(seconds=6)      # past the ~5s batch window
         files = s.buffer_tick(_tick(current["now"]))
         assert files and s.pending_tick_count == 0
     finally:
         s.close()
 
 
-# --------------------------------------------------------------------------- retention (§4.5)
+# --------------------------------------------------------------------------- retention
 def test_retention_purges_expired_only(tmp_path):
     current = {"now": FIXED_NOW - timedelta(days=120)}          # start 120 days in the past
     clock = Clock(time_source=lambda: current["now"])
@@ -614,13 +614,13 @@ def test_news_insert_dedupes_on_url_and_clusters(store, clock):
          "url": "https://mc/1", "published_at": clock.now()},
     ]
     assert store.insert_news(rows) == 2
-    assert store.insert_news(rows) == 0                          # idempotent backfill (§4.4 job 10)
+    assert store.insert_news(rows) == 0                          # idempotent backfill
 
     assert store.existing_news_urls(["https://et/1", "https://et/2"]) == {"https://et/1"}
     assert store.existing_news_urls([]) == set()
 
     headlines = store.get_news(unclustered_only=True)
-    assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # §2.4: always untrusted
+    assert len(headlines) == 2 and all(h["untrusted"] for h in headlines)   # always untrusted
 
     store.set_news_cluster([h["headline_id"] for h in headlines], "01CLUSTER")
     assert store.get_news(unclustered_only=True) == []
@@ -652,14 +652,14 @@ def test_catalyst_watchlist_replace_is_idempotent_with_decimal_levels(store, clo
         "expires_at": d + timedelta(days=2),
     }
     store.replace_catalyst_watchlist(d, [row])
-    store.replace_catalyst_watchlist(d, [row])                   # digest re-run: no duplicates (§2.6)
+    store.replace_catalyst_watchlist(d, [row])                   # digest re-run: no duplicates
     got = store.get_catalyst_watchlist(d)
     assert len(got) == 1
     assert got[0]["grade"] == "originating" and got[0]["entry_id"]          # catalyst_ref minted
     assert got[0]["confirm_trigger"] == Decimal("4130.00")                  # deterministic levels exact
     assert store.get_catalyst_watchlist(d, grade="context") == []
 
-    store.replace_catalyst_watchlist(d, [])                       # empty-but-fresh digest (§2.7)
+    store.replace_catalyst_watchlist(d, [])                       # empty-but-fresh digest
     assert store.get_catalyst_watchlist(d) == []
 
 
@@ -675,7 +675,7 @@ def test_sector_map_snapshots_and_latest(store):
 
 def test_reconcile_log_checkpoints(store, clock):
     d = date(2026, 6, 16)
-    assert store.has_reconcile_entry(d) is False                  # §2.6: un-reconciled day detected
+    assert store.has_reconcile_entry(d) is False                  # un-reconciled day detected
     store.append_reconcile_log([{
         "d": d, "symbol": "RELIANCE", "bars_self": 375, "bars_official": 375, "bars_compared": 370,
         "vol_drift_bars": 1, "close_drift_bars": 0, "offline_bars": 5, "bad_bar_fraction": 0.0027,
@@ -748,7 +748,7 @@ def test_instruments_universe_features_roundtrip(store, clock):
         "tick_size": Decimal("0.05"), "lot_size": 1, "mis_eligible": True, "fno": True,
     }])
     inst = store.get_instruments_daily(d)[0]
-    assert inst["tick_size"] == Decimal("0.05") and inst["surveillance"] is None   # clean = NULL (A8)
+    assert inst["tick_size"] == Decimal("0.05") and inst["surveillance"] is None   # clean = NULL
 
     store.upsert_universe_daily([
         {"d": d, "symbol": "RELIANCE", "included": True, "mis_candidate": True},
@@ -793,7 +793,7 @@ def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
 
 
 def test_batch_universe_reads_both_index_markers(store, clock):
-    """O15 (2026-09-04): the extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``
+    """Owner decision 2026-09-04: the extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``
     when the index became NIFTY 500. Rows written 2026-09-01…09-04 carry the LEGACY marker and
     nothing rewrites history, so the batch view must honour both — otherwise every extended name
     persisted before the rename silently leaves the news/advisory/shadow scan set."""
@@ -851,7 +851,7 @@ async def test_async_wrappers_offload_sync_core(store, clock):
 # --------------------------------------------------------------------------- settings (additive keys)
 def test_settings_load_with_new_phase1_keys():
     s = load_settings()
-    # Per-feed RSS cadences (§3.2.4); gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
+    # Per-feed RSS cadences; gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
     # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).
     rss = s.news.feeds.rss
     # 2026-08-05 pool widening: 3 new DOMAINS (hbl/cnbctv18/ndtvprofit) — corroboration pool 2 → 5.
@@ -861,7 +861,7 @@ def test_settings_load_with_new_phase1_keys():
         "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
         "bs_markets": 900, "bs_companies": 900,
     }
-    # The exchange as a feed (§2.7 amendment 2026-09-04) — its own cadence and drop list.
+    # The exchange as a feed (2026-09-04) — its own cadence and drop list.
     ann = s.news.feeds.nse_announcements
     assert (ann.enabled, ann.poll_s) == (True, 300) and "Trading Window" in ann.drop_subjects
     assert (s.news.gdelt_poll_s, s.news.request_timeout_s) == (3600, 30.0)
@@ -874,7 +874,7 @@ def test_settings_load_with_new_phase1_keys():
     assert s.lifecycle.active_period_starts == [time(8, 0)]
     assert (s.lifecycle.start_grace_s, s.lifecycle.catchup_grace_s) == (900, 900)
     assert s.lifecycle.crashloop_window_s == 600
-    # O15 (2026-09-04): the eligible universe is the CONFIGURED index. O18 (2026-10-08): NIFTY
+    # Owner decision 2026-09-04: the eligible universe is the CONFIGURED index. Owner decision 2026-10-08: NIFTY
     # Total Market, with NIFTY 500 as the CORE (evidence-population) index.
     assert s.universe.index_name == "NIFTY Total Market"
     assert s.universe.index_seed_path == "config/universe/niftytotalmarket_seed.csv"
@@ -889,7 +889,7 @@ def test_settings_load_with_new_phase1_keys():
 
 
 def test_retired_nifty200_universe_keys_are_rejected_not_ignored():
-    """O15 (2026-09-04): ``nifty200_source_url`` / ``nifty200_seed_path`` were REPLACED, not
+    """Owner decision 2026-09-04: ``nifty200_source_url`` / ``nifty200_seed_path`` were REPLACED, not
     aliased. ``UniverseCfg`` therefore forbids extras — a settings.yaml left on the old keys must
     fail loudly at boot instead of silently falling through to the NIFTY 500 defaults and
     presenting a stale config as live."""
@@ -925,7 +925,7 @@ def test_new_catalog_messages_shapes():
         assert msg.kind == kind and msg.severity == severity
         rendered = msg.render()
         for leak in ("kind=", "data={", "buttons=", "MessageKind."):
-            assert leak not in rendered                     # no raw-model leak into owner prose (R8)
+            assert leak not in rendered                     # no raw-model leak into owner prose
         assert msg.data                                     # structured fields preserved for audit
 
 

@@ -1,4 +1,4 @@
-"""Pre-open Kite token validity check (WO-21 (iii), R6/A5).
+"""Pre-open Kite token validity check.
 
 2026-08-20: the daily access token was already stale at the open and NOTHING looked at it — the
 first rejection surfaced at 09:50 as a mid-session TokenException → FROZEN, ~108 minutes of the

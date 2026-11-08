@@ -1,30 +1,30 @@
-"""ValidationPipeline (§3.2.10 / §6.4 step 2, E2) — anchored walk-forward + skfolio CPCV + the
+"""ValidationPipeline — anchored walk-forward + skfolio CPCV + the
 multiple-testing-deflated promotion decision.
 
-Semantics pinned by the plan:
+Semantics:
 
 * **Anchored walk-forward** — 6 months train / 1 month test, rolling: the train window is always
   anchored at the start of the data; each successive fold's 1-month test slice rolls forward. With
-  fixed candidate params (no re-fit inside Phase 1) the folds are successive out-of-sample months —
+  fixed candidate params (no re-fit inside this pipeline) the folds are successive out-of-sample months —
   reported per fold, never pooled into the promotion rule.
-* **CPCV** — ``skfolio.model_selection.CombinatorialPurgedCV`` (purge 5 d, embargo 5 d, §6.4) over
+* **CPCV** — ``skfolio.model_selection.CombinatorialPurgedCV`` (purge 5 d, embargo 5 d) over
   the **cost-adjusted daily return series** of the candidate. Fold expectancy = mean net daily
   return over the fold's test observations; a fold passes iff that expectancy is **> 0 after costs**.
-* **fold_pass_min(N)** (§6.4 step 2 / §9.1, exact boundaries): 60% for N ≤ 10, 70% for
+* **fold_pass_min(N)** (exact boundaries): 60% for N ≤ 10, 70% for
   11 ≤ N ≤ 30, 80% for N > 30 — monotone deflation in the trial count N.
 * **Trial count N** = the optimizer-reported count of every configuration evaluated
-  (``SweepReport.trial_count_n``, §6.4 step 1) — NOT the count of surfaced ``param_sets`` rows.
-  A report with **no cited N is not promotable** (E2). Promotable iff the CPCV fold-pass fraction
-  ≥ ``fold_pass_min(N)`` (§9.1) — plus, when a champion max-DD is supplied (seam; ``ChampionChallenger`` not yet built), max DD
-  ≤ 1.25× champion's (§6.4 step 2).
-* **Margin floor** (WO-3, 2026-08-13) — a fold-pass FRACTION says how often the edge was positive,
+  (``SweepReport.trial_count_n``) — NOT the count of surfaced ``param_sets`` rows.
+  A report with **no cited N is not promotable**. Promotable iff the CPCV fold-pass fraction
+  ≥ ``fold_pass_min(N)`` — plus, when a champion max-DD is supplied (seam; ``ChampionChallenger`` not yet built), max DD
+  ≤ 1.25× champion's.
+* **Margin floor** (2026-08-13) — a fold-pass FRACTION says how often the edge was positive,
   never by how much. Four rsi2 runs passed at exactly 12/15 = 80.0% with every passing split under
   0.02%/day (median ≈ 0.0006%/day): statistically "positive", economically indistinguishable from
   zero. So promotion now ALSO requires the **median passing-split expectancy ≥ cost_floor /
   MARGIN_FLOOR_DAYS per day** — see :data:`MARGIN_FLOOR_DAYS` for the constant's derivation. The
   ``fold_pass_fraction`` comparison deliberately stays strict-``<`` (silently flipping it to ``<=``
   would move a documented boundary invisibly; the margin floor is the real fix).
-* **Winner stability** (WO-3) — the sweep's winning config changed three times across near-identical
+* **Winner stability** — the sweep's winning config changed three times across near-identical
   grid densities. The report records whether the adjacent density picked the same winner as a
   **flag** (:class:`WinnerStability`), NOT an auto-fail: instability is evidence about the ranking
   surface's flatness, and turning it into a hard gate would silently discard genuinely robust
@@ -33,9 +33,9 @@ Semantics pinned by the plan:
   (``status='candidate'``, ``validation_report`` JSON citing N, ``evaluated_at``) for audit, and a
   report artifact (md + json) is written via :mod:`engine.learning.reports`.
 
-The N here is per-validation-run; the §6.4 rolling-window / per-``feature_set_version`` N
-bookkeeping belongs to ``ChampionChallenger`` (not yet built, plan §6.4; autonomous promotion is
-Phase 5), which passes the windowed N in via
+The N here is per-validation-run; the rolling-window / per-``feature_set_version`` N
+bookkeeping belongs to ``ChampionChallenger`` (not yet built; autonomous promotion is
+online learning, also not built), which passes the windowed N in via
 :class:`ParamSet`. skfolio is imported function-level only (native import-order guard,
 ``engine._preload``); the pipeline itself is pandas/numpy + stdlib.
 """
@@ -61,7 +61,7 @@ from engine.core.log import get_logger
 
 _log = get_logger("engine.learning.validate")
 
-#: §6.4 step 2 pinned defaults: purge 5 d, embargo 5 d. Fold counts are not plan-pinned;
+#: Pinned defaults: purge 5 d, embargo 5 d. Fold counts are not pinned;
 #: 6 folds × 2 test folds gives C(6,2) = 15 combinatorial splits (constructor knobs).
 CPCV_PURGE_DAYS = 5
 CPCV_EMBARGO_DAYS = 5
@@ -69,41 +69,42 @@ CPCV_N_FOLDS = 6
 CPCV_N_TEST_FOLDS = 2
 WF_TRAIN_MONTHS = 6
 WF_TEST_MONTHS = 1
-CHAMPION_MAX_DD_MULT = 1.25            # §6.4 step 2: max DD ≤ 1.25× champion's
+CHAMPION_MAX_DD_MULT = 1.25            # max DD ≤ 1.25× champion's
 
-#: WO-3 margin floor: the median PASSING CPCV split must earn at least ``cost_floor / 20`` per day,
-#: where ``cost_floor`` is the strategy's full round-trip friction (fees + spread, WO-2) at the
+#: Margin floor: the median PASSING CPCV split must earn at least ``cost_floor / 20`` per day,
+#: where ``cost_floor`` is the strategy's full round-trip friction (fees + spread) at the
 #: sweep's sizing — ``CostModel.breakeven_pct(reference_notional, product)``.
 #:
-#: DERIVATION OF THE 20. It is the §7.1 swing holding cap / the §6.3 ``rebalance_days`` upper bound —
+#: DERIVATION OF THE 20. It is the risk-limit swing holding cap / the parameter-envelope ``rebalance_days``
+#: upper bound —
 #: 20 trading sessions ≈ one month. Read it as: **a position must, over the horizon it is actually
 #: held, earn at least the one round trip it costs to hold it.** Spread the round trip evenly across
 #: those 20 sessions and the per-day bar is ``cost_floor/20``. An edge that merely covers its own
 #: costs once per holding period sits exactly ON the floor; anything below it is paying the broker
 #: and the spread to take risk.
 #:
-#: CALIBRATION AGAINST THE RECORDED NUMBERS (IMPROVEMENT_SPEC Part III / F3):
+#: CALIBRATION AGAINST THE RECORDED NUMBERS:
 #:   * CNC ₹20k cost floor = 0.2992% fees + 0.0200% spread = 0.3192% ⇒ floor 0.01596 %/day.
 #:   * rsi2's four "promotable" runs: median passing split ≈ 0.0006 %/day ⇒ ~27× BELOW the floor.
 #:     Even the best recorded baseline (mom, max passing split 0.0058 %/day) is ~3× below it.
-#:     Every recorded pre-WO-2 promotion therefore fails, which is the intent.
+#:     Every recorded promotion from before the spread correction therefore fails, which is the intent.
 #:   * A genuinely cost-clearing edge passes: a swing rule that nets one round trip (0.3192%) per
 #:     20-session holding period lands exactly on 0.01596 %/day; anything better clears it.
 #: Intraday strategies (``orb``) round-trip far more often than once per 20 sessions, so for them
-#: this floor is a LOWER bound rather than the true bar — honest, and the sweep's own C3 cost gate
+#: this floor is a LOWER bound rather than the true bar — honest, and the sweep's own cost gate
 #: plus the fold-pass rule carry that case. The mirror case is ``trend``: a POSITIONAL leg whose
-#: §7.1 cap is ``max_holding.position_trading_days`` = 120, so the 20 overstates its per-day bar by
+#: risk-limit cap is ``max_holding.position_trading_days`` = 120, so the 20 overstates its per-day bar by
 #: 6× — the denominator must be the horizon the strategy is actually held for (pre-registered
-#: 2026-09-12, plan §6.4 step 2). Overridable per call, never silently.
+#: 2026-09-12). Overridable per call, never silently.
 MARGIN_FLOOR_DAYS = 20
 
-#: The sweep sizing the cost floor is quoted at when the caller supplies none (WO-2 (iii)).
+#: The sweep sizing the cost floor is quoted at when the caller supplies none.
 _DEFAULT_REFERENCE_NOTIONAL = Decimal("20000")
 
 
-# --------------------------------------------------------------------------- fold_pass_min (§6.4/§9.1)
+# --------------------------------------------------------------------------- fold_pass_min
 def fold_pass_min(n: int) -> float:
-    """Minimum CPCV fold-pass fraction for trial count ``n`` (§6.4 step 2, exact §9.1 boundaries).
+    """Minimum CPCV fold-pass fraction for trial count ``n`` (exact boundaries).
 
     60% for N ≤ 10, 70% for 11 ≤ N ≤ 30, 80% for N > 30 — tightens monotonically with N
     (lightweight multiple-testing deflation). ``n`` must be ≥ 0.
@@ -119,11 +120,11 @@ def fold_pass_min(n: int) -> float:
 
 # --------------------------------------------------------------------------- models
 class RealizedHold(BaseModel):
-    """The sweep's MEASURED holding distribution + open/closed trade split for one config (R2).
+    """The sweep's MEASURED holding distribution + open/closed trade split for one config.
 
-    **Reporting only — nothing here reaches :func:`promotion_decision`.** It exists because the WO-3
+    **Reporting only — nothing here reaches :func:`promotion_decision`.** It exists because the
     margin floor's denominator is a *horizon*, and until 2026-09-12 no artifact recorded the horizon
-    a strategy was actually held for: the 20 is the §7.1 swing cap and the 120 the positional one,
+    a strategy was actually held for: the 20 is the risk-limit swing cap and the 120 the positional one,
     both CAPS. A floor quoted at a cap that the backtest never enforced can read 4× more comfortable
     than the same floor at the realized median hold — so the measured numbers travel with the
     verdict, in the same JSON, and :func:`realized_hold_floor_cells` re-bases the floor on them.
@@ -139,7 +140,7 @@ class RealizedHold(BaseModel):
     n_open: int
     #: The sweep's per-trade net return over ALL trades (incl. open ones at their unrealized
     #: mark-to-market, no exit leg paid) and the same figure over CLOSED round trips only. Since
-    #: WO-M (2026-09-13) the CLOSED one is the sweep's headline and the statistic the grid winner
+    #: the sweep-mechanics fix (2026-09-13) the CLOSED one is the sweep's headline and the statistic the grid winner
     #: was ranked on; the all-trades one is reported beside it. Field MEANINGS are unchanged — only
     #: which of the two the sweep promotes.
     expectancy_per_trade_pct: float | None = None
@@ -153,7 +154,7 @@ class RealizedHold(BaseModel):
 
 
 class MarginFloorCell(BaseModel):
-    """The WO-3 floor re-based on ONE measured holding period (R2, 2026-09-12) — REPORTING ONLY.
+    """The margin floor re-based on ONE measured holding period (2026-09-12) — REPORTING ONLY.
 
     ``headroom_x`` is the observed median passing-split expectancy divided by this cell's floor: the
     multiple by which the edge clears the bar at THIS horizon. The promotion verdict continues to be
@@ -170,11 +171,11 @@ class MarginFloorCell(BaseModel):
     headroom_x: float | None = None
 
 class ParamSet(BaseModel):
-    """A candidate parameter set entering validation (§3.2.10 / §6.4 step 1).
+    """A candidate parameter set entering validation.
 
     ``trial_count_n`` is the optimizer-reported evaluated-config count for this strategy's window
-    (``SweepReport.trial_count_n``; the not-yet-built ``ChampionChallenger``, plan §6.4, would supply the rolling-window N).
-    ``None`` ⇒ the resulting report is not promotable (E2). ``sweep_stats`` optionally carries the
+    (``SweepReport.trial_count_n``; the not-yet-built ``ChampionChallenger`` would supply the rolling-window N).
+    ``None`` ⇒ the resulting report is not promotable. ``sweep_stats`` optionally carries the
     sweep's trade-level stats for report context (never part of the promotion rule).
     """
 
@@ -185,26 +186,27 @@ class ParamSet(BaseModel):
     params: dict[str, float]
     trial_count_n: int | None = None
     sweep_stats: dict[str, float | None] | None = None
-    #: WO-3 margin floor: full round-trip friction (fees + spread) at the sweep's sizing, in percent
+    #: Margin floor: full round-trip friction (fees + spread) at the sweep's sizing, in percent
     #: (``SweepReport.cost_floor_pct``). ``None`` ⇒ the pipeline derives it from the CostModel.
     cost_floor_pct: float | None = None
-    #: WO-3 winner-stability flag inputs (all optional; absent ⇒ "not assessed", never a fail).
+    #: Winner-stability flag inputs (all optional; absent ⇒ "not assessed", never a fail).
     grid_density: str | None = None
     adjacent_density: str | None = None
     adjacent_winner: dict[str, float] | None = None
-    #: R2 (2026-09-12) REPORTING-ONLY inputs — the measured holding distribution behind these
+    #: REPORTING-ONLY inputs (added 2026-09-12) — the measured holding distribution behind these
     #: returns, and whether the population is a survivorship-tainted proxy. Both are rendered and
     #: persisted; NEITHER is an input to :func:`promotion_decision`.
     realized_hold: RealizedHold | None = None
     population_is_survivorship_tainted_proxy: bool | None = None
-    #: WO-M (2026-09-13): the sweep's one-line mechanics stamp (``SweepReport.mechanics``), carried
+    #: Sweep-mechanics fix (2026-09-13): the sweep's one-line mechanics stamp (``SweepReport.mechanics``), carried
     #: into the validation artifact so a verdict names the mechanics its returns were produced
     #: under. ``None`` ⇒ pre-fix (or a caller that ran no sweep); never an input to the promotion
     #: rule, which is decided by the CPCV folds and the margin floor exactly as before.
     sweep_mechanics: str | None = None
     #: False when ``params`` are NOT a grid winner — the sweep ranked nothing (every config closed no
     #: round trip, or the open/closed split was unreadable for all of them) and the caller fell back
-    #: to the §6.3 envelope DEFAULTS. WO-M item (iii) widened that path: an unrankable config is now
+    #: to the parameter envelope DEFAULTS. The sweep-mechanics fix widened that path: an
+    #: unrankable config is now
     #: excluded instead of ranked on its unrealized marks, so a window shorter than the strategy's
     #: realized hold can leave the whole grid unrankable. REPORTING ONLY — it does not gate the
     #: verdict (that would be an unregistered promotion-rule change); it exists so a defaults
@@ -240,7 +242,7 @@ class CPCVFold(BaseModel):
 
 
 class WinnerStability(BaseModel):
-    """WO-3 (b): did the ADJACENT grid density select the same winning config? A FLAG, never a fail.
+    """Winner stability: did the ADJACENT grid density select the same winning config? A FLAG, never a fail.
 
     ``stable is None`` means "not assessed" — no adjacent-density winner was supplied. An unstable
     winner is reported (report note + this structured field) so a reader can weigh it; the promotion
@@ -284,7 +286,7 @@ def winner_stability(
     grid_density: str | None = None,
     adjacent_density: str | None = None,
 ) -> WinnerStability:
-    """Compare a sweep winner with the adjacent grid density's winner (pure, §9.6).
+    """Compare a sweep winner with the adjacent grid density's winner (pure).
 
     ``adjacent_winner is None`` ⇒ ``stable=None`` ("not assessed"). Parameters present in only one of
     the two dicts count as differing (a density that adds an axis genuinely changed the winner).
@@ -304,7 +306,7 @@ def winner_stability(
 
 
 class ValidationReport(BaseModel):
-    """§6.4 step 2 output. MUST cite the trial count N — a report with no cited N is not promotable.
+    """Validation output. MUST cite the trial count N — a report with no cited N is not promotable.
 
     Statistics are floats deliberately (they are statistics, not ledger money — same argument as
     ``engine.strategy.indicators``); nothing here is ever a persisted price. ``max_drawdown_pct``
@@ -316,7 +318,7 @@ class ValidationReport(BaseModel):
     strategy_id: str
     param_set_id: str
     params: dict[str, float]
-    trial_count_n: int | None                       # the cited N (§6.4); None ⇒ not promotable
+    trial_count_n: int | None                       # the cited N; None ⇒ not promotable
     fold_pass_min: float | None                     # fold_pass_min(N); None when N absent
     data_start: date | None
     data_end: date | None
@@ -327,32 +329,32 @@ class ValidationReport(BaseModel):
     walk_forward: list[WalkForwardFold]
     cpcv: list[CPCVFold]
     cpcv_fold_pass_fraction: float | None
-    #: WO-3 margin floor inputs/outputs — median expectancy of the PASSING splits, the cost floor it
+    #: Margin floor inputs/outputs — median expectancy of the PASSING splits, the cost floor it
     #: is measured against, and the resulting per-day bar (all %; None ⇒ not evaluable).
     cpcv_median_passing_expectancy_pct: float | None = None
     cost_floor_pct: float | None = None
     margin_floor_pct_per_day: float | None = None
     #: The denominator the floor was taken at, in sessions (:data:`MARGIN_FLOOR_DAYS` unless the
-    #: caller overrode it — a positional leg's §7.1 holding cap is 120, not the swing 20). Recorded
+    #: caller overrode it — a positional leg's risk-limit holding cap is 120, not the swing 20). Recorded
     #: so the artifact alone reproduces the floor; None only on reports built before this field.
     margin_floor_days: int | None = None
-    #: R2 (2026-09-12) REPORTING-ONLY block: the measured holding distribution behind these returns,
-    #: the same WO-3 floor re-based on it, and whether the population is a survivorship-tainted
+    #: REPORTING-ONLY block (added 2026-09-12): the measured holding distribution behind these returns,
+    #: the same margin floor re-based on it, and whether the population is a survivorship-tainted
     #: proxy. None of it feeds :func:`promotion_decision` — it exists so a reader of the verdict can
     #: see the horizon and the population the verdict was earned on without re-running anything.
     realized_hold: RealizedHold | None = None
     realized_hold_cells: list[MarginFloorCell] = Field(default_factory=list)
     population_is_survivorship_tainted_proxy: bool | None = None
-    #: WO-M (2026-09-13) sweep-mechanics stamp (``SweepReport.mechanics``) — reporting only, so a
+    #: Sweep-mechanics stamp (``SweepReport.mechanics``, added 2026-09-13) — reporting only, so a
     #: verdict is never compared with one produced under different sweep mechanics. ``None`` ⇒ the
     #: returns came from a pre-fix sweep or from a provider that stamps nothing.
     sweep_mechanics: str | None = None
     #: ``ParamSet.params_are_grid_winner`` mirrored onto the verdict: False ⇒ these params are the
-    #: §6.3 envelope DEFAULTS substituted because the grid ranked NO config, not a sweep winner.
+    #: parameter envelope DEFAULTS substituted because the grid ranked NO config, not a sweep winner.
     #: Reporting only (it moves no threshold), but it is rendered as a banner and named in the notes
     #: so such a verdict never reads like one the grid selected.
     params_are_grid_winner: bool | None = None
-    #: WO-3 winner-stability FLAG (never part of the promotion rule).
+    #: Winner-stability FLAG (never part of the promotion rule).
     winner_stability: WinnerStability | None = None
     promotable: bool
     reasons: list[str]                              # every reason the report is NOT promotable
@@ -372,11 +374,11 @@ def _add_months(d: date, months: int) -> date:
 def walk_forward_splits(
     dates: Sequence[date], *, train_months: int = WF_TRAIN_MONTHS, test_months: int = WF_TEST_MONTHS
 ) -> list[tuple[date, date, date, date]]:
-    """Anchored walk-forward boundaries over observation ``dates`` (§6.4: 6 m train / 1 m test).
+    """Anchored walk-forward boundaries over observation ``dates`` (6 m train / 1 m test).
 
     Returns ``(train_start, train_end, test_start, test_end)`` tuples with exclusive ends and
     ``train_end == test_start``; the train window is always anchored at the first date. Folds whose
-    test window contains no observations are skipped. Pure and deterministic (§9.6): the same date
+    test window contains no observations are skipped. Pure and deterministic: the same date
     set always yields byte-identical splits.
     """
     ds = sorted(set(dates))
@@ -404,15 +406,15 @@ def cpcv_splits(
     purge: int = CPCV_PURGE_DAYS,
     embargo: int = CPCV_EMBARGO_DAYS,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Combinatorial purged CV index splits via skfolio (§6.4: purge 5 d, embargo 5 d).
+    """Combinatorial purged CV index splits via skfolio (purge 5 d, embargo 5 d).
 
     Returns ``(train_indices, test_indices)`` pairs over ``range(n_obs)`` daily observations.
-    skfolio already purges/embargoes; as an invariant enforcement (the §9.1 no-overlap property)
+    skfolio already purges/embargoes; as an invariant enforcement (the no-overlap property)
     every train index within ``purge`` observations before or ``embargo`` after any test block is
     dropped again here — belt and braces, so the guarantee cannot regress with a skfolio upgrade.
     Empty list when ``n_obs`` is too small to form meaningful folds — skfolio requires
     ``purge + embargo < (n_obs // n_folds) − 1``; below that a valid purged CPCV cannot be formed, so
-    we return ``[]`` (⇒ no CPCV folds ⇒ not promotable, §6.4 step 2) rather than raise.
+    we return ``[]`` (⇒ no CPCV folds ⇒ not promotable) rather than raise.
     """
     if n_obs < n_folds * 2:
         return []
@@ -436,11 +438,11 @@ def cpcv_splits(
     return out
 
 
-# --------------------------------------------------------------------------- promotion rule (§6.4/§9.1)
+# --------------------------------------------------------------------------- promotion rule
 def margin_floor_pct_per_day(
     cost_floor_pct: float | None, *, margin_floor_days: int = MARGIN_FLOOR_DAYS
 ) -> float | None:
-    """The WO-3 per-day expectancy floor = ``cost_floor_pct / margin_floor_days`` (see
+    """The per-day expectancy margin floor = ``cost_floor_pct / margin_floor_days`` (see
     :data:`MARGIN_FLOOR_DAYS` for the derivation). ``None`` in ⇒ ``None`` out."""
     if cost_floor_pct is None:
         return None
@@ -466,7 +468,7 @@ def realized_hold_floor_cells(
     cost_floor_pct: float | None,
     median_passing_expectancy_pct: float | None,
 ) -> list[MarginFloorCell]:
-    """The WO-3 floor re-based on each MEASURED holding period (R2, 2026-09-12) — REPORTING ONLY.
+    """The margin floor re-based on each MEASURED holding period (2026-09-12) — REPORTING ONLY.
 
     Same arithmetic as :func:`margin_floor_pct_per_day` (``cost_floor / sessions``), same round-trip
     floor, only the denominator changes: a CAP (20 swing / 120 positional) is an upper bound on the
@@ -474,7 +476,7 @@ def realized_hold_floor_cells(
     median is the one a reader should weigh the verdict against. ``headroom_x`` is the observed
     median passing-split expectancy over the cell's floor.
 
-    Pure and total (§9.6): missing inputs and non-positive holds yield fewer cells, never an
+    Pure and total: missing inputs and non-positive holds yield fewer cells, never an
     exception — this is a reporting path and must not be able to fail a validation run. A zero or
     negative hold is skipped because ``cost_floor / 0`` is not a per-day bar at all.
     """
@@ -512,20 +514,20 @@ def promotion_decision(
     cost_floor_pct: float | None = None,
     margin_floor_days: int = MARGIN_FLOOR_DAYS,
 ) -> tuple[bool, list[str]]:
-    """The deterministic §6.4 step-2 pass rule. Returns ``(promotable, reasons_not_promotable)``.
+    """The deterministic pass rule. Returns ``(promotable, reasons_not_promotable)``.
 
-    * no cited N ⇒ not promotable (E2);
+    * no cited N ⇒ not promotable;
     * no CPCV folds ⇒ not promotable (nothing was validated out-of-sample);
-    * fold-pass fraction ≥ ``fold_pass_min(N)`` (§9.1) — comparison stays **strict-<**, deliberately
-      unchanged by WO-3 (moving a documented boundary silently is a semantics trap);
-    * **margin floor (WO-3)**: median PASSING-split expectancy ≥ ``cost_floor_pct /
+    * fold-pass fraction ≥ ``fold_pass_min(N)`` — comparison stays **strict-<**, deliberately
+      unchanged by the margin floor (moving a documented boundary silently is a semantics trap);
+    * **margin floor**: median PASSING-split expectancy ≥ ``cost_floor_pct /
       margin_floor_days`` per day. FAIL-CLOSED — no cost floor supplied ⇒ not promotable, exactly
       like a missing N: a floor that silently no-ops when the caller forgets to pass it would
       re-open the near-zero-margin hole it exists to close;
-    * and, when a champion max-DD is provided (``ChampionChallenger`` seam, not yet built — plan §6.4),
+    * and, when a champion max-DD is provided (``ChampionChallenger`` seam, not yet built),
       max DD ≤ 1.25× champion's.
 
-    Winner stability is NOT here on purpose — WO-3 makes it a report-level flag, not a gate.
+    Winner stability is NOT here on purpose — it is a report-level flag, not a gate.
     """
     reasons: list[str] = []
     if n is None:
@@ -540,7 +542,7 @@ def promotion_decision(
             reasons.append(
                 f"CPCV fold-pass fraction {fold_pass_fraction:.1%} < fold_pass_min(N={n}) = {need:.0%}"
             )
-    # ---- WO-3 margin floor: "how often positive" is not "positive enough to be worth trading" ----
+    # ---- margin floor: "how often positive" is not "positive enough to be worth trading" ----
     floor = margin_floor_pct_per_day(cost_floor_pct, margin_floor_days=margin_floor_days)
     if floor is None:
         reasons.append(
@@ -573,9 +575,9 @@ _COST_FLOOR_MEMO: dict[str, float | None] = {}
 
 
 def default_cost_floor_pct(strategy_id: str) -> float | None:
-    """Round-trip friction (fees + spread, WO-2) at the ₹20,000 sweep sizing, in percent.
+    """Round-trip friction (fees + spread) at the ₹20,000 sweep sizing, in percent.
 
-    The WO-3 margin floor is a multiple of this. Derived from the SAME ``CostModel`` the sweeps and
+    The margin floor is a multiple of this. Derived from the SAME ``CostModel`` the sweeps and
     the live gate use, so the floor can never drift from the costs the returns were charged. Unknown
     strategies fall back to **CNC** (delivery — the dearer surface, and the product every non-``orb``
     baseline and the filings rules trade), so an unmapped strategy gets the STRICTER floor.
@@ -609,7 +611,7 @@ Splitter = Callable[[int], list[tuple[np.ndarray, np.ndarray]]]
 
 
 class ValidationPipeline:
-    """§3.2.10 ``ValidationPipeline`` (E2): walk-forward + CPCV over cost-adjusted returns.
+    """``ValidationPipeline``: walk-forward + CPCV over cost-adjusted returns.
 
     Parameters
     ----------
@@ -617,24 +619,24 @@ class ValidationPipeline:
         ``(strategy_id, params) -> pd.Series`` of cost-adjusted DAILY net returns (the
         ``SweepRunner.returns_for`` closure in production; a synthetic series in tests).
     clock:
-        The single source of "now" (§3.2) — stamps ``generated_at`` / ``evaluated_at``.
+        The single source of "now" — stamps ``generated_at`` / ``evaluated_at``.
     conn:
         SQLite connection for the ``param_sets`` audit row (``None`` ⇒ persistence skipped —
-        offline analysis only). ``learning`` writes only its own tables (R4, §3.2.10).
+        offline analysis only). ``learning`` writes only its own tables.
     reports_dir:
         Directory for the md+json report artifact (``None`` ⇒ artifact skipped).
     splitter:
-        CPCV splitter override (defaults to skfolio :func:`cpcv_splits` with the §6.4 knobs).
+        CPCV splitter override (defaults to skfolio :func:`cpcv_splits` with the default knobs).
     champion_max_dd_provider:
-        ``strategy_id -> champion max-DD %`` (``ChampionChallenger`` seam, not yet built — plan §6.4); ``None`` values
-        skip the 1.25× DD comparison (no champion exists in Phase 1).
+        ``strategy_id -> champion max-DD %`` (``ChampionChallenger`` seam, not yet built); ``None`` values
+        skip the 1.25× DD comparison (no champion exists yet).
     cost_floor_provider:
-        ``strategy_id -> round-trip friction %`` for the WO-3 margin floor. Defaults to
+        ``strategy_id -> round-trip friction %`` for the margin floor. Defaults to
         :func:`default_cost_floor_pct` (the CostModel at the ₹20,000 sweep sizing), so the floor is
         enforced even when the caller passes nothing; a ``ParamSet.cost_floor_pct`` (the sweep's own
         measured floor) overrides it per candidate.
     margin_floor_days:
-        The WO-3 constant (default :data:`MARGIN_FLOOR_DAYS` = 20) — see its derivation.
+        The margin-floor constant (default :data:`MARGIN_FLOOR_DAYS` = 20) — see its derivation.
     """
 
     def __init__(
@@ -675,10 +677,10 @@ class ValidationPipeline:
                 )
         self._splitter = splitter
 
-    # ------------------------------------------------------------------ public surface (§3.2.10)
+    # ------------------------------------------------------------------ public surface
     async def validate(self, strategy_id: str, params: ParamSet) -> ValidationReport:
-        """Validate a candidate (pinned §3.2.10 signature). CPU-bound work is executor-offloaded
-        (`asyncio.to_thread`) so the in-engine caller never blocks the loop (§2.2)."""
+        """Validate a candidate (pinned signature). CPU-bound work is executor-offloaded
+        (`asyncio.to_thread`) so the in-engine caller never blocks the loop."""
         return await asyncio.to_thread(self.validate_sync, strategy_id, params)
 
     def validate_sync(self, strategy_id: str, params: ParamSet) -> ValidationReport:
@@ -742,7 +744,7 @@ class ValidationPipeline:
             cost_floor_pct=cost_floor,
             margin_floor_days=self._margin_floor_days,
         )
-        # R2 (2026-09-12) reporting-only block. Built AFTER promotion_decision above and fed into
+        # Reporting-only block (2026-09-12). Built AFTER promotion_decision above and fed into
         # nothing but the artifact: the verdict must stay a function of the registered denominator,
         # never of a horizon measured on the same run it is judging.
         hold_cells = realized_hold_floor_cells(params.realized_hold, cost_floor, median_passing)
@@ -758,8 +760,8 @@ class ValidationPipeline:
             )
         notes.extend(self._realized_hold_notes(params.realized_hold, hold_cells))
         if params.params_are_grid_winner is False:
-            # Reporting only — deliberately NOT a promotion gate: gating on it would move the §6.4
-            # rule, which no work order registers. What it must never do is render silently, because
+            # Reporting only — deliberately NOT a promotion gate: gating on it would move the
+            # promotion rule, which no registered change covers. What it must never do is render silently, because
             # every other field here (the cited N, the sweep context, the stability flag) describes
             # a grid the winner did not come out of.
             notes.append(
@@ -817,7 +819,7 @@ class ValidationPipeline:
     def _realized_hold_notes(
         self, hold: RealizedHold | None, cells: Sequence[MarginFloorCell]
     ) -> list[str]:
-        """R2 reporting-only notes: the measured hold, the re-based floors, open-vs-closed trades.
+        """Reporting-only notes: the measured hold, the re-based floors, open-vs-closed trades.
 
         Rendered into the md artifact so a reader who only ever sees the report gets the two facts
         that decide how comfortable the verdict actually is — the horizon the floor was quoted at
@@ -886,7 +888,7 @@ class ValidationPipeline:
     def _cpcv(self, values: np.ndarray) -> tuple[list[CPCVFold], float | None, float | None]:
         """Returns ``(folds, pass_fraction, median_passing_expectancy_pct)``.
 
-        The median is over the PASSING splits only (WO-3): it answers "when this edge worked, by how
+        The median is over the PASSING splits only: it answers "when this edge worked, by how
         much?" — the question a pass FRACTION cannot answer, and the one four boundary-exact rsi2
         promotions turned out to answer with ~0.0006%/day.
         """
@@ -895,7 +897,7 @@ class ValidationPipeline:
         for i, (train_idx, test_idx) in enumerate(splits):
             sl = values[np.asarray(test_idx, dtype=np.int64)]
             expectancy = float(sl.mean() * 100.0) if len(sl) else None
-            passed = expectancy is not None and expectancy > 0.0  # > 0 after costs, strictly (§6.4)
+            passed = expectancy is not None and expectancy > 0.0  # > 0 after costs, strictly
             folds.append(
                 CPCVFold(
                     split=i,
@@ -912,7 +914,7 @@ class ValidationPipeline:
         return folds, sum(f.passed for f in folds) / len(folds), median_passing
 
     def _persist(self, report: ValidationReport) -> None:
-        """Audit row per §6.4 step 1: every surfaced candidate is a ``param_sets`` row
+        """Audit row: every surfaced candidate is a ``param_sets`` row
         (``status='candidate'``); the deflating N lives INSIDE the cited report JSON."""
         if self._conn is None:
             return

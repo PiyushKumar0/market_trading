@@ -1,21 +1,21 @@
 #!/usr/bin/env python
-"""Phase-1 backtest CLI (§8.2 G1) — sweep + validate + report for the four price baselines.
+"""Backtest CLI — sweep + validate + report for the four price baselines.
 
     python scripts/backtest.py <orb|rsi2|trend|mom|all> --from 2024-01-01 --to 2025-12-31 \
         [--grid-density coarse|medium|fine] [--symbols RELIANCE,TCS] [--index-symbol "NIFTY 50"] \
         [--reports-dir data/reports] [--margin-floor-days 20]
 
-For each strategy it: (1) runs the vectorbt sweep over the §6.3 envelope grid — the sweep reports the
-**trial count N** (every configuration evaluated, §6.4 step 1); (2) picks the best config by
+For each strategy it: (1) runs the vectorbt sweep over the parameter-envelope grid — the sweep reports the
+**trial count N** (every configuration evaluated); (2) picks the best config by
 cost-adjusted expectancy; (3) runs the ValidationPipeline (anchored walk-forward + skfolio CPCV on
 cost-adjusted returns) citing that N; (4) writes the sweep + validation reports to ``data/reports``
 and persists the candidate to SQLite ``param_sets``. Honest negative results are surfaced, never
-massaged (C9): a negative expectancy / non-promotable verdict is a valid outcome and is printed.
+massaged: a negative expectancy / non-promotable verdict is a valid outcome and is printed.
 
 This is a **standalone, blocking** tool — fine here. The in-engine nightly re-optimization path
-(Phase 2 ``ChampionChallenger``) must run the identical logic **executor-offloaded**
+(``ChampionChallenger``) must run the identical logic **executor-offloaded**
 (``ValidationPipeline.validate`` is already an ``asyncio.to_thread`` wrapper) so it never blocks the
-event loop (§2.2). Exit codes: 0 = ran; 2 = no symbols/bars resolved (nothing to backtest).
+event loop. Exit codes: 0 = ran; 2 = no symbols/bars resolved (nothing to backtest).
 """
 
 from __future__ import annotations
@@ -49,13 +49,13 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 
 _log = get_logger("scripts.backtest")
 
-#: Canonical reference index for the ``rsi2`` regime filter (§6.1 "above rising 50-DMA index").
+#: Canonical reference index for the ``rsi2`` regime filter ("above rising 50-DMA index").
 #: Mirrors ``engine.ops.main.INDEX_SYMBOL`` / the ``FeatureEngine`` default so the DEFAULT backtest
 #: validates the SAME pinned rule the live ``Rsi2Scanner`` runs — never the all-regime variant. Pass
 #: ``--index-symbol ""`` (empty) to deliberately disable the filter (all-regime; disclosed in notes).
 _DEFAULT_INDEX_SYMBOL = "NIFTY 50"
 
-#: WO-3 winner-stability adjacency (manager-decided wiring, 2026-08-13): DAILY strategies only —
+#: Winner-stability adjacency (manager-decided wiring, 2026-08-13): DAILY strategies only —
 #: ``orb`` is the intraday/1m-scale baseline and stays single-density (its ``ParamSet`` never gets
 #: an ``adjacent_density``, so the validate report's ``WinnerStability`` reads "not assessed", by
 #: design). ``PRICE_BASELINES`` minus ``orb``.
@@ -121,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _default_params(strategy_id: str) -> dict[str, float]:
-    """§6.3 envelope defaults (bare keys) for ``strategy_id`` — the champion baseline config."""
+    """Parameter-envelope defaults (bare keys) for ``strategy_id`` — the champion baseline config."""
     prefix = strategy_id + "."
     env = load_envelope()
     return {k[len(prefix):]: float(v["default"]) for k, v in env.items() if k.startswith(prefix)}
@@ -148,7 +148,7 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
     return {
         "n_trades": float(s.n_trades),
         "n_closed": float(s.n_closed),
-        # WO-M (iii): every per-trade key here NAMES its population. This dict is persisted verbatim
+        # Every per-trade key here NAMES its population. This dict is persisted verbatim
         # into ``param_sets.validation_report``, where a query spans rows written on both sides of
         # 2026-09-13 — so the pre-fix keys ``win_rate`` and ``sweep_expectancy_pct``, whose meaning
         # would have silently changed from all-trades to closed-only under the same name, are RETIRED
@@ -166,10 +166,10 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
 
 
 def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
-    """R2 (2026-09-12): the winning config's MEASURED holding distribution, in SESSIONS.
+    """Added 2026-09-12: the winning config's MEASURED holding distribution, in SESSIONS.
 
     Returns ``None`` for an intraday sweep (``orb``), whose ``hold_bars_*`` are 1-minute bars — the
-    WO-3 floor's denominator is sessions, and re-labelling 1m bars as sessions would produce a floor
+    margin floor's denominator is sessions, and re-labelling 1m bars as sessions would produce a floor
     ~375× too strict and a headroom multiple to match. ``None`` also when the config scored no
     trades: there is no realized horizon to report, and the reporting cells are simply omitted.
     """
@@ -181,8 +181,8 @@ def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
         n_closed=s.n_closed,
         n_open=s.n_open,
         # RealizedHold keeps its field meanings: ``_pct`` is the ALL-trades mean, ``_closed_pct``
-        # the closed-only one. WO-M changed which of the two the sweep ranks on (the closed one),
-        # not what either field holds — so the report can label both correctly.
+        # the closed-only one. The sweep-mechanics fix changed which of the two the sweep ranks on
+        # (the closed one), not what either field holds — so the report can label both correctly.
         expectancy_per_trade_pct=s.expectancy_all_pct,
         expectancy_per_trade_closed_pct=s.expectancy_closed_pct,
         mean_sessions=s.hold_bars_mean,
@@ -204,7 +204,7 @@ def _adjacent_winner(
     grid_density: str,
     run_adjacent: bool,
 ) -> tuple[str | None, dict[str, float] | None]:
-    """WO-3 winner-stability input (manager-decided wiring): for a DAILY strategy, ALSO run the
+    """Winner-stability input (manager-decided wiring): for a DAILY strategy, ALSO run the
     adjacent grid density (coarse<->medium) and return ``(adjacent_density, adjacent_winner)``.
 
     ``orb`` and any density outside the coarse/medium pair (e.g. ``fine``) return ``(None, None)`` —
@@ -266,10 +266,10 @@ def _run_one(
             file=sys.stderr,
         )
 
-    # The grid can rank NOTHING: since WO-M item (iii) a config that closed no round trip inside the
+    # The grid can rank NOTHING: since the sweep-mechanics fix a config that closed no round trip inside the
     # window is excluded rather than ranked on its unrealized marks, so a window shorter than the
     # strategy's realized hold — or any vectorbt schema change that makes every open/closed split
-    # unreadable — leaves ``best_params`` None. Falling back to the §6.3 defaults keeps the run
+    # unreadable — leaves ``best_params`` None. Falling back to the envelope defaults keeps the run
     # producing a verdict, but that verdict is about the DEFAULT config, not about a swept winner,
     # and the console line plus the artifact must both say so. ASCII only (cp1252 console).
     grid_selected_winner = sweep.best_params is not None
@@ -289,18 +289,18 @@ def _run_one(
     params = ParamSet(
         strategy_id=strategy_id,
         params=best,
-        trial_count_n=sweep.trial_count_n,           # §6.4: the cited N = every config evaluated
+        trial_count_n=sweep.trial_count_n,           # the cited N = every config evaluated
         sweep_stats=_sweep_stats_dict(sweep, best),
-        cost_floor_pct=sweep.cost_floor_pct,          # WO-3 margin floor: the sweep's OWN measured floor
-        grid_density=sweep.grid_density,              # WO-3 winner-stability: this run's density
-        adjacent_density=adjacent_density,            # None for orb / a non-adjacent density (WO-3)
+        cost_floor_pct=sweep.cost_floor_pct,          # margin floor: the sweep's OWN measured floor
+        grid_density=sweep.grid_density,              # winner-stability: this run's density
+        adjacent_density=adjacent_density,            # None for orb / a non-adjacent density
         adjacent_winner=adjacent_winner,
-        # R2 (2026-09-12), REPORTING ONLY — neither reaches the promotion rule:
+        # Realized hold (2026-09-12), REPORTING ONLY — neither reaches the promotion rule:
         realized_hold=_realized_hold(sweep, best),    # the horizon the floor should be read against
         population_is_survivorship_tainted_proxy=(    # a present-day list applied backwards
             sweep.population_is_survivorship_tainted_proxy
         ),
-        # WO-M (2026-09-13): the sweep's mechanics stamp travels into the validation artifact, so a
+        # Since 2026-09-13: the sweep's mechanics stamp travels into the validation artifact, so a
         # verdict is never read beside one produced under the pre-fix mechanics.
         sweep_mechanics=sweep.mechanics,
         # ... and so does whether these params were RANKED or merely defaulted to (see above).

@@ -1,4 +1,4 @@
-"""WO-26a (2026-08-25): the tick-flush starvation class, closed.
+"""Store isolation (2026-08-25): the tick-flush starvation class, closed.
 
 Three trading days died of the same mechanism. ``flush_ticks`` is called once per tick event whose
 batch is due, it serialized whole flushes on ``_flush_lock``, and every wrapper on ``MarketStore``
@@ -52,7 +52,7 @@ from tests.unit.test_health_wo24 import (
 SLOW_FLUSH_MAX_S = 5.0
 
 #: Enough blocked calls to saturate the DEFAULT executor too (its width is min(32, cpu+4)), which is
-#: what makes the isolation test a real regression guard rather than a tautology: before WO-26a these
+#: what makes the isolation test a real regression guard rather than a tautology: before the store isolation change these
 #: same calls WERE default-executor threads.
 SATURATING_CALLS = 40
 
@@ -299,7 +299,7 @@ async def test_a_saturated_store_pool_cannot_starve_an_unrelated_to_thread(tmp_p
     """08-25 in one assertion.
 
     ``SATURATING_CALLS`` blocked store calls is more than the default executor's whole width, so
-    before WO-26a this is precisely the state the process was in when the intelligence layer went
+    before the store isolation change this is precisely the state the process was in when the intelligence layer went
     silent: every default-executor thread held by the store, nothing else able to get one. With the
     store on its own pool the unrelated offload does not even notice.
     """
@@ -442,14 +442,14 @@ async def test_the_abandoned_count_drops_once_the_stuck_probe_finally_answers(ca
 
 
 def test_no_shared_executor_dispatch_remains_in_store_py():
-    """2026-09-02 review: five pre-WO-26a filings wrappers were missed by the to_thread->_off
+    """2026-09-02 review: five filings wrappers that predate the store isolation change were missed by the to_thread->_off
     migration, silently re-opening the shared-executor starvation path. Pin the invariant the
-    WO-26a docstrings claim ("never asyncio.to_thread") at the source level."""
+    store-isolation docstrings claim ("never asyncio.to_thread") at the source level."""
     from pathlib import Path
 
     import engine.marketdata.store as store_mod
 
     source = Path(store_mod.__file__).read_text(encoding="utf-8")
-    # Call sites only — the WO-26a docstrings legitimately NAME asyncio.to_thread while explaining
+    # Call sites only — the store-isolation docstrings legitimately NAME asyncio.to_thread while explaining
     # why it must never be used here.
     assert "asyncio.to_thread(" not in source

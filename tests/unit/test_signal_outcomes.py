@@ -1,4 +1,4 @@
-"""Review §9 #5/#6: the hindsight ``signal_outcomes`` job."""
+"""The hindsight ``signal_outcomes`` job."""
 
 from __future__ import annotations
 

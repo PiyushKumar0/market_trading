@@ -1,4 +1,4 @@
-"""scripts/backtest_market_pause.py: the pre-registered market-wide pause study (review §9 #1). Synthetic only."""
+"""scripts/backtest_market_pause.py: the pre-registered market-wide pause study. Synthetic only."""
 
 from __future__ import annotations
 

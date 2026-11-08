@@ -1,4 +1,4 @@
-"""Retention of state snapshots / NSSM service logs (§10.5) and the stderr level split (core.log)."""
+"""Retention of state snapshots / NSSM service logs and the stderr level split (core.log)."""
 
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ def test_rotated_service_logs_past_90_days_go_but_live_logs_stay(dirs):
     assert report["service_logs_deleted"] == 1
 
 
-# --------------------------------------------------------------------------- DuckDB exports (§10.5)
+# --------------------------------------------------------------------------- DuckDB exports
 def market_export(backups, at: datetime, *, tmp: bool = False):
     p = backups / f"market-{at:%Y%m%dT%H%M%S}{'.tmp' if tmp else ''}"
     p.mkdir()

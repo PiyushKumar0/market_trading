@@ -22,7 +22,7 @@ def open_readonly(db_path: Path) -> duckdb.DuckDBPyConnection:
 
     ``MarketStore.open()`` runs schema DDL and is a writer, so it is deliberately not used here.
     DuckDB takes a file lock even for a read-only attach, so a running engine makes this fail — which
-    is exactly the refusal the plan asks for, rather than a half-run against a moving store.
+    is exactly the refusal wanted, rather than a half-run against a moving store.
     """
     p = Path(db_path)
     if not p.exists():

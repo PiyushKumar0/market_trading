@@ -1,22 +1,22 @@
-"""Shareholding pattern (SHP) + pledge → ``shp_quarterly`` (§2.8 job ``filings_shp``, ~18:50 — O14, E5).
+"""Shareholding pattern (SHP) + pledge → ``shp_quarterly`` (job ``filings_shp``, ~18:50).
 
 Daily incremental (RUN_LATEST, never entry-blocking): scan the NSE ``corporate-share-holdings-master``
 cross-section for submissions with ``broadcastDate`` newer than the stored watermark; for each new
 (symbol, quarter) fetch the BSE SHP detail stack — the SEBI-format quarterly tables that carry the
 per-category **pledged/encumbered** + locked shares NSE's master does not — and upsert one row per
-category into ``shp_quarterly`` (§2.8.1). The BSE detail is two calls (``SHPQNewFormat/w`` quarter
+category into ``shp_quarterly``. The BSE detail is two calls (``SHPQNewFormat/w`` quarter
 index → ``CorporatesSHPSecuritybeta/w`` detail per ``qtrid``), paced ≥1.5 s apart (observed safe).
 
 The BSE scrip code comes from ``symbol_isin`` (seeded by ``isin_map`` / the backfill). A symbol with
 no scrip-code mapping is **skipped-and-counted**, never a failure — the feed degrades to less data,
-never raises (§2.8 rule iii, news-equal E5). A per-symbol BSE fetch failure (incl. the documented
+never raises. A per-symbol BSE fetch failure (incl. the documented
 ``error_Bse.html``-as-200 quirk via :func:`engine.core.bse_http.bse_get`) degrades that symbol only.
 
 DATA ONLY in stage 1 (no decision path touched).
 
-**BSE SHP detail shape — LIVE-VERIFIED 2026-07-16** (the original Phase-1 probe had guessed the WRONG
+**BSE SHP detail shape — LIVE-VERIFIED 2026-07-16** (the original probe had guessed the WRONG
 endpoints — ``ShareholdingPattern/w`` / ``ShareholdingPatternGetData/w`` — which returned
-``error_Bse.html``; the §2.8-named endpoints were re-probed live during this build):
+``error_Bse.html``; the endpoints below were re-probed live during this build):
   * ``SHPQNewFormat/w?scripcode=`` → ``{"Table": [{yr, qtrid (float), qtr ("June 2026"),
     filing_date_time, XbrlFile, ...}]}`` — the filed-quarter index. ``qtrid`` is a float (``130.0``);
     the quarter is a "<Month> <Year>" LABEL, not a date, so we derive the quarter-END date from it.
@@ -47,16 +47,16 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_shp")
 
-#: NSE SHP daily-incremental master cross-section (equities). [VERIFY Phase-1]; probe-verified list shape.
+#: NSE SHP daily-incremental master cross-section (equities). [VERIFY]; probe-verified list shape.
 NSE_SHP_MASTER_URL = "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities"
 
-#: BSE SHP detail stack (§2.8) — endpoints and shape live-verified 2026-07-16 (module docstring).
+#: BSE SHP detail stack — endpoints and shape live-verified 2026-07-16 (module docstring).
 BSE_SHP_QUARTER_INDEX_URL = "https://api.bseindia.com/BseIndiaAPI/api/SHPQNewFormat/w?scripcode={code}"
 BSE_SHP_DETAIL_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/CorporatesSHPSecuritybeta/w?scripcode={code}&qtrid={qtrid}"
 )
 
-#: BSE per-request spacing (§2.8: ≥1.5 s observed safe). Module indirection so tests skip the wait.
+#: BSE per-request spacing (≥1.5 s observed safe). Module indirection so tests skip the wait.
 _BSE_SPACING_S = 1.5
 _sleep = asyncio.sleep
 
@@ -66,7 +66,7 @@ SOURCE_BSE = "bse"
 
 
 class FilingsShpResult(BaseModel):
-    """One run's outcome (never an exception, E5)."""
+    """One run's outcome (never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -149,7 +149,7 @@ def _bse_table(payload: Any, key: str = "Table") -> list[dict[str, Any]]:
 
 # --------------------------------------------------------------------------- NSE master (VERIFIED shape)
 class ShpSubmission(BaseModel):
-    """One NSE SHP-master submission (the daily new-filing detection unit, §2.8)."""
+    """One NSE SHP-master submission (the daily new-filing detection unit)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -208,7 +208,7 @@ _LOCKED_ALIASES = ("fld_nooflockedinshares", "lockedshares", "noofshareslocked")
 _DETAIL_ROW_KEYS = ("Table1", "Table5", "Table")
 
 #: The DECLARATION row (result set ``Table``) carries the quarter's disclosure timestamp
-#: ``Fld_AuthoriseDate`` — the point-in-time key (§2.8 rule i) for backfill-path rows, where no
+#: ``Fld_AuthoriseDate`` — the point-in-time key for backfill-path rows, where no
 #: NSE-master broadcast is available. Alias fallbacks defensive like every other field.
 _AUTHORISE_ALIASES = ("fld_authorisedate", "authorisedate", "fld_authorizedate")
 _DECLARATION_ROW_KEYS = ("Table", "Table4", "Table2")
@@ -272,7 +272,7 @@ def parse_shp_quarter_index(payload: Any) -> list[dict[str, Any]]:
 
 
 def qtrid_for(quarter_index: list[dict[str, Any]], qtr_end: date) -> str | None:
-    """The ``qtrid`` whose quarter-end matches ``qtr_end`` (the BSE detail-fetch key, §2.8)."""
+    """The ``qtrid`` whose quarter-end matches ``qtr_end`` (the BSE detail-fetch key)."""
     for entry in quarter_index:
         if entry.get("qtr_end") == qtr_end:
             return entry.get("qtrid")
@@ -297,7 +297,7 @@ def parse_shp_detail(
     the ``Table1`` SEBI table). A row without a category label is skipped. ``source='bse'``.
 
     ``broadcast_dt=None`` (the backfill path — quarter loops have no NSE-master timestamp) falls
-    back to the payload's OWN declaration-row ``Fld_AuthoriseDate`` (§2.8 rule i); still-None rows
+    back to the payload's OWN declaration-row ``Fld_AuthoriseDate``; still-None rows
     are stored with NULL broadcast_dt and excluded by point-in-time consumers — never invented."""
     if broadcast_dt is None:
         broadcast_dt = declaration_broadcast_dt(payload)
@@ -327,7 +327,7 @@ def parse_shp_detail(
 
 
 class FilingsShpJob:
-    """§2.8 job ``filings_shp`` — SHP + pledge history → ``shp_quarterly`` (run-latest, E5)."""
+    """Job ``filings_shp`` — SHP + pledge history → ``shp_quarterly`` (run-latest)."""
 
     def __init__(
         self,
@@ -352,7 +352,7 @@ class FilingsShpJob:
 
     async def run(self) -> FilingsShpResult:
         """Scan the NSE SHP-master for new submissions and fetch the BSE detail stack for each.
-        Run-latest (§2.6): a single pass covers the gap. Never raises into the scheduler (E5)."""
+        Run-latest: a single pass covers the gap. Never raises into the scheduler."""
         try:
             resp = await nse_get(self._http, NSE_SHP_MASTER_URL, timeout=self._timeout)
             submissions = parse_shp_master(json.loads(resp.content))
@@ -458,7 +458,7 @@ class FilingsShpJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Filings are NEVER load-bearing (§2.8 rule iii): warning, not entry-blocking.
+            # Filings are NEVER load-bearing: warning, not entry-blocking.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Shareholding-pattern (SHP) feed degraded",
             body=(

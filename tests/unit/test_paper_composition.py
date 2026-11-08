@@ -1,4 +1,4 @@
-"""The paper autopilot as the composition root builds it (plan Q4.1-Q4.9)."""
+"""The paper autopilot as the composition root builds it."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ async def compose(conn, bus, now):
     async def build(*, store: Store | None = None, limits: Limits | None = None, real=lambda: RiskState.NORMAL,
                     notify=opsmain.no_notify):
         limits = limits or Limits()
-        shipped = load_settings()          # the stop path: these tests check the GTT wiring (D14 runs in paper e2e)
+        shipped = load_settings()          # the stop path: these tests check the GTT wiring (the paper no-stop test runs in paper e2e)
         settings = shipped.model_copy(update={"paper": shipped.paper.model_copy(update={"no_stop_strategies": ()})})
         stack = await opsmain._compose_paper(
             conn, clock, calendar, bus, settings, control,
@@ -164,7 +164,7 @@ async def test_the_position_book_is_given_the_full_round_trip_and_the_spread_fre
 
 
 def test_a_misspelled_no_stop_strategy_is_named_at_boot(caplog):
-    """PositionBook matches ids exactly, so ``hi_52`` would silently drop hi52 from the D14 test."""
+    """PositionBook matches ids exactly, so ``hi_52`` would silently drop hi52 from the paper no-stop test."""
     caplog.set_level(logging.WARNING)
     assert opsmain._unknown_no_stop_strategies(("hi_52", "ins", "brk20")) == ["hi_52"]
     assert [r for r in caplog.records if r.getMessage() == "paper_no_stop_unknown_strategy"]

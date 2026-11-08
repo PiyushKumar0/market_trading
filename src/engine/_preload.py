@@ -25,7 +25,7 @@ mid-import of a module sklearn needs (numpy, scipy, joblib) would deadlock. A gu
 before ``engine`` is out of reach; a scikit-learn that is installed but fails to import raises at the
 first guarded import instead of letting the native stack load unguarded.
 
-The Phase-0 install smoke test (``scripts/smoke_test.py``) independently validates the coexistence in
+The install smoke test (``scripts/smoke_test.py``) independently validates the coexistence in
 an isolated subprocess, and the startup self-test surfaces :func:`guard_armed` for operational visibility.
 """
 

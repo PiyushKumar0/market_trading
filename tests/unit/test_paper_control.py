@@ -1,4 +1,4 @@
-"""PaperControl over paper_state and PaperSettings (plan Q4.0). The Telegram flow is in
+"""PaperControl over paper_state and PaperSettings. The Telegram flow is in
 test_telegram_commands.py, GET /paper in test_api_routes.py."""
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def test_active_halts_excludes_cleared(conn, clock):
 def test_shipped_paper_settings_apart_from_the_go_live_flag():
     assert load_settings().paper.model_copy(update={"subsystem_enabled": False}) == PaperSettings(
         subsystem_enabled=False, seed=20261006, exit_minutes_before_close=10, exit_working_timeout_min=5,
-        no_stop_strategies=(hi52.STRATEGY_ID, ins.STRATEGY_ID, brk20.STRATEGY_ID),   # D14, pre-registered C5
+        no_stop_strategies=(hi52.STRATEGY_ID, ins.STRATEGY_ID, brk20.STRATEGY_ID),   # the paper no-stop test, pre-registered no-stop verdict
     )
 
 

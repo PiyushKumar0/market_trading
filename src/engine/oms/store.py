@@ -1,4 +1,4 @@
-"""Order persistence over the state.db SQLite connection (WO-P3-1, 2026-09-10; §4.2, R8).
+"""Order persistence over the state.db SQLite connection (2026-09-10).
 
 Follows the repo's state-store idiom (``engine.risk.mode`` / ``engine.risk.kill``): the caller owns
 the connection (opened by :func:`engine.core.db.connect`, WAL, single writer), the SQL is
@@ -9,19 +9,19 @@ hand-written next to its owner, and a state change that must precede a side effe
 ``orders`` row and its ``order_events`` row in ONE transaction and returns only after the COMMIT, so
 a caller that acts (places/modifies/cancels a broker order) strictly after ``record`` returns can
 never act on a state that isn't durable. A crash in the gap leaves a consistent DB and the reconciler
-a complete audit chain (R5/R8) — the same before-act ordering the kill switch uses (R10).
+a complete audit chain — the same before-act ordering the kill switch uses.
 
 Two write guards, both raising rather than absorbing:
 
 * a persisted **terminal** order rejects every further record — a FILLED/CANCELLED/REJECTED/LAPSED
-  row is never re-opened (§3.5.1);
+  row is never re-opened;
 * a record whose ``order_before`` does not match the persisted state is refused
   (:class:`StaleOrderWrite`) — a compare-and-swap, so a caller holding a stale snapshot cannot roll
   the row backwards over a concurrent write.
 
 A no-op postback (a replay, an intermediate, a held cancel intent) is audited through
 :meth:`OrderStore.record_noop`, which writes the ``order_events`` row ALONE and is therefore allowed
-on a terminal row — §3.5.1 promises every broker frame is recorded, and "terminal is final" is a
+on a terminal row — every broker frame is recorded, and "terminal is final" is a
 statement about the ``orders`` row, not about the audit trail (2026-09-10 review).
 """
 
@@ -72,7 +72,7 @@ _SELECT = f"SELECT {', '.join(_ORDER_COLUMNS)} FROM orders"
 
 
 class TerminalOrderWrite(RuntimeError):
-    """A record against an order already persisted in a terminal state (§3.5.1: never re-opened)."""
+    """A record against an order already persisted in a terminal state (never re-opened)."""
 
 
 class StaleOrderWrite(RuntimeError):
@@ -80,7 +80,7 @@ class StaleOrderWrite(RuntimeError):
 
 
 def _text(value: Decimal | None) -> str | None:
-    """Money as TEXT (§4.2): SQLite has no decimal type and floats corrupt ticks."""
+    """Money as TEXT: SQLite has no decimal type and floats corrupt ticks."""
     return None if value is None else str(value)
 
 
@@ -90,7 +90,7 @@ def _ts(value: datetime | None) -> str | None:
 
 def _json(value: dict[str, Any] | None) -> str | None:
     # default=str so a Decimal/datetime that reached a payload serialises instead of exploding at the
-    # point of persistence (losing the audit row would be worse than losing the exact type, R8).
+    # point of persistence (losing the audit row would be worse than losing the exact type).
     return None if value is None else json.dumps(value, default=str, sort_keys=True)
 
 
@@ -132,7 +132,7 @@ def _row_to_order(row: sqlite3.Row) -> PlatformOrder:
 
 
 class OrderStore:
-    """``orders`` + ``order_events`` persistence. The caller owns the connection (§4.1 single writer)."""
+    """``orders`` + ``order_events`` persistence. The caller owns the connection (single writer)."""
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -140,7 +140,7 @@ class OrderStore:
     # ----------------------------------------------------------------- writes
     def insert(self, order: PlatformOrder) -> None:
         """Insert a new order row. NOT an upsert — a duplicate ``order_id`` raises ``IntegrityError``
-        (a re-inserted order is a duplicate-order hazard, the §4 review priority)."""
+        (a re-inserted order is a duplicate-order hazard)."""
         placeholders = ", ".join("?" for _ in _ORDER_COLUMNS)
         self._conn.execute(
             f"INSERT INTO orders ({', '.join(_ORDER_COLUMNS)}) VALUES ({placeholders})",
@@ -150,7 +150,7 @@ class OrderStore:
     def record(
         self, order_before: PlatformOrder, order_after: PlatformOrder, event: OrderEvent
     ) -> None:
-        """Persist a transition: the updated order row AND its event, in ONE transaction (R8).
+        """Persist a transition: the updated order row AND its event, in ONE transaction.
 
         Returns only after the COMMIT — the caller acts (broker call, alert, protection placement)
         strictly afterwards, so no side effect can precede its durable record.
@@ -161,7 +161,7 @@ class OrderStore:
             The order was never :meth:`insert`ed.
         TerminalOrderWrite
             The persisted row is already terminal. A no-op duplicate event for a terminal order (a
-            replayed postback, §3.5.1) goes to :meth:`record_noop` instead — it is still audited.
+            replayed postback) goes to :meth:`record_noop` instead — it is still audited.
         StaleOrderWrite
             The persisted state is not ``order_before.state`` — a stale snapshot; refused.
         """
@@ -212,10 +212,10 @@ class OrderStore:
     def record_noop(self, order_id: str, event: OrderEvent) -> None:
         """Audit a postback that changed nothing: writes ONLY the ``order_events`` row.
 
-        §3.5.1 promises every broker frame is recorded, but :meth:`record` refuses terminal rows —
+        Every broker frame is recorded, but :meth:`record` refuses terminal rows —
         so a replayed postback against a FILLED/CANCELLED order had nowhere to land and the audit
         chain silently lost it (2026-09-10 review). An unrecorded broker action is an unexplained
-        one, which is exactly what the Reconciler (R5) later has to explain. This door is therefore
+        one, which is exactly what the Reconciler later has to explain. This door is therefore
         allowed on terminal rows; it never touches the ``orders`` row, so "terminal is final" holds.
 
         Raises
@@ -226,7 +226,7 @@ class OrderStore:
             The event is not an annotated no-op: it claims a transition (``from_state != to_state``)
             OR it is an unannotated self-edge — the PARTIALLY_FILLED accretion is a REAL transition
             that moves ``filled_qty`` (2026-09-10 round-3 review: routing it here audited a clean
-            event while the fill never reached the row, an under-protected position, R3). Both
+            event while the fill never reached the row, an under-protected position). Both
             belong in :meth:`record`, which applies the order-row guards.
         """
         annotated = any(event.payload.get(flag) for flag in NOOP_FLAGS)
@@ -289,7 +289,7 @@ class OrderStore:
         return None if row is None else _row_to_order(row)
 
     def by_broker_id(self, broker_order_id: str | None) -> PlatformOrder | None:
-        """Correlate a postback to a platform order (A3). A NULL broker id never matches — an
+        """Correlate a postback to a platform order. A NULL broker id never matches — an
         un-correlated order must go through the pending-correlation buffer, not a NULL join."""
         if broker_order_id is None:
             return None
@@ -308,7 +308,7 @@ class OrderStore:
         return [_row_to_order(r) for r in rows]
 
     def events(self, order_id: str) -> list[OrderEvent]:
-        """The order's transition audit trail in arrival order (R8)."""
+        """The order's transition audit trail in arrival order."""
         rows = self._conn.execute(
             "SELECT from_state, to_state, payload, at FROM order_events WHERE order_id=? ORDER BY id",
             (order_id,),

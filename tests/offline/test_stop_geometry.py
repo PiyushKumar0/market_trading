@@ -1,8 +1,8 @@
-"""WO-17 stop-geometry harness — mechanics pinned on SYNTHETIC 1m fixtures only.
+"""Stop-geometry harness — mechanics pinned on SYNTHETIC 1m fixtures only.
 
 Nothing in this file opens ``data/market.duckdb`` (or any store): every test builds its own 1m bars in
 memory and injects them through ``StopGeometryExperiment(loader=...)`` or hand-builds an
-``EntryContext``. The pre-registration is what is under test — if one of these changes, WO-17 has
+``EntryContext``. The pre-registration is what is under test — if one of these changes, the harness has
 drifted:
 
 * the **axis**: {1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 exit ladders = exactly 10 configs;
@@ -14,7 +14,7 @@ drifted:
 * **adverse-first**: a bar touching stop AND target in the same 1m bar is booked as a STOP;
 * the **MAE / stop-out invariant** — "MAE >= w x ATR_10m" and "stopped at width w" are the same event
   — and the hand-computable p25/p50/p75/p90 aggregation;
-* the **ATR switch point**: WO-10b prior-session seeding is what makes a 09:46 orb entry stoppable at
+* the **ATR switch point**: prior-session ATR seeding is what makes a 09:46 orb entry stoppable at
   all; unseeded, the same entry falls inside the 140-minute warm-up and is dropped;
 * **promotion is NOT sought**: the module never names ``ValidationPipeline``.
 
@@ -218,7 +218,7 @@ def _experiment(loader, **kwargs) -> StopGeometryExperiment:
 
 # --------------------------------------------------------------------------- the fixed axis
 def test_the_axis_is_the_pre_registered_ten_configs_and_nothing_else():
-    """{1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 ladders. Drift here = WO-17 drift."""
+    """{1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 ladders. Drift here = pre-registration drift."""
     assert STOP_ATR_MULTIPLES == (1.0, 1.5, 2.5, 4.0)
     assert STOP_AXIS == (1.0, 1.5, 2.5, 4.0, None)
     assert LADDERS == (True, False)
@@ -247,7 +247,7 @@ def test_reference_config_is_no_stop_no_target():
 
 
 def test_orb_population_params_are_the_envelope_defaults():
-    """WO-17 says 'the orb entry-signal stream' — the §6.3 default baseline, read from the envelope."""
+    """The stop-geometry pre-registration says 'the orb entry-signal stream' — the parameter-envelope default baseline, read from the envelope."""
     assert orb_default_params() == {
         "orb_minutes": 30.0,
         "rr_target": 1.5,
@@ -337,9 +337,9 @@ def test_dodged_winner_net_and_gross_readings_can_disagree_and_both_are_reported
     assert acc.dodged_winner_fraction_gross == pytest.approx(1.0)  # …and the gross reading is visible
 
 
-# --------------------------------------------------------------------------- fills (WO-2)
+# --------------------------------------------------------------------------- fills
 def test_exit_fills_at_the_next_bars_open_never_at_the_stop_price_or_the_trigger_bars_close():
-    """WO-2's fill rule, pinned so every wrong-but-plausible fill price is detectably different."""
+    """The next-open fill rule, pinned so every wrong-but-plausible fill price is detectably different."""
     ctx = _dip_then_recover()
     trade = simulate_entry(
         ctx,
@@ -528,7 +528,7 @@ def test_mae_distribution_of_an_empty_slice_is_none_not_nan():
 
 # --------------------------------------------------------------------------- the ATR switch point
 def test_seeded_atr_is_the_switch_point_and_is_what_makes_a_0946_orb_entry_stoppable():
-    """WO-17 depends on WO-10b's shared unit: unseeded, orb's morning entry has no stop and is dropped.
+    """The harness depends on the shared prior-session ATR seeding: unseeded, orb's morning entry has no stop and is dropped.
 
     Same frame, same signal bar, one flag: with the prior-session seed the 09:46 breakout carries an
     ATR (0.5, the flat prior session's value) and is bookable; unseeded it sits inside the 140-minute
@@ -687,7 +687,7 @@ def test_owner_facing_strings_survive_a_cp1252_console():
 
 
 def test_promotion_is_never_sought_the_module_cannot_reach_the_validation_pipeline():
-    """WO-17: promotion is NOT sought — so the promotion path must be UNREACHABLE, not merely unused.
+    """Promotion is NOT sought — so the promotion path must be UNREACHABLE, not merely unused.
 
     Checked structurally (the module's prose is allowed to DISCUSS the absence): no import of
     ``engine.learning.validate`` in any spelling (``import engine.learning.validate``, ``from
@@ -721,7 +721,7 @@ def test_promotion_is_never_sought_the_module_cannot_reach_the_validation_pipeli
 
 
 def test_the_full_round_trip_is_charged_on_every_trade_including_stop_outs():
-    """WO-17: 'each stop-out realizes the full round-trip cost floor.'"""
+    """Pre-registered: 'each stop-out realizes the full round-trip cost floor.'"""
     ctx = _dip_then_recover()
     for cfg in all_configs():
         trade = simulate_entry(ctx, cfg, cost_floor_pct=_COST)

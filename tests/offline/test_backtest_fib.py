@@ -1,4 +1,4 @@
-"""scripts/backtest_fib.py: the pre-registered Fibonacci retracement study (IMPLEMENTATION_PLAN §3). Synthetic only."""
+"""scripts/backtest_fib.py: the pre-registered Fibonacci retracement study. Synthetic only."""
 
 from __future__ import annotations
 

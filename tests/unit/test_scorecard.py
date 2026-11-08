@@ -1,4 +1,4 @@
-"""Hindsight scorecard aggregation (plan Q2.4)."""
+"""Hindsight scorecard aggregation."""
 
 from __future__ import annotations
 

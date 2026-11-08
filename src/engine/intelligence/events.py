@@ -1,8 +1,8 @@
-"""Intelligence-domain event payloads published on the bus (§3.2.1 canonical topics).
+"""Intelligence-domain event payloads published on the bus.
 
 The budget governor is the only originator here: a degrade-tier change drives the dashboard state, the
-Telegram alert (R8), and the D6 mode-capability mapping consumers apply. Publishing it as data on
-``budget.state`` keeps ``risk``/``oms`` free of any import of this package (R1, §2.3).
+Telegram alert, and the mode-capability mapping consumers apply. Publishing it as data on
+``budget.state`` keeps ``risk``/``oms`` free of any import of this package (the three-tier rule).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ TOPIC_BUDGET_STATE = "budget.state"
 
 
 class BudgetStateChanged(BaseModel):
-    #: ``window_key`` is the quota window's start Thursday (ISO date, §5.6) — the spend figure is
+    #: ``window_key`` is the quota window's start Thursday (ISO date) — the spend figure is
     #: meaningless without it now that the period is a subscription week, not the calendar month.
     old_tier: DegradeTier
     new_tier: DegradeTier

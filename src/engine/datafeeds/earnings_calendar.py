@@ -1,18 +1,18 @@
-"""NSE results/board-meeting calendar → ``earnings_calendar`` (§4.4 job 8, 18:30 — R2, E5).
+"""NSE results/board-meeting calendar → ``earnings_calendar`` (18:30).
 
 Pulls upcoming results / board-meeting dates from the NSE event-calendar API and persists them to
-the DuckDB ``earnings_calendar`` table (§4.3). Two consumers (live in Phase 2; the features engine and pre-open planner also read it):
+the DuckDB ``earnings_calendar`` table. Two consumers (live in RECOMMEND mode; the features engine and pre-open planner also read it):
 
-1. **R2 no-trade windows** — "no entry in a symbol on its results day" (§7.1 ``no_trade_windows``,
-   day T only), checked at gate time per instrument. The table is in the §2.6 step-5
+1. **Results-day no-trade windows** — "no entry in a symbol on its results day" (``no_trade_windows``,
+   day T only), checked at gate time per instrument. The table is in the
    safety/deadline-critical catch-up set: it must run or verify before entries open.
-2. **§6.1 ``cat`` T+1 PEAD eligibility (O13)** — the digest reads results dates to grade the T+1
+2. **``cat`` T+1 PEAD eligibility** — the digest reads results dates to grade the T+1
    earnings-continuation catalyst.
 
-Parsing is defensive (E5): the row list is located under common wrapper keys, field names are
+Parsing is defensive: the row list is located under common wrapper keys, field names are
 matched case-insensitively with aliases, the free-text ``purpose`` is classified by keyword
 (``results`` vs ``board_meeting`` — a board meeting that mentions results IS a results event for
-R2). On fetch failure: alert + reuse yesterday's rows (the table keeps what it has; the §2.6
+the results-day no-trade window). On fetch failure: alert + reuse yesterday's rows (the table keeps what it has; the
 catch-up retries). Never raises into the scheduler.
 """
 
@@ -34,25 +34,24 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.earnings_calendar")
 
-#: NSE corporate event-calendar API (results/board-meeting dates). [VERIFY Phase-1]; anti-bot [likely].
+#: NSE corporate event-calendar API (results/board-meeting dates). [VERIFY]; anti-bot [likely].
 NSE_EVENT_CALENDAR_URL = "https://www.nseindia.com/api/event-calendar"
 
 
 def event_calendar_range_url(frm: date, to: date) -> str:
-    """Event-calendar URL for an explicit ``[frm, to]`` window (§2.8 filings_results historical leg).
+    """Event-calendar URL for an explicit ``[frm, to]`` window (the filings_results historical leg).
 
     The default :data:`NSE_EVENT_CALENDAR_URL` returns only the forward-looking cross-section; the
     ``from_date``/``to_date`` (DD-MM-YYYY) variant returns the PAST board-meeting/results dates too —
-    the historical results-date source the §2.7 event study lacked (630 rows for Jan-2023, verified
-    §2.8). The provider's existing job contract (:meth:`EarningsCalendarJob.run`) is unchanged; this
+    the historical results-date source the catalyst event study lacked (630 rows for Jan-2023, verified). The provider's existing job contract (:meth:`EarningsCalendarJob.run`) is unchanged; this
     is the added historical leg only."""
     return (
         "https://www.nseindia.com/api/event-calendar?index=equities"
         f"&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
     )
 
-#: ``earnings_calendar.kind`` vocabulary (PK component, §4.3). ``results`` drives the R2 no-trade
-#: window + O13 PEAD; ``board_meeting`` is recorded for completeness (audit / future rules).
+#: ``earnings_calendar.kind`` vocabulary (PK component). ``results`` drives the results-day no-trade
+#: window + the ``cat`` PEAD rule; ``board_meeting`` is recorded for completeness (audit / future rules).
 KIND_RESULTS = "results"
 KIND_BOARD_MEETING = "board_meeting"
 
@@ -60,7 +59,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class EarningsCalendarResult(BaseModel):
-    """One run's outcome (never an exception, E5)."""
+    """One run's outcome (never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -93,7 +92,7 @@ def _parse_date(raw: str) -> date | None:
 
 
 def classify_event(purpose: str) -> str:
-    """Free-text purpose → kind. "result" anywhere ⇒ ``results`` (R2 binds on results DAYS — a
+    """Free-text purpose → kind. "result" anywhere ⇒ ``results`` (the no-trade rule binds on results DAYS — a
     board meeting "to consider financial results" IS a results event); everything else is a plain
     ``board_meeting``. Deterministic keyword rule, never a guess."""
     return KIND_RESULTS if "result" in purpose.lower() else KIND_BOARD_MEETING
@@ -138,7 +137,7 @@ def parse_event_calendar(payload: Any) -> list[dict[str, Any]]:
 
 
 class EarningsCalendarJob:
-    """§4.4 job 8 — NSE event calendar → ``earnings_calendar`` (R2 no-trade windows + O13 PEAD)."""
+    """NSE event calendar → ``earnings_calendar`` (results-day no-trade windows + ``cat`` PEAD)."""
 
     def __init__(
         self,
@@ -161,7 +160,7 @@ class EarningsCalendarJob:
 
     async def run(self, d: date) -> EarningsCalendarResult:
         """Fetch + upsert results/board-meeting dates (idempotent on (symbol, event_date, kind)).
-        ``d`` is the run day (audit only — the feed is forward-looking). Never raises (E5)."""
+        ``d`` is the run day (audit only — the feed is forward-looking). Never raises."""
         try:
             resp = await nse_get(self._http, NSE_EVENT_CALENDAR_URL, timeout=self._timeout)
             rows = parse_event_calendar(json.loads(resp.content))
@@ -182,9 +181,9 @@ class EarningsCalendarJob:
 
     async def run_range(self, frm: date, to: date) -> EarningsCalendarResult:
         """Ingest the event calendar over an explicit ``[frm, to]`` window into the SAME
-        ``earnings_calendar`` table (§2.8 filings_results historical leg). Same defensive parse +
+        ``earnings_calendar`` table (the filings_results historical leg). Same defensive parse +
         idempotent upsert as :meth:`run`; the forward-looking daily job contract is untouched. Never
-        raises (E5) — a failure degrades and the caller (filings_results) decides how to alert."""
+        raises — a failure degrades and the caller (filings_results) decides how to alert."""
         url = event_calendar_range_url(frm, to)
         try:
             resp = await nse_get(self._http, url, timeout=self._timeout)
@@ -208,7 +207,7 @@ class EarningsCalendarJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Earnings calendar is in the §2.6 safety/deadline-critical set (R2 no-trade windows):
+            # Earnings calendar is in the safety/deadline-critical set (results-day no-trade windows):
             # a stale calendar must be verified before entries open, else FROZEN-for-entries.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Earnings-calendar feed degraded",

@@ -1,7 +1,7 @@
-"""``LiveScanContextProvider`` (§3.2.5) — the live ``context_provider`` seam.
+"""``LiveScanContextProvider`` — the live ``context_provider`` seam.
 
 Covers the :class:`ScanContext` contract it must fill (intraday series with the scanned bar last,
-daily/index/flagged/ex-date/momentum context, calendar window), the §3.2 hot-path read budget (ONE
+daily/index/flagged/ex-date/momentum context, calendar window), the hot-path read budget (ONE
 ``get_bars_1d`` per symbol per day, one flagged/corp-action read per day, rebuilt on date change,
 nothing read at construction), and its degradation rules (out-of-order + redelivered bars, snapshot
 minting failure, non-trading date).
@@ -31,7 +31,7 @@ from tests.conftest import FIXED_NOW
 D = FIXED_NOW.date()                      # 2026-06-17 (Wed), a real trading day (conftest)
 PREV_D = date(2026, 6, 16)                # Tue — D's prior trading session (flagged reads anchor here)
 NEXT_D = date(2026, 6, 18)                # Thu, also a trading day
-SUNDAY = date(2026, 6, 21)                # not a trading day (weekend, no muhurat) — R6
+SUNDAY = date(2026, 6, 21)                # not a trading day (weekend, no muhurat)
 SESSION_OPEN = datetime(2026, 6, 17, 9, 15, tzinfo=IST)
 
 
@@ -45,7 +45,7 @@ class SpyStore(MarketStore):
         self.minute_reads: list[str] = []
         self.flagged_reads: list[date] = []
         self.corp_action_reads: int = 0
-        # WO-27: the per-bar reads the FeatureEngine used to make from inside the pre-screen lock.
+        # The per-bar reads the FeatureEngine used to make from inside the pre-screen lock.
         self.sector_map_reads: int = 0
         self.catalyst_reads: int = 0
 
@@ -77,7 +77,7 @@ class SpyStore(MarketStore):
 class StubFeatures:
     """Minimal ``FeatureEngine`` stand-in: the provider only reads ``features_snapshot_id``.
 
-    Records the ``bars`` series handed to each call (WO-27) — the provider must pass the today's
+    Records the ``bars`` series handed to each call — the provider must pass the today's
     session series it just built, not leave the engine to re-read it from DuckDB per bar.
     """
 
@@ -190,7 +190,7 @@ def test_intraday_seeded_from_store_with_current_bar_last(store, provider):
     ctx = provider(incoming)
 
     ts = [b.ts_minute for b in ctx.intraday_bars]
-    assert ts == sorted(ts)                              # ascending (§3.2.5 contract)
+    assert ts == sorted(ts)                              # ascending (the ScanContext contract)
     assert len(ctx.intraday_bars) == 6                   # 5 seeded + the scanned bar
     assert ctx.intraday_bars[-1].ts_minute == incoming.ts_minute
     assert ctx.intraday_bars[-1].close == incoming.close
@@ -305,7 +305,7 @@ def test_momentum_present_for_cached_symbols(store, provider):
 def test_momentum_nan_when_history_is_short(store, provider):
     _seed_daily(store, "AAA", _weekdays_back(D - timedelta(days=1), 5), 100.0, 0.5)
     ctx = provider(_bar("AAA"))
-    assert math.isnan(ctx.momentum_by_symbol["AAA"])     # unrankable, never an error (§6.1 mom)
+    assert math.isnan(ctx.momentum_by_symbol["AAA"])     # unrankable, never an error
 
 
 def test_momentum_nan_when_symbol_has_no_daily_history(store, provider):
@@ -340,7 +340,7 @@ def test_index_daily_closes_populated(store, provider):
 
 def test_flagged_reads_the_prior_session(store, provider):
     """2026-08-18 fix: the deals job writes day-``d``'s flags at 20:30 of ``d`` itself, so a
-    same-day read was structurally empty and orb's §6.1 bulk/block-deal suppression had never
+    same-day read was structurally empty and orb's bulk/block-deal suppression had never
     fired live (log-verified flagged=0 on every day 08-11→08-18, including days the job
     succeeded). The knowable — and now pinned — semantics: a deal on the PRIOR trading session
     flags the symbol today."""
@@ -374,8 +374,8 @@ def test_upcoming_ex_dates_bucketed_per_symbol(store, provider):
 
 
 def test_ex_date_horizon_covers_the_mom_skip_window(store, provider):
-    # §6.1 mom skips on ex-dates within ceil(rebalance_days x 7/5) calendar days, INCLUSIVE — 28 at the
-    # §6.3 upper bound of 20 (momentum.py). The provider must reach that window's LAST day, or the A12
+    # mom skips on ex-dates within ceil(rebalance_days x 7/5) calendar days, INCLUSIVE — 28 at the
+    # envelope upper bound of 20 (momentum.py). The provider must reach that window's LAST day, or the ex-date
     # skip is silently defeated exactly there.
     edge = D + timedelta(days=28)
     store.upsert_corp_actions([{"symbol": "AAA", "ex_date": edge, "kind": "dividend"}])
@@ -393,27 +393,27 @@ def test_trade_window_and_session_open_on_a_trading_day(provider):
 
 def test_non_trading_date_yields_no_window_and_no_session_open(store, provider):
     ctx = provider(_bar("AAA", d=SUNDAY))
-    assert ctx.trade_window is None                      # NSECalendar raises; provider degrades (R6)
+    assert ctx.trade_window is None                      # NSECalendar raises; provider degrades
     assert ctx.session_open is None
     assert store.minute_reads == []                      # no session ⇒ no intraday seed
     assert len(ctx.intraday_bars) == 1                   # still the scanned bar, ascending contract
 
 
 def test_mom_sessions_since_rebalance_no_conn_degrades_to_legacy_none(provider):
-    # WO-13: the `provider` fixture wires no `conn` — this is the backward-compat degradation path
-    # (pre-WO-13 behaviour), not the resolved feature. Every day still reads "due" with no state
+    # The `provider` fixture wires no `conn` — this is the backward-compat degradation path
+    # (the behaviour without rebalance state), not the resolved feature. Every day still reads "due" with no state
     # persisted; see the ``mom rebalance state`` block below for the real (conn-wired) behaviour.
     assert provider(_bar("AAA", d=D)).mom_sessions_since_rebalance is None
     assert provider(_bar("AAA", d=NEXT_D)).mom_sessions_since_rebalance is None
 
 
-# --------------------------------------------------------------------------- mom rebalance state (WO-13)
+# --------------------------------------------------------------------------- mom rebalance state
 #
 # Trading-day sequence from D=2026-06-17 (conftest FIXED_NOW, a Wednesday): 06-17(D), 06-18(NEXT_D,
 # Thu), 06-19(Fri) — 06-20/21 are a weekend, 06-26 (Fri) is a holiday (Muharram, config/calendar/
 # 2026.yaml) — then 06-22(Mon), the next trading day after 06-19. Tests use a small
 # ``mom_rebalance_days=2`` override so the cadence exercises in three real trading days instead of
-# the §6.3 default 15.
+# the envelope default 15.
 THIRD_D = date(2026, 6, 19)     # Fri — 2 trading sessions after D
 FOURTH_D = date(2026, 6, 22)    # Mon — 1 trading session after THIRD_D
 
@@ -469,7 +469,7 @@ def test_mom_rebalance_non_trading_day_never_advances_marker(conn, store, clock,
 
 
 def test_mom_scanner_fires_only_when_due_end_to_end(conn, store, clock, calendar, features):
-    """The full WO-13 path: MomentumScanner + LiveScanContextProvider wired together, no hand-built
+    """The full path: MomentumScanner + LiveScanContextProvider wired together, no hand-built
     ``ScanContext``. Not-due emits nothing; due emits; the marker persists across the sequence."""
     days = _weekdays_back(D - timedelta(days=1), 30)
     _seed_daily(store, "AAA", days, 100.0, 0.5)                # rising momentum ⇒ ranks top_n=1
@@ -513,7 +513,7 @@ def test_real_feature_engine_snapshot_is_persisted(store, clock, calendar):
 
 
 def test_provider_hands_the_feature_engine_its_in_memory_series(store, provider, features):
-    """WO-27: the FeatureEngine used to re-read today's bars from DuckDB for EVERY scanned bar, on
+    """The FeatureEngine used to re-read today's bars from DuckDB for EVERY scanned bar, on
     the thread holding the pre-screen lock — the very rows this provider already keeps in memory.
     It now passes that series, so the snapshot costs no round trip and cannot lag the writer."""
     _seed_intraday(store, "AAA", range(15, 20))          # 09:15..09:19 already persisted
@@ -531,7 +531,7 @@ def test_provider_hands_the_feature_engine_its_in_memory_series(store, provider,
 
 
 def test_real_feature_engine_reads_nothing_on_later_bars(store, clock, calendar):
-    """End-to-end §3.2 read budget (WO-27): after a symbol's first bar, a whole scan — context AND
+    """End-to-end read budget: after a symbol's first bar, a whole scan — context AND
     feature snapshot — touches DuckDB only to WRITE the snapshot row. Before this, each bar cost
     ~9 statements inside ``SignalPreScreen._scan``'s lock."""
     engine = FeatureEngine(store, clock, calendar)
@@ -574,7 +574,7 @@ def test_provider_satisfies_the_prescreen_context_provider_seam(store, provider)
     assert [b.ts_minute.minute for b in seen[-1].intraday_bars] == [20, 21]
 
 
-# ================================ owner window changes mid-session (§3.2.7, 2026-08-18 origination fix)
+# ================================ owner window changes mid-session (2026-08-18 origination fix)
 #
 # THE BUG this section pins. `trade_window` is day-cached like the rest, but unlike the rest it is a
 # CONTROL-PLANE value the owner can change mid-session. The cache is per PROCESS per date, so a
@@ -586,7 +586,7 @@ def test_provider_satisfies_the_prescreen_context_provider_seam(store, provider)
 # listened. engine.ops.main now wires it to invalidate_trade_window().
 
 class _SwappableWindowCalendar:
-    """Real calendar with an owner-swappable ``trade_window`` — the §3.2.7 seam, without SQLite."""
+    """Real calendar with an owner-swappable ``trade_window`` — the trade-window seam, without SQLite."""
 
     def __init__(self, inner: NSECalendar, window) -> None:
         self._inner = inner
@@ -643,7 +643,7 @@ def test_invalidate_trade_window_refreshes_on_the_next_bar(swappable):
 def test_invalidate_refreshes_only_the_window_not_the_whole_day_cache(store, swappable):
     """Why one field and not a cache drop: a rebuild re-runs the index/flagged/ex-date reads and the
     ~100-symbol momentum preload on the pre-screen's worker — exactly the per-bar read budget this
-    cache exists to protect (§3.2 hot-path invariant)."""
+    cache exists to protect (hot-path invariant)."""
     cal, provider = swappable
     provider(_bar("AAA", mm=20))
     daily, flagged, minute = list(store.daily_reads), list(store.flagged_reads), list(store.minute_reads)
@@ -661,7 +661,7 @@ def test_invalidate_before_the_first_bar_is_a_no_op(swappable):
     """Wired at composition time, long before the worker thread exists — must not build or crash."""
     cal, provider = swappable
     provider.invalidate_trade_window()
-    assert cal.reads == 0                                # nothing read at construction (§3.2)
+    assert cal.reads == 0                                # nothing read at construction
     assert provider(_bar("AAA", mm=20)).trade_window == OLD_W
     assert cal.reads == 1
 
@@ -695,7 +695,7 @@ def test_day_rollover_still_rebuilds_the_window_without_invalidation(swappable):
 
 
 def test_flagged_degrades_to_none_when_no_prior_session_resolves(store, clock, calendar, features):
-    """The E5 degrade: an unresolvable prior session (calendar hole) yields NO flags and NO error —
+    """The degrade: an unresolvable prior session (calendar hole) yields NO flags and NO error —
     orb runs unsuppressed rather than the whole day cache failing to build."""
 
     class _HolyCalendar(_SwappableWindowCalendar):

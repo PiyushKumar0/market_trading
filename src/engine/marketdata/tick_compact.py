@@ -1,9 +1,9 @@
-"""Tick-partition compaction (§4.3 storage, WO-7) — the nightly small-file collapse.
+"""Tick-partition compaction — the nightly small-file collapse.
 
-The live tick writer flushes every ``flush_interval_s`` (60 s default since WO-7) or ``max_buffered_ticks``, writing
+The live tick writer flushes every ``flush_interval_s`` (60 s default since tick compaction was added) or ``max_buffered_ticks``, writing
 ONE parquet file per (date, symbol) present in each batch (``MarketStore.flush_ticks``). Over a
 session that is ~7.5 K files per symbol-day and 752,150 files / 1.37 GB for a single day (≈1.9 KB
-per file, audit F9). Readers glob ``ticks/date=…/symbol=…/*.parquet``, so fragments and a compacted
+per file). Readers glob ``ticks/date=…/symbol=…/*.parquet``, so fragments and a compacted
 file are *equivalent* to every reader — the pathology is pure read amplification and inode count,
 never correctness. This module collapses each symbol-day to ONE file:
 
@@ -36,10 +36,10 @@ retry and a date-keyed catch-up replay all no-ops on days already compacted, and
 failure (one bad symbol) resumable — the successful symbols simply do not come back.
 
 The job runs on its own in-memory DuckDB connection in a worker thread: the live ``MarketStore``
-connection is the bar/tick write path (§2.2 heartbeat invariant), and a full day's compaction must
+connection is the bar/tick write path (the heartbeat invariant), and a full day's compaction must
 never queue behind — or in front of — it.
 
-SINGLE-FLIGHT (2026-08-14): WO-15's ``CatchUpRunner`` guards catch-up-vs-catch-up replay, but the
+SINGLE-FLIGHT (2026-08-14): ``CatchUpRunner`` guards catch-up-vs-catch-up replay, but the
 post-arm one-shot and the scheduler's ``_scheduled_runner`` both reach this job directly — neither
 knows about the other. Two concurrent runs racing the same partitions is not a correctness bug (the
 loser always fails at READ time, before writing anything — the winner's output is unaffected) but it
@@ -124,7 +124,7 @@ def _open_connection(ticks_root: Path) -> duckdb.DuckDBPyConnection:
 
 @dataclass
 class TickCompactionResult:
-    """One run's outcome — ok-bearing so the §2.6 watermark verdict sees a degraded run (E5).
+    """One run's outcome — ok-bearing so the watermark verdict sees a degraded run.
 
     ``ok=False`` (a symbol-day that failed, or holds two compacted files) records a FAILED watermark,
     and the next sweep retries: the symbol-days that DID compact are no-ops on the retry.
@@ -162,12 +162,12 @@ def compact_ticks(
     job's ``run_for`` day — a catch-up replay of an older slot therefore compacts only what that
     slot could have seen, and the next slot picks up the rest.
 
-    BOUNDED + OBSERVABLE (the §2.6 filed proposal, applied here because the FIRST run faces the
+    BOUNDED + OBSERVABLE (applied here because the FIRST run faces the
     whole standing backlog — up to 30 retained days × ~200 symbols × ~7.5 K files each, hours of
     pure filesystem work). ``max_symbol_days`` stops a run once it has done that much; oldest-first
     order plus per-symbol-day idempotence makes progress monotone, so the backlog drains over
     successive nightly runs instead of one unbounded pass. ``max_dates`` bounds the partition scan
-    itself (ticks retain 30 days, §4.5 — a bigger backlog means retention is broken, not this).
+    itself (ticks retain 30 days — a bigger backlog means retention is broken, not this).
 
     SINGLE-FLIGHT (2026-08-14, module docstring): a non-blocking ``threading.Lock`` acquire. The
     loser never touches the store or filesystem — it returns immediately with

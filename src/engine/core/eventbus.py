@@ -1,10 +1,10 @@
-"""In-process async pub/sub event bus (§3.2.1).
+"""In-process async pub/sub event bus.
 
 The only coupling mechanism between modules — modules publish/subscribe on canonical topics rather
-than importing each other (which keeps the R1 tier separation enforceable, §2.3). Single process, so
-this is plain in-memory dispatch; no broker, no distributed state (E4).
+than importing each other (which keeps the three-tier separation enforceable). Single process, so
+this is plain in-memory dispatch; no broker, no distributed state.
 
-Canonical topics (§3.2.1):
+Canonical topics:
     tick · bar.1m · order.update · position.update · signal.candidate · proposal.created ·
     verdict.issued · risk.state · mode.changed · budget.state · feed.health
 """
@@ -29,7 +29,7 @@ class EventBus:
     ``publish`` is fire-and-forget (schedules handler tasks on the running loop); ``apublish`` awaits
     all handlers (deterministic ordering — used where a publisher needs delivery before proceeding, and
     in tests). A handler that raises is logged and isolated; it never breaks the publisher or sibling
-    handlers (R8 observability over silent loss). :meth:`drain` awaits what ``publish`` scheduled, so
+    handlers (observability over silent loss). :meth:`drain` awaits what ``publish`` scheduled, so
     teardown can finish every delivery before closing the stores the handlers write to.
     """
 

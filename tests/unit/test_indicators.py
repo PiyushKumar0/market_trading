@@ -1,4 +1,4 @@
-"""Hand-computed reference values for ``engine.strategy.indicators`` (§6.1/§6.2, §9.6).
+"""Hand-computed reference values for ``engine.strategy.indicators``.
 
 Every expected number below is derived BY HAND from the smoothing conventions pinned in the
 indicators module docstring (Wilder SMA-seeded recursions; EMA ``adjust=False`` seeded at the first
@@ -174,7 +174,7 @@ def test_cross_sectional_rank_deterministic():
     ranks = cross_sectional_rank({"B": 0.3, "A": 0.1, "D": 0.1, "C": float("nan")})
     # Descending by value; alphabetical tie-break; NaN excluded; ranks sequential.
     assert ranks == {"B": 1, "A": 2, "D": 3}
-    # Same inputs in a different dict order -> identical result (§9.6).
+    # Same inputs in a different dict order -> identical result.
     assert cross_sectional_rank({"D": 0.1, "C": float("nan"), "A": 0.1, "B": 0.3}) == ranks
 
 
@@ -198,4 +198,4 @@ def test_same_window_same_values_and_input_type_invariance():
     a = wilder_rsi(closes, 2)
     b = wilder_rsi(pd.Series(closes), 2)
     pd.testing.assert_series_equal(a, b)
-    pd.testing.assert_series_equal(wilder_rsi(closes, 2), a)  # rerun => identical (§9.6)
+    pd.testing.assert_series_equal(wilder_rsi(closes, 2), a)  # rerun => identical

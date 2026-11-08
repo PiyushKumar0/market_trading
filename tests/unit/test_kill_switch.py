@@ -1,4 +1,4 @@
-"""Kill-switch stickiness + control (R10, §7.2). The G0 gate item: set kill → "restart" → blocked."""
+"""Kill-switch stickiness + control. The gate check: set kill → "restart" → blocked."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ async def test_kill_state_survives_restart(conn, clock, db_path):
     ks = KillSwitch(conn, clock)
     await ks.trigger("cumulative_floor breach", actor=Actor.RISK_GATE, flatten=False)
 
-    # Simulate a process restart: a brand-new connection to the same db sees KILLED (sticky, R10).
+    # Simulate a process restart: a brand-new connection to the same db sees KILLED (sticky).
     conn2 = connect(db_path)
     try:
         ks2 = KillSwitch(conn2, clock)
@@ -62,7 +62,7 @@ async def test_flatten_callback_runs_after_persist(conn, clock):
     order: list[str] = []
 
     async def flatten(reason: str) -> None:
-        # By the time flatten runs, KILLED must already be persisted (persist-before-act, R10).
+        # By the time flatten runs, KILLED must already be persisted (persist-before-act).
         assert ks.is_killed() is True
         order.append("flatten")
 

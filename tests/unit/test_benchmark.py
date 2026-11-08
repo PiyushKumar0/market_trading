@@ -1,4 +1,4 @@
-"""Equal-weight benchmark (plan Q2.2)."""
+"""Equal-weight benchmark."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def test_excludes_split_and_outlier_and_averages_rest(store, cal, clock):
 
 
 def test_averages_over_the_core_subset_only(store, cal):
-    """O18 (2026-10-08): an eligible but non-core (microcap) name never enters the benchmark, so the
+    """Owner decision 2026-10-08: an eligible but non-core (microcap) name never enters the benchmark, so the
     series stays one population across the NIFTY Total Market widening."""
     _universe(store, WED, ["A"])
     store.upsert_universe_daily([{"d": WED, "symbol": "MICRO", "included": True,

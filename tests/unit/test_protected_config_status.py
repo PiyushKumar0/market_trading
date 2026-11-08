@@ -1,4 +1,4 @@
-"""scripts/protected_config_status.py: the O19 recovery path for a limits.yaml reverted by git under a
+"""scripts/protected_config_status.py: the owner's dashboard capital change recovery path for a limits.yaml reverted by git under a
 newer signature. It may only ever put back the exact bytes the signature covers."""
 
 from __future__ import annotations

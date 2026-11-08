@@ -1,11 +1,11 @@
-"""Shared plumbing for chaos cases 3 / 14 / 18: the §7.1 ENTRY gate exactly as ``engine.ops.main``
+"""Shared plumbing for chaos cases 3 / 14 / 18: the ENTRY gate exactly as ``engine.ops.main``
 composes it (``main.py`` ``ctx_builder = GateContextBuilder(...)`` + ``gate = RiskGate(...)``) — the
 real :class:`GateContextBuilder` over a temp :class:`MarketStore` and the migrated temp SQLite, the
 real :class:`RiskGate` over the SHIPPED ``config/limits.yaml`` / ``config/costs.yaml`` (read-only).
 
 The seams main.py injects as closures (``ltp_fn`` / ``tick_age_fn`` / ``warmup_status_fn`` /
 ``clock_skew_ok_fn``) are passed in by each case, which is precisely what each case perturbs. A case
-asserts on named §7.1 checks of the verdict (``stale_data_guard``, ``clock_skew``, ``warmup_ready``,
+asserts on named checks of the verdict (``stale_data_guard``, ``clock_skew``, ``warmup_ready``,
 ``regime_data_ready``, ``mode_risk_state``) — the other rules depend on universe/instrument data the
 chaos stores deliberately do not carry, so a whole-verdict ``approve`` is never the assertion.
 """

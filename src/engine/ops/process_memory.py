@@ -14,7 +14,7 @@ Three counters are read, all in bytes, for the CURRENT process:
 * ``WorkingSetSize``     — resident working-set bytes.
 * ``PeakWorkingSetSize`` — the high-water mark of the working set since process start.
 
-This is telemetry, not a check (§2.6 distinguishes the two): a read failure logs one DEBUG line and
+This is telemetry, not a check: a read failure logs one DEBUG line and
 returns ``None`` — it must never raise and must never affect the health verdict.
 
 Non-Windows platforms: :meth:`ProcessMemoryReader.read` is a guarded no-op (returns ``None``), following

@@ -1,8 +1,8 @@
-"""HeadlineClusterer (§2.7 step 2 / §3.2.4 pinned algorithm / §9.1): golden-file byte-identity
+"""HeadlineClusterer: golden-file byte-identity
 (clusterer_headlines.json in ⇒ clusterer_expected.json out), input-order invariance, the
 greedy-earliest-first_seen assignment, the ``cat.max_event_age_days`` window, distinct
-``source_domains`` (the §7.1 corroboration input), and the store-wired ``run`` preserving persisted
-step-4 LLM scores on re-upsert (R8)."""
+``source_domains`` (the risk gate's corroboration input), and the store-wired ``run`` preserving persisted
+LLM scores on re-upsert."""
 
 from __future__ import annotations
 
@@ -60,8 +60,7 @@ def store(tmp_path, clock):
 @pytest.mark.asyncio
 async def test_run_executes_the_cluster_pass_off_the_event_loop(store):
     """2026-08-10: the pure-difflib pass blocked the event loop ~95 s on a weekend backlog (measured
-    90.6 s at 429×1,500). ``run()`` must execute :meth:`cluster` in a worker thread (§3.2 convention
-    12) — pinned so a refactor cannot silently re-inline it."""
+    90.6 s at 429×1,500). ``run()`` must execute :meth:`cluster` in a worker thread — pinned so a refactor cannot silently re-inline it."""
     import threading
 
     loop_thread = threading.get_ident()
@@ -81,7 +80,7 @@ async def test_run_executes_the_cluster_pass_off_the_event_loop(store):
     assert seen_threads and all(t != loop_thread for t in seen_threads)
 
 
-# --------------------------------------------------------------------------- golden file (§9.1)
+# --------------------------------------------------------------------------- golden file
 def test_golden_file_byte_identity():
     """Same headlines in ⇒ byte-identical clusters out (committed golden pair)."""
     fx, hs = _load_fixture()
@@ -134,7 +133,7 @@ def test_age_window_excludes_stale_clusters():
 
 
 def test_source_domains_are_distinct_and_sorted():
-    """The cluster's source_domains set is the §7.1 min_source_domains corroboration input:
+    """The cluster's source_domains set is the risk gate's min_source_domains corroboration input:
     DISTINCT domains, so a second headline from the same outlet adds no corroboration."""
     fx, hs = _load_fixture()
     by_cid = {c.cluster_id: c for c in _clusterer(fx).cluster(hs)}
@@ -157,7 +156,7 @@ def test_existing_clusters_join_without_mutation_and_only_touched_returned():
         source_domains=["thehindubusinessline.com"],
         first_seen=FIXED_NOW - timedelta(hours=2),
         last_seen=FIXED_NOW - timedelta(hours=2),
-        sentiment=0.4,  # a scored cluster (step 4) — must be carried through untouched
+        sentiment=0.4,  # a scored cluster — must be carried through untouched
     )
     joiner = by_id["h02"]  # near-duplicate of the existing representative
     out = _clusterer(fx).cluster([joiner], existing=[existing])
@@ -182,7 +181,7 @@ def test_pinned_normalization():
     assert a == b and similarity(a, b) == 1.0
 
 
-# --------------------------------------------------------------------------- store-wired run (R8)
+# --------------------------------------------------------------------------- store-wired run
 async def test_run_persists_clusters_links_news_and_preserves_scores(store, clock):
     fx, _ = _load_fixture()
     clusterer = HeadlineClusterer(store, sim_threshold=fx["sim_threshold"], max_event_age_days=2)
@@ -199,17 +198,17 @@ async def test_run_persists_clusters_links_news_and_preserves_scores(store, cloc
     assert c1.cluster_id == "c-n1"
 
     rows = store.get_news()
-    assert rows[0]["cluster_id"] == "c-n1"  # news.cluster_id linked (§4.3)
+    assert rows[0]["cluster_id"] == "c-n1"  # news.cluster_id linked
 
-    # Step 4 (Phase 2) scores the cluster; simulate the persisted scores.
+    # The LLM scoring step scores the cluster; simulate the persisted scores.
     (persisted,) = store.get_news_clusters()
-    assert persisted["untrusted"] is True  # §2.4: always
+    assert persisted["untrusted"] is True  # always
     store.upsert_news_clusters([
         dict(persisted) | {"sentiment": 0.8, "materiality": 0.9, "event_type": "earnings_beat",
                            "novelty": 0.6, "scored_at": FIXED_NOW, "scorer_model": "haiku"}
     ])
 
-    # A later poll brings a near-duplicate: the cluster gains a member WITHOUT losing its scores (R8).
+    # A later poll brings a near-duplicate: the cluster gains a member WITHOUT losing its scores.
     h2 = Headline(
         headline_id="n2",
         title="Infosys Q1 profit beats estimates raises FY27 guidance",
@@ -231,7 +230,7 @@ async def test_run_persists_clusters_links_news_and_preserves_scores(store, cloc
 
 
 # ----------------------------------------- partial persist -> orphan re-sweep convergence (2026-08-10)
-#: The §4.4 job-10 orphan re-sweep's own bounds (``engine.ops.main.job_news_chain``): unclustered
+#: The news-chain job's orphan re-sweep's own bounds (``engine.ops.main.job_news_chain``): unclustered
 #: headlines newer than the cutoff are re-swept, oldest-first, capped. Mirrored here so the
 #: convergence test drives the re-sweep through EXACTLY the production query (the cutoff itself is
 #: pinned in ``test_ops_main_wiring.test_orphan_resweep_abandons_headlines_older_than_four_days``).
@@ -241,7 +240,7 @@ _NEWS_ROW_KEYS = ("headline_id", "title", "source_domain", "url", "published_at"
 
 
 def _persisted_state(s: MarketStore) -> tuple[list[dict], dict[str, str | None]]:
-    """The whole persisted step-2 state: cluster rows + the ``news.cluster_id`` membership map."""
+    """The whole persisted clustering state: cluster rows + the ``news.cluster_id`` membership map."""
     return (
         sorted((dict(r) for r in s.get_news_clusters()), key=lambda r: r["cluster_id"]),
         {r["headline_id"]: r["cluster_id"] for r in s.get_news()},
@@ -333,7 +332,7 @@ async def test_run_requires_store_and_handles_empty_batch(store):
 
 # --------------------------------------------------------------------------- boilerplate strip (2026-08-03)
 def test_boilerplate_phrases_do_not_contribute_to_similarity():
-    """The G1-sample production finding (defense-in-depth leg): template phrases are stripped from the
+    """The production-sample finding (defense-in-depth leg): template phrases are stripped from the
     similarity input so shared boilerplate cannot glue unrelated titles together on its own. The
     PRIMARY guard is upstream — NewsIngest drops live-blog page titles entirely (news.drop_title_patterns);
     this strip covers residual template fragments that slip a pattern list."""
@@ -347,7 +346,7 @@ def test_boilerplate_phrases_do_not_contribute_to_similarity():
 
 
 def test_earnings_template_does_not_bridge_different_companies():
-    """G1 seed-6 golden pairs — the three REAL cross-company merges observed live (2026-08-03):
+    """Seed-6 golden pairs — the three REAL cross-company merges observed live (2026-08-03):
     same-day "Q1 Results" template headlines cleared the 0.75 bar on shared template tokens alone.
     With the earnings-template vocabulary stripped, similarity runs on distinctive tokens only."""
     contaminated = [
@@ -377,7 +376,7 @@ def test_same_story_rereports_still_cluster_after_template_strip():
         assert similarity(clusterer_normalize(a), clusterer_normalize(b)) >= 0.75, (a, b)
 
 
-# ------------------------------------------ token-bearing representative (§2.7 amendment 2026-09-04)
+# ------------------------------------------ token-bearing representative (2026-09-04)
 def _hl(hid: str, title: str, domain: str, minutes: int) -> Headline:
     return Headline(
         headline_id=hid,

@@ -1,4 +1,4 @@
--- ------------------------------------------------------------ §2.6 catch-up: failing-streak clock
+-- ------------------------------------------------------------ catch-up: failing-streak clock
 -- 2026-08-18: date-keyed catch-up gained a give-up path (a day still failing after days of retries
 -- is marked ``skipped`` — terminal — instead of retrying and alerting forever). The give-up must be
 -- keyed on how long the day has been FAILING, never on the day's calendar age: a cold boot after a

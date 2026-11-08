@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""C5 NO-STOP FORWARD-TEST VERDICT (IMPLEMENTATION_PLAN.md §6.1 "C5 NO-STOP FORWARD TEST", owner D14).
+"""NO-STOP FORWARD-TEST VERDICT (the paper no-stop exit test).
 
 Compares the shipped stop/target exit with NO stop plus a fixed 20-session time exit on live
 signals. Read-only: state.db through a ``file:...?mode=ro`` URI, the optional market DuckDB through

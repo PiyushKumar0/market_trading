@@ -1,6 +1,6 @@
-"""scripts/backtest.py argument defaults (§6.1/§8.2 G1).
+"""scripts/backtest.py argument defaults.
 
-The ``rsi2`` baseline is pinned to the "above a rising 50-DMA index" regime filter (§6.1 row 2); the
+The ``rsi2`` baseline is pinned to the "above a rising 50-DMA index" regime filter; the
 live ``Rsi2Scanner`` always applies it. The backtest CLI must therefore validate that SAME rule by
 DEFAULT — a ``--index-symbol`` that defaults to nothing silently disables the sweep's regime gate
 (``SweepRunner(index_symbol=None)``), promoting params measured on an all-regime strategy the live
@@ -54,7 +54,7 @@ def test_explicit_index_symbol_override_is_honored():
     assert args.index_symbol == "NIFTY BANK"
 
 
-# ============================================================================ WO-3 adjacency wiring
+# ============================================================================ adjacency wiring
 #
 # "for the DAILY strategies only (rsi2/trend/mom — NOT orb), also run the adjacent grid density
 # (coarse<->medium) and pass adjacent_density + adjacent_winner (+ cost_floor_pct from the sweep)
@@ -104,7 +104,7 @@ class _FakeValidationReport:
     fold_pass_min = None
     margin_floor_pct_per_day = None
     margin_floor_days = None
-    realized_hold = None            # R2 reporting block — absent on this stub
+    realized_hold = None            # reporting block — absent on this stub
     realized_hold_cells = ()
     reasons = ["stub report — fake pipeline, no real validation"]
 
@@ -192,9 +192,9 @@ def test_no_adjacent_cli_flag_defaults_false_and_parses():
     assert bt._build_parser().parse_args([*_BASE_ARGV, "--no-adjacent"]).no_adjacent is True
 
 
-# ====================================================================== R2 --margin-floor-days wiring
+# ====================================================================== --margin-floor-days wiring
 #
-# The WO-3 margin floor is cost_floor / <days>. The 20 is the §7.1 SWING holding cap; a positional
+# The margin floor is cost_floor / <days>. The 20 is the risk-limits SWING holding cap; a positional
 # leg (trend, max_holding.position_trading_days = 120) is measured against a 6x-too-high bar at that
 # denominator. The CLI now carries the denominator, and these tests pin (a) the default is still 20,
 # so every pre-existing invocation is byte-identical, and (b) the value REACHES the
@@ -328,9 +328,9 @@ def test_all_run_with_a_non_default_denominator_warns(tmp_path, monkeypatch, cap
     assert capsys.readouterr().err == ""          # the default denominator warns about nothing
 
 
-# ============================================ R2 (2026-09-12): realized-hold + survivorship wiring
+# ============================================ 2026-09-12: realized-hold + survivorship wiring
 #
-# The 2026-09-12 trend run was promoted against a floor spread over the 120-session §7.1 CAP while
+# The 2026-09-12 trend run was promoted against a floor spread over the 120-session risk-limits CAP while
 # no artifact recorded that its median trade was held 33 sessions (where the same edge clears by
 # 1.07x, not 3.89x), and no artifact said the 200-name universe is a present-day snapshot applied
 # backwards. Both now travel from the sweep into the ParamSet the pipeline validates. Neither is an
@@ -340,7 +340,7 @@ def test_all_run_with_a_non_default_denominator_warns(tmp_path, monkeypatch, cap
 
 def _stat(strategy_params: dict[str, float], **kw) -> ParamSetStat:
     base = dict(
-        # WO-M: expectancy_pct IS the closed-trade mean; the all-trades figure rides beside it, and
+        # expectancy_pct IS the closed-trade mean; the all-trades figure rides beside it, and
         # the win rate is reported on both populations so the pair never mixes bases.
         params=strategy_params, n_trades=303, win_rate=0.3729, expectancy_pct=1.841,
         total_return_pct=5.026, sharpe=0.98, max_drawdown_pct=3.24,
@@ -379,7 +379,7 @@ def _sweep_with_stats(strategy_id: str = "trend", **report_kw) -> SweepReport:
 def test_sweep_stats_dict_carries_the_closed_only_expectancy_beside_the_headline():
     sweep = _sweep_with_stats()
     d = bt._sweep_stats_dict(sweep, sweep.best_params)
-    # WO-M: every per-trade key NAMES its population. This dict is persisted verbatim into
+    # Every per-trade key NAMES its population. This dict is persisted verbatim into
     # param_sets.validation_report, so the two keys whose MEANING would otherwise have silently
     # changed on 2026-09-13 (all-trades -> closed-only) under an unchanged name are RETIRED, not
     # redefined: a query spanning both sides of the fix must never compare two statistics as one.
@@ -398,7 +398,7 @@ def test_realized_hold_maps_the_winning_configs_measured_sessions():
     assert (hold.n_trades, hold.n_closed, hold.n_open) == (303, 273, 30)
     assert hold.median_sessions == 33.0 and hold.mean_sessions == 48.64
     assert hold.median_sessions_closed == 31.0 and hold.p90_sessions_closed == 111.2
-    # RealizedHold's field meanings are unchanged by WO-M: _pct is ALL trades, _closed_pct closed.
+    # RealizedHold's field meanings are unchanged by the sweep-mechanics fix: _pct is ALL trades, _closed_pct closed.
     assert hold.expectancy_per_trade_pct == 3.626
     assert hold.expectancy_per_trade_closed_pct == 1.841
 
@@ -437,7 +437,7 @@ def test_run_one_threads_the_hold_and_the_survivorship_flag_into_the_validated_p
     assert ps.realized_hold.median_sessions == 33.0
     # the platform stores no point-in-time index membership, so this can only be True today
     assert ps.population_is_survivorship_tainted_proxy is True
-    # WO-M: the sweep's mechanics stamp reaches the validated ParamSet, so the verdict artifact
+    # The sweep's mechanics stamp reaches the validated ParamSet, so the verdict artifact
     # names the mechanics its returns were produced under instead of leaving it to the reader.
     assert ps.sweep_mechanics == MECHANICS_STAMP
     assert ps.params_are_grid_winner is True
@@ -446,9 +446,9 @@ def test_run_one_threads_the_hold_and_the_survivorship_flag_into_the_validated_p
 def test_a_grid_that_ranked_nothing_validates_the_defaults_but_never_looks_like_a_winner(
     tmp_path, monkeypatch, capsys
 ):
-    """WO-M item (iii) made an unrankable config drop OUT of the ranking, so a window shorter than
+    """The sweep-mechanics fix made an unrankable config drop OUT of the ranking, so a window shorter than
     the strategy's realized hold (or a vectorbt schema change that makes every open/closed split
-    unreadable) can leave ``best_params`` None. The CLI still validates the Section 6.3 defaults —
+    unreadable) can leave ``best_params`` None. The CLI still validates the parameter-envelope defaults —
     that is the long-standing fallback and nothing here gates on it — but a defaults verdict must be
     impossible to mistake for a swept one, on the console line AND in the persisted ParamSet."""
     _stub_report_writers(monkeypatch, tmp_path)

@@ -1,8 +1,8 @@
-"""§9.4 chaos case 16 — Offline across the EOD-jobs window.
+"""Chaos case 16 — Offline across the EOD-jobs window.
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 16), "Must hold":
+Drill-catalog row (case 16), "Must hold":
 
-    "next startup catches up every missed EOD job idempotently via job_runs watermarks (§2.6/§4.2):
+    "next startup catches up every missed EOD job idempotently via job_runs watermarks:
     date-keyed jobs (reconcile/bhavcopy/corp-actions/deals/nightly review) run once per missed trading
     day; champ/chall eval + backup are single run-latest snapshots; startup report lists what was
     caught up"
@@ -27,12 +27,12 @@ Clauses covered:
 * "startup report lists what was caught up" — ``StartupReport.jobs_caught_up`` and the owner's
   ``CATCHUP_REPORT`` both carry every caught-up ``job:date``.
 
-corp-actions: the §9.4 row lists it with the date-keyed jobs, but the §2.6 step-5 class list (the
-detailed spec) does not, and the registry runs ``corp_actions`` RUN_LATEST (forward-looking A12 feed).
+corp-actions: the drill-catalog row lists it with the date-keyed jobs, but the startup catch-up class list (the
+detailed spec) does not, and the registry runs ``corp_actions`` RUN_LATEST (forward-looking feed).
 For a one-trading-day gap both classes mean "exactly once" — asserted as such (see case 17 for the
 multi-day behaviour).
 
-CD-3 (fixed 2026-09-24): the EOD-window SAFETY-CRITICAL job ``earnings_calendar`` (18:30; §2.6 lists
+Fixed 2026-09-24: the EOD-window SAFETY-CRITICAL job ``earnings_calendar`` (18:30; the startup-recovery spec lists
 earnings among the EOD jobs AND among the "must run or verify before entries open, else FROZEN +
 alert" set) was neither replayed nor flagged, because the runner only considered TODAY's fire-time.
 It now resolves the run that governs the next entries (``CatchUpRunner._governing_day``);
@@ -40,8 +40,8 @@ It now resolves the run that governs the next entries (``CatchUpRunner._governin
 missed EOD window.
 
 Unbuilt (skipped, ``test_case16_champion_challenger_eval_single_snapshot``): the champion/challenger
-evaluation (§6.4) — ``JOB_CHAMP_CHALL`` is a reserved watermark id only; no job is registered
-(ChampionChallenger, §6.4, is not built; ``engine.learning`` otherwise holds research/validation code
+evaluation — ``JOB_CHAMP_CHALL`` is a reserved watermark id only; no job is registered
+(ChampionChallenger is not built; ``engine.learning`` otherwise holds research/validation code
 plus runtime helpers: exit_sim, benchmark, evidence, hi52_forward).
 """
 
@@ -72,7 +72,7 @@ from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
 TUE, WED, THU = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18)
 A_BOOT, A_STOP, B_BOOT = time(9, 35), time(15, 40), time(8, 5)   # A boots after the 09:30 time exit
 
-#: The date-keyed jobs the §9.4 row names (corp-actions: see the module docstring).
+#: The date-keyed jobs the drill-catalog row names (corp-actions: see the module docstring).
 PLAN_NAMED_DATE_KEYED = {JOB_RECONCILE, JOB_BHAVCOPY, JOB_DEALS, JOB_NIGHTLY_REVIEW}
 
 
@@ -130,8 +130,8 @@ async def test_case16_missed_eod_jobs_caught_up_once_idempotently(tmp_path, monk
     # Date-keyed: exactly one run per missed trading day (Wed), run_for = Wed.
     for job_id in sorted(eod_date_keyed):
         assert [d for j, d in calls if j == job_id] == [WED], f"{job_id}: {[c for c in calls if c[0] == job_id]}"
-    # Run-latest (incl. backup) and the EOD safety-critical jobs Thu's entries read (earnings,
-    # CD-3): a single run, recorded under the missed fire-day.
+    # Run-latest (incl. backup) and the EOD safety-critical jobs Thu's entries read (earnings):
+    # a single run, recorded under the missed fire-day.
     for job_id in sorted(eod_run_latest | eod_safety):
         assert [j for j, _ in calls if j == job_id] == [job_id], job_id
         assert b.catch_up.was_run(job_id, WED)

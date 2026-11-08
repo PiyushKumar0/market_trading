@@ -1,13 +1,12 @@
-"""Kill switch (R10, §7.2). Tier-2-owned, sticky across crash/reboot/NSSM restart.
+"""Kill switch. Tier-2-owned, sticky across crash/reboot/NSSM restart.
 
 The defining property: ``kill_state=KILLED`` is persisted to SQLite (fsync via WAL) BEFORE any order
 action, and :meth:`is_killed` is checked before ANY order on EVERY startup — so no startup path
-(manual, scheduled-task, or NSSM crash-restart) can resurrect trading after a kill (R10, §2.6).
+(manual, scheduled-task, or NSSM crash-restart) can resurrect trading after a kill.
 
-The flatten sequence (cancel opens → flatten MIS → verify CNC GTTs) is OMS-dependent and arrives in
-Phase 3; here it is invoked via an injected ``flatten_callback`` (None until then). What ships in
-Phase 0 is the load-bearing part: sticky persistence, the before-act ordering, single-step trigger /
-two-step owner reset, and the startup order-path block (the G0 gate item).
+The flatten sequence (cancel opens → flatten MIS → verify CNC GTTs) is OMS-dependent and arrives with the
+order machinery; here it is invoked via an injected ``flatten_callback`` (None until then). What ships here is the load-bearing part: sticky persistence, the before-act ordering, single-step trigger /
+two-step owner reset, and the startup order-path block .
 """
 
 from __future__ import annotations
@@ -30,11 +29,11 @@ AlertCallback = Callable[[str], Awaitable[None]]
 
 
 class KillSwitchEngaged(RuntimeError):
-    """Raised by :meth:`KillSwitch.assert_orders_allowed` when the kill switch is engaged (R10)."""
+    """Raised by :meth:`KillSwitch.assert_orders_allowed` when the kill switch is engaged."""
 
 
 class KillSwitch:
-    """Sticky kill switch (R10)."""
+    """Sticky kill switch."""
 
     def __init__(
         self,
@@ -62,16 +61,16 @@ class KillSwitch:
 
     def assert_orders_allowed(self) -> None:
         """Block ANY order while killed. The kill sequence's own flatten/cancel bypasses this by not
-        going through it (no self-deadlock, §3.2.7)."""
+        going through it (no self-deadlock)."""
         if self.is_killed():
             raise KillSwitchEngaged(f"kill switch engaged: {self.reason()!r} (R10)")
 
     # ----------------------------------------------------------------- trigger (single-step)
     async def trigger(self, reason: str, *, actor: Actor = Actor.OWNER, flatten: bool = True) -> None:
-        """Engage the kill switch. Persists KILLED BEFORE acting (R10).
+        """Engage the kill switch. Persists KILLED BEFORE acting.
 
         Idempotent: re-triggering an already-killed switch re-runs the flatten/verify (defensive) but
-        does not stack state. Killing is single-step (fast); only *reset* is two-step (§7.2).
+        does not stack state. Killing is single-step (fast); only *reset* is two-step.
         """
         already = self.is_killed()
         now = self._clock.now().isoformat()
@@ -89,7 +88,7 @@ class KillSwitch:
                 TOPIC_KILL_STATE,
                 KillStateChanged(killed=True, reason=reason, actor=actor, at=self._clock.now()),
             )
-        # 2) Flatten sequence (OMS-owned, Phase 3) — risk-reducing, exempt from the order block.
+        # 2) Flatten sequence (OMS-owned) — risk-reducing, exempt from the order block.
         if flatten and self._flatten is not None:
             await self._flatten(reason)
         # 3) Alert the owner.
@@ -98,7 +97,7 @@ class KillSwitch:
 
     # ----------------------------------------------------------------- reset (owner two-step)
     async def owner_reset(self, confirmation: OwnerConfirmation) -> None:
-        """Clear the kill switch — owner-only, two-step authenticated flow (R10, §7.2)."""
+        """Clear the kill switch — owner-only, two-step authenticated flow."""
         if not confirmation.confirmed or confirmation.actor != Actor.OWNER:
             raise PermissionError("kill reset requires an authenticated OWNER two-step confirmation (R10)")
         now = self._clock.now().isoformat()

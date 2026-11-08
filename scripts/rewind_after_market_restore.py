@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Rewind ``state.db`` after ``market.duckdb`` was restored from a backup export (§10.5, §2.6).
+"""Rewind ``state.db`` after ``market.duckdb`` was restored from a backup export.
 
 The RUNBOOK "Restore market.duckdb from backup" step that follows the ``IMPORT DATABASE``. The export
 ``data/backups/market-<YYYYmmddTHHMMSS>`` holds DuckDB as of its stamp; ``state.db`` is NOT restored,
 so its ``job_runs`` watermarks and ``backfill_checkpoints`` still claim the days after the stamp are
-done, and the §2.6 catch-up would never refill them. This script rewinds exactly those two things.
+done, and the catch-up would never refill them. This script rewinds exactly those two things.
 
     python scripts/rewind_after_market_restore.py (--export NAME_OR_PATH | --since YYYY-MM-DD)
                                                    [--apply [--engine-crashed]]
@@ -91,7 +91,7 @@ through_date >= S is set to S-1 (calendar day).** ``BackfillJob.run`` resumes at
 checkpoint of S-1 restarts every later fetch at S — the replayed ``daily_bars`` days and the boot regime
 fill ``backfill.run([index_symbol, vix_symbol], "day", ...)`` (engine/ops/post_login.py:212). A
 calendar S-1 needs no trading calendar and is never later than the trading-day one. ``minute``
-checkpoints are rewound too, but no engine path reads them: the §2.6 minute fills (``warmup_gap``) pick
+checkpoints are rewound too, but no engine path reads them: the minute fills (``warmup_gap``) pick
 their range from store coverage over TODAY's session (post_login.py:232, main.py:1282), never from a
 checkpoint, so the engine never refetches past minute bars. The rewind keeps the checkpoints truthful,
 so a manual ``scripts/backfill.py run --interval minute`` or a later ``seed`` refetches the days after S

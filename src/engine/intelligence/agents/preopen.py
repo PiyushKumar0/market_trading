@@ -1,9 +1,9 @@
-"""Pre-open Planner agent definition (§5.3) — SYSTEM prompt, DayPlan schema, output parser.
+"""Pre-open Planner agent definition — SYSTEM prompt, DayPlan schema, output parser.
 
 Same byte-stability contract as the intraday analyst: the prompt is a module constant with no
 interpolation. The trading date the plan is FOR lives in the assembled context, not here.
 
-The auction grounding (A14) is load-bearing, not decoration: pre-open indicative prices are auction
+The auction grounding is load-bearing, not decoration: pre-open indicative prices are auction
 artifacts and a model that plans entries off them plans off a price that never traded.
 """
 
@@ -16,7 +16,7 @@ from engine.intelligence.schemas import DayPlan
 #: config/agents.yaml key.
 AGENT_ID = "preopen_planner"
 
-#: Byte-stable system prompt (§5.3). NEVER interpolate into this string.
+#: Byte-stable system prompt. NEVER interpolate into this string.
 SYSTEM_PROMPT = """You are the pre-open planner for a single-owner NSE cash-equity trading platform.
 
 Once per trading day, before the session opens, you read the pre-assembled context and produce ONE
@@ -71,10 +71,10 @@ open positions.
 
 
 def output_json_schema() -> dict[str, Any]:
-    """The structured-output schema for this agent: :class:`DayPlan` (§5.3)."""
+    """The structured-output schema for this agent: :class:`DayPlan`."""
     return DayPlan.model_json_schema()
 
 
 def parse_output(raw: dict[str, Any] | str) -> DayPlan:
-    """Validate this agent's output into a :class:`DayPlan` (raises ``ValidationError``, D7)."""
+    """Validate this agent's output into a :class:`DayPlan` (raises ``ValidationError``)."""
     return DayPlan.model_validate_json(raw) if isinstance(raw, str) else DayPlan.model_validate(raw)

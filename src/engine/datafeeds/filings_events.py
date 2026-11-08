@@ -1,30 +1,30 @@
-"""``FilingsEventBuilder`` (§2.8.2) — PURE mapping of stored ``insider_trades`` rows to typed candidate
+"""``FilingsEventBuilder`` — PURE mapping of stored ``insider_trades`` rows to typed candidate
 events. NO store writes, no catalyst-watchlist writing; origination happens in
-``engine.datafeeds.ins_crossings`` (the §6.1 ``ins`` leg, 2026-08-17), not here. The module-level
+``engine.datafeeds.ins_crossings`` (the ``ins`` leg, 2026-08-17), not here. The module-level
 mapping is consumed live by ``ins_crossings`` and by ``scripts/validate_insider.py``;
 ``FilingsEventBuilder`` and ``row_source`` are test-only helpers.
 
-Scope (stage 3): the ONE event type §2.8.4 cleared — ``insider_net_buy`` (the trailing-session
+Scope (stage 3): the ONE event type the filings event study cleared — ``insider_net_buy`` (the trailing-session
 open-market promoter/director BUY cluster, stage-2 verdict PASSED: T+10 net +0.75%, T+20 +1.61%,
 n=110). ``pledge_delta`` / ``results_filing`` are NOT built here (stage-2 verdicts INCONCLUSIVE /
-FAILED-as-origination — plan §2.8.4).
+FAILED-as-origination).
 
-**Reuse, don't duplicate (plan §2.8.2 / §6.1 `ins` addendum):** the point-in-time entry mapping
+**Reuse, don't duplicate:** the point-in-time entry mapping
 (:func:`entry_session_index`), the open-market predicate (:func:`is_open_market_buy` + the pinned
 ``INSIDER_ACQ_MODE_EXCLUSIONS`` taxonomy) and the trailing-window re-arming crossing logic
-(:func:`insider_cluster_events`) are the SAME functions the stage-2 / WO-16 study runs — they now live
+(:func:`insider_cluster_events`) are the SAME functions the stage-2 study runs — they now live
 in :mod:`engine.datafeeds.insider_crossings` and are imported here (and back into
 ``scripts/event_study.py``) so the live event set is byte-identical to the validated rule. The
-absolute-₹ floor is applied; the §2.8.2 value/20d-ADV floor is deliberately NOT part of this proxy
+absolute-₹ floor is applied; the value/20d-ADV floor is deliberately NOT part of this proxy
 (matching the validated leg — see ``insider_cluster_events``'s note).
 
-> **Resolved 2026-08-17 (§6.1 `ins`).** This module used to path-load ``scripts/event_study.py`` at
+> **Resolved 2026-08-17.** This module used to path-load ``scripts/event_study.py`` at
 > import time and its own docstring flagged that as a debt to settle "when this library is wired into
 > a live job". ``ins`` is that live job (``engine.datafeeds.ins_crossings``), so the dependency was
 > inverted: the primitives moved into the engine package verbatim and the loose script imports them
 > back. No runtime engine→scripts import remains.
 
-**Cross-source duplicates (§2.8 edge case):** the SAME disclosure reaches both exchanges and both
+**Cross-source duplicates:** the SAME disclosure reaches both exchanges and both
 feeds store it. :meth:`MarketStore.get_insider_trades` returns each trade once (the earlier broadcast),
 so the rows this module receives are already de-duplicated. Until 2026-09-24 a looser rule here
 dropped a BSE row whose ``(symbol, txn_from, qty)`` matched ANY NSE row, which can drop a different
@@ -42,7 +42,7 @@ from typing import Any
 from engine.datafeeds.filings_pit import NSE_SOURCE as SOURCE_NSE
 from engine.datafeeds.filings_pit_fresh import BSE_ID_PREFIX, BSE_SOURCE
 
-# --- the ONE definition of the validated crossing rule (promoted 2026-08-17, §6.1 `ins`) -------------
+# --- the ONE definition of the validated crossing rule (promoted 2026-08-17) -------------
 from engine.datafeeds.insider_crossings import (
     INSIDER_TRAILING_SESSIONS,
     entry_session_index,
@@ -67,7 +67,7 @@ def insider_net_buy(
     min_value_inr: float | int | Decimal,
 ) -> list[dict[str, Any]]:
     """Typed ``insider_net_buy`` candidate events over ``insider_trades``-shaped ``filings`` and an
-    ascending ``sessions`` calendar (§2.8.2). One event dict per trailing-window crossing::
+    ascending ``sessions`` calendar. One event dict per trailing-window crossing::
 
         {symbol, event_session, broadcast_dt, trailing_value, contributing_filings_n,
          person_category_dominant}
@@ -130,8 +130,8 @@ def insider_net_buy(
 
 
 class FilingsEventBuilder:
-    """§2.8.2 event builder (PURE — no store writes). Stage 3 exposes only ``insider_net_buy`` (the
-    one event type §2.8.4 cleared). ``insider_min_value_inr`` is the absolute-₹ floor
+    """Event builder (PURE — no store writes). Stage 3 exposes only ``insider_net_buy`` (the
+    one event type the filings event study cleared). ``insider_min_value_inr`` is the absolute-₹ floor
     (``settings.filings.insider_min_value_inr``, ₹1cr default)."""
 
     def __init__(self, *, insider_min_value_inr: float | int | Decimal) -> None:

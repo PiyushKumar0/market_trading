@@ -1,4 +1,4 @@
-"""SQLite migrations runner (§4.2).
+"""SQLite migrations runner.
 
 Numbered ``NNNN_name.sql`` files in this directory are applied in order, each exactly once, recorded
 in a ``schema_migrations`` table. Idempotent: re-running applies only new files. Run with::

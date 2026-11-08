@@ -1,9 +1,9 @@
-"""ReconcileJob (§3.2.3 / §4.4 job 2, A13): drift math, threshold boundaries, offline exclusion.
+"""ReconcileJob: drift math, threshold boundaries, offline exclusion.
 
 Hand-computed self-vs-official bar sets: drift only when STRICTLY beyond |Δvol|>2% or |Δclose|>1
 tick (settings.reconcile [tunable]); an official minute with no self-built bar is an OFFLINE span —
-backfilled from official and EXCLUDED from the drift denominator (§2.6), never a failure. Official
-candles become the canonical bars_1m rows; the A14 auction_open survives the canonical upsert.
+backfilled from official and EXCLUDED from the drift denominator, never a failure. Official
+candles become the canonical bars_1m rows; the auction_open survives the canonical upsert.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ async def test_drift_math_boundaries_offline_exclusion_and_alert(store, clock):
     (sym,) = report.symbols
     assert sym.bars_self == 5
     assert sym.bars_official == 7
-    assert sym.bars_compared == 5                 # offline minutes NOT in the denominator (§2.6)
+    assert sym.bars_compared == 5                 # offline minutes NOT in the denominator
     assert sym.vol_drift_bars == 1
     assert sym.close_drift_bars == 1
     assert sym.offline_bars == 2
@@ -101,23 +101,23 @@ async def test_drift_math_boundaries_offline_exclusion_and_alert(store, clock):
     assert report.symbols_flagged == ["A"]
     assert report.alerted is True
 
-    # The alert went to the injected async sink with the catalog shape (A13 "alert on drift").
+    # The alert went to the injected async sink with the catalog shape.
     assert len(sent) == 1
     assert sent[0].kind == MessageKind.RECONCILE_DRIFT
     assert sent[0].data["symbols_flagged"] == ["A"]
     assert sent[0].data["bars_compared"] == 5
 
-    # Official candles are now the CANONICAL rows (§4.4 job 2)…
+    # Official candles are now the CANONICAL rows…
     bars = store.get_bars_1m("A", at(9, 15), at(9, 22))
     assert len(bars) == 7
     assert {b.src for b in bars} == {"kite_official"}
     assert bars[1].volume == 1000                 # official replaced the drifted self volume
     # …the offline span was backfilled from official…
     assert bars[5].ts_minute == at(9, 20) and bars[5].close == Decimal("101.00")
-    # …and the A14 auction_open survived the canonical upsert on the 09:15 row.
+    # …and the auction_open survived the canonical upsert on the 09:15 row.
     assert bars[0].auction_open == Decimal("99.50")
 
-    # reconcile_log row = the §2.6 per-day catch-up checkpoint.
+    # reconcile_log row = the per-day catch-up checkpoint.
     assert store.has_reconcile_entry(D) is True
     (row,) = store.get_reconcile_log(D)
     assert row["bars_self"] == 5 and row["bars_official"] == 7
@@ -271,7 +271,7 @@ async def test_token_rejection_aborts_remaining_symbols_processed_portion_intact
 
 async def test_token_rejection_on_first_symbol_leaves_day_uncheckpointed(store, clock):
     """When the token is already dead, the very first fetch aborts: nothing processed, no log row,
-    and ok=False — the job_runs watermark records the day failed, so the §2.6 sweep re-runs it
+    and ok=False — the job_runs watermark records the day failed, so the catch-up sweep re-runs it
     after re-login."""
     store.insert_bars_1m([
         self_bar("A", at(9, 15), "10.00", 100),

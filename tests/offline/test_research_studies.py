@@ -1,4 +1,4 @@
-"""scripts/research_common.py + scripts/backtest_exit_geometry.py (plan-2026-10-06 Q5.3, C1)."""
+"""scripts/research_common.py + scripts/backtest_exit_geometry.py."""
 
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ def test_brk20_reference_arm_reproduces_the_registered_baseline():
     """Arm (ii) at close(fill+20) re-measures V2_limit_at_H20_N5 at horizon 20 (2026-09-12 report).
 
     The sets differ only at the edges: --end 2026-08-31 drops roughly the last 8 sessions of
-    admissible fills (~1% of n), and C1 excludes exit_sim void_ca trades the registered run kept
+    admissible fills (~1% of n), and the exit-geometry study excludes exit_sim void_ca trades the registered run kept
     (~0.5%). Removing ~1.5% of the trades on a return-agnostic basis moves n by that much and the
     median by a few hundredths of a point, so n within 3% and median net within 0.10 pp; a larger
     gap means the population or the walk drifted from the registered construct.

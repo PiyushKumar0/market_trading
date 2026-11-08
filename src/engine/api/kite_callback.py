@@ -1,28 +1,28 @@
-"""Kite daily-login callback route (§3.2.11; R6, R10).
+"""Kite daily-login callback route.
 
 The ONE unauthenticated HTTP surface in the platform. It exposes a single route::
 
     GET /kite/callback?request_token=...
 
-which completes the daily Kite Connect login (R6) and does NOTHING else. After the owner taps the
+which completes the daily Kite Connect login and does NOTHING else. After the owner taps the
 login link on their phone and clears Kite's TOTP screen, Kite redirects the phone's browser to the
-registered redirect URL ``http://<pc-lan-ip>:8400/kite/callback`` (the phone is on the same LAN, §10.1),
+registered redirect URL ``http://<pc-lan-ip>:8400/kite/callback`` (the phone is on the same LAN),
 appending ``request_token`` (and informational ``status``/``action``) as query parameters. This route
 hands that ``request_token`` to :meth:`SessionManager.complete_login`, which performs the checksum
 exchange and stores the resulting access token via ``Secrets`` (DPAPI).
 
-**Why it is safe to leave unauthenticated (§2.4, trust-boundary R10):**
+**Why it is safe to leave unauthenticated:**
 
 * It can *only complete a login*. It never reads platform/book state and never originates an order —
   there is no code path from here to the OMS, the risk gate, or any read view.
 * The ``request_token`` is single-use and seconds-lived: Kite invalidates it on the checksum exchange,
   so a replay (or a stale value lingering in a browser history / proxy log) buys an attacker nothing.
 * The dashboard binds LAN-only (``:8400``); this token transits the owner's own Wi-Fi (TLS/Tailscale is
-  the documented upgrade path, §14 Q11). Every other route requires the bearer token.
+  the documented upgrade path). Every other route requires the bearer token.
 * The worst an unauthenticated caller can do is submit a bad/foreign ``request_token``, which the
   checksum exchange rejects — surfaced here as an HTTP 400 with a manual-paste fallback hint.
 
-**Fallback (§10.1 step 4):** if the phone is off-LAN (so the redirect can't reach the PC), the owner
+**Fallback:** if the phone is off-LAN (so the redirect can't reach the PC), the owner
 copies the ``request_token`` out of the browser address bar and sends ``/token <value>`` on Telegram.
 The 400 page returned on failure repeats that hint.
 
@@ -54,7 +54,7 @@ _SUCCESS_HTML = (
 
 
 def _failure_html(detail: str) -> str:
-    """Render the 400 body with a manual-paste fallback hint (§10.1 step 4).
+    """Render the 400 body with a manual-paste fallback hint.
 
     ``detail`` is escaped before interpolation; it may carry a provider/exception message.
     """
@@ -73,10 +73,10 @@ def _failure_html(detail: str) -> str:
 
 
 def build_kite_callback_router(session_manager, clock) -> APIRouter:
-    """Build the unauthenticated ``GET /kite/callback`` router (R6).
+    """Build the unauthenticated ``GET /kite/callback`` router.
 
     Args:
-        session_manager: a ``SessionManager`` (§3.2.4); only ``complete_login`` is used here. Its
+        session_manager: a ``SessionManager``; only ``complete_login`` is used here. Its
             ``complete_login(request_token)`` is awaited and raises on failure (checksum mismatch,
             expired/foreign token, provider error) rather than returning a flag.
         clock: the platform ``Clock`` (the single sanctioned "now"). Held for symmetry with the rest of
@@ -85,7 +85,7 @@ def build_kite_callback_router(session_manager, clock) -> APIRouter:
 
     Returns:
         An ``APIRouter`` with exactly one route, mounted by the app *without* the bearer-auth
-        dependency that guards every other route (§2.4).
+        dependency that guards every other route.
     """
     router = APIRouter(tags=["kite-login"])
 

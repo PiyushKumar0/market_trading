@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Best-effort re-scrape of the Zerodha charges page -> prints a config/costs.yaml DIFF proposal (C2).
+"""Best-effort re-scrape of the Zerodha charges page -> prints a config/costs.yaml DIFF proposal.
 
-Run before EACH release (C2: broker fees now change mid-year). This script NEVER writes
+Run before EACH release (broker fees now change mid-year). This script NEVER writes
 ``config/costs.yaml`` — it prints a human-reviewed proposal (path, current value, scraped value,
 and the matched page snippet as evidence). The owner applies accepted changes by hand and bumps
-``verified_on``; the §9.1 CostModel worked-example tests then re-anchor against the new rates.
+``verified_on``; the CostModel worked-example tests then re-anchor against the new rates.
 
 Method: fetch https://zerodha.com/charges (or ``--html-file`` for an offline/saved copy), strip the
 HTML to text, and run a table of labelled regexes for the equity charge classes the CostModel

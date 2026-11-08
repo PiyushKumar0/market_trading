@@ -1,4 +1,4 @@
-"""§2.8.2 ``FilingsEventBuilder.insider_net_buy`` — PURE event derivation over synthetic
+"""``FilingsEventBuilder.insider_net_buy`` — PURE event derivation over synthetic
 ``insider_trades``-shaped rows. Covers: the trailing-window crossing (delegated verbatim to the
 stage-2-validated ``event_study.insider_cluster_events``) + emitted metadata (trailing_value /
 contributing count / dominant person-category / point-in-time broadcast_dt); the open-market predicate
@@ -50,7 +50,7 @@ def test_insider_net_buy_single_crossing_with_metadata():
 
 
 def test_insider_net_buy_excludes_esop_and_below_threshold():
-    # An ESOP "Buy" is NOT open-market (§2.8.2 taxonomy) -> excluded; the two ₹4L market buys sum to
+    # An ESOP "Buy" is NOT open-market -> excluded; the two ₹4L market buys sum to
     # ₹8L, under the ₹10L floor -> no event.
     filings = [
         _buy(2, 400_000), _buy(3, 400_000),

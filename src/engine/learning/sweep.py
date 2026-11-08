@@ -1,24 +1,24 @@
-"""Phase-1 vectorbt parameter sweep (§6.4 step 1, §8.2) — the multiple-testing trial-count source.
+"""Vectorbt parameter sweep — the multiple-testing trial-count source.
 
-Vectorized backtests of the four §6.1 **price-only** baselines over the §6.3 envelope grid, with
+Vectorized backtests of the four **price-only** baselines over the envelope grid, with
 round-trip costs from :class:`~engine.strategy.cost_model.CostModel`. The sweep's job is threefold:
 
 1. score every grid configuration (per-param-set trade stats), and
 2. report the **trial count N** = the number of configurations evaluated (grid cardinality) — the
-   §6.4 multiple-testing deflation input the ``ValidationReport`` must cite (a 200-point sweep can
-   NOT log ``N=1`` and keep the promotion bar lenient — that is the gaming hole §6.4 step 1 closes), and
+   multiple-testing deflation input the ``ValidationReport`` must cite (a 200-point sweep can
+   NOT log ``N=1`` and keep the promotion bar lenient — that is the gaming hole this closes), and
 3. expose :meth:`SweepRunner.returns_for` — the cost-adjusted **daily** net-return series a candidate
    feeds into :class:`~engine.learning.validate.ValidationPipeline` (walk-forward + CPCV).
 
-The indicator math is the SAME pure ``engine.strategy.indicators`` the live scanners use (§6.1), so
-research and live cannot diverge (§9.6). vectorbt is imported **function-level** (native import-order
+The indicator math is the SAME pure ``engine.strategy.indicators`` the live scanners use, so
+research and live cannot diverge. vectorbt is imported **function-level** (native import-order
 guard, ``engine._preload`` — ``import engine`` makes the first numba/vectorbt import load sklearn's OpenMP
 runtime first); the module top level is pandas/numpy + stdlib only, so ``import engine.learning.sweep``
 stays cheap for the pure-Python test tier.
 
-FILL MECHANICS — **next-bar OPEN** (WO-2, 2026-08-13; this is the one that invalidated every prior
+FILL MECHANICS — **next-bar OPEN** (2026-08-13; this is the one that invalidated every prior
 report). Signals are computed from bar *t*'s COMPLETED values, so no order derived from them can fill
-before bar *t+1*. Implementation, of the two the WO offered: **the signal frames are shifted forward
+before bar *t+1*. Implementation, of the two options considered: **the signal frames are shifted forward
 one bar and an explicit price frame (``price=frames.open``) is passed to ``from_signals``** — so a
 signal computed on *t* becomes an order on row *t+1* and fills at *t+1*'s OPEN. (The alternative —
 leaving signals on *t* and passing ``open.shift(-1)`` as the price — fills at the same price but
@@ -37,17 +37,16 @@ the signal. Consequences pinned by ``tests/offline/test_sweep_smoke.py``:
 * stops/targets anchor at the FILL price (``stop_entry_price='fillprice'``), not at some other bar's
   close — with next-open fills the entry bar's close is no longer the price paid.
 
-Documented modelling choices (Phase-1 backtests are **vectorbt-vectorized only**, §8.2; the
-event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in Phase 3):
+Documented modelling choices (backtests here are **vectorbt-vectorized only**; the
+event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in paper AUTO):
 
-* **Long-only.** Every Phase-1 baseline is long-only (the §1.4.9 shorts gate is not open); ``orb``
-  models upside breakouts only. The scanner records SELL/short candidates for §6.1 attribution, but
+* **Long-only.** Every baseline is long-only (the shorts gate is not open); ``orb``
+  models upside breakouts only. The scanner records SELL/short candidates for attribution, but
   they are not tradeable and are not backtested here.
 * **Per-symbol, equal-weight.** Each symbol is an independent single-name backtest (its own cash);
   the strategy's daily return is the cross-sectional **mean** of the per-symbol daily returns (0 on a
   day a name is flat) — the return of an equal-weight allocation running the rule across the frame.
-  §7.1 portfolio limits / concurrent-position caps / sizing are the gate + paper layer's job (Phase
-  2/3), deliberately NOT modelled in the raw-edge sweep.
+  Portfolio limits / concurrent-position caps / sizing are the gate + paper layer's job, deliberately NOT modelled in the raw-edge sweep.
 * **Costs — fees.** A constant proportional per-side fee = ½ × ``CostModel.fee_breakeven_pct`` (the
   STATUTORY-fee breakeven, spread excluded — spread is charged separately as slippage, see below) at
   a reference notional (``reference_notional``, default ₹20,000), charged by vectorbt on BOTH legs so
@@ -55,11 +54,11 @@ event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in 
   (DP flat, delivery brokerage flat, MIS per-order cap) do not scale linearly with notional, so the
   fee is exact only near the reference book size — documented in every report's notes. ``orb`` is
   priced MIS; ``rsi2``/``trend``/``mom`` are priced CNC (delivery).
-* **Costs — spread** (WO-2). ``CostModel.half_spread_pct`` (½ of the measured ``costs.yaml``
+* **Costs — spread**. ``CostModel.half_spread_pct`` (½ of the measured ``costs.yaml``
   ``spread_pct``) is passed to vectorbt as ``slippage``, so EVERY order fills half a spread against
-  itself and a round trip pays the full measured spread — on top of the fees. Before WO-2 the sweep
-  charged zero spread and zero slippage anywhere (F4).
-* **Sizing** (WO-2). ``init_cash`` defaults to ``reference_notional`` (₹20,000 — the live per-trade
+  itself and a round trip pays the full measured spread — on top of the fees. Before the spread correction the sweep
+  charged zero spread and zero slippage anywhere.
+* **Sizing**. ``init_cash`` defaults to ``reference_notional`` (₹20,000 — the live per-trade
   notional), not the old fixed ₹100,000. Each per-symbol backtest opens one all-in position, so
   trades are sized at the same notional the constant fee was calibrated at. (Fees/slippage here are
   proportional, so the RETURN series is scale-invariant; what the old 100k-vs-20k mismatch broke was
@@ -67,17 +66,17 @@ event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in 
   compounds within a symbol, so later positions drift from the reference — the constant-fee
   approximation is exact only near it.
 * **Stops/exits.** ``orb`` uses vectorbt ``sl_stop``/``tp_stop`` per-signal fractions (intrabar via
-  high/low) with risk anchored at the OPPOSITE opening-range edge (§6.1 v2 2026-07-12:
+  high/low) with risk anchored at the OPPOSITE opening-range edge (v2 2026-07-12:
   ``stop_range_frac × (entry − range_low)``; sub-cost-floor breakouts — risk < 2× round-trip
-  breakeven, C3 — are skipped, mirroring the live §7.1 cost gate) plus a forced session-end
+  breakeven — are skipped, mirroring the live cost gate) plus a forced session-end
   square-off (MIS). ``rsi2`` exits on RSI>``rsi_exit`` OR a ``max_hold_days`` scheduled time-exit
   (modelled 2026-07-12) with a constant ``stop_pct`` protective stop; ``trend`` exits on the 20/50
   EMA death cross with an ATR-fraction trailing stop; ``mom`` turns the book over on the rebalance
-  cadence. The A12 ex-date skip and ``flagged_instrument_days`` suppression are live/Phase-3
-  concerns (the sweep runs on corp-action-adjusted bars, A11) — noted honestly, never silently
+  cadence. The ex-date skip and ``flagged_instrument_days`` suppression are live/paper-AUTO
+  concerns (the sweep runs on corp-action-adjusted bars) — noted honestly, never silently
   dropped.
 
-SWEEP MECHANICS — **WO-M (2026-09-13, plan §6.4 sweep-mechanics work order)**, three settings that
+SWEEP MECHANICS — **the 2026-09-13 fix**, three settings that
 every report now stamps (:data:`MECHANICS_STAMP`) because all three moved the numbers and all three
 previously moved them the SAME way, in the strategy's favour:
 
@@ -133,33 +132,33 @@ _log = get_logger("engine.learning.sweep")
 
 PRICE_BASELINES: tuple[str, ...] = ("orb", "rsi2", "trend", "mom")
 
-#: product each baseline is costed under (§6.1: orb intraday MIS; the rest delivery CNC). Public —
-#: ``engine.learning.validate`` reads it to derive the §6.4 margin-floor cost floor per strategy.
+#: product each baseline is costed under (orb intraday MIS; the rest delivery CNC). Public —
+#: ``engine.learning.validate`` reads it to derive the margin-floor cost floor per strategy.
 PRODUCT_BY_STRATEGY: dict[str, str] = {"orb": "MIS", "rsi2": "CNC", "trend": "CNC", "mom": "CNC"}
 _PRODUCT = PRODUCT_BY_STRATEGY          # internal alias (kept for readability at call sites)
 
-#: The live per-trade notional the cost model is calibrated at (§6.3/§7.1) — also the sweep's default
-#: per-symbol ``init_cash`` (WO-2 (iii): calibrate the constant fee at the size actually traded).
+#: The live per-trade notional the cost model is calibrated at — also the sweep's default
+#: per-symbol ``init_cash`` (calibrate the constant fee at the size actually traded).
 REFERENCE_NOTIONAL_DEFAULT: Decimal = Decimal("20000")
 
 #: grid density → target points per parameter (before the default is unioned in). Configurable via
-#: the CLI ``--grid-density``; the grid cardinality is the trial count N (§6.4 step 1).
+#: the CLI ``--grid-density``; the grid cardinality is the trial count N.
 DENSITY_POINTS: dict[str, int] = {"coarse": 2, "medium": 3, "fine": 5}
 
-_ORB_ENTRY_START = time(9, 30)      # §6.1 orb base entry window (intersect owner window live)
+_ORB_ENTRY_START = time(9, 30)      # orb base entry window (intersect owner window live)
 _ORB_ENTRY_END = time(14, 30)
-_MEDIAN_WINDOW = 20                 # §6.1 20-bar volume median
+_MEDIAN_WINDOW = 20                 # 20-bar volume median
 _ATR_PERIOD = 14
 _RSI_PERIOD = 2
 _STOCK_DMA = 200
 _MOM_LOOKBACK = 20                  # 4 weeks × 5 sessions (indicators.momentum)
 _TRADING_DAYS_Y = 252
 
-#: WO-2 (i): what every report's ``fill_mechanics`` field and modelling note declare.
+#: What every report's ``fill_mechanics`` field and modelling note declare.
 FILL_MECHANICS = "next_bar_open"
 
-# --- WO-M sweep mechanics (2026-09-13, plan §6.4 sweep-mechanics work order). The three settings
-# --- the work order registered, as named constants so the report stamp and the code cannot drift.
+# --- Sweep mechanics (2026-09-13). The three settings
+# --- registered here, as named constants so the report stamp and the code cannot drift.
 #: (i) stops are decided against the bar's OWN OHLC (``open``/``high``/``low`` are passed to vectorbt
 #: for DAILY frames too, not only intraday), so an intrabar breach stops out — the live resting
 #: broker stop's behaviour — and it fills where that stop would fill: at the OPEN when the bar gaps
@@ -169,7 +168,7 @@ FILL_MECHANICS = "next_bar_open"
 #: ``get_stop_price_nb`` returns the open whenever the open is already through the level, so an
 #: ``open`` silently substituted by the close books every close-through-the-stop bar at that close
 #: rather than at the level (pessimistic on an ``sl_stop`` leg, optimistic on a ``tp_stop`` one).
-#: Two within-bar residues REMAIN, both in the strategy's favour, both unmeasured (WO-M re-review,
+#: Two within-bar residues REMAIN, both in the strategy's favour, both unmeasured (re-review,
 #: 2026-09-13): (a) a TRAILING stop is checked against the PRIOR bar's high-water and only then
 #: ratcheted with the current bar's high (``portfolio/nb.py`` ~2025-2051: ``get_stop_price_nb``
 #: first, ``if _high > sl_curr_price: sl_curr_price = _high`` after), so a bar that makes a new high
@@ -211,7 +210,7 @@ class ParamSetStat(BaseModel):
     params: dict[str, float]
     n_trades: int
     win_rate: float | None                 # fraction of ALL trades with net return > 0 (see below)
-    #: Mean per-trade net return over CLOSED round trips only, % (WO-M (iii), 2026-09-13) — THE
+    #: Mean per-trade net return over CLOSED round trips only, % (2026-09-13) — THE
     #: ranking statistic (:meth:`SweepRunner._rank_best`) and the per-trade figure the promotion
     #: packet quotes. ``None`` when the config closed no round trip (nothing realized to average)
     #: or when the open/closed split could not be read — in both cases the config is NOT rankable,
@@ -223,21 +222,21 @@ class ParamSetStat(BaseModel):
     sharpe: float | None                   # annualized (252) Sharpe of the daily series
     max_drawdown_pct: float | None         # positive magnitude
 
-    # --- R2 (2026-09-12) reporting additions; WO-M (2026-09-13) promoted the closed-only figure
+    # --- Reporting additions (2026-09-12); the 2026-09-13 sweep-mechanics fix promoted the closed-only figure
     # --- above to BE ``expectancy_pct``. What stays reporting-only: the holding distribution, the
-    # --- open/closed counts, and ``expectancy_all_pct`` — so the WO-3 margin floor can be quoted at
-    # --- the horizon the strategy was actually held for instead of only at a §7.1 cap, and so the
+    # --- open/closed counts, and ``expectancy_all_pct`` — so the margin floor can be quoted at
+    # --- the horizon the strategy was actually held for instead of only at a cap, and so the
     # --- pre-2026-09-13 headline remains readable beside the one that replaced it.
     #: Open/closed split of the trades. vectorbt's per-trade ``Return`` includes STILL-OPEN
     #: positions at their unrealized mark-to-market, so a window that ends on a run of winners
-    #: inflates ``expectancy_all_pct``; ``expectancy_pct`` excludes them (WO-M (iii)).
+    #: inflates ``expectancy_all_pct``; ``expectancy_pct`` excludes them.
     n_closed: int = 0
     n_open: int = 0
     #: Mean per-trade net return over CLOSED trades only, % — the SAME number as ``expectancy_pct``
-    #: since WO-M, kept because it names its basis in the JSON and every consumer written between
+    #: since the sweep-mechanics fix, kept because it names its basis in the JSON and every consumer written between
     #: 2026-09-12 and the fix reads it.
     expectancy_closed_pct: float | None = None
-    #: Mean per-trade net return over ALL trades, % — the pre-WO-M headline, kept as the figure
+    #: Mean per-trade net return over ALL trades, % — the pre-fix headline, kept as the figure
     #: reported BESIDE ``expectancy_pct``. Reporting only: it ranks nothing and promotes nothing.
     expectancy_all_pct: float | None = None
     #: Fraction of CLOSED round trips with net return > 0 — the same population ``expectancy_pct``
@@ -257,33 +256,33 @@ class ParamSetStat(BaseModel):
 
 
 class SweepReport(BaseModel):
-    """Output of one strategy sweep. ``trial_count_n`` = grid cardinality (§6.4 step 1)."""
+    """Output of one strategy sweep. ``trial_count_n`` = grid cardinality."""
 
     model_config = ConfigDict(frozen=True)
 
     strategy_id: str
     product: str
     grid_density: str
-    trial_count_n: int                     # THE §6.4 multiple-testing input (every config evaluated)
+    trial_count_n: int                     # THE multiple-testing input (every config evaluated)
     n_symbols: int
     symbols: list[str]
     data_start: date | None
     data_end: date | None
     reference_notional: str                # Decimal as string (money convention)
     per_side_fee_pct: float                # the modelled constant per-side STATUTORY fee, %
-    init_cash: str = "0"                   # per-symbol backtest cash (= reference_notional, WO-2)
-    spread_pct: float = 0.0                # measured full quoted spread, % (costs.yaml, WO-2)
+    init_cash: str = "0"                   # per-symbol backtest cash (= reference_notional)
+    spread_pct: float = 0.0                # measured full quoted spread, % (costs.yaml)
     slippage_per_leg_pct: float = 0.0      # = spread_pct/2, charged by vectorbt on EVERY order
     cost_floor_pct: float = 0.0            # round-trip friction at the reference notional (fees+spread)
-    fill_mechanics: str = "next_bar_open"  # WO-2; "same_bar_close" was the pre-2026-08-13 defect
-    #: WO-M (2026-09-13): the one-line stamp of the three sweep-mechanics settings
+    fill_mechanics: str = "next_bar_open"  # "same_bar_close" was the pre-2026-08-13 defect
+    #: Sweep-mechanics fix (2026-09-13): the one-line stamp of the three sweep-mechanics settings
     #: (:data:`MECHANICS_STAMP`). Absent/"" on any artifact written before the fix — which is
     #: exactly how a pre-fix report is told apart from a post-fix one.
     mechanics: str = ""
     #: What one bar of ``ParamSetStat.hold_bars_*`` IS — "session" for the daily baselines, "1m bar"
     #: for ``orb``. Recorded so a holding number in the JSON is never read in the wrong unit.
     bar_unit: str = "session"
-    #: R2 (2026-09-12): this platform stores NO point-in-time index membership, so EVERY universe a
+    #: Added 2026-09-12: this platform stores NO point-in-time index membership, so EVERY universe a
     #: caller can pass is a present-day list applied backwards — survivorship-tainted and optimistic
     #: in LEVEL (comparisons between runs sharing one list are unaffected). There is deliberately no
     #: code path that sets this False: it would be a claim the platform cannot currently support.
@@ -294,9 +293,9 @@ class SweepReport(BaseModel):
     generated_at: datetime
 
 
-# --------------------------------------------------------------------------- envelope + grid (§6.3)
+# --------------------------------------------------------------------------- envelope + grid
 def load_envelope(path: Path | None = None) -> dict[str, dict[str, Any]]:
-    """Parse ``config/envelope.yaml`` → ``{param_name: {min, max, default, used_by}}`` (§6.3 bounds)."""
+    """Parse ``config/envelope.yaml`` → ``{param_name: {min, max, default, used_by}}``."""
     p = Path(path) if path is not None else config_dir() / "envelope.yaml"
     raw = yaml.safe_load(p.read_text(encoding="utf-8"))
     return dict(raw["parameters"])
@@ -310,7 +309,7 @@ def _param_points(spec: Mapping[str, Any], points: int) -> list[float]:
     """``points`` values spanning ``[min, max]`` (endpoints inclusive) with the default always in.
 
     Integer-valued envelope rows (e.g. ``orb.orb_minutes``, ``mom.top_n``) collapse to unique integer
-    steps; float rows round to 6 dp to keep grid keys stable/deterministic (§9.6).
+    steps; float rows round to 6 dp to keep grid keys stable/deterministic.
     """
     lo, hi, default = float(spec["min"]), float(spec["max"]), float(spec["default"])
     k = max(1, int(points))
@@ -326,11 +325,11 @@ def _param_points(spec: Mapping[str, Any], points: int) -> list[float]:
 def build_param_grid(
     strategy_id: str, *, points: int = 2, envelope: Mapping[str, dict[str, Any]] | None = None
 ) -> list[dict[str, float]]:
-    """Cartesian product of §6.3 per-parameter value lists for ``strategy_id`` (bare, un-namespaced).
+    """Cartesian product of per-parameter value lists for ``strategy_id`` (bare, un-namespaced).
 
     ``points`` is the target values-per-parameter (grid density); the strategy default is always
     unioned in so the champion baseline is one of the evaluated configs. Returns the full grid; its
-    length is the trial count N (§6.4 step 1).
+    length is the trial count N.
     """
     env = dict(envelope) if envelope is not None else load_envelope()
     prefix = strategy_id + "."
@@ -394,20 +393,20 @@ def _intraday_symbol_frame(
 
 # --------------------------------------------------------------------------- the runner
 class SweepRunner:
-    """Runs §6.1-baseline vectorbt sweeps and exposes the validate-ready returns provider.
+    """Runs baseline vectorbt sweeps and exposes the validate-ready returns provider.
 
     Parameters
     ----------
     store:
         The read surface for bars (``get_bars_1d`` / ``get_bars_1m``). Opened by the caller.
     cost_model:
-        Round-trip cost source (C1–C4). The per-side fee is derived once per strategy from its
+        Round-trip cost source. The per-side fee is derived once per strategy from its
         breakeven at ``reference_notional``.
     clock:
-        Single "now" (§3.2) — stamps ``generated_at``.
+        Single "now" — stamps ``generated_at``.
     reference_notional / init_cash:
         The book size the constant per-side fee is calibrated at, and per-symbol backtest cash.
-        ``init_cash=None`` (the default) means "the same number" — WO-2 (iii): the pre-2026-08-13
+        ``init_cash=None`` (the default) means "the same number": the pre-2026-08-13
         default charged a fee calibrated at ₹20,000 to a ₹100,000 book. Pass an explicit
         ``init_cash`` only to deliberately re-introduce that mismatch.
     index_symbol:
@@ -430,7 +429,7 @@ class SweepRunner:
         self._cost_model = cost_model
         self._clock = clock
         self._reference_notional = Decimal(reference_notional)
-        # WO-2 (iii): trade at the notional the fee constant was calibrated at.
+        # Trade at the notional the fee constant was calibrated at.
         self._init_cash = float(self._reference_notional) if init_cash is None else float(init_cash)
         self._index_symbol = index_symbol
         # frames cached per strategy so returns_for() recomputes without re-reading the store.
@@ -446,7 +445,7 @@ class SweepRunner:
 
         Fees only (``fee_breakeven_pct``) — the spread half of the friction is charged separately as
         vectorbt ``slippage`` (:meth:`_slippage_per_leg`), so using the spread-inclusive
-        ``breakeven_pct`` here would double-count it (WO-2).
+        ``breakeven_pct`` here would double-count it.
         """
         product = _PRODUCT[strategy_id]
         be_pct = float(self._cost_model.fee_breakeven_pct(self._reference_notional, product))
@@ -454,12 +453,12 @@ class SweepRunner:
 
     def _slippage_per_leg(self) -> float:
         """Half the measured quoted spread, as a fraction — vectorbt charges it on EVERY order, so a
-        round trip pays the full ``costs.yaml`` ``spread_pct`` (WO-2)."""
+        round trip pays the full ``costs.yaml`` ``spread_pct``."""
         return float(self._cost_model.half_spread_pct) / 100.0
 
     def _cost_floor_pct(self, strategy_id: str) -> float:
         """Full round-trip friction (fees + spread) at the reference notional, in percent — the
-        number WO-3's promotion margin floor is expressed as a fraction of."""
+        number the promotion margin floor is expressed as a fraction of."""
         return float(self._cost_model.breakeven_pct(self._reference_notional, _PRODUCT[strategy_id]))
 
     # ------------------------------------------------------------------ public surface
@@ -475,7 +474,7 @@ class SweepRunner:
     ) -> SweepReport:
         """Backtest every grid config of ``strategy_id`` over ``[start, end]`` on ``symbols``.
 
-        ``param_grid`` overrides the §6.3-derived grid (used by the smoke test for a tiny grid); when
+        ``param_grid`` overrides the envelope-derived grid (used by the smoke test for a tiny grid); when
         omitted the grid is :func:`build_param_grid` at the ``grid_density`` point count. The report's
         ``trial_count_n`` is ALWAYS the number of configurations actually evaluated.
         """
@@ -503,7 +502,7 @@ class SweepRunner:
             notes.append("NO BARS for the requested symbols/window — every config scored zero trades.")
         for params in grid:
             stats.append(self._score(strategy_id, frames, params, fee))
-        # WO-M (iii): a config that traded but closed no round trip — or whose open/closed split
+        # A config that traded but closed no round trip — or whose open/closed split
         # could not be read (``_trade_split_stats`` degrades rather than raising) — has no realized
         # per-trade expectancy and is excluded from the ranking. Say so in the artifact; a silently
         # smaller candidate set is how a grid winner stops meaning what the reader thinks it means.
@@ -554,7 +553,7 @@ class SweepRunner:
         """Cost-adjusted **daily** net-return series for ``params`` — the ValidationPipeline provider.
 
         Reuses the frames cached by the most recent :meth:`run` for ``strategy_id`` (deterministic:
-        same frames + params ⇒ same series, §9.6). Index is ``datetime.date``, ascending.
+        same frames + params ⇒ same series). Index is ``datetime.date``, ascending.
         """
         frames = self._frames.get(strategy_id)
         if frames is None:
@@ -617,8 +616,8 @@ class SweepRunner:
         n = int(len(trades))
         win_rate: float | None = None
         expectancy_all: float | None = None
-        # R2 (2026-09-12): the open/closed split and the realized holding distribution of the trade
-        # records. WO-M (iii, 2026-09-13): the CLOSED-only mean IS ``expectancy_pct`` now — a still
+        # Added 2026-09-12: the open/closed split and the realized holding distribution of the trade
+        # records. Since 2026-09-13: the CLOSED-only mean IS ``expectancy_pct`` now — a still
         # -open position is unrealized and has paid no exit leg, so it cannot sit inside the
         # statistic the grid winner is ranked on. A config with no closed round trip (or whose split
         # could not be read) scores ``None`` and drops out of the ranking rather than falling back
@@ -659,12 +658,12 @@ class SweepRunner:
 
     @staticmethod
     def _rank_best(stats: Sequence[ParamSetStat]) -> dict[str, float] | None:
-        """Grid winner by CLOSED-trade expectancy (WO-M (iii)), then total return, then shallowest DD.
+        """Grid winner by CLOSED-trade expectancy, then total return, then shallowest DD.
 
         A config that opened positions but closed NO round trip inside the window has no realized
         per-trade expectancy, so it is not rankable — it is excluded rather than ranked on its
         unrealized marks, and an all-``None`` grid returns ``None`` (the CLI then validates the
-        §6.3 default config, as it already does for an empty frame — flagging it on the console line
+        envelope default config, as it already does for an empty frame — flagging it on the console line
         and on the ``ParamSet`` as ``params_are_grid_winner=False``, because a defaults verdict must
         never render like a swept one).
         """
@@ -834,7 +833,7 @@ class SweepRunner:
         return self._portfolio(frames, builder(frames, params, fee), fee)
 
     def _portfolio(self, frames: _Frames, sig: _Signals, fee: float):
-        """Run one vectorbt backtest of already-built signals under the WO-2 fill mechanics.
+        """Run one vectorbt backtest of already-built signals under the next-open fill mechanics.
 
         This is where the NEXT-BAR-OPEN rule lives (module docstring): every signal frame is moved
         one bar forward and ``price=frames.open`` makes the order fill at that bar's OPEN. Split out
@@ -852,15 +851,15 @@ class SweepRunner:
             close=frames.close,
             entries=entries,
             exits=exits,
-            price=frames.open,                 # WO-2: fill at THIS row's open (signals already +1)
+            price=frames.open,                 # fill at THIS row's open (signals already +1)
             fees=fee,
-            slippage=self._slippage_per_leg(),  # WO-2: half the measured spread, every order
+            slippage=self._slippage_per_leg(),  # half the measured spread, every order
             init_cash=self._init_cash,
             direction="longonly",
             # stops are fractions OF THE PRICE PAID; with next-open fills the signal bar's close is
             # no longer that price, so anchor them at the fill (vectorbt's default is "close").
             stop_entry_price="fillprice",
-            # WO-M (ii): a stop exit pays the half-spread like every other exit. vectorbt's default
+            # A stop exit pays the half-spread like every other exit. vectorbt's default
             # ``stoplimit`` returns (stop_price, 0.0) — fee charged, slippage ZEROED;
             # ``stopmarket`` returns (stop_price, slippage), keeping the stop LEVEL as the fill
             # reference while charging the per-leg half-spread (portfolio/nb.py
@@ -874,7 +873,7 @@ class SweepRunner:
             kwargs["tp_stop"] = _shift_stop_frame(sig.tp_stop, session_codes=session)
         if sig.sl_trail:
             kwargs["sl_trail"] = True
-        # WO-M (i): the bar's OWN open/high/low go in for DAILY frames too (they were intraday-only),
+        # The bar's OWN open/high/low go in for DAILY frames too (they were intraday-only),
         # so a stop/trail is decided against the bar's range — an intrabar breach stops out, and a
         # trail ratchets on highs. vectorbt substitutes the CLOSE for any of the three it is not
         # given (portfolio/nb.py: `if np.isnan(_open): _open = _close`), and `get_stop_price_nb`
@@ -913,18 +912,18 @@ class _Signals:
     sl_stop: pd.DataFrame | float | None = None
     tp_stop: pd.DataFrame | float | None = None
     sl_trail: bool = False
-    #: WO-2: exits normally shift to the next bar like entries. ``orb`` sets this False because its
+    #: Exits normally shift to the next bar like entries. ``orb`` sets this False because its
     #: only signal-driven exit is the forced MIS session-end square-off, which must stay on the
     #: session's own last bar (a shift would carry it into the next session ⇒ overnight MIS ride).
     shift_exits: bool = True
 
 
 def _params_key(params: Mapping[str, float]) -> tuple[tuple[str, float], ...]:
-    """Deterministic memo key for one grid config (§9.6)."""
+    """Deterministic memo key for one grid config."""
     return tuple(sorted((k, float(v)) for k, v in params.items()))
 
 
-# --------------------------------------------------------------------------- next-bar-open fills (WO-2)
+# --------------------------------------------------------------------------- next-bar-open fills
 def _session_codes(index: pd.Index) -> np.ndarray:
     """Per-row session id for an intraday index (equal codes ⇒ same trading day)."""
     codes, _ = pd.factorize(pd.Index([pd.Timestamp(ts).date() for ts in index]))
@@ -947,10 +946,10 @@ def _first_rows_mask(n: int, session_codes: np.ndarray | None) -> np.ndarray:
 
 
 def _shift_to_next_bar(frame: pd.DataFrame, *, session_codes: np.ndarray | None) -> pd.DataFrame:
-    """Move every boolean signal ONE bar forward: a signal computed on bar t acts on bar t+1 (WO-2).
+    """Move every boolean signal ONE bar forward: a signal computed on bar t acts on bar t+1.
 
     Signals on the frame's last bar (and, intraday, on a session's last bar) are DROPPED — there is
-    no bar left to fill them in. Deterministic and pure (§9.6).
+    no bar left to fill them in. Deterministic and pure.
     """
     shifted = frame.shift(1, fill_value=False)
     drop = _first_rows_mask(len(frame), session_codes)
@@ -962,7 +961,7 @@ def _shift_to_next_bar(frame: pd.DataFrame, *, session_codes: np.ndarray | None)
 def _shift_stop_frame(
     stop: pd.DataFrame | float | None, *, session_codes: np.ndarray | None
 ) -> pd.DataFrame | float | None:
-    """Shift a per-signal stop/target FRACTION frame in lockstep with its entries (WO-2).
+    """Shift a per-signal stop/target FRACTION frame in lockstep with its entries.
 
     The fractions are stamped on the signal bar, so they must travel with the signal or they would
     arrive on a bar the entry no longer occupies. Scalars (``rsi2``'s constant ``stop_pct``) and
@@ -985,15 +984,15 @@ def _nan_like(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(np.nan, index=frame.index, columns=frame.columns)
 
 
-# --------------------------------------------------------------------------- rsi2 (§6.1 row 2)
+# --------------------------------------------------------------------------- rsi2
 def _signals_rsi2(frames: _Frames, params: Mapping[str, float], fee: float = 0.0) -> _Signals:
     del fee  # CNC costing enters via vectorbt ``fees=``; only orb consumes the fee in its builder
     rsi_entry = float(params["rsi_entry"])
     rsi_exit = float(params["rsi_exit"])
     stop_pct = float(params["stop_pct"])
-    # §6.1 pins "exit RSI(2) > rsi_exit OR max_hold_days" — the time-exit is MODELLED (2026-07-12;
+    # The strategy rules pin "exit RSI(2) > rsi_exit OR max_hold_days" — the time-exit is MODELLED (2026-07-12;
     # previously omitted, so the swept max_hold_days axis was a no-op and the reported expectancy
-    # belonged to a rule the plan does not pin). 0/absent ⇒ no time-exit.
+    # belonged to a rule the strategy rules do not pin). 0/absent ⇒ no time-exit.
     max_hold = int(params.get("max_hold_days", 0) or 0)
     close = frames.close
     entries = _bool_like(close)
@@ -1030,7 +1029,7 @@ def _signals_rsi2(frames: _Frames, params: Mapping[str, float], fee: float = 0.0
             # (documented in the report notes): the schedule is per-SIGNAL, so a signal that fired
             # while already in position leaves a stale exit that can clip a subsequent re-entry
             # early by ≤ max_hold sessions — rare (oversold signals cluster; vectorbt ignores exits
-            # while flat), and the true §6.1 semantics live in the Phase-3 position manager.
+            # while flat), and the true strategy-rule semantics live in the paper-AUTO position manager.
             ex_np = ex.to_numpy().copy()
             sched = np.flatnonzero(ent.to_numpy()) + max_hold
             sched = sched[sched < ex_np.size]
@@ -1042,7 +1041,7 @@ def _signals_rsi2(frames: _Frames, params: Mapping[str, float], fee: float = 0.0
 
 
 def _index_uptrend(index_closes: pd.Series, target_index: pd.Index) -> pd.Series:
-    """Uptrend = index close > its 50-DMA AND the 50-DMA is rising over 20 sessions (§6.1 rsi2)."""
+    """Uptrend = index close > its 50-DMA AND the 50-DMA is rising over 20 sessions."""
     sma50 = sma(index_closes, 50)
     rising = sma50 > sma50.shift(20)
     up = (index_closes > sma50) & rising
@@ -1051,7 +1050,7 @@ def _index_uptrend(index_closes: pd.Series, target_index: pd.Index) -> pd.Series
     return pd.Series(up.reindex(tgt).fillna(False).to_numpy(), index=target_index)
 
 
-# --------------------------------------------------------------------------- trend (§6.1 row 3)
+# --------------------------------------------------------------------------- trend
 def _signals_trend(frames: _Frames, params: Mapping[str, float], fee: float = 0.0) -> _Signals:
     del fee  # CNC costing enters via vectorbt ``fees=``; only orb consumes the fee in its builder
     adx_min = float(params["adx_min"])
@@ -1087,7 +1086,7 @@ def _signals_trend(frames: _Frames, params: Mapping[str, float], fee: float = 0.
     return _Signals(entries=entries, exits=exits, sl_stop=sl, sl_trail=True)
 
 
-# --------------------------------------------------------------------------- mom (§6.1 row 4)
+# --------------------------------------------------------------------------- mom
 def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0) -> _Signals:
     del fee  # CNC costing enters via vectorbt ``fees=``; only orb consumes the fee in its builder
     top_n = int(params["top_n"])
@@ -1096,7 +1095,7 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
     entries = _bool_like(close)
     exits = _bool_like(close)
 
-    # WO-2 (iv) — the ranking window must exclude the session actually TRADED. It does, by
+    # The ranking window must exclude the session actually TRADED. It does, by
     # construction, once fills are next-session-open: the signal stamped on row t is shifted to row
     # t+1 by ``_portfolio``, so the rank that fills on t+1 was computed from closes through t. In
     # fill-row space that is ``momentum.shift(1)`` — the same "through d−1" window the live
@@ -1122,16 +1121,16 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
     return _Signals(entries=entries, exits=exits)
 
 
-# --------------------------------------------------------------------------- orb (§6.1 row 1)
+# --------------------------------------------------------------------------- orb
 def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0) -> _Signals:
     orb_minutes = int(params["orb_minutes"])
     vol_mult = float(params["vol_mult"])
     frac = float(params["stop_range_frac"])   # v2 2026-07-12: stop at the opposite range edge
     rr = float(params["rr_target"])
-    # §6.1 v2 cost floor (C3): a breakout whose risk cannot pay for itself twice is not a viable
+    # v2 cost floor: a breakout whose risk cannot pay for itself twice is not a viable
     # candidate — skip entries with risk/price < 2 × round-trip breakeven (round trip = 2 × the
-    # per-side fee). Live this suppression is the §7.1 cost gate's job; modelling it here keeps the
-    # Phase-1 sweep aligned with the stack the signal actually flows through (scanner → gate).
+    # per-side fee). Live this suppression is the cost gate's job; modelling it here keeps the
+    # sweep aligned with the stack the signal actually flows through (scanner → gate).
     min_risk_frac = 4.0 * fee
     close = frames.close
     entries = _bool_like(close)
@@ -1141,7 +1140,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
 
     ts_index = pd.DatetimeIndex(close.index)
     session_dates = pd.Index([t.date() for t in ts_index])
-    # Hot path (§8.2): this builder runs once per grid config over ~9M cells. Everything below is
+    # Hot path: this builder runs once per grid config over ~9M cells. Everything below is
     # positional numpy on int64-ns timestamps — the original per-(symbol, day) index masks and
     # boxed per-bar ``ts_index[p]`` comparisons cost ~8 min per config (~10 h per coarse sweep).
     # Semantics are bit-identical to the loop it replaces (verified old-vs-new on real frames).
@@ -1218,7 +1217,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                 price = float(c_np[p])
                 risk = frac * (price - range_lo)
                 if risk <= 0.0 or risk / price < min_risk_frac:
-                    continue  # sub-cost-floor breakout (C3) — live, the §7.1 cost gate kills it
+                    continue  # sub-cost-floor breakout — live, the cost gate kills it
                 entries.iloc[p, ent_col] = True
                 sl.iloc[p, sl_col] = risk / price
                 tp.iloc[p, tp_col] = rr * risk / price
@@ -1226,10 +1225,10 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                 break
             if entered:
                 # Forced session-end square-off (MIS): exit at the day's LAST bar, NOT the 14:30
-                # entry-window end. §6.1 pins "squared off by window end" and this module's own notes
+                # entry-window end. The strategy rules pin "squared off by window end" and this module's own notes
                 # say "forced session-end square-off"; a breakout still open at 14:30 that has hit
                 # neither its range-anchored stop nor its RR target rides to the end-of-session MIS
-                # square-off (~15:15–15:29). Truncating at 14:30 biased the §6.1 CPCV baselines.
+                # square-off (~15:15–15:29). Truncating at 14:30 biased the CPCV baselines.
                 # The exit must sit on a bar THIS symbol actually has: union-index rows the symbol
                 # is missing carry NaN close, and vectorbt silently ignores NaN-price orders
                 # (OrderStatusInfo.PriceNaN), so an exit on the union last bar could be dropped and
@@ -1237,7 +1236,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                 # Non-empty by construction: the entry bar's close was a real (non-NaN) price.
                 sym_valid = day_pos[~np.isnan(c_np[day_pos])]
                 exits.iloc[sym_valid[-1], ex_col] = True
-    # shift_exits=False (WO-2): the entry above IS subject to the same-bar-close defect the daily
+    # shift_exits=False: the entry above IS subject to the same-bar-close defect the daily
     # baselines had — it is stamped on the bar whose CLOSE cleared the range — so ``_portfolio``
     # shifts it (and its sl/tp fractions) one 1m bar forward, session-aware. The square-off exit is
     # the one signal that must stay put: it is a clock-driven MIS obligation on THIS session's last
@@ -1265,7 +1264,7 @@ def _trade_split_stats(
     tuple[float | None, float | None, float | None],
     tuple[float | None, float | None, float | None],
 ]:
-    """R2 reporting block for one config:
+    """Reporting block for one config:
     ``(n_closed, n_open, expectancy_closed_pct, win_rate_closed, hold_all, hold_closed)``.
 
     TOTAL BY CONSTRUCTION. It reads two vectorbt ``records_readable`` columns whose names are a
@@ -1273,11 +1272,11 @@ def _trade_split_stats(
     function did not anticipate must degrade — never take the sweep, and never the promotion verdict
     computed from it, down with it. The failure is logged, not swallowed silently.
 
-    Since WO-M (2026-09-13) the degraded return is no longer merely "no holding figures": ``None``
+    Since the 2026-09-13 sweep-mechanics fix the degraded return is no longer merely "no holding figures": ``None``
     here is also ``ParamSetStat.expectancy_pct``, so the config drops OUT of the grid ranking
     (:meth:`SweepRunner._rank_best`) instead of being ranked on an all-trades mean that includes
     unrealized marks. That is the fail-closed direction on purpose — an unreadable split must not
-    silently restore the statistic item (iii) removed — and :meth:`SweepRunner.run` counts the
+    silently restore the statistic the fix removed — and :meth:`SweepRunner.run` counts the
     excluded configs into the report's notes so the shrunken candidate set is never invisible.
     """
     none3: tuple[float | None, float | None, float | None] = (None, None, None)
@@ -1301,7 +1300,7 @@ def _trade_split_stats(
 
 
 def _trade_hold_bars(trades: pd.DataFrame, index: pd.Index) -> np.ndarray:
-    """Holding duration of every trade in BARS: exit row position − entry row position (R2).
+    """Holding duration of every trade in BARS: exit row position − entry row position.
 
     ``records_readable`` carries TIMESTAMPS, not row positions, so the frame index is what converts
     them back to a count of bars — calendar arithmetic would count weekends and holidays the market
@@ -1309,7 +1308,7 @@ def _trade_hold_bars(trades: pd.DataFrame, index: pd.Index) -> np.ndarray:
     position's age at the window edge rather than a realized hold (hence the closed-only figures
     reported beside it). Rows whose timestamps are not in ``index`` (never observed — defensive
     against a future vectorbt returning a resampled stamp) score ``NaN`` and are dropped by
-    :func:`_hold_stats` rather than silently counted as a same-bar round trip. Pure (§9.6).
+    :func:`_hold_stats` rather than silently counted as a same-bar round trip. Pure.
     """
     if trades.empty:
         return np.zeros(0, dtype="float64")

@@ -1,4 +1,4 @@
-"""Paper ExitManager (plan Q4.6): the one exit routine, the D2 time exit and corporate actions.
+"""Paper ExitManager: the one exit routine, the time exit and corporate actions.
 
 Every live exit cause (time, equity-floor flatten, PROTECTION_FAILED, overdue, residual) goes through
 :meth:`ExitManager.exit_position`; nothing else flattens paper, and a real kill or halt never does.
@@ -37,9 +37,9 @@ _WORKING = "state NOT IN ({})".format(", ".join(f"'{s.value}'" for s in sorted(T
 _PAISA = Decimal("0.01")
 _PRICE = Decimal("0.0001")
 
-#: Open positions are re-checked for an ex-date this often in session (plan Q4.6).
+#: Open positions are re-checked for an ex-date this often in session.
 CORP_RECHECK = timedelta(minutes=15)
-#: An in-session exit still waiting on an unapplied leg this long is logged as stuck (Q4.7 reconcile adopts it).
+#: An in-session exit still waiting on an unapplied leg this long is logged as stuck (the reconciler adopts it).
 STUCK_DEFERRAL = timedelta(minutes=5)
 
 #: ``corp_actions_fn(ex_from, ex_to)``: the UNADJUSTED_KINDS corporate actions with ``ex_from <= ex_date``
@@ -87,7 +87,7 @@ def _ex_date(value: Any) -> date:
 
 class ExitManager:
     """Seams: :meth:`exit_position` is the ProtectionManager's ``exit_fn``; :meth:`tick` runs from
-    ``paper_tick``; :meth:`flatten_all` is Q4.8's; :meth:`entry_refusal` is Q4.9's."""
+    ``paper_tick``; :meth:`flatten_all` and :meth:`entry_refusal` are further seams."""
 
     def __init__(
         self,
@@ -264,7 +264,7 @@ class ExitManager:
 
     def exit_session_for(self, strategy_id: str, style: str, entry_session: date, *, key: str) -> date | None:
         """Session N of the hold, ``entry_session`` being 1; None while the calendar cannot say (the
-        raise is logged and counted once per ``key`` a day; Q0.4 alerts) or the hold is unknown."""
+        raise is logged and counted once per ``key`` a day) or the hold is unknown."""
         try:
             n = self._hold_fn(strategy_id, style)
             if n is not None:
@@ -364,7 +364,7 @@ class ExitManager:
             )
         _log.info("paper_position_relabelled_void", position_id=pid, was=row["close_reason"], gross=str(gross))
 
-    # ---------------------------------------------------------------- step 6
+    # ---------------------------------------------------------------- closed-GTT sweep
     async def _sweep_closed_gtts(self) -> None:
         """No ACTIVE GTT outlives its position's close."""
         orphans = {

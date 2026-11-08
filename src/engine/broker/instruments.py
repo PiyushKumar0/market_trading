@@ -1,32 +1,32 @@
-"""Daily NSE instruments dump + per-symbol tick/lot/token store (§3.2.2, A10/A8/C7).
+"""Daily NSE instruments dump + per-symbol tick/lot/token store.
 
 The ``InstrumentStore`` is refreshed once per trading day at ~08:15 from the full Kite instruments
-dump (``instruments_daily`` snapshot, §4.3). It is the single authority for per-symbol metadata that
+dump (``instruments_daily`` snapshot). It is the single authority for per-symbol metadata that
 the rest of the platform reads — never re-derived inline:
 
-- ``tick_size`` (A10): the exchange-published price-band tick for each instrument. NSE tick sizes are
+- ``tick_size``: the exchange-published price-band tick for each instrument. NSE tick sizes are
   price-banded, so this is a PER-INSTRUMENT value taken from the dump, NOT a flat ₹0.05 assumption.
   :meth:`round_to_tick` quantises a price to that instrument's tick grid and is the ONLY sanctioned
-  way to snap a price (used by the gate and OMS — never inline math, §3.2.2/§6/§C of the plan).
+  way to snap a price (used by the gate and OMS — never inline math).
 - ``lot_size`` / ``instrument_token`` / ``segment``: order sizing, ticker subscription, routing.
-- F&O membership (C7): :meth:`is_fno` backs the dynamic-circuit-band rule (MIS candidates must be on
+- F&O membership: :meth:`is_fno` backs the dynamic-circuit-band rule (MIS candidates must be on
   the F&O list because F&O names get the wider ±10–20% dynamic band rather than a fixed ±x% band).
 - Index rows (NSE ``INDICES`` segment — e.g. ``NIFTY 50`` token 256265, ``INDIA VIX`` token 264969) are
   non-tradable and carry ``tick_size=0``/``lot_size=0``, so they cannot be an :class:`Instrument`
-  (which requires a positive tick, A10). They get a SEPARATE token-only seam: :meth:`refresh` harvests
+  (which requires a positive tick). They get a SEPARATE token-only seam: :meth:`refresh` harvests
   ``tradingsymbol -> instrument_token`` into ``_index_tokens`` (+ reverse), and
   :meth:`token_for_symbol` / :meth:`symbol_for_token` fall back to it so daily-bar backfill can resolve
-  a regime symbol's token (A2). :meth:`by_symbol` / :meth:`round_to_tick` / :meth:`is_fno` still
+  a regime symbol's token. :meth:`by_symbol` / :meth:`round_to_tick` / :meth:`is_fno` still
   raise/deny for indices — you never price, size, or route an index, so fail-closed there is correct.
 
 The store is in-memory: a process holds today's dump only after a :meth:`refresh` (or a cold-start
 :meth:`hydrate`). Because the map is rebuilt from scratch each boot, an engine restart AFTER the
 08:15 ``instruments`` job — whose ``job_runs`` watermark makes the catch-up runner skip it — would
 otherwise leave every token lookup empty (the cold-start ``unknown_token`` storm). Two seams close
-that gap (§4.3): :meth:`snapshot_rows` renders the current dump as ``instruments_daily`` rows the
+that gap: :meth:`snapshot_rows` renders the current dump as ``instruments_daily`` rows the
 08:15 job persists, and :meth:`hydrate` rebuilds the in-memory index from the latest stored snapshot
 at startup — pre-login, so recovery never waits on a Kite session. This module talks only to ``core``
-+ the injected ``kite_client``; it never imports ``engine.intelligence`` (R1).
++ the injected ``kite_client``; it never imports ``engine.intelligence``.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from engine.core.log import get_logger
 _log = get_logger("engine.broker.instruments")
 
 # Derivative rows (these exchanges, FUT|CE|PE types) carry their underlying's tradingsymbol in
-# ``name``; an NSE equity whose tradingsymbol is such a ``name`` is F&O-listed (C7) — the NFO join
+# ``name``; an NSE equity whose tradingsymbol is such a ``name`` is F&O-listed — the NFO join
 # :meth:`InstrumentStore.refresh` performs (2026-07-31) and stamps on each ``Instrument.is_fno``.
 _FNO_EXCHANGES = frozenset({"NFO", "BFO", "CDS", "MCX"})
 _FNO_INSTRUMENT_TYPES = frozenset({"FUT", "CE", "PE"})
@@ -52,7 +52,7 @@ _FNO_INSTRUMENT_TYPES = frozenset({"FUT", "CE", "PE"})
 class UnknownInstrument(KeyError):
     """Raised by :meth:`InstrumentStore.by_symbol` when a tradingsymbol is not in today's dump.
 
-    Subclasses ``KeyError`` (per the §3.2.2 contract) so existing ``except KeyError`` callers keep
+    Subclasses ``KeyError`` so existing ``except KeyError`` callers keep
     working, while giving the gate/OMS a precise type to catch. An unknown instrument is a hard stop:
     the platform must never size, price, or route an order for a symbol it has no tick/lot for.
     """
@@ -62,7 +62,7 @@ class Instrument(BaseModel):
     """One row of the daily instruments dump (the fields the platform actually consumes).
 
     ``tick_size`` is a ``Decimal`` (price), per the money/price convention; it is the price-banded
-    exchange tick for THIS instrument (A10), not a global constant.
+    exchange tick for THIS instrument, not a global constant.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -71,16 +71,16 @@ class Instrument(BaseModel):
     instrument_token: int
     exchange: str
     segment: str
-    tick_size: Decimal = Field(gt=0)            # A10 — per-instrument, price-banded; must be positive
+    tick_size: Decimal = Field(gt=0)            # per-instrument, price-banded; must be positive
     lot_size: int = Field(gt=0)
     instrument_type: str                        # "EQ" | "FUT" | "CE" | "PE" | ...
-    is_fno: bool = False                        # C7 — F&O-listed underlying (dynamic band membership)
-    name: str | None = None                     # company name from the dump — the §3.2.4 alias-seed
-                                                # source (dropped until 2026-08-03: empty-alias G1 finding)
+    is_fno: bool = False                        # F&O-listed underlying (dynamic band membership)
+    name: str | None = None                     # company name from the dump — the alias-seed
+                                                # source (dropped until 2026-08-03: empty-alias finding)
 
 
 class InstrumentStore:
-    """In-memory index of today's instruments, keyed by ``tradingsymbol`` (§3.2.2, A10/A8/C7).
+    """In-memory index of today's instruments, keyed by ``tradingsymbol``.
 
     Construct once per process with the shared :class:`~engine.core.clock.Clock`; call
     :meth:`refresh` during the 08:15 daily job (or startup catch-up) to (re)load the dump. Tests use
@@ -91,7 +91,7 @@ class InstrumentStore:
         self._clock = clock
         self._by_symbol: dict[str, Instrument] = {}
         self._by_token: dict[int, str] = {}   # reverse index: instrument_token -> tradingsymbol (ticker)
-        # A2 — non-tradable INDICES seam: tradingsymbol -> token (+ reverse), kept OUT of the tradable
+        # Non-tradable INDICES seam: tradingsymbol -> token (+ reverse), kept OUT of the tradable
         # maps so by_symbol/round_to_tick/is_fno still fail-closed for indices.
         self._index_tokens: dict[str, int] = {}
         self._index_by_token: dict[int, str] = {}
@@ -110,19 +110,19 @@ class InstrumentStore:
         Index rows (``segment`` contains ``INDICES`` — e.g. ``NIFTY 50``/``INDIA VIX``) are harvested
         into a SEPARATE token map rather than built as tradable :class:`Instrument`s (their
         ``tick_size=0`` would fail the ``gt=0`` model). They are NOT counted as malformed/skipped; only
-        an index row missing its symbol or token is skipped like any other bad row (A2).
+        an index row missing its symbol or token is skipped like any other bad row.
 
         The daily snapshot is persisted to the DuckDB ``instruments_daily`` table by the 08:15 job
-        (via :meth:`snapshot_rows`) so a later restart can :meth:`hydrate` the token map pre-login
-        (§4.3). TODO: no job writes ``instruments_daily.mis_leverage``/``mis_eligible``/
-        ``surveillance`` (see :meth:`snapshot_rows`); A8 is enforced by the universe build's exclusions.
+        (via :meth:`snapshot_rows`) so a later restart can :meth:`hydrate` the token map pre-login.
+        TODO: no job writes ``instruments_daily.mis_leverage``/``mis_eligible``/
+        ``surveillance`` (see :meth:`snapshot_rows`); the MIS and surveillance restrictions are enforced by the universe build's exclusions.
         """
         raw = kite_client.instruments()
         if hasattr(raw, "__await__"):
             raw = await raw
         raw = list(raw)
 
-        # C7 NFO→underlying join (2026-07-31: the per-row heuristic marked only the DERIVATIVE rows
+        # NFO→underlying join (2026-07-31: the per-row heuristic marked only the DERIVATIVE rows
         # is_fno, never the NSE equity the platform actually looks up — mis_candidates was 0 every
         # day and the gate structurally rejected every MIS proposal). A derivative row's ``name`` is
         # its underlying's tradingsymbol; collect them first, then flag matching equities.
@@ -141,7 +141,7 @@ class InstrumentStore:
         skipped = 0
         for row in raw:
             # Detect index rows BEFORE building an Instrument: they carry tick_size=0 and would be
-            # swallowed by the ValidationError branch below, so route them to the token-only seam (A2).
+            # swallowed by the ValidationError branch below, so route them to the token-only seam.
             segment = str(self._row_get(row, "segment", "") or "").upper()
             if "INDICES" in segment:
                 try:
@@ -189,7 +189,7 @@ class InstrumentStore:
         """Load instruments from a list (unit-test / replay helper). Returns the tradable count loaded.
 
         Replaces the current snapshot — including the index seam: ``index_tokens`` (``tradingsymbol ->
-        instrument_token``, A2) replaces ``_index_tokens`` (+ reverse), and passing it as ``None``/
+        instrument_token``) replaces ``_index_tokens`` (+ reverse), and passing it as ``None``/
         omitting it clears any prior index entries (replace-snapshot semantics, mirroring
         :meth:`refresh`). Does not touch the clock-stamped ``_refreshed_at`` semantics of a real
         :meth:`refresh` beyond recording that a load happened, so tests stay deterministic.
@@ -203,8 +203,8 @@ class InstrumentStore:
         self._hydrated = False
         return len(self._by_symbol)
 
-    # -- persistence / cold-start hydration (§4.3, F1/F2) --------------------------------------
-    #: The ``instruments_daily`` column order (§4.3 DDL / store ``_TABLE_SPEC``). Pinned here so
+    # -- persistence / cold-start hydration --------------------------------------
+    #: The ``instruments_daily`` column order (DDL / store ``_TABLE_SPEC``). Pinned here so
     #: :meth:`snapshot_rows` emits exactly these keys; the test asserts it against the store spec so a
     #: DDL column add/rename fails loudly instead of silently dropping data.
     _SNAPSHOT_COLUMNS: tuple[str, ...] = (
@@ -213,7 +213,7 @@ class InstrumentStore:
     )
 
     def snapshot_rows(self, d: date) -> list[dict[str, Any]]:
-        """Render today's dump as ``instruments_daily`` rows for day ``d`` (§4.3, F1).
+        """Render today's dump as ``instruments_daily`` rows for day ``d``.
 
         One dict per tradable :class:`Instrument` PLUS one per index token (the non-tradable
         ``INDICES`` seam), each carrying exactly the :attr:`_SNAPSHOT_COLUMNS` keys so the store's
@@ -221,7 +221,7 @@ class InstrumentStore:
         are left at the table's ``NULL`` default — this writer persists only what the dump itself
         carries, and no other job fills them: the MIS-leverage and surveillance lists feed only the
         ``universe_daily`` exclusions (``engine.universe.builder``). ``name`` IS
-        dump-carried and persists verbatim: it is the §3.2.4 alias-seed source (2026-08-03 G1 finding —
+        dump-carried and persists verbatim: it is the alias-seed source (2026-08-03 finding —
         a NULL name column left ``entity_aliases`` empty and every headline unresolved).
 
         Each tradable ``tick_size`` is emitted verbatim (a ``Decimal``); the store column is
@@ -231,7 +231,7 @@ class InstrumentStore:
         Index rows are representable within the DDL (``tick_size``/``lot_size`` are nullable): they
         get ``segment='INDICES'`` (the discriminator :meth:`hydrate`/:meth:`refresh` route on) and
         ``instrument_type='INDEX'``, with ``tick_size``/``lot_size`` NULL (an index is never priced or
-        sized, A2) and ``fno=False`` (an index is not an F&O underlying, C7).
+        sized) and ``fno=False`` (an index is not an F&O underlying).
         """
         rows: list[dict[str, Any]] = []
         for ins in self._by_symbol.values():
@@ -271,7 +271,7 @@ class InstrumentStore:
         return rows
 
     def hydrate(self, rows: list[dict[str, Any]]) -> int:
-        """Rebuild the in-memory index from persisted ``instruments_daily`` rows (§4.3, F2).
+        """Rebuild the in-memory index from persisted ``instruments_daily`` rows.
 
         The cold-start inverse of :meth:`snapshot_rows`: classify the stored rows the way :meth:`refresh`
         classifies live-dump rows (``INDICES``/``INDEX`` → the non-tradable token seam, everything else →
@@ -287,12 +287,12 @@ class InstrumentStore:
         builds an :class:`Instrument` straight from the live dump (so a sub-₹0.01 tick like ₹0.0025 is a
         valid ``tick_size>0`` row), but ``hydrate`` rebuilds from the PERSISTED tick — which the
         ``instruments_daily.tick_size`` column must not have truncated to 0.00 (the widened
-        ``DECIMAL(18,6)`` column, §4.3, is what keeps this lossless). A row whose stored tick is genuinely
+        ``DECIMAL(18,6)`` column, is what keeps this lossless). A row whose stored tick is genuinely
         non-positive (corrupt EQUITY data) still fails the ``gt=0`` model and is skip-counted here — that
-        A10 invariant is deliberately NOT weakened.
+        positive-tick invariant is deliberately NOT weakened.
 
         Unlike :meth:`refresh`, ``is_fno`` is read from the stored ``fno`` column verbatim (not
-        re-derived) so hydrate stays a faithful inverse, since F&O membership comes from the C7 NFO
+        re-derived) so hydrate stays a faithful inverse, since F&O membership comes from the NFO
         join over the whole dump, which a stored equity row alone cannot reproduce.
         """
         indexed: dict[str, Instrument] = {}
@@ -305,7 +305,7 @@ class InstrumentStore:
             # AND ``instrument_type='INDEX'``, with a NULL tick). Recognising EITHER hardens the round-trip
             # against a snapshot where one field drifted (2026-07-21); a genuine tradable never carries
             # ``instrument_type='INDEX'``, so a corrupt EQUITY row still falls through to the tradable
-            # path below and is rejected (the A10 ``tick_size>0`` invariant stays intact).
+            # path below and is rejected (the ``tick_size>0`` invariant stays intact).
             segment = str(self._row_get(row, "segment", "") or "").upper()
             instrument_type = str(self._row_get(row, "instrument_type", "") or "").upper()
             if "INDICES" in segment or instrument_type == "INDEX":
@@ -348,7 +348,7 @@ class InstrumentStore:
 
     @property
     def is_empty(self) -> bool:
-        """True when no dump is loaded (no tradable rows AND no index tokens) — the F2 hydrate trigger."""
+        """True when no dump is loaded (no tradable rows AND no index tokens) — the hydrate trigger."""
         return not self._by_symbol and not self._index_tokens
 
     @property
@@ -359,7 +359,7 @@ class InstrumentStore:
 
     @property
     def index_count(self) -> int:
-        """Number of resolvable non-tradable index tokens (the A2 ``INDICES`` seam) — for the startup
+        """Number of resolvable non-tradable index tokens (the ``INDICES`` seam) — for the startup
         report line, where a hydrated dump reports ``count`` tradables + ``indices`` regime tokens."""
         return len(self._index_tokens)
 
@@ -375,7 +375,7 @@ class InstrumentStore:
             raise UnknownInstrument(tradingsymbol) from exc
 
     def round_to_tick(self, symbol: str, price: Decimal) -> Decimal:
-        """Quantise ``price`` to the nearest multiple of ``symbol``'s tick size (A10).
+        """Quantise ``price`` to the nearest multiple of ``symbol``'s tick size.
 
         Load-bearing: the gate and OMS price every order through here so a banded tick (e.g. ₹0.01,
         ₹0.05, ₹0.10) is honoured instead of a hard-coded ₹0.05. The price is snapped to the tick
@@ -395,11 +395,11 @@ class InstrumentStore:
     def token_for_symbol(self, symbol: str) -> int | None:
         """``tradingsymbol -> instrument_token`` (the ticker-subscription / backfill resolver seam).
 
-        Resolves tradable instruments first, then falls back to the non-tradable index token map (A2)
+        Resolves tradable instruments first, then falls back to the non-tradable index token map
         so a regime symbol like ``NIFTY 50``/``INDIA VIX`` resolves for daily-bar backfill even though
         it has no tradable tick. Returns ``None`` for an unknown symbol (never guesses a token) so
         callers such as :class:`~engine.marketdata.backfill.BackfillJob` can report that symbol failed
-        rather than request candles for the wrong instrument (§3.2.3).
+        rather than request candles for the wrong instrument.
         """
         instrument = self._by_symbol.get(symbol)
         if instrument is not None:
@@ -409,9 +409,9 @@ class InstrumentStore:
     def symbol_for_token(self, token: int) -> str | None:
         """``instrument_token -> tradingsymbol`` reverse index (the ticker frame → symbol mapping).
 
-        Tradable reverse index first, then the index reverse map (A2). Returns ``None`` for a token not
+        Tradable reverse index first, then the index reverse map. Returns ``None`` for a token not
         in today's dump so the ``TickerSupervisor`` drops an unrecognised frame rather than mislabelling
-        it (A3/§3.2.2).
+        it.
         """
         symbol = self._by_token.get(token)
         if symbol is not None:
@@ -419,7 +419,7 @@ class InstrumentStore:
         return self._index_by_token.get(token)
 
     def is_fno(self, symbol: str) -> bool:
-        """True if ``symbol`` is F&O-listed (C7 — dynamic-band membership).
+        """True if ``symbol`` is F&O-listed (dynamic-band membership).
 
         Returns ``False`` for an unknown symbol (conservative: a name we have no record of is treated
         as non-F&O, so the dynamic-band MIS-eligibility check fails closed rather than open).
@@ -445,7 +445,7 @@ class InstrumentStore:
         """Map one Kite dump row (dict or object) to an :class:`Instrument`.
 
         Tolerant of dict-shaped (pykiteconnect ``instruments()``) and attribute-shaped rows.
-        ``fno_underlyings`` is the C7 join input from :meth:`refresh`: an NSE equity whose
+        ``fno_underlyings`` is the NFO join input from :meth:`refresh`: an NSE equity whose
         tradingsymbol appears among the derivative rows' ``name`` values is F&O-listed.
         """
         get = row.get if isinstance(row, dict) else (lambda k, d=None: getattr(row, k, d))
@@ -454,7 +454,7 @@ class InstrumentStore:
         instrument_type = str(get("instrument_type", "") or "")
         tradingsymbol = str(get("tradingsymbol"))
         # A derivative row is F&O by its own shape; an EQUITY is F&O-listed when its tradingsymbol
-        # is among the derivative rows' underlying names (the C7 join — 2026-07-31; the shape-only
+        # is among the derivative rows' underlying names (the NFO join — 2026-07-31; the shape-only
         # heuristic left every NSE equity is_fno=False and mis_candidates empty forever).
         is_fno = (
             exchange in _FNO_EXCHANGES

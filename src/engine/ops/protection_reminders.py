@@ -1,4 +1,4 @@
-"""Protection reminders for owner-taken positions (plan Q1.9, D6).
+"""Protection reminders for owner-taken positions.
 
 The platform places no orders in RECOMMEND, so a taken position stays unprotected until the owner
 confirms the stop order with ``/protected``. At most two reminders per position, tracked in

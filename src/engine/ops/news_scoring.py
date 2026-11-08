@@ -1,43 +1,43 @@
-"""News-Analyst scoring job (§2.7 step 4 / §5.4) — the ONLY writer of the step-4 score columns.
+"""News-Analyst scoring job — the ONLY writer of the score columns.
 
 The job is a thin, deterministic shell around one Tier-1 agent: it decides WHETHER to call (time
-window, batch trigger, governor), chunks the queue to the §5.4 cap, and writes the returned scores
-back onto ``news_clusters`` under the §3.2.4 fan-out purity rule. Everything that could widen the
+window, batch trigger, governor), chunks the queue to the batch cap, and writes the returned scores
+back onto ``news_clusters`` under the fan-out purity rule. Everything that could widen the
 origination surface is decided here, in Python, never by the model:
 
-- **Fan-out purity (§3.2.4, asserted in §9.1).** LLM-emitted ``sectors``/``themes`` are advisory and
+- **Fan-out purity.** LLM-emitted ``sectors``/``themes`` are advisory and
   are INTERSECTED with (never a superset of) the RESOLVER's deterministic tags already persisted on
   the cluster. A sector the resolver never tagged therefore fans out to nothing.
-- **The LLM never assigns a symbol (§2.7 step 3).** Its ``entities`` are verbatim STRINGS that
+- **The LLM never assigns a symbol.** Its ``entities`` are verbatim STRINGS that
   re-enter :meth:`EntityResolver.resolve` as ``extra_texts``; only that resolver's unambiguous,
   in-universe matches are merged into ``symbols``.
-- **Fail to zero (§2.7 fail-safe ladder).** A blocked governor, a harness failure or an out-of-enum
-  ``event_type`` (D7) all leave the affected clusters UNSCORED, which excludes them from the digest's
+- **Fail to zero (the fail-safe ladder).** A blocked governor, a harness failure or an out-of-enum
+  ``event_type`` all leave the affected clusters UNSCORED, which excludes them from the digest's
   watchlist — `cat` originates nothing. No alert is raised here: the digest owns the ``CATALYST_*``
   alerts, and a scoring gap that never reaches the digest is not an owner-visible condition.
 
 Spec ambiguities resolved here (documented for the integrator):
 
 - The 30-minute age trigger is read from :meth:`BudgetGovernor.news_batch_cadence_min` rather than
-  hard-coded, so the §5.6 DG2 row ("news-analyst batching coarsens 30 → 60 min") is actually load-
-  bearing instead of decorative. It returns the §5.4 default of 30 unless the platform is
+  hard-coded, so the DG2 row ("news-analyst batching coarsens 30 → 60 min") is actually load-
+  bearing instead of decorative. It returns the default of 30 unless the platform is
   at DG2+ or the news analyst is over its own share (per-agent degrade, 2026-09-12), when it returns 60.
-- The market-hours leg of the time gate requires a trading day (R6); the 19:00–22:00 sweep does not.
+- The market-hours leg of the time gate requires a trading day; the 19:00–22:00 sweep does not.
   Weekend/holiday news is eligible for the next session's digest (`cat.max_event_age_days` counts
   SESSIONS), so refusing to score it on a Sunday evening would only shove the whole weekend queue
   into the pre-open batch it is supposed to keep small.
-- ``sectors``/``themes`` are intersected against the cluster's PERSISTED step-3 columns, not against
+- ``sectors``/``themes`` are intersected against the cluster's PERSISTED resolver columns, not against
   a fresh ``resolve()`` of the headline: the persisted tags are what the digest's fan-out will
-  actually consume, and alias/theme-map state may have drifted since step 3.
-- ``entities`` is persisted as the RESOLVER's matched-alias output (a superset of the step-3 value,
-  since ``extra_texts`` can only add matches) — the column keeps its §3.2.4 meaning rather than
+  actually consume, and alias/theme-map state may have drifted since the resolver ran.
+- ``entities`` is persisted as the RESOLVER's matched-alias output (a superset of the resolver's value,
+  since ``extra_texts`` can only add matches) — the column keeps its existing meaning rather than
   becoming a dump of model prose. The model's UNMATCHED strings are logged to
-  ``unresolved_entities`` (reason ``no_match``): those are precisely the §5.5 weekly alias-suggestion
-  inputs the plan wants from this seam.
+  ``unresolved_entities`` (reason ``no_match``): those are precisely the weekly alias-suggestion
+  inputs wanted from this seam.
 - A missing ``news_analyst`` entry in the roster is a construction-time error, not a runtime skip: a
   parked agent means the job should not have been wired at all.
 
-**Chain-lock discipline (2026-09-09, §2.6 hardening ii).** The caller may hand ``run_batch`` the
+**Chain-lock discipline (2026-09-09).** The caller may hand ``run_batch`` the
 ``news_chain_lock`` that serialises the ``news_clusters`` read-modify-write against the per-feed
 polls. The lock is held for the STORE HOPS ONLY — the initial queue read and each chunk's write-back
 — never across the model call: held around the whole batch it also spanned one LLM await per chunk,
@@ -94,10 +94,10 @@ from engine.marketdata.store import MarketStore
 
 _log = get_logger("engine.ops.news_scoring")
 
-#: §5.4 batch trigger: this many queued clusters fire a call regardless of age.
+#: Batch trigger: this many queued clusters fire a call regardless of age.
 MIN_BATCH_CLUSTERS = 8
 
-#: §5.4 scoring windows (IST wall-clock, inclusive bounds).
+#: Scoring windows (IST wall-clock, inclusive bounds).
 MARKET_WINDOW: tuple[time, time] = (time(9, 0), time(15, 30))
 SWEEP_WINDOW: tuple[time, time] = (time(19, 0), time(22, 0))
 
@@ -111,36 +111,36 @@ SKIP_GOVERNOR = "governor"
 
 
 class ScoringResult(BaseModel):
-    """One :meth:`NewsScoringJob.run_batch` outcome. Frozen: a job result is evidence (R8).
+    """One :meth:`NewsScoringJob.run_batch` outcome. Frozen: a job result is evidence.
 
     ``skipped_reason`` is set ONLY when no SDK call was attempted. A run that called and failed
     mid-queue returns the partial ``scored`` count with no reason — the remaining clusters simply
-    stay queued for the next cadence, which is the §2.7 fail-safe behaviour, not an error state.
+    stay queued for the next cadence, which is the fail-safe behaviour, not an error state.
     """
 
     model_config = ConfigDict(frozen=True)
 
     scored: int = 0
-    dropped: tuple[str, ...] = ()       # D7 per-item drops (out-of-enum event_type &c) — left UNSCORED
+    dropped: tuple[str, ...] = ()       # Per-item drops (out-of-enum event_type &c) — left UNSCORED
     skipped_reason: str | None = None
 
 
 class NewsScoringJob:
-    """§5.4 batched cluster scoring: queue → the Tier-1 news analyst (model per agents.yaml) → ``news_clusters`` step-4 columns.
+    """Batched cluster scoring: queue → the Tier-1 news analyst (model per agents.yaml) → ``news_clusters`` score columns.
 
     Parameters
     ----------
     store:
         DuckDB access; every read/write is offloaded through ``arun``/``a*`` (convention 12).
     resolver:
-        The step-3 :class:`EntityResolver`, already loaded with alias/sector/theme/universe state.
-        It is the ONLY thing allowed to turn the model's entity strings into symbols (§2.7 step 3).
+        The :class:`EntityResolver`, already loaded with alias/sector/theme/universe state.
+        It is the ONLY thing allowed to turn the model's entity strings into symbols.
     assembler / harness / agent_defs:
-        The §3.2.6 context assembler, the sole SDK caller, and the loaded ``agents.yaml`` roster.
+        The context assembler, the sole SDK caller, and the loaded ``agents.yaml`` roster.
     governor:
-        §5.6 admission + the DG2 batching cadence.
+        Admission + the DG2 batching cadence.
     clock / calendar:
-        The single "now" and the trading-day fact for the time gate (§3.2 — no naive datetimes).
+        The single "now" and the trading-day fact for the time gate (no naive datetimes).
     """
 
     def __init__(
@@ -176,8 +176,8 @@ class NewsScoringJob:
     async def run_batch(
         self, *, force: bool = False, lock: asyncio.Lock | None = None
     ) -> ScoringResult:
-        """Score the queued clusters (§5.4). ``force`` is the PRE-OPEN batch: it ignores both the
-        time gate and the ≥8/30-min trigger and scores everything unscored (§5.4 pre-open rule).
+        """Score the queued clusters. ``force`` is the PRE-OPEN batch: it ignores both the
+        time gate and the ≥8/30-min trigger and scores everything unscored.
 
         ``lock`` is the caller's news-chain lock (2026-09-09): taken for the queue read and for each
         chunk's write-back, NEVER across the model call — see the module docstring. ``None`` (no
@@ -217,7 +217,7 @@ class NewsScoringJob:
 
             decision = self._governor.can_invoke(news_analyst.AGENT_ID)
             if not decision.allowed:
-                # Fail to ZERO (§2.7): the clusters stay unscored, so the digest excludes them and
+                # Fail to ZERO: the clusters stay unscored, so the digest excludes them and
                 # `cat` originates nothing. No alert here — CATALYST_* belongs to the digest.
                 _log.warning(
                     "news_scoring_blocked",
@@ -249,7 +249,7 @@ class NewsScoringJob:
             )
             if not result.ok:
                 # Stop at the first failed chunk: the remaining clusters stay queued for the next
-                # cadence rather than being re-sent inside a run that is already failing (D7). Stale
+                # cadence rather than being re-sent inside a run that is already failing. Stale
                 # ids (merged/rescored away at an earlier chunk's write-back) are subtracted too: they
                 # already left the queue, so counting them as still-queued overstates this log's number.
                 _log.warning(
@@ -278,16 +278,16 @@ class NewsScoringJob:
         )
         return ScoringResult(scored=scored, dropped=tuple(dropped))
 
-    # ------------------------------------------------------------------ triggers (§5.4)
+    # ------------------------------------------------------------------ triggers
     def _in_scoring_window(self, now: datetime) -> bool:
-        """§5.4: market hours on a trading day, or the evening sweep (see the module's decisions)."""
+        """Market hours on a trading day, or the evening sweep (see the module's decisions)."""
         t = now.time()
         if SWEEP_WINDOW[0] <= t <= SWEEP_WINDOW[1]:
             return True
         return self._calendar.is_trading_day(now.date()) and MARKET_WINDOW[0] <= t <= MARKET_WINDOW[1]
 
     def _batch_ready(self, clusters: Sequence[NewsCluster], now: datetime) -> bool:
-        """§5.4: ≥8 queued clusters, or the oldest has waited out the (governor-set) cadence."""
+        """≥8 queued clusters, or the oldest has waited out the (governor-set) cadence."""
         if len(clusters) >= MIN_BATCH_CLUSTERS:
             return True
         if not clusters:
@@ -295,7 +295,7 @@ class NewsScoringJob:
         cadence = timedelta(minutes=self._governor.news_batch_cadence_min())
         return min(c.first_seen for c in clusters) <= now - cadence
 
-    # ------------------------------------------------------------------ write-back (§3.2.4 purity)
+    # ------------------------------------------------------------------ write-back (fan-out purity)
     async def _write_back(
         self, chunk: Sequence[NewsCluster], scores: Sequence[ClusterScore]
     ) -> tuple[int, int]:
@@ -305,7 +305,7 @@ class NewsScoringJob:
         that is no longer queued as still-remaining (see ``_run_batch``'s ``stale_total``).
 
         Called under the (always-present, 2026-09-23) chain lock: re-reads the FULL unscored rows
-        under that SAME hold (2026-09-09) and, for each id we actually sent, applies the step-4 score
+        under that SAME hold (2026-09-09) and, for each id we actually sent, applies the score
         columns onto the CURRENT cluster — never onto the pre-LLM snapshot. Two things ride on that:
         an id no longer in the queue (a poll merged it away, or another batch scored it) is skipped
         rather than resurrected as a zombie row / clobbered with an older score, and — because the
@@ -330,7 +330,7 @@ class NewsScoringJob:
                 continue
             # The row the score is applied to is the FRESH re-read (the snapshot only ever answers
             # "did we send this id"); everything below — the resolve input, the symbol union, the
-            # sector/theme intersection — therefore reads the CURRENT step-2/3 columns.
+            # sector/theme intersection — therefore reads the CURRENT cluster columns.
             cluster = live.get(score.cluster_id)
             if cluster is None:
                 stale.append(score.cluster_id)
@@ -352,10 +352,10 @@ class NewsScoringJob:
                     update={
                         "scope": score.scope,
                         "entities": resolved.entities,
-                        # The LLM never assigns a symbol (§2.7 step 3): only the resolver's
+                        # The LLM never assigns a symbol: only the resolver's
                         # unambiguous, in-universe matches join the existing set.
                         "symbols": sorted({*(cluster.symbols or []), *resolved.symbols}),
-                        # FAN-OUT PURITY (§3.2.4/§9.1): advisory ∩ deterministic, never a superset.
+                        # FAN-OUT PURITY: advisory ∩ deterministic, never a superset.
                         "sectors": sorted(set(score.sectors) & set(cluster.sectors or [])),
                         "themes": sorted(set(score.themes) & set(cluster.themes or [])),
                         "sentiment": score.sentiment,
@@ -377,10 +377,10 @@ class NewsScoringJob:
     async def _log_unmatched(
         self, cluster: NewsCluster, score: ClusterScore, resolved: Any
     ) -> None:
-        """Log the model's UNMATCHED entity strings for the §5.5 weekly alias-suggestion loop.
+        """Log the model's UNMATCHED entity strings for the weekly alias-suggestion loop.
 
         Only ``no_match`` entries whose text is one of this score's strings are logged: an ambiguous
-        alias found in the representative headline was already recorded by step 3, and re-logging it
+        alias found in the representative headline was already recorded by the resolver, and re-logging it
         on every scoring run would bury the genuinely new suggestions in duplicates.
         """
         emitted = set(score.entities)
@@ -412,10 +412,10 @@ def _chunks(clusters: Sequence[NewsCluster], size: int) -> list[Sequence[NewsClu
 
 
 def _prompt_row(cluster: NewsCluster) -> dict[str, Any]:
-    """The ONLY cluster fields the prompt may see (§5.4): identity, recency, corroboration, headline.
+    """The ONLY cluster fields the prompt may see: identity, recency, corroboration, headline.
 
     Built explicitly rather than dumping the row, so a future column cannot leak into the prompt —
-    in particular the step-4 columns themselves, which would let a re-score anchor on a prior score.
+    in particular the score columns themselves, which would let a re-score anchor on a prior score.
     """
     return {
         "cluster_id": cluster.cluster_id,

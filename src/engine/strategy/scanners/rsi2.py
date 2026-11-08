@@ -1,8 +1,8 @@
-"""§6.1 ``rsi2`` — RSI(2) mean reversion with regime filter (swing, CNC, long-only).
+"""``rsi2`` — RSI(2) mean reversion with regime filter (swing, CNC, long-only).
 
-PINNED rule sketch (§6.1 row 2): RSI(2) < ``rsi_entry`` on stocks above their 200-DMA in an
+PINNED rule sketch: RSI(2) < ``rsi_entry`` on stocks above their 200-DMA in an
 uptrending index; exit RSI(2) > ``rsi_exit`` or ``max_hold_days``; stop = ``stop_pct``
-(gap-adjustment of the risk-at-stop is the gate's R2 job — ``raw_levels.stop`` is the plain
+(gap-adjustment of the risk-at-stop is the gate's sizing job — ``raw_levels.stop`` is the plain
 percentage level).
 
 Documented choices where the sketch is silent:
@@ -15,10 +15,10 @@ Documented choices where the sketch is silent:
 * **Daily series = completed daily closes + today's provisional close** (the scanned 1m bar's close):
   RSI(2) and the 200-DMA both include today's provisional value, so the signal reflects the price at
   which the entry would actually happen. Needs 199 completed dailies (200-DMA) — fewer ⇒ fail to
-  zero (warm-up, §7.1 ``warmup_ready``).
-* **Long-only**: mean-reversion buys the dip; CNC cannot short overnight (C5). No SELL variant.
+  zero (warm-up, ``warmup_ready``).
+* **Long-only**: mean-reversion buys the dip; CNC cannot short overnight. No SELL variant.
 * **Exit levels are informational** — ``rsi_exit`` / ``max_hold_days`` ride along in ``self.params``
-  for the position manager / Tier-1 context; the pinned §3.2.5 candidate carries no exit-rule fields,
+  for the position manager / Tier-1 context; the pinned candidate carries no exit-rule fields,
   so ``raw_levels.target`` is ``None`` (never a synthetic invention).
 * **Score** = ``(rsi_entry − rsi) / rsi_entry`` clamped to [0, 1] — deeper oversold ⇒ stronger.
 """
@@ -39,8 +39,8 @@ from engine.strategy.types import PendingSetup, ScanContext, SignalCandidate, ro
 
 _log = get_logger("engine.strategy.scanners.rsi2")
 
-_RSI_PERIOD = 2        # §6.1: RSI(2)
-_STOCK_DMA = 200       # §6.1: stock above 200-DMA
+_RSI_PERIOD = 2        # RSI(2)
+_STOCK_DMA = 200       # stock above 200-DMA
 # Imported by scripts/backtest_regime_filter.py (a completed study, kept byte-identical).
 _INDEX_DMA = regime.INDEX_SMA
 _RISING_LOOKBACK = regime.RISING_LOOKBACK
@@ -51,7 +51,7 @@ class Rsi2Scanner(Scanner):
     strategy_id = "rsi2"
     style = "swing"
 
-    DEFAULT_PARAMS = {           # §6.3 envelope defaults
+    DEFAULT_PARAMS = {           # parameter-envelope defaults
         "rsi_entry": 10,
         "rsi_exit": 65,          # informational exit rule (position manager), not a raw_level
         "stop_pct": 4.0,
@@ -62,7 +62,7 @@ class Rsi2Scanner(Scanner):
         super().__init__(params)
         #: Session date of the last ``rsi2_regime_blocked`` line. The ONLY mutable state on this
         #: scanner and it is log-only: :meth:`scan` returns the same candidates with or without it,
-        #: so the §9.6 purity contract in ``scanners/base.py`` still holds for the outputs. The guard
+        #: so the purity contract in ``scanners/base.py`` still holds for the outputs. The guard
         #: is per instance because the integrator builds one scanner per process, and `scan` runs on
         #: every 1m bar of every watchlist symbol — ~80,000 lines a session without it.
         self._regime_logged_on: date | None = None
@@ -96,7 +96,7 @@ class Rsi2Scanner(Scanner):
                 side="BUY",
                 entry=entry,
                 stop=stop,
-                target=None,     # exit is RSI(2) > rsi_exit or max_hold_days — informational (§6.1)
+                target=None,     # exit is RSI(2) > rsi_exit or max_hold_days — informational
                 score=(p["rsi_entry"] - rsi) / p["rsi_entry"],
             )
         ]
@@ -109,7 +109,7 @@ class Rsi2Scanner(Scanner):
         working" and "the scanner is broken" looked identical from the outside for two weeks.
 
         Session date = ``bar.ts_minute.date()`` (bars are IST-aware), never a Clock: the same rule
-        the pre-screen uses for "today", so a §9.6 replay logs once per replayed session too.
+        the pre-screen uses for "today", so a replay logs once per replayed session too.
         """
         session = bar.ts_minute.date()
         if self._regime_logged_on == session:
@@ -125,7 +125,7 @@ class Rsi2Scanner(Scanner):
         )
 
     def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
-        """The dip price at which RSI(2) would cross under ``rsi_entry`` today (§3.2.5 sweep).
+        """The dip price at which RSI(2) would cross under ``rsi_entry`` today.
 
         RSI(2) over ``completed closes + [P]`` is strictly increasing in ``P``, so the arm level is
         found by bisection on today's provisional close. The level is only reported while it stays

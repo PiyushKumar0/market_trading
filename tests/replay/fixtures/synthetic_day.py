@@ -1,6 +1,6 @@
-"""Deterministic synthetic tick day written in the PRODUCTION Parquet layout (WO-P3-3, 2026-09-10).
+"""Deterministic synthetic tick day written in the PRODUCTION Parquet layout (2026-09-10).
 
-Why generated and not committed (plan §9.3/§9.6, work-order constraint): the golden replay day must be
+Why generated and not committed: the golden replay day must be
 byte-reproducible from source, and a committed binary fixture is neither reviewable nor regenerable —
 it also drags real recorded market data into the repo. Everything here is a closed-form integer
 recurrence (no RNG, no clock read), so two calls produce identical bytes-in, identical bars-out.
@@ -13,11 +13,11 @@ writer available and is the one the store itself uses.
 
 Shape of the day (what each segment exists to prove):
 
-* **pre-open 09:00:00–09:14:xx** — A14: these must build no bar, and the LAST pre-open print is the
+* **pre-open 09:00:00–09:14:xx** — these must build no bar, and the LAST pre-open print is the
   auction open stamped on the 09:15 row.
 * **session 09:15:00–15:29:xx**, 5 prints per minute, with **one whole minute missing** (the gap
   minute) — a replay must not invent a bar for a minute that had no prints.
-* **one post-close print strictly after 15:30** — WO-5 symmetry: no bar, but counted.
+* **one post-close print strictly after 15:30** — post-close symmetry: no bar, but counted.
 
 Each symbol's ticks are split across TWO Parquet files per partition so the harness's single
 ``read_parquet`` glob is exercised against a multi-fragment partition (the live archive holds
@@ -39,7 +39,7 @@ from engine.core.clock import IST
 #: for recorded market data.
 SYMBOLS: tuple[str, ...] = ("SYNA", "SYNB", "SYNC")
 
-#: Session boundaries the fixture is built against (the BarBuilder defaults, A14 / WO-5).
+#: Session boundaries the fixture is built against (the BarBuilder defaults).
 SESSION_OPEN = time(9, 15)
 SESSION_CLOSE = time(15, 30)
 
@@ -48,7 +48,7 @@ PRE_OPEN_TICKS = 20
 PRE_OPEN_STEP_S = 45
 
 #: Seconds-within-minute at which each session minute's prints land. Six per minute puts the day over
-#: the 6,000 ticks the §8.4 warm perf smoke asserts against, while staying a whole number of prints.
+#: the 6,000 ticks the warm perf smoke asserts against, while staying a whole number of prints.
 SECONDS_IN_MINUTE: tuple[int, ...] = (1, 11, 21, 31, 41, 51)
 
 #: The one session minute with NO prints at all (a real feed drops minutes; the harness must not
@@ -65,7 +65,7 @@ TICK_COLUMNS: tuple[str, ...] = (
 )
 
 #: Mirrors ``store._TICK_STAGE_DDL`` — the widths are load-bearing (DECIMAL(12,2) prices, the
-#: DECIMAL(14,4) exchange day-VWAP, §4.3): a fixture written at a different width would prove the
+#: DECIMAL(14,4) exchange day-VWAP): a fixture written at a different width would prove the
 #: harness works on data the engine never produces.
 _STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _fixture_ticks (
@@ -96,9 +96,9 @@ class SyntheticDay:
     session_ticks: int
     post_close_ticks: int
     session_minutes: int                         # distinct minutes that carry at least one print
-    auction_open: dict[str, Decimal]             # last pre-open ltp per symbol (A14)
-    first_session_ltp: dict[str, Decimal]        # first in-session print per symbol (the open, A14)
-    first_session_cum: dict[str, int]            # its cumulative volume (A13)
+    auction_open: dict[str, Decimal]             # last pre-open ltp per symbol
+    first_session_ltp: dict[str, Decimal]        # first in-session print per symbol (the open)
+    first_session_cum: dict[str, int]            # its cumulative volume
     open_bar_volume: dict[str, int]              # cumulative at the END of 09:15 == that bar's volume
     gap_minute: datetime                         # the minute with no prints
     post_close_at: datetime
@@ -118,14 +118,14 @@ def _paise(sym_idx: int, k: int, base: int) -> int:
 
 
 def _dec2(paise: int) -> Decimal:
-    """Paise → an exact ``DECIMAL(12,2)``-shaped Decimal. No float ever touches a price (§3.2)."""
+    """Paise → an exact ``DECIMAL(12,2)``-shaped Decimal. No float ever touches a price."""
     return Decimal(paise).scaleb(-2)
 
 
 def _rows_for_symbol(
     day: date, sym_idx: int, symbol: str
 ) -> tuple[list[tuple], Decimal, Decimal, int, int]:
-    """Every row for one symbol, in exchange_ts order, plus the A14/A13 landmarks the test asserts."""
+    """Every row for one symbol, in exchange_ts order, plus the pre-open/cumulative-volume landmarks the test asserts."""
     base = 10_000 + sym_idx * 5_000                     # ₹100 / ₹150 / ₹200
     token = 1_000 + sym_idx
     ohlc = (_dec2(base - 50), _dec2(base + 300), _dec2(base - 300), _dec2(base - 10))
@@ -142,7 +142,7 @@ def _rows_for_symbol(
         rows.append(_row(token, symbol, ltp, cum, start + timedelta(seconds=i * PRE_OPEN_STEP_S), ohlc))
         k += 1
         # Pre-open prints carry a cumulative volume of 0: the auction volume is reported into the
-        # session's first cumulative value, which is exactly what A13's "up from the open ⇒ the whole
+        # session's first cumulative value, which is exactly what the "up from the open ⇒ the whole
         # cumulative belongs to the 09:15 bar" rule consumes.
 
     # --- session (5 prints/minute, one whole minute missing) --------------------------------------
@@ -158,19 +158,19 @@ def _rows_for_symbol(
             continue
         for sec in SECONDS_IN_MINUTE:
             ltp = _dec2(_paise(sym_idx, k, base))
-            cum += 100 + (k % 7)                       # strictly increasing (A13 cumulative volume)
+            cum += 100 + (k % 7)                       # strictly increasing (cumulative volume)
             if first_ltp is None:
                 first_ltp, first_cum = ltp, cum
             rows.append(_row(token, symbol, ltp, cum, minute + timedelta(seconds=sec), ohlc))
             k += 1
         if minute.time() == SESSION_OPEN:
-            # A13 "engine up from the open": the WHOLE cumulative belongs to the 09:15 bar, so the
+            # "engine up from the open": the WHOLE cumulative belongs to the 09:15 bar, so the
             # cumulative standing at the end of that minute IS the bar's volume — an exact number the
             # golden test asserts (a delta-only builder would produce cum_last − cum_first instead).
             open_bar_volume = cum
         minute += timedelta(minutes=1)
 
-    # --- one post-close print (WO-5: no bar, counted) ---------------------------------------------
+    # --- one post-close print (no bar, counted) ---------------------------------------------
     cum += 100
     rows.append(
         _row(token, symbol, _dec2(_paise(sym_idx, k, base)), cum,
@@ -182,7 +182,7 @@ def _rows_for_symbol(
 
 def _row(token: int, symbol: str, ltp: Decimal, cum: int, ts: datetime,
          ohlc: tuple[Decimal, Decimal, Decimal, Decimal]) -> tuple:
-    """One row in ``TICK_COLUMNS`` order. bid/ask straddle the ltp by one tick (A10 ₹0.05)."""
+    """One row in ``TICK_COLUMNS`` order. bid/ask straddle the ltp by one tick (₹0.05)."""
     return (
         token, symbol, ltp, cum, ts,
         ohlc[0], ohlc[1], ohlc[2], ohlc[3],

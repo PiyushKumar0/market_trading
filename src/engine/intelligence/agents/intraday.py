@@ -1,6 +1,6 @@
-"""Intraday Analyst agent definition (§5.2) — SYSTEM prompt, output schema, output parser.
+"""Intraday Analyst agent definition — SYSTEM prompt, output schema, output parser.
 
-The prompt is a MODULE CONSTANT and byte-stable by construction (D8 cache discipline): no f-string,
+The prompt is a MODULE CONSTANT and byte-stable by construction (cache discipline): no f-string,
 no date, no mode flag, no degrade tier, nothing that varies call to call. Everything volatile —
 including the trading date — lives in the assembled context blocks (`engine.intelligence.context`),
 never here. A prompt that changes bytes between calls is a guaranteed cache miss on every call.
@@ -8,7 +8,7 @@ never here. A prompt that changes bytes between calls is a guaranteed cache miss
 ``AGENT_ID`` is the ``config/agents.yaml`` key: the budget governor's ledger, the allocation table and
 the degrade ladder all key off this exact string.
 
-Byte-stability is a property of the constant, not of its history: WO-20b (2026-08-20) rewrote rules
+Byte-stability is a property of the constant, not of its history: the 2026-08-20 change rewrote rules
 12-15 once, deliberately, so the analyst judges each candidate inside its own strategy contract
 (``engine.strategy.contracts``) instead of one intraday day-trade rubric — a one-time cache reset,
 after which the prompt is again identical call to call.
@@ -25,7 +25,7 @@ from engine.intelligence.schemas import intraday_guidance_json_schema, parse_int
 #: config/agents.yaml key (model, timeouts, triggers, budget allocation).
 AGENT_ID = "intraday_analyst"
 
-#: Byte-stable system prompt (§5.2, ~1.5k tokens). NEVER interpolate into this string.
+#: Byte-stable system prompt (~1.5k tokens). NEVER interpolate into this string.
 SYSTEM_PROMPT = """You are the intraday analyst for a single-owner NSE cash-equity trading platform.
 
 Your job is to read the pre-assembled context you are given and produce AT MOST ONE action proposal,
@@ -87,7 +87,7 @@ other, say so and prefer no_action.
 
 
 def output_json_schema() -> dict[str, Any]:
-    """The structured-output schema sent to the runtime: the FLAT guidance form of the §5.2 union
+    """The structured-output schema sent to the runtime: the FLAT guidance form of the union
     (the runtime's output_format falls back to text mode on oneOf/anyOf — see the guidance schema's
     docstring). Client-side validation still runs the discriminated union via parse_output."""
     return intraday_guidance_json_schema()

@@ -1,11 +1,11 @@
-"""Per-strategy EVALUATION CONTRACTS, rendered into every signal-candidate context (WO-20a, 2026-08-20).
+"""Per-strategy EVALUATION CONTRACTS, rendered into every signal-candidate context (2026-08-20).
 
 The analyst judges a candidate within its OWN strategy's frame — timeframe class, exit mechanism,
 reward basis, evidence status, entry-anchor semantics and the strategy's own disqualifier list —
 instead of inside a single intraday day-trade rubric that fits exactly one of the legs (seven at the time).
 
 WHY THIS FILE EXISTS (the funnel autopsy, 08-13 -> 08-19). 63/63 analyst evaluations ended
-``no_action``, zero proposals were ever created and the §7.1 risk gate has never been invoked. The
+``no_action``, zero proposals were ever created and the risk gate has never been invoked. The
 declines decomposed into two inputs that lie and one rubric that structurally cannot pass the shapes
 the platform validated:
 
@@ -19,7 +19,7 @@ the platform validated:
   one layer above the gate seam (``strategy_expected_edge_pct``) that already handles the case.
 * **E4** — swing candidates were judged on intraday microstructure (five 1m bars, VWAP position,
   opening-range completeness at 09:20) — a category error for a 5-20 session hold, and on the one
-  validated leg (``ins``) it re-imposed the exact discretionary filter the WO-16 validation removed.
+  validated leg (``ins``) it re-imposed the exact discretionary filter the validation removed.
 
 E1/E2 are fixed at render time in :mod:`engine.intelligence.context`; E3/E4 are fixed here plus in
 ``intraday.SYSTEM_PROMPT`` rule 12/13. Evidence status is stated HONESTLY per leg — one validated (ins),
@@ -27,8 +27,8 @@ one forward test (hi52), the rest exploratory (cat/cat_reversal as SHADOW) — w
 
 PLAIN DATA. No imports beyond the stdlib-free module body itself: this is read by the context
 assembler on the hot path and must never drag a heavy module (store, pandas, numba) into an import
-graph that does not already have one. Nothing here is a limit, a filter or a gate — the §7.1 gate is
-untouched by WO-20 and remains the hard disposal layer.
+graph that does not already have one. Nothing here is a limit, a filter or a gate — the gate is
+untouched by this change and remains the hard disposal layer.
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ reward basis: target=None BY DESIGN. Reward is the validated expected edge, whic
 entry anchor: entry is the crossing session's close — a stale-by-design pre-open REFERENCE for a next-open-style fill (replay determinism; the gate sizes off max(entry, LTP)). entry below the live price does NOT mean 'bidding into weakness'.
 valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst of the fraud/default/pledge-invocation class; surveillance flags; the results-day entry ban; evident liquidity collapse; concrete evidence the disclosure itself is suspect. Absent those grounds the validated design expects this candidate to become a proposal — if you decline, name which ground applies."""
 
-#: The C3-cost-check reminder for every leg that ships with NO configured validated edge (rsi2,
-#: trend, mom): the gate can only verify C3 economics from an explicit target on these legs, so a
+#: The cost-gate reminder for every leg that ships with NO configured validated edge (rsi2,
+#: trend, mom): the gate can only verify cost economics from an explicit target on these legs, so a
 #: targetless enter is rejected as unverifiable regardless of merit. One constant, not three pastes.
 _NO_EDGE_GATE_NOTE = (
     "no configured validated edge — the gate verifies C3 economics only from an explicit target; "
@@ -93,7 +93,7 @@ evidence status: PROMOTED 2026-09-12 as a FORWARD TEST, not a validated edge. Th
 valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst of the fraud/default/pledge-invocation class; surveillance flags; the results-day entry ban; evident liquidity collapse; concrete evidence the breakout print itself is erroneous (a bad tick, an unadjusted corporate action). Absent those grounds the registered rule expects this candidate to become a proposal — if you decline, name which ground applies."""
 
 #: ``strategy_id`` -> the contract rendered into that candidate's context block. The keys are exactly
-#: the §6.1 deterministic legs; a new leg MUST land here in the same commit that ships it, or its
+#: the deterministic legs; a new leg MUST land here in the same commit that ships it, or its
 #: candidates reach the analyst with :data:`UNKNOWN_CONTRACT` and a warning in the log.
 #: (That rule was violated once: hi52 shipped 2026-09-01 without its entry and IDFCFIRSTB was
 #: evaluated under the generic frame — caught by the 2026-09-02 review.)
@@ -113,7 +113,7 @@ STRATEGY_CONTRACTS: dict[str, str] = {
 def contract_text(strategy_id: str) -> str:
     """The evaluation contract for ``strategy_id``, or :data:`UNKNOWN_CONTRACT` for an unknown id.
 
-    Total by construction — a context assembly must never fail on an unregistered strategy (D7 fail
+    Total by construction — a context assembly must never fail on an unregistered strategy (fail
     to zero): a thinner frame is a worse call, a raised exception is a lost one.
     """
     return STRATEGY_CONTRACTS.get(strategy_id, UNKNOWN_CONTRACT)

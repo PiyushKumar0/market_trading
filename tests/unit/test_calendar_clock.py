@@ -1,4 +1,4 @@
-"""NSE calendar + IST clock (R6). Trading-day logic, sessions, fail-safe strict mode, trade window."""
+"""NSE calendar + IST clock. Trading-day logic, sessions, fail-safe strict mode, trade window."""
 
 from __future__ import annotations
 
@@ -46,14 +46,14 @@ def test_trading_day_logic(cal):
 
 
 def test_no_calendar_no_trading(cal):
-    # No 2027 calendar file is loaded => not a trading day (fail-safe, R6).
+    # No 2027 calendar file is loaded => not a trading day (fail-safe).
     assert cal.is_trading_day(date(2027, 6, 17)) is False
 
 
 def test_strict_mode_refuses_unverified(clock, tmp_path):
     # Strict mode refuses any date whose year-calendar is not verified: true ("no calendar, no
-    # trading", R6) — tested against a synthetic draft calendar, not the shipped files (which are
-    # verified since the B2 boot-log fix, runbooks/boot-log-investigation-2026-07-10.md).
+    # trading") — tested against a synthetic draft calendar, not the shipped files (which are
+    # verified since the boot-log fix, runbooks/boot-log-investigation-2026-07-10.md).
     (tmp_path / "2026.yaml").write_text("year: 2026\nverified: false\nholidays: []\n", encoding="utf-8")
     assert NSECalendar(tmp_path, clock, strict=True).is_trading_day(WED) is False
     assert NSECalendar(tmp_path, clock, strict=False).is_trading_day(WED) is True  # dev mode tolerates
@@ -70,7 +70,7 @@ def test_strict_mode_refuses_beyond_verified_through(clock, tmp_path):
 
 def test_shipped_calendars_are_strict_usable(clock):
     # The shipped 2024/2025/2026 calendars are verified with a full-year horizon so the 200-session
-    # warmup lookback can enumerate history (boot-log fix B2). Guards the exact regression that froze
+    # warmup lookback can enumerate history (the boot-log fix). Guards the exact regression that froze
     # warmup with "calendar horizon < 200 sessions".
     strict = NSECalendar(CAL_DIR, clock, strict=True)
     assert strict.is_trading_day(WED) is True                 # 2026 mid-week, verified

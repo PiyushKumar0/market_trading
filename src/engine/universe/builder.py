@@ -1,45 +1,44 @@
-"""Daily tradeable-universe build (§3.2.4 ``UniverseBuilder``, 08:30 — A8/C7/E5).
+"""Daily tradeable-universe build (``UniverseBuilder``, 08:30).
 
-The PINNED universe rule (§3.2.4, zero latitude):
+The PINNED universe rule (zero latitude):
 
-    <configured index> ∩ MIS-eligible (Zerodha leverage file) ∩ NOT in GSM/ASM/T2T/ESM (A8)
+    <configured index> ∩ MIS-eligible (Zerodha leverage file) ∩ NOT in GSM/ASM/T2T/ESM
     ∩ median 20d traded value ≥ ₹5cr [``data.min_median_traded_value_inr``, tunable];
-    mis_candidates ⊆ F&O list (C7); active intraday watchlist capped at
+    mis_candidates ⊆ F&O list; active intraday watchlist capped at
     ``data.universe_max_watchlist`` [tunable].
 
-**O15 (owner-directed 2026-09-04):** the index is CONFIG (``universe.index_name`` /
+**Owner decision 2026-09-04:** the index is CONFIG (``universe.index_name`` /
 ``index_source_url`` / ``index_seed_path``), NIFTY 500 since this date — widened from NIFTY200;
-NIFTY Total Market since O18 (2026-10-08), with NIFTY 500 kept as the CORE index.
+NIFTY Total Market since the owner's 2026-10-08 widening, with NIFTY 500 kept as the CORE index.
 The focus cap is deliberately UNCHANGED at 200 and therefore BINDS again: eligible is now ~350–450
 names, so the tick watchlist is the top 200 by median traded value and the remainder audit as
 ``watchlist_cap``. Raising the cap is a separate, measured step (tick volume, bar building and
 per-minute feature snapshots all scale with it); every swing/batch leg read the full eligible set
-until O18, which keeps hi52/ins/cat on the NIFTY 500 core subset.
-(Cap 200 -> 300 on 2026-09-07; kept at 300 by O18 — ``data.universe_max_watchlist``.)
+until the 2026-10-08 widening, which keeps hi52/ins/cat on the NIFTY 500 core subset.
+(Cap 200 -> 300 on 2026-09-07; kept at 300 by the 2026-10-08 widening — ``data.universe_max_watchlist``.)
 
-Every index symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons (auditable,
-§4.3). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass every rule
+Every index symbol gets a ``universe_daily`` row with its per-symbol exclusion reasons (auditable). ``included=True`` means "in today's ACTIVE watchlist" (≤ cap): symbols that pass every rule
 but fall past the cap are persisted ``included=False`` with reason ``watchlist_cap`` so the audit
 trail explains exactly why an otherwise-eligible name is out.
 
-**Extended leg (§3.2.4 addendum, owner-directed 2026-09-01):** when ``data.batch_universe_enabled``,
+**Extended leg (owner-directed 2026-09-01):** when ``data.batch_universe_enabled``,
 criteria-PASSING symbols outside the index (candidates = MIS-margins keys ∩ NSE listed-equity master
 − the index, top ``data.batch_universe_max`` by median traded value) are additionally persisted as
 ``included=False`` rows with reason ``not_in_index`` — visible to batch rules, the news shadow and
 the pre-open advisory through ``get_batch_universe_symbols``, invisible to the tick watchlist
 (``included_only``) and rejected by the risk gate, which accepts the ELIGIBLE set — ``included``
-rows plus ``watchlist_cap`` rows — and nothing marked ``not_in_index`` (O15, 2026-09-04: the cap
+rows plus ``watchlist_cap`` rows — and nothing marked ``not_in_index`` (owner decision 2026-09-04: the cap
 governs ticks, not the RECOMMEND boundary). Failing non-index candidates get NO row.
 
-**O18 (owner-directed 2026-10-08):** the index is NIFTY Total Market (≈750 names = NIFTY 500 +
+**Owner decision 2026-10-08:** the index is NIFTY Total Market (≈750 names = NIFTY 500 +
 Microcap 250), and a second list — the CORE index (``universe.core_index_*``, NIFTY 500) — is
-loaded through the same E5 ladder and stamped on every row as ``core_index``. The eligible set and
+loaded through the same download/cache/seed ladder and stamped on every row as ``core_index``. The eligible set and
 the risk gate follow the index; the legs whose evidence was measured on NIFTY 500 read the core
 subset (``MarketStore.get_core_eligible_symbols``). A core list unavailable from download, cache AND
 seed stamps every row non-core — those legs originate nothing that day (fail closed) while the
 build itself, brk20 and the gate carry on. Same URL for both ⇒ every index member is core.
 
-Index membership is best-effort (E5): download the NSE indices constituents CSV
+Index membership is best-effort: download the NSE indices constituents CSV
 (``settings.universe.index_source_url``) → on failure fall back to the runtime cached copy under
 ``data/universe/`` → then to the committed seed ``settings.universe.index_seed_path``
 (owner-refreshed). Non-download provenance alerts but never blocks the build.
@@ -54,15 +53,15 @@ carried the old one (a remapped lagging list or one NSE already updated). Stored
 re-keyed here: until ``scripts/rekey_symbol.py`` moves it, daily-lookback rules see the new symbol as a
 fresh listing.
 
-Resolved ambiguities (documented, plan-silent):
+Resolved ambiguities (documented):
 - Median traded value uses ``close × volume`` over the last up-to-20 ``bars_1d`` rows strictly
   BEFORE the build date (built pre-open; day ``d`` has no bar yet). A symbol with NO daily bars
   cannot confirm liquidity ⇒ excluded (``no_liquidity_data`` — conservative, never assume liquid).
 - The watchlist cap keeps the TOP-``N`` eligible symbols by median traded value (desc, symbol asc
   tie-break) — deterministic and liquidity-first.
 
-Dependencies: ``core``, ``broker`` (InstrumentStore, C7), ``marketdata`` (MarketStore single-writer,
-convention 12), sibling ``universe`` ingests. Never raises into the scheduler (E5).
+Dependencies: ``core``, ``broker`` (InstrumentStore), ``marketdata`` (MarketStore single-writer,
+convention 12), sibling ``universe`` ingests. Never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -90,26 +89,26 @@ from engine.universe.surveillance import SurveillanceIngest, SurveillanceLists
 
 _log = get_logger("engine.universe.builder")
 
-# ---------------------------------------------------------------- exclusion reasons (auditable, §4.3)
+# ---------------------------------------------------------------- exclusion reasons (auditable)
 EXCL_NOT_MIS = "not_mis_eligible"                     # absent/1× in the Zerodha leverage file
-EXCL_GSM = "surveillance_gsm"                         # A8
+EXCL_GSM = "surveillance_gsm"
 EXCL_ASM = "surveillance_asm"
 EXCL_T2T = "surveillance_t2t"
 EXCL_ESM = "surveillance_esm"
 EXCL_LOW_VALUE = "below_min_traded_value"             # median 20d traded value < threshold
 EXCL_NO_DATA = "no_liquidity_data"                    # no bars_1d history ⇒ liquidity unconfirmable
 EXCL_CAP = "watchlist_cap"                            # eligible, but past the top-N focus cap
-EXCL_INDEX = "not_in_index"                           # §3.2.4 extended leg (2026-09-01): passes every
+EXCL_INDEX = "not_in_index"                           # extended leg (2026-09-01): passes every
                                                       # criteria rule but is outside the CONFIGURED index —
                                                       # batch/news/advisory visibility only, never the
                                                       # tick watchlist or the risk gate. Renamed from
-                                                      # 'not_nifty200' by O15 (2026-09-04) when the index
+                                                      # 'not_nifty200' by the owner's 2026-09-04 change when the index
                                                       # became config; the store still READS the legacy
                                                       # marker for rows written 09-01…09-04.
 
 #: Calendar-day lookback that comfortably contains 20 TRADING days (holidays/weekends margin).
 _TRADED_VALUE_LOOKBACK_DAYS = 45
-_TRADED_VALUE_BARS = 20                               # §3.2.4: "median 20d traded value"
+_TRADED_VALUE_BARS = 20                               # "median 20d traded value"
 _PAISE = Decimal("0.01")
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
@@ -118,10 +117,10 @@ IndexSource = Literal["download", "cache", "seed", "none"]
 
 
 class Universe(BaseModel):
-    """One day's resolved universe (§3.2.4 ``build`` output; persisted as ``universe_daily``).
+    """One day's resolved universe (``build`` output; persisted as ``universe_daily``).
 
     ``symbols`` is the ACTIVE intraday watchlist (≤ cap, sorted); ``mis_candidates`` ⊆ ``symbols``
-    ∩ F&O list (C7). ``eligible`` is the pre-cap rule-passing set (audit). ``exclusions`` maps every
+    ∩ F&O list. ``eligible`` is the pre-cap rule-passing set (audit). ``exclusions`` maps every
     excluded index symbol to its reasons. ``degraded=True`` when any input was reused/stale (index
     list not freshly downloaded, leverage file cached, or a surveillance source down).
     """
@@ -136,11 +135,11 @@ class Universe(BaseModel):
     median_traded_value: dict[str, Decimal] = Field(default_factory=dict)
     index_source: IndexSource = "none"
     degraded: bool = False
-    #: §3.2.4 extended leg (2026-09-01): criteria-passing NON-index symbols (sorted). Persisted as
+    #: Extended leg (2026-09-01): criteria-passing NON-index symbols (sorted). Persisted as
     #: included=False rows with exclusion_reasons=['not_in_index'] — the batch-rule / news-shadow /
     #: pre-open-advisory set beyond the index, never the tick watchlist and never gate-approvable.
     extended: tuple[str, ...] = ()
-    #: O18 (2026-10-08): the eligible symbols that are also CORE-index members (sorted) — the
+    #: Owner decision 2026-10-08: the eligible symbols that are also CORE-index members (sorted) — the
     #: origination population of the evidence-bound legs. Persisted per row as ``core_index``.
     core_eligible: tuple[str, ...] = ()
     core_index_source: IndexSource = "none"
@@ -149,7 +148,7 @@ class Universe(BaseModel):
 def parse_index_constituents_csv(text: str) -> list[str]:
     """Symbols from an NSE index-constituents CSV (``Company Name,Industry,Symbol,Series,ISIN``).
 
-    Defensive (E5): ``#``-prefixed comment lines are skipped (the committed seed carries an owner
+    Defensive: ``#``-prefixed comment lines are skipped (the committed seed carries an owner
     note), the ``Symbol`` column is located case-insensitively, and a ``Series`` column (if present)
     filters to EQ. Order-preserving, de-duplicated, uppercased.
     """
@@ -196,7 +195,7 @@ def _follow_renames(
 def _mis_eligible(
     leverage: MisLeverageMap, symbol: str, aliases: Mapping[str, Sequence[str]]
 ) -> bool:
-    """A8 MIS eligibility. A symbol absent from the (lagging) margins file reads through the retired
+    """MIS eligibility. A symbol absent from the (lagging) margins file reads through the retired
     symbols it replaced; an entry under the current symbol is authoritative."""
     if leverage.leverage(symbol) is not None:
         return leverage.is_mis_eligible(symbol)
@@ -206,7 +205,7 @@ def _mis_eligible(
 def _surveillance_reasons(
     surveillance: SurveillanceLists, symbol: str, aliases: Mapping[str, Sequence[str]]
 ) -> list[str]:
-    """A8 reasons for ``symbol`` AND every retired symbol it replaced — a list still naming the old
+    """Surveillance reasons for ``symbol`` AND every retired symbol it replaced — a list still naming the old
     ticker must not wave the new one through (fail closed)."""
     reasons = surveillance.reasons_for(symbol)
     for old in aliases.get(symbol, ()):
@@ -215,7 +214,7 @@ def _surveillance_reasons(
 
 
 class UniverseBuilder:
-    """§3.2.4 ``UniverseBuilder`` — runs 08:30 daily; persists the ``universe_daily`` snapshot.
+    """``UniverseBuilder`` — runs 08:30 daily; persists the ``universe_daily`` snapshot.
 
     Parameters
     ----------
@@ -225,14 +224,14 @@ class UniverseBuilder:
         Single-writer :class:`MarketStore` (convention 12) — ``bars_1d`` reads + ``universe_daily``
         writes, all executor-offloaded via ``store.arun`` (convention 4).
     instruments:
-        :class:`InstrumentStore` — the C7 F&O-membership authority (``is_fno``).
+        :class:`InstrumentStore` — the F&O-membership authority (``is_fno``).
     leverage / surveillance:
         The sibling ingests; :meth:`build` reads their ``current()`` snapshot (scheduler refreshes
         them at 08:15/08:20 before the 08:30 build; on catch-up ``current()`` self-refreshes).
     clock:
-        Single source of "now" (§3.2).
+        Single source of "now".
     http:
-        Injected ``httpx.AsyncClient`` for the index-constituents download (convention 11, E5).
+        Injected ``httpx.AsyncClient`` for the index-constituents download (convention 11).
     notify:
         Optional owner-alert sink for degraded inputs / build failure.
     """
@@ -261,7 +260,7 @@ class UniverseBuilder:
         self._timeout = float(request_timeout_s)
         seed = Path(settings.universe.index_seed_path)
         self._seed_path = seed if seed.is_absolute() else repo_root() / seed
-        # Index-agnostic cache name (O15, 2026-09-04): the file holds whatever index
+        # Index-agnostic cache name (owner decision 2026-09-04): the file holds whatever index
         # ``universe.index_source_url`` points at, so it must not be named for one of them.
         self._cache_path = settings.resolved_data_dir() / "universe" / "index_cached.csv"
         core_seed = Path(settings.universe.core_index_seed_path)
@@ -269,9 +268,9 @@ class UniverseBuilder:
         self._core_cache_path = settings.resolved_data_dir() / "universe" / "core_index_cached.csv"
 
     async def build(self, d: date) -> Universe:
-        """Build + persist day ``d``'s universe. NEVER raises into the scheduler (E5): a total
+        """Build + persist day ``d``'s universe. NEVER raises into the scheduler: a total
         failure alerts and returns an empty, degraded :class:`Universe` (fail closed — no universe,
-        no new entries; risk-reducing paths are elsewhere and unaffected, R3)."""
+        no new entries; risk-reducing paths are elsewhere and unaffected)."""
         try:
             return await self._build(d)
         except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise into the scheduler
@@ -338,9 +337,9 @@ class UniverseBuilder:
             else:
                 eligible.append(symbol)
 
-        # Focus cap (§3.2.4): top-N eligible by median traded value desc, symbol asc tie-break.
-        # BINDING since O15 (2026-09-04): the eligible set of the configured index (NIFTY Total Market
-        # since O18) is larger than data.universe_max_watchlist, so the ranked tail below is real and
+        # Focus cap: top-N eligible by median traded value desc, symbol asc tie-break.
+        # BINDING since the owner decision 2026-09-04: the eligible set of the configured index (NIFTY Total Market
+        # since the 2026-10-08 widening) is larger than data.universe_max_watchlist, so the ranked tail below is real and
         # its watchlist_cap rows are the audit.
         cap = int(self._settings.data.universe_max_watchlist)
         ranked = sorted(eligible, key=lambda s: (-medians[s], s))
@@ -348,7 +347,7 @@ class UniverseBuilder:
         for symbol in ranked[cap:]:
             exclusions[symbol] = [EXCL_CAP]
 
-        # mis_candidates ⊆ F&O list (C7): dynamic circuit band required for MIS names.
+        # mis_candidates ⊆ F&O list: dynamic circuit band required for MIS names.
         mis_candidates = tuple(s for s in watchlist if self._instruments.is_fno(s))
 
         included = set(watchlist)
@@ -368,7 +367,7 @@ class UniverseBuilder:
             for symbol in members
         ]
 
-        # §3.2.4 extended leg (owner-directed 2026-09-01, JINDALSAW/movers review): the SAME criteria
+        # Extended leg (owner-directed 2026-09-01, JINDALSAW/movers review): the SAME criteria
         # rules over criteria-passing NON-index symbols. Candidates = MIS-margins keys ∩ the NSE
         # listed-equity master (EQ series — keeps ETFs/SME boards out) − the index. Only PASSING
         # symbols get a row (included=False, exclusion_reasons=['not_in_index'] — the marker every
@@ -528,9 +527,9 @@ class UniverseBuilder:
         return (f"{old} → {new}: Kite token {r.instrument_token} carries {new} since "
                 f"{r.effective_d.isoformat()}; {where}.{history}")
 
-    # -------------------------------------------------------- configured-index membership (E5)
+    # -------------------------------------------------------- configured-index membership
     async def _load_index(self) -> tuple[list[str], IndexSource]:
-        """The configured index through the E5 ladder (see :meth:`_load_list`)."""
+        """The configured index through the download/cache/seed ladder (see :meth:`_load_list`)."""
         u = self._settings.universe
         return await self._load_list(
             u.index_name, u.index_source_url, self._cache_path, self._seed_path
@@ -539,9 +538,9 @@ class UniverseBuilder:
     async def _load_core_index(
         self, members: list[str]
     ) -> tuple[list[str], IndexSource | Literal["same"]]:
-        """O18: the CORE (evidence) index. When it is configured as the SAME list as the index the
+        """The CORE (evidence) index. When it is configured as the SAME list as the index the
         index's own members are reused (``"same"`` — no second download, every member core: the
-        pre-O18 shape). Otherwise the same E5 ladder with its own cache file; ``([], "none")`` when
+        pre-widening shape). Otherwise the same download/cache/seed ladder with its own cache file; ``([], "none")`` when
         download, cache and seed all fail."""
         u = self._settings.universe
         if u.core_index_source_url == u.index_source_url:
@@ -553,7 +552,7 @@ class UniverseBuilder:
     async def _load_list(
         self, index_name: str, url: str, cache_path: Path, seed_path: Path
     ) -> tuple[list[str], IndexSource]:
-        """Download → runtime cache → committed seed (E5 ladder). Alerts when not freshly downloaded."""
+        """Download → runtime cache → committed seed. Alerts when not freshly downloaded."""
         try:
             resp = await self._http.get(url, timeout=self._timeout)
             resp.raise_for_status()

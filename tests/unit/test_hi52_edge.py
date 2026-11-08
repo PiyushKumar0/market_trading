@@ -78,7 +78,7 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
     limits = config_dir() / "limits.yaml"
 
     # Pinned at the REGISTRATION inputs (base 40,000), not the live file: the runtime cap
-    # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (O19), so a
+    # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (the owner's dashboard capital change), so a
     # capital change must not break this pin.
     pinned = tmp_path / "limits.yaml"
     pinned.write_text(
@@ -90,7 +90,7 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
     assert derived == Decimal("1.53")                                   # O17: 2.0x gap mult
     assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
     # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can
-    # buy a candidate a C3 pass it did not earn.
+    # buy a candidate a cost-gate pass it did not earn.
     floor = fv.cost_floor_pct(Decimal("6000"))                          # Rs 36,000 x 2% / (2.0 x 6%)
     assert floor == pytest.approx(Decimal("0.498167"), abs=Decimal("1e-6"))
     assert fv.MEASURED_T20_MEDIAN_GROSS_PCT - floor > derived          # 1.5354 -> 1.53

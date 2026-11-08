@@ -1,19 +1,19 @@
-"""Typed owner-message catalog (§3.2.11 / R8) — the single source of every notification the
+"""Typed owner-message catalog — the single source of every notification the
 ``TelegramBot`` sends and ``HealthMonitor``/risk/oms surfaces raise.
 
 This module defines the *shapes* (a :class:`MessageKind` enum + a single
 :class:`CatalogMessage` Pydantic model) plus tiny pure constructor helpers that stamp the right
 ``kind``/``severity`` and assemble a human title/body. It deliberately contains NO transport (no
 python-telegram-bot, no formatting beyond plain f-strings) and NO ``Clock`` access — callers pass
-in already-`Clock`-derived values. ``TelegramBot.send(msg: CatalogMessage)`` (§3.2.11) consumes
-these; the catalog enumerated in §8/R8 is: recommendation, fill, limit breach, kill, budget
+in already-`Clock`-derived values. ``TelegramBot.send(msg: CatalogMessage)`` consumes
+these; the catalog is: recommendation, fill, limit breach, kill, budget
 warning, daily/weekly summary, startup/recovery report, trade-window changed, login prompt,
 feed-stale, REC_FILL_SUSPECTED.
 
-Plan citations per kind are documented on the :class:`MessageKind` members and on each helper.
+Each kind is documented on the :class:`MessageKind` members and on each helper.
 Load-bearing detail captured here (so the bot layer stays dumb): ``buttons`` carry the exact owner
 command each tap runs (an entry card's six ``/veto <rec_id> <reason>`` skips), and ``data`` carries
-the structured fields the bot/audit log persists alongside the rendered text (R8).
+the structured fields the bot/audit log persists alongside the rendered text.
 """
 
 from __future__ import annotations
@@ -39,81 +39,79 @@ _SEVERITY_GLYPH: dict[str, str] = {"info": "ℹ️", "warning": "⚠️", "criti
 
 
 class MessageKind(StrEnum):
-    """Every owner-facing message type in the §8/R8 catalog.
+    """Every owner-facing message type in the catalog.
 
-    Each member documents its trigger and the plan ID(s) that own it. The value is the stable
-    machine key persisted in the audit/notification log (R8) and never localised.
+    Each member documents its trigger. The value is the stable
+    machine key persisted in the audit/notification log and never localised.
     """
 
     RECOMMENDATION = "recommendation"
-    """A new RECOMMEND-mode recommendation for the owner to act on (§3.6/O8). Carries rec id,
+    """A new RECOMMEND-mode recommendation for the owner to act on. Carries rec id,
     symbol, side, qty, entry/stop/target and validity; the owner replies ``/taken``/``/closed``."""
 
     FILL = "fill"
-    """An order filled — AUTO-mode platform fill or owner-confirmed RECOMMEND fill (R8 audit).
+    """An order filled — AUTO-mode platform fill or owner-confirmed RECOMMEND fill.
     Carries symbol, side, qty, avg price, order id. A paper fill is titled "PAPER" and carries
     ``is_paper`` in ``data`` (paper entry completion and position close, never a real order)."""
 
     LIMIT_BREACH = "limit_breach"
-    """A §7.1 risk rule tripped (FREEZE/FLATTEN/limit), alerting the owner with the tripping rule
-    name and the observed-vs-threshold values (§7.1 "alert the owner with the tripping rule +
-    values", R8). Severity is ``warning`` for FREEZE, ``critical`` for FLATTEN/equity-floor."""
+    """A risk rule tripped (FREEZE/FLATTEN/limit), alerting the owner with the tripping rule
+    name and the observed-vs-threshold values. Severity is ``warning`` for FREEZE, ``critical`` for FLATTEN/equity-floor."""
 
     KILL = "kill"
-    """The kill switch fired (cumulative floor / manual / RMS), sticky in SQLite (R10/§7.2). Always
+    """The kill switch fired (cumulative floor / manual / RMS), sticky in SQLite. Always
     ``critical``; reset requires the owner two-step ``/kill_reset`` flow."""
 
     BUDGET_WARNING = "budget_warning"
-    """The LLM/API spend budget governor crossed a degrade rung (§5.6 ladder DG1..DG4). Warns the
+    """The LLM/API spend budget governor crossed a degrade rung (degrade ladder DG1..DG4). Warns the
     owner which tier is now active and the spend-vs-cap; informational-to-warning severity."""
 
     DAILY_SUMMARY = "daily_summary"
-    """End-of-day owner digest — realised P&L, trades, open positions, FROZEN reasons (O8/R8)."""
+    """End-of-day owner digest — realised P&L, trades, open positions, FROZEN reasons."""
 
     WEEKLY_SUMMARY = "weekly_summary"
     """Weekly owner digest, sent after the week's last regular session by ``ops.weekly_summary``:
-    the week's recs by owner decision plus hindsight outcomes. Not platform P&L (O8)."""
+    the week's recs by owner decision plus hindsight outcomes. Not platform P&L."""
 
     ENGINE_STARTED = "engine_started"
-    """Process-lifecycle alert sent immediately on boot (§2.2), BEFORE the §2.6 recovery/catch-up runs,
+    """Process-lifecycle alert sent immediately on boot, BEFORE the recovery/catch-up runs,
     so the owner knows the engine is alive even if catch-up takes a while. Carries mode + build version +
     a ``crash_recovered`` flag when the prior run exited uncleanly (state was RUNNING/STOPPING). The fuller
     STARTUP_REPORT follows on recovery completion. Gated by ``settings.lifecycle.notify_started``."""
 
     ENGINE_STOPPED = "engine_stopped"
-    """Process-lifecycle alert sent as the LAST act of a clean/planned shutdown (§2.2): reason, open-
+    """Process-lifecycle alert sent as the LAST act of a clean/planned shutdown: reason, open-
     position protection status, next expected start. Best-effort — a failed send never blocks exit (the
     watchdog is the backstop). Gated by ``settings.lifecycle.notify_planned_stop``."""
 
     STARTUP_REPORT = "startup_report"
-    """The every-startup recovery & catch-up report (§2.6 step 7): off-duration, what reconciled,
+    """The every-startup recovery & catch-up report: off-duration, what reconciled,
     jobs caught up, MIS squared, FROZEN reasons. Expected on every (manual/scheduled/crash) boot."""
 
     TRADE_WINDOW_CHANGED = "trade_window_changed"
-    """The owner changed the trade window via ``/trade_window`` or the dashboard (§3.2.7/§7.1);
-    sticky state written, audited, applied immediately and echoed back to the owner (line §3.2.4)."""
+    """The owner changed the trade window via ``/trade_window`` or the dashboard;
+    sticky state written, audited, applied immediately and echoed back to the owner."""
 
     CAPITAL_CHANGED = "capital_changed"
-    """The owner changed ``limits.yaml capital_base_inr`` from the dashboard (O19): the file was
+    """The owner changed ``limits.yaml capital_base_inr`` from the dashboard: the file was
     re-signed and reloaded, so every limit already uses the new base. Old → new for every figure that
     moved, plus the reminder to commit the file (a stash or checkout would revert it, and the next boot would FREEZE, or KILL if a real
     position is open)."""
 
     LOGIN_PROMPT = "login_prompt"
     """The daily Kite login is required — the owner must open the login URL and return the
-    ``request_token`` (R6; access token expires ~06:00 IST, §3.2.11 ``/token``). ``critical`` because
+    ``request_token`` (access token expires ~06:00 IST, ``/token``). ``critical`` because
     no trading proceeds without it."""
 
     FEED_STALE = "feed_stale"
-    """The live tick feed went silent while RUNNING past the staleness budget (§7.1
-    ``stale_data_guard``: tick age 5 s / heartbeat silence 10 s ⇒ FROZEN + ticker respawn, A4/R2).
-    NOT raised during WARMING/intentionally-off (those are suppressed upstream, §2.6/§3.2.12).
+    """The live tick feed went silent while RUNNING past the staleness budget (``stale_data_guard``: tick age 5 s / heartbeat silence 10 s ⇒ FROZEN + ticker respawn).
+    NOT raised during WARMING/intentionally-off (those are suppressed upstream).
     No production caller of :func:`feed_stale` today: staleness pages via RISK_STATE_CHANGE with
     cause ``feed_stale`` (engine.risk.causes); the kind and helper are kept for the alert catalog."""
 
     FEED_DEGRADED = "feed_degraded"
     """The live tick feed went silent DURING market hours while the child's 1 s heartbeats keep it
-    HEALTHY (2026-07-22 tickless-HEALTHY session, R2/§7.1). Heartbeats are KiteTicker-independent, so a
+    HEALTHY (2026-07-22 tickless-HEALTHY session). Heartbeats are KiteTicker-independent, so a
     feed delivering ZERO ticks used to read HEALTHY all day and write zero self-built bars in silence.
     Distinct from FEED_STALE (heartbeat silence ⇒ kill+respawn+FROZEN, critical): DEGRADED is
     ``warning`` — the child is alive, the FEED is not delivering ticks. Recovers automatically the
@@ -135,80 +133,79 @@ class MessageKind(StrEnum):
     first, one-shot notice of the same episode) and FEED_WEDGED (the child never heartbeats)."""
 
     REC_FILL_SUSPECTED = "rec_fill_suspected"
-    """The reconciler matched a broker position to an open RECOMMEND rec (R5/§3.6): exactly one
+    """The reconciler matched a broker position to an open RECOMMEND rec: exactly one
     one-tap confirm prompt, pre-filled with the observed qty/price, BEFORE any ``positions`` row or
     order call. Owner confirms via ``/taken`` (one tap) ⇒ ``origin='recommended'``; dismiss/expiry ⇒
     ``no_action``. Never auto-adopted."""
 
     POSITION_NOT_IN_HOLDINGS = "position_not_in_holdings"
-    """The §3.6 holdings reconcile found a tracked OPEN CNC position that is ABSENT or SHORT in the
+    """The holdings reconcile found a tracked OPEN CNC position that is ABSENT or SHORT in the
     broker's holdings (owner-directed 2026-09-07): the owner almost certainly sold it and never sent
     ``/closed``, so the platform is tracking — and blocking new buys on — a position that no longer
     exists. One alert per position per trading day, naming the exact ``/closed <entry_rec_id> <price>``
     reply. Alert-only: the platform never auto-closes a human-owned position (the exit price is the
-    owner's fact, §6.5) and never touches risk state on this signal."""
+    owner's fact) and never touches risk state on this signal."""
 
     RECONCILE_DRIFT = "reconcile_drift"
-    """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (A13/§3.2.3:
-    |Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
+    """Nightly self-built-vs-official bar reconciliation drifted beyond thresholds (|Δvol|>``reconcile.vol_drift_pct`` or |Δclose|>``reconcile.close_drift_ticks`` on more than
     ``reconcile.max_bad_bar_fraction`` of compared bars). Offline spans are excluded from the
-    denominator (§2.6) — this alert means genuine self-vs-official divergence, investigate the feed."""
+    denominator — this alert means genuine self-vs-official divergence, investigate the feed."""
 
     BACKFILL_REPORT = "backfill_report"
-    """A ``BackfillJob`` run (historical or §2.6 warm-up gap-fill) finished — bars written, span,
-    failures (§3.2.3/§4.4 jobs 1+3). Warning when any symbol failed; info otherwise."""
+    """A ``BackfillJob`` run (historical or warm-up gap-fill) finished — bars written, span,
+    failures. Warning when any symbol failed; info otherwise."""
 
     WARMUP_FROZEN = "warmup_frozen"
-    """The §2.6 step-6 cold-start warm-up gate: entries stay FROZEN because contiguous bar coverage
-    is insufficient for a strategy's feature lookbacks (§7.1 ``warmup_ready``; §10.3
+    """The cold-start warm-up gate: entries stay FROZEN because contiguous bar coverage
+    is insufficient for a strategy's feature lookbacks (``warmup_ready``;
     ``WARMUP_FROZEN(symbol/strategy)``). Never trade on thin data — distinct from feed-stale."""
 
     CATCHUP_REPORT = "catchup_report"
-    """The §2.6 step-5 ``CatchUpRunner`` finished replaying missed jobs after an off period: which
+    """The ``CatchUpRunner`` finished replaying missed jobs after an off period: which
     jobs were caught up, in dependency order, and which failed (feeding the STARTUP_REPORT)."""
 
     ENGINE_CRASHLOOP = "engine_crashloop"
     """Repeated fast respawns inside ``lifecycle.crashloop_window_s`` coalesced into one loud alert
-    (§2.2/§10.7) instead of a page per restart. Always critical — something is structurally wrong."""
+    instead of a page per restart. Always critical — something is structurally wrong."""
 
     DATA_FRESHNESS_FROZEN = "data_freshness_frozen"
-    """A safety/deadline-critical daily job (instruments/tick-size A10, surveillance A8, earnings
-    calendar R2, corp-action GTT adjustment A12) could not run or verify before entries open ⇒
-    FROZEN-for-entries + this alert (§2.6 step 5). Risk-reducing actions continue (R3). Also reused
+    """A safety/deadline-critical daily job (instruments/tick-size, surveillance, earnings
+    calendar, corp-action GTT adjustment) could not run or verify before entries open ⇒
+    FROZEN-for-entries + this alert. Risk-reducing actions continue. Also reused
     by the daily feed jobs (bhavcopy, deals, filings_*, sector/isin maps, leverage, universe,
     feed_freshness) to report a stale or failed feed: the alert itself freezes nothing — the freeze
     comes from ``engine.ops.jobs`` when a SAFETY_CRITICAL job fails."""
 
     MODE_CHANGE = "mode_change"
-    """The engine mode moved ``OFF ↔ RECOMMEND ↔ AUTO`` (§10.3 ``MODE_CHANGE``). Owner-initiated or a
-    risk-forced downgrade — the ``actor`` says which, and a risk-forced one never re-arms on a timer
-    (R3/R5). Warning: the owner must always know which mode their capital is running under."""
+    """The engine mode moved ``OFF ↔ RECOMMEND ↔ AUTO``. Owner-initiated or a
+    risk-forced downgrade — the ``actor`` says which, and a risk-forced one never re-arms on a timer.
+    Warning: the owner must always know which mode their capital is running under."""
 
     RISK_STATE_CHANGE = "risk_state_change"
-    """The Tier-2 risk state moved (§10.3 ``RISK_STATE(FROZEN/CLOSE_ONLY)``, §3.5.3). Carries the
+    """The Tier-2 risk state moved (``RISK_STATE(FROZEN/CLOSE_ONLY)``). Carries the
     per-cause reason that drove the edge — states are reached by direct per-cause edges composed
     most-restrictive-wins, so the cause is the actionable half of the message (see
     :class:`engine.risk.causes.RiskStateLatch`)."""
 
     CATALYST_WATCHLIST = "catalyst_watchlist"
-    """The daily catalyst watchlist was built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST``): how many
+    """The daily catalyst watchlist was built (``CATALYST_WATCHLIST``): how many
     symbols are ORIGINATING candidates (news may start a trade) vs CONTEXT-only (news may veto/size
-    but never originate, O11/§2.7)."""
+    but never originate)."""
 
     CATALYST_DISABLED = "catalyst_disabled"
-    """The news/catalyst layer disabled itself via the §2.7 fail-safe ladder (stale digest, too few
+    """The news/catalyst layer disabled itself via its fail-safe ladder (stale digest, too few
     source domains, feed outage, …). Warning, not critical: the platform keeps trading its
-    deterministic strategies — it just stops originating on news (§10.3 ``CATALYST_DISABLED``)."""
+    deterministic strategies — it just stops originating on news (``CATALYST_DISABLED``)."""
 
     SCAN_SWEEP = "scan_sweep"
-    """An on-demand scanner sweep completed (§3.2.5 sweep addendum, 2026-07-29): fired when the
+    """An on-demand scanner sweep completed (2026-07-29): fired when the
     trade window becomes active or the owner asks via ``/scan_now``. Carries the explicit verdict —
     candidates published now, plus the deterministic PENDING arm levels ("X arms below ₹N") so the
     owner can decide whether shifting the window is worth it. Never silent: "nothing to trade right
     now" is a first-class answer."""
 
     POST_LOGIN_RECOVERY = "post_login_recovery"
-    """The §2.6 cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
+    """The cold-start RE-TRIGGER: after the owner completes the daily Kite login (the LAN
     ``/kite/callback`` route or the Telegram ``/token`` fallback both land in
     ``SessionManager.complete_login``), the post-login recovery re-runs the startup steps a pre-login
     boot could not — instruments load/persist, regime + warm-up-gap backfill, warm-up re-evaluation
@@ -216,7 +213,7 @@ class MessageKind(StrEnum):
     BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
 
     EARLY_HYDRATION = "early_hydration"
-    """The §2.6 early-hydration pass ran (owner-directed 2026-09-09): an early Kite login (~06:30) on
+    """The early-hydration pass ran (owner-directed 2026-09-09): an early Kite login (~06:30) on
     a trading day pulled the pre-open chain — surveillance, universe, news chain, catalyst digest,
     pre-open planner — forward from its 08:20–08:50 clock, so the digest exists before the window
     opens on days the owner is travelling at 08:15. Carries the per-job outcome (ran / already run /
@@ -236,17 +233,16 @@ class MessageKind(StrEnum):
     failed at boot. Always ``critical``; halts, voids and reconcile mismatches are not sent."""
 
     SURVEILLANCE_MIGRATION = "surveillance_migration"
-    """An OPEN real position's symbol is on an exchange surveillance list (GSM/ASM/T2T/ESM) — A8,
-    §4.4 job 5 "held-position migrations alert immediately", §2.6 step 5 (diff over the gap), §10.3
+    """An OPEN real position's symbol is on an exchange surveillance list (GSM/ASM/T2T/ESM) — held-position migrations alert immediately (diff over the gap),
     ``SURVEILLANCE_MIGRATION(symbol)``. Raised by every ``SurveillanceIngest.refresh``; the journal's
     ``dedupe_key`` delivers it once per (position, list). Always ``critical``; alert-only."""
 
 
 class CatalogMessage(BaseModel):
-    """A single rendered, typed owner notification consumed by ``TelegramBot.send`` (§3.2.11).
+    """A single rendered, typed owner notification consumed by ``TelegramBot.send``.
 
     ``title``/``body`` are presentation text; ``data`` carries the structured fields persisted to the
-    notification/audit log (R8) and used by tests, so callers must not bury load-bearing values
+    notification/audit log and used by tests, so callers must not bury load-bearing values
     (ids, prices, rule names) in the prose only. ``buttons`` are optional inline button rows, each
     button a ``{"text": <label>, "command": <bot command>}`` dict; the command is the button's
     callback data, so it must fit Telegram's 64 bytes, and the bot runs it on tap only when its verb
@@ -265,7 +261,7 @@ class CatalogMessage(BaseModel):
     """Journal-level idempotency key: a second send with the same key is dropped, not delivered."""
 
     def render(self) -> str:
-        """Owner-facing plain-text rendering consumed by ``TelegramBot.send`` (§3.2.11).
+        """Owner-facing plain-text rendering consumed by ``TelegramBot.send``.
 
         Presentation only: a severity-glyphed ``title`` line followed by ``body``. The structured
         ``data`` / ``buttons`` are transport & audit concerns and are deliberately NOT dumped
@@ -280,7 +276,7 @@ class CatalogMessage(BaseModel):
 # --------------------------------------------------------------------------- helpers
 # Each helper is pure: it takes already-validated/`Clock`-derived primitives and returns a fully
 # populated CatalogMessage. Decimal in → str in ``body``/``data`` (prices round-trip as strings so
-# nothing is mangled by float formatting; mirrors the §8.1 decimal-as-string convention).
+# nothing is mangled by float formatting; mirrors the decimal-as-string convention).
 
 
 def login_instruction(url: str) -> str:
@@ -290,8 +286,8 @@ def login_instruction(url: str) -> str:
 
 
 def login_prompt(url: str) -> CatalogMessage:
-    """Daily Kite login required (R6). ``url`` is the broker login URL; the owner opens it and
-    returns the ``request_token`` via ``/token`` (§3.2.11)."""
+    """Daily Kite login required. ``url`` is the broker login URL; the owner opens it and
+    returns the ``request_token`` via ``/token``."""
     return CatalogMessage(
         kind=MessageKind.LOGIN_PROMPT,
         title="Kite login required",
@@ -302,7 +298,7 @@ def login_prompt(url: str) -> CatalogMessage:
 
 
 def engine_started(*, mode: str, version: str, crash_recovered: bool = False) -> CatalogMessage:
-    """Process-lifecycle boot alert (§2.2). Sent before the §2.6 recovery body runs. ``crash_recovered``
+    """Process-lifecycle boot alert. Sent before the recovery body runs. ``crash_recovered``
     leads the message when the prior run exited uncleanly (belt-and-suspenders to the watchdog's
     real-time ``ENGINE_DOWN``, which a dead process could not send about itself)."""
     lead = "⚠ recovered from an unclean prior exit — " if crash_recovered else ""
@@ -316,8 +312,8 @@ def engine_started(*, mode: str, version: str, crash_recovered: bool = False) ->
 
 
 def engine_stopped(*, reason: str, open_positions: int, next_start: str | None = None) -> CatalogMessage:
-    """Process-lifecycle clean-stop alert (§2.2), the last act before exit. ``reason`` ∈
-    {owner, window-idle, update, service-stop}; ``open_positions`` are broker-protected throughout (R3)."""
+    """Process-lifecycle clean-stop alert, the last act before exit. ``reason`` ∈
+    {owner, window-idle, update, service-stop}; ``open_positions`` are broker-protected throughout."""
     nxt = f" Next expected start: {next_start}." if next_start else ""
     return CatalogMessage(
         kind=MessageKind.ENGINE_STOPPED,
@@ -345,15 +341,15 @@ def startup_report(
     warmup_classes_short: list[str] | None = None,
     warmup_blockers: list[str] | None = None,
 ) -> CatalogMessage:
-    """The every-startup recovery & catch-up report (§2.6 step 7 / STARTUP_REPORT).
+    """The every-startup recovery & catch-up report (STARTUP_REPORT).
 
     Critical when the book is frozen on an integrity failure, the kill switch is engaged, or the
     prior run crashed; otherwise info. The owner sees a compact status line plus the frozen/deferred
     reasons — the full structured report is preserved in ``data`` (and the ``startup_report`` log),
-    never dumped as a raw dict into the prose (R8).
+    never dumped as a raw dict into the prose.
 
     ``warmup_classes_short`` renders its own line because since the 2026-09-13 per-class scoping
-    (§2.6 step-6 addendum) a short warm-up class no longer implies a ``frozen:`` entry: an INTRADAY
+    a short warm-up class no longer implies a ``frozen:`` entry: an INTRADAY
     shortfall refuses intraday candidates per candidate and sends no ``WARMUP_FROZEN`` page, so this
     line is the owner's ONLY boot-time notice that the session is running on incomplete coverage."""
     lead = f"⚠ crash-recovered (prior state {prior_state}) — " if crash_recovered else ""
@@ -389,7 +385,7 @@ def startup_report(
 
 
 def feed_stale(age_s: float) -> CatalogMessage:
-    """Live feed silent for ``age_s`` seconds while running (§7.1 ``stale_data_guard``; A4/R2)."""
+    """Live feed silent for ``age_s`` seconds while running (``stale_data_guard``)."""
     return CatalogMessage(
         kind=MessageKind.FEED_STALE,
         title="Feed stale — entries frozen",
@@ -407,7 +403,7 @@ def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
 
     Warning (not critical): the ticker child is alive and heartbeating, but its KiteTicker is delivering
     no ticks, so NO self-built 1-minute bars are being written. Fires once on the HEALTHY→DEGRADED
-    transition (§7.1 in-session tick-silence guard); the state recovers to HEALTHY when ticks resume.
+    transition (in-session tick-silence guard); the state recovers to HEALTHY when ticks resume.
     """
     return CatalogMessage(
         kind=MessageKind.FEED_DEGRADED,
@@ -423,7 +419,7 @@ def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
 
 
 def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
-    """The ticker feed is WEDGED — repeated WARMING-timeout respawns never reached HEALTHY (§2.6/R2).
+    """The ticker feed is WEDGED — repeated WARMING-timeout respawns never reached HEALTHY.
 
     Escalated ONCE after ``ticker.max_wedge_respawns`` consecutive WARMING-timeout respawns (2026-07-23
     sleep/resume wedge): the supervisor keeps retrying at capped backoff, but the child never delivers a
@@ -471,13 +467,13 @@ def feed_silent_unrecovered(*, respawns: int, since: datetime, silence_s: float)
 def rec_fill_suspected(
     rec_id: str, symbol: str, qty: int, price: Decimal
 ) -> CatalogMessage:
-    """Reconciler matched a broker position to open RECOMMEND rec ``rec_id`` (R5/§3.6).
+    """Reconciler matched a broker position to open RECOMMEND rec ``rec_id``.
 
     No production caller yet; reserved for the real-order Reconciler.
 
     Emits a one-tap ``/taken`` confirm pre-filled with the observed ``qty``/``price``. The owner's
-    single tap routes through the same ``/taken`` command (§3.2.11) ⇒ ``origin='recommended'``;
-    dismissing/expiring leaves it a ``no_action`` non-fill (unbiased training signal, §6.5).
+    single tap routes through the same ``/taken`` command ⇒ ``origin='recommended'``;
+    dismissing/expiring leaves it a ``no_action`` non-fill (unbiased training signal).
     """
     price_s = str(price)
     return CatalogMessage(
@@ -489,11 +485,11 @@ def rec_fill_suspected(
         ),
         severity="warning",
         data={"rec_id": rec_id, "symbol": symbol, "qty": qty, "price": price_s},
-        # One-tap confirm: the button command is the literal /taken the bot will execute (§3.6).
+        # One-tap confirm: the button command is the literal /taken the bot will execute.
         # Not tappable yet: ``taken`` joins the bot's button allow-list when this gets a caller.
         buttons=[
             [{"text": f"✓ /taken {symbol} {qty}@{price_s}", "command": f"/taken {rec_id} {qty} {price_s}"}],
-            # /veto is the rec-dismiss command (§3.6); /reject resolves owner_approvals rows.
+            # /veto is the rec-dismiss command; /reject resolves owner_approvals rows.
             [{"text": "✗ No action", "command": f"/veto {rec_id}"}],
         ],
     )
@@ -597,7 +593,7 @@ def position_not_in_holdings(
     held_qty: int,
     entry_rec_id: str | None,
 ) -> CatalogMessage:
-    """A tracked OPEN CNC position is absent/short in the broker's holdings (§3.6 reconcile).
+    """A tracked OPEN CNC position is absent/short in the broker's holdings.
 
     The message exists to produce ONE owner action, so the body ends in the literal reply to type:
     ``/closed <entry_rec_id> <price>``. ``entry_rec_id`` is the ENTRY recommendation id from the
@@ -607,7 +603,7 @@ def position_not_in_holdings(
     eleven-session limbo this check was built to end.
 
     No ``buttons``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
-    it is the owner's fact (§6.5) — so a one-tap button would have to invent one.
+    it is the owner's fact — so a one-tap button would have to invent one.
     """
     reply = (
         f"/closed {entry_rec_id} <price>" if entry_rec_id
@@ -656,12 +652,12 @@ def reconcile_drift(
     bad_bar_fraction: float,
     max_bad_bar_fraction: float,
 ) -> CatalogMessage:
-    """Self-built vs official 1m bars drifted beyond the §3.2.3 thresholds on day ``d`` (A13).
+    """Self-built vs official 1m bars drifted beyond the reconcile thresholds on day ``d``.
 
     ``symbols_flagged`` lists the symbols whose bad-bar fraction exceeded
     ``reconcile.max_bad_bar_fraction``; offline (gap-backfilled) spans were already excluded from the
-    denominator (§2.6), so this is genuine divergence. Official candles have replaced the drifted
-    self-built rows (``src='kite_official'`` canonical, §4.4 job 2) — the alert is for investigation.
+    denominator, so this is genuine divergence. Official candles have replaced the drifted
+    self-built rows (``src='kite_official'`` canonical) — the alert is for investigation.
     """
     shown = ", ".join(symbols_flagged[:10]) + ("…" if len(symbols_flagged) > 10 else "")
     return CatalogMessage(
@@ -694,13 +690,13 @@ def backfill_report(
     duration_s: float,
     failures: list[str],
 ) -> CatalogMessage:
-    """A ``BackfillJob`` run finished (§3.2.3; historical §4.4 job 3 or §2.6 warm-up gap-fill).
+    """A ``BackfillJob`` run finished (historical or warm-up gap-fill).
 
     No production caller yet: BackfillJob does not notify; kept reserved for that wiring.
 
     ``frm``/``to`` are already-rendered IST strings (callers pass Clock-derived values; no Clock
     access here). Warning when any symbol failed — those symbols stay behind their checkpoint and the
-    next run resumes them (A2 resumable)."""
+    next run resumes them (resumable)."""
     fail = f"\nFailed: {', '.join(failures)}" if failures else ""
     return CatalogMessage(
         kind=MessageKind.BACKFILL_REPORT,
@@ -723,13 +719,13 @@ def backfill_report(
 
 
 def warmup_frozen(*, blockers: list[str], classes: list[str] | None = None) -> CatalogMessage:
-    """Entries FROZEN by the cold-start warm-up gate (§2.6 step 6 / §7.1 ``warmup_ready``).
+    """Entries FROZEN by the cold-start warm-up gate (``warmup_ready``).
 
     Each blocker is a rendered "scope: have/need" line (e.g. ``"orb:RELIANCE bars 12/30"``) — the
     strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
-    automatically once coverage is met; risk-reducing actions were never gated (R3).
+    automatically once coverage is met; risk-reducing actions were never gated.
 
-    ``classes`` are the coverage classes short (2026-09-13, §2.6 step-6 addendum). It LEADS the body
+    ``classes`` are the coverage classes short (2026-09-13). It LEADS the body
     and travels in ``data`` beside the blockers rather than inside them: which class froze entries is
     the first thing the owner needs, an intraday line riding along in the same freeze must not read
     as the cause, and every element of ``blockers`` stays a rendered "scope: have/need" line for the
@@ -754,7 +750,7 @@ def catchup_report(
     jobs_caught_up: list[str],
     jobs_failed: list[str],
 ) -> CatalogMessage:
-    """§2.6 step-5 ``CatchUpRunner`` summary: missed jobs replayed in dependency order after an off
+    """``CatchUpRunner`` summary: missed jobs replayed in dependency order after an off
     period. Failures of safety/deadline-critical jobs additionally raise DATA_FRESHNESS_FROZEN."""
     caught = ", ".join(jobs_caught_up) if jobs_caught_up else "none"
     failed = ", ".join(jobs_failed) if jobs_failed else "none"
@@ -775,10 +771,10 @@ def catchup_report(
 
 
 def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
-    """Coalesced crash-loop alarm (§2.2/§10.7): ``restarts`` fast respawns inside ``window_s``.
+    """Coalesced crash-loop alarm: ``restarts`` fast respawns inside ``window_s``.
 
     One loud page instead of one per restart. The engine should be held STOPPED for investigation —
-    open positions remain broker-protected throughout (R3)."""
+    open positions remain broker-protected throughout."""
     return CatalogMessage(
         kind=MessageKind.ENGINE_CRASHLOOP,
         title="Engine crash-looping",
@@ -792,7 +788,7 @@ def engine_crashloop(*, restarts: int, window_s: int) -> CatalogMessage:
 
 
 def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
-    """Post-login recovery summary (§2.6 cold-start RE-TRIGGER).
+    """Post-login recovery summary (cold-start RE-TRIGGER).
 
     ``steps`` is the ordered ``(name, status, detail)`` list, ``status`` in {ok, skipped, failed}.
     Info severity unless any step failed (then warning). The owner SEES this on Telegram so a
@@ -816,7 +812,7 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
 
 
 def early_hydration(*, at: str, outcomes: list[tuple[str, str]]) -> CatalogMessage:
-    """Early-hydration summary (§2.6 addendum, 2026-09-09) — ONE owner line per early login.
+    """Early-hydration summary (2026-09-09) — ONE owner line per early login.
 
     ``at`` is the already-``Clock``-derived HH:MM of the login (this module never reads a clock);
     ``outcomes`` is the ordered ``(job_id, outcome)`` list from ``CatchUpRunner.hydrate_ahead``,
@@ -845,9 +841,9 @@ def early_hydration(*, at: str, outcomes: list[tuple[str, str]]) -> CatalogMessa
 
 
 def mode_change(old: str, new: str, actor: str, reason: str) -> CatalogMessage:
-    """Engine mode changed (§10.3 ``MODE_CHANGE``; §3.5.3 machine). Rendered from the ``mode.changed``
+    """Engine mode changed (``MODE_CHANGE``). Rendered from the ``mode.changed``
     event, so the owner sees every transition — including a gate-forced downgrade they did not ask for
-    (which re-arms only on explicit owner action, never a timer; R3/R5)."""
+    (which re-arms only on explicit owner action, never a timer)."""
     return CatalogMessage(
         kind=MessageKind.MODE_CHANGE,
         title=f"Mode {old} → {new}",
@@ -858,11 +854,11 @@ def mode_change(old: str, new: str, actor: str, reason: str) -> CatalogMessage:
 
 
 def risk_state_change(old: str, new: str, cause: str) -> CatalogMessage:
-    """Risk state changed (§10.3 ``RISK_STATE``; §3.5.3 per-cause edges, most-restrictive-wins).
+    """Risk state changed (``RISK_STATE``; per-cause edges, most-restrictive-wins).
 
     ``cause`` is the latching cause (or the re-arm note) from
     :class:`engine.risk.causes.RiskStateLatch` — the actionable half: it names what must clear before
-    entries reopen. Risk-reducing actions are never gated by any of these states (R3)."""
+    entries reopen. Risk-reducing actions are never gated by any of these states."""
     return CatalogMessage(
         kind=MessageKind.RISK_STATE_CHANGE,
         title=f"Risk state {old} → {new}",
@@ -876,8 +872,8 @@ def risk_state_change(old: str, new: str, cause: str) -> CatalogMessage:
 
 
 def kill_state(*, killed: bool, reason: str, actor: str) -> CatalogMessage:
-    """Kill switch engaged or reset (§10.3 ``KILL/KILL_RESET``, §7.2). Engaging is loud (``critical``)
-    and single-step; the reset is the owner's two-step ``/kill_reset`` + ``/confirm`` flow (R10)."""
+    """Kill switch engaged or reset (``KILL/KILL_RESET``). Engaging is loud (``critical``)
+    and single-step; the reset is the owner's two-step ``/kill_reset`` + ``/confirm`` flow."""
     return CatalogMessage(
         kind=MessageKind.KILL,
         title="KILL SWITCH ENGAGED" if killed else "Kill switch reset",
@@ -892,7 +888,7 @@ def kill_state(*, killed: bool, reason: str, actor: str) -> CatalogMessage:
 
 
 def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -> CatalogMessage:
-    """The daily trade window was changed (§3.2.7/§10.3 ``TRADE_WINDOW_CHANGED``). Already-rendered
+    """The daily trade window was changed (``TRADE_WINDOW_CHANGED``). Already-rendered
     ``HH:MM`` strings in (no Clock access here); the setter validated + audited before publishing."""
     return CatalogMessage(
         kind=MessageKind.TRADE_WINDOW_CHANGED,
@@ -906,7 +902,7 @@ def trade_window_changed(*, start: str, end: str, buffer_min: int, actor: str) -
     )
 
 
-#: ``CapitalChanger`` figure keys in the dashboard dialog's order and wording (redesign §15).
+#: ``CapitalChanger`` figure keys in the dashboard dialog's order and wording.
 _CAPITAL_FIGURES: tuple[tuple[str, str], ...] = (
     ("capital_inr", "Starting capital"),
     ("max_deployed_capital_inr", "Most capital in use at once"),
@@ -943,7 +939,7 @@ def _capital_figure(key: str, value: str | None, *, whole: bool = False) -> str:
 def capital_changed(
     *, old: Mapping[str, str | None], new: Mapping[str, str | None], actor: str
 ) -> CatalogMessage:
-    """The capital base was changed and is live (O19 ``CAPITAL_CHANGED``). ``old``/``new`` are the
+    """The capital base was changed and is live (``CAPITAL_CHANGED``). ``old``/``new`` are the
     ``CapitalChanger`` figure tables (decimal strings, ``None`` where unknown)."""
     known = [key for key, _label in _CAPITAL_FIGURES]
     extra = [key for key in (*old, *new) if key not in known]
@@ -970,10 +966,10 @@ def capital_changed(
 
 
 def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> CatalogMessage:
-    """The §5.6 degrade ladder moved a rung (§10.3 ``BUDGET_TIER(DGn)``).
+    """The degrade ladder moved a rung (``BUDGET_TIER(DGn)``).
 
     Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning; a second kind for the
-    same event would fork the audit log (R8). The window is named in the prose: the period is the
+    same event would fork the audit log. The window is named in the prose: the period is the
     subscription's Thursday-14:00-IST quota week, so "$103" alone reads as a month figure to the owner."""
     return CatalogMessage(
         kind=MessageKind.BUDGET_WARNING,
@@ -1058,7 +1054,7 @@ def scan_sweep(
     pending: list[dict[str, Any]],
     suppressed_today: int,
 ) -> CatalogMessage:
-    """§3.2.5 sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
+    """Sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
 
     Rendering per owner feedback (2026-07-29): trade types grouped intraday/swing, every setup
     shows its full plan (entry + stop + target or exit rule), friendly strategy names, held
@@ -1093,9 +1089,9 @@ def scan_sweep(
 
 
 def catalyst_watchlist(n_originating: int, n_context: int) -> CatalogMessage:
-    """Daily catalyst watchlist built (§4.4 job 14 / §10.3 ``CATALYST_WATCHLIST(n_originating,
+    """Daily catalyst watchlist built (``CATALYST_WATCHLIST(n_originating,
     n_context)``). ORIGINATING symbols may start a trade; CONTEXT-only symbols may only veto/size
-    one (O11/§2.7) — the split is the whole message."""
+    one — the split is the whole message."""
     return CatalogMessage(
         kind=MessageKind.CATALYST_WATCHLIST,
         title="Catalyst watchlist built",
@@ -1109,7 +1105,7 @@ def catalyst_watchlist(n_originating: int, n_context: int) -> CatalogMessage:
 
 
 def catalyst_disabled(reason: str) -> CatalogMessage:
-    """The news/catalyst layer disabled itself (§2.7 fail-safe ladder / §10.3 ``CATALYST_DISABLED``).
+    """The news/catalyst layer disabled itself (fail-safe ladder / ``CATALYST_DISABLED``).
     Deterministic strategies keep running — only news-originated entries stop."""
     return CatalogMessage(
         kind=MessageKind.CATALYST_DISABLED,
@@ -1123,24 +1119,24 @@ def catalyst_disabled(reason: str) -> CatalogMessage:
     )
 
 
-#: §3.6 recommendation rendering budgets — a Telegram message must stay readable on a phone.
+#: Recommendation rendering budgets — a Telegram message must stay readable on a phone.
 THESIS_MAX_CHARS = 300
 MAX_HEADROOM_LINES = 5
 MAX_MESSAGE_CHARS = 4096  # plain text, no parse mode
 
 #: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid.
 #: Everything else in the footer is known at delivery time; a guessed fill price would be a fabricated
-#: number in the owner's own audit trail (§8.1 — the recommendation's entry zone is not a fill).
+#: number in the owner's own audit trail (the recommendation's entry zone is not a fill).
 _PRICE_PLACEHOLDER = "<price>"
 
 
 def _capture_footer(rec: Recommendation) -> str:
-    """The copy-ready outcome-capture line that closes every §3.6 recommendation (WO-29, 2026-08-26).
+    """The copy-ready outcome-capture line that closes every recommendation (2026-08-26).
 
-    The message used to end at the B7 checklist, and the only handle it carried for ``/taken`` was a
+    The message used to end at the checklist, and the only handle it carried for ``/taken`` was a
     ``rec_id`` printed nowhere — so on the first day the owner actually took a recommendation, the
     capture command was untypable. The footer now states the command verbatim, with the INSTRUMENT as
-    the handle (which the owner commands resolve, WO-29(a)) and the recommended qty already filled in.
+    the handle (which the owner commands resolve) and the recommended qty already filled in.
     Only the fill price stays a placeholder, because that number is the owner's, not the platform's.
 
     Three kinds, three honest footers. An ``entry`` is a fill to record or decline. An ``exit`` asks
@@ -1238,11 +1234,11 @@ def _cost_line(rec: Recommendation) -> str:
 
 
 def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -> CatalogMessage:
-    """Render a §3.6 :class:`~engine.core.contracts.Recommendation` (plan Q1.5 card).
+    """Render a :class:`~engine.core.contracts.Recommendation` (the owner card).
 
     Pure: every line is printed only when the payload carries its data. A degenerate entry zone is a
     LIMIT level; ``ltp`` (optional, never invented) adds the gap to it. Every failed gate check is
-    shown, the B7 checklist is never truncated, and the capture footer is always the last line.
+    shown, the checklist is never truncated, and the capture footer is always the last line.
     """
     low, high = rec.entry_zone
     at_level = low == high
@@ -1278,7 +1274,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
         _cost_line(rec),
         "checklist (yours to place — the platform places no orders in RECOMMEND, B7):",
         *(f"  • {item}" for item in rec.manual_checklist),
-        # WO-29: the last line is the reply the owner types back — the message teaches its own capture.
+        # The last line is the reply the owner types back — the message teaches its own capture.
         _capture_footer(rec),
     ]
 
@@ -1309,7 +1305,7 @@ def recommendation_message(rec: Recommendation, *, ltp: Decimal | None = None) -
             "qty": rec.qty,
             "notional": str(rec.notional),
             "entry_zone": [str(low), str(high)],
-            # WO-4: the actionable trigger and the price it must be judged against, as separate
+            # The actionable trigger and the price it must be judged against, as separate
             # machine-readable fields — never only the level, never only the quote.
             "level": str(low) if at_level else None,
             "ltp": None if ltp is None else str(ltp),
@@ -1409,7 +1405,7 @@ def surveillance_migration(
     unconfirmed: bool,
     list_as_of: str | None = None,
 ) -> CatalogMessage:
-    """A held REAL position is on surveillance list ``list_key`` (A8, §4.4 job 5).
+    """A held REAL position is on surveillance list ``list_key``.
 
     ``status``: ``new`` = absent from the ``previous_as_of`` list (over an offline gap the two dates
     show the span); ``listed`` = already on it; ``unknown`` = no earlier list to compare. The
@@ -1464,10 +1460,10 @@ def surveillance_migration(
 
 
 def data_freshness_frozen(*, job_id: str, last_success: str | None, reason: str) -> CatalogMessage:
-    """A safety/deadline-critical daily job is not fresh ⇒ entries FROZEN (§2.6 step 5).
+    """A safety/deadline-critical daily job is not fresh ⇒ entries FROZEN.
 
     ``last_success`` is a rendered IST timestamp of the job's last good run (or None if never).
-    Entries stay frozen until the job runs/verifies; risk-reducing actions continue (R3)."""
+    Entries stay frozen until the job runs/verifies; risk-reducing actions continue."""
     last = last_success or "never"
     return CatalogMessage(
         kind=MessageKind.DATA_FRESHNESS_FROZEN,

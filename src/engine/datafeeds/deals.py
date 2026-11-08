@@ -1,12 +1,11 @@
-"""NSE bulk/block deals → ``flagged_instrument_days`` (§4.4 job 9, settings.jobs.deals_ist — 20:30 since 2026-07-24; E5 best-effort).
+"""NSE bulk/block deals → ``flagged_instrument_days`` (settings.jobs.deals_ist — 20:30 since 2026-07-24; best-effort).
 
 A day with a bulk or block deal in a symbol distorts its volume profile: scanners must suppress
-volume-breakout signals on flagged (symbol, day)s ("fake-volume-breakout suppression", §4 spec /
-§4.3 ``flagged_instrument_days``). This job pulls the day's bulk-deal and block-deal lists from the
-NSE historical-deals APIs (date-ranged, so the §2.6 date-keyed catch-up can re-run any missed
+volume-breakout signals on flagged (symbol, day)s ("fake-volume-breakout suppression", the ``flagged_instrument_days`` table). This job pulls the day's bulk-deal and block-deal lists from the
+NSE historical-deals APIs (date-ranged, so the date-keyed catch-up can re-run any missed
 trading day) and writes one flagged row per (symbol, day, reason).
 
-Failure model (E5): each source (bulk, block) runs under its OWN guard — one failing never blocks
+Failure model: each source (bulk, block) runs under its OWN guard — one failing never blocks
 the other. A failed source alerts + leaves the table's existing rows in force (reuse yesterday; the
 date-keyed catch-up retries the missed day). Rows whose own trade-date parses to a DIFFERENT day
 are dropped (wrong window — never mis-key a flag). Never raises into the scheduler.
@@ -46,7 +45,7 @@ NSE_BLOCK_DEALS_URL_TEMPLATE = (
     "?optionType=block_deals&from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
 )
 
-#: ``flagged_instrument_days.reason`` vocabulary (PK component, §4.3).
+#: ``flagged_instrument_days.reason`` vocabulary (PK component).
 REASON_BULK = "bulk_deal"
 REASON_BLOCK = "block_deal"
 
@@ -61,7 +60,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class DealsResult(BaseModel):
-    """One run's outcome (never an exception, E5). ``ok`` = at least one source ingested;
+    """One run's outcome (never an exception). ``ok`` = at least one source ingested;
     ``degraded`` = at least one source failed (its existing rows stay in force)."""
 
     model_config = ConfigDict(frozen=True)
@@ -105,7 +104,7 @@ def _first(keys: dict[str, Any], aliases: tuple[str, ...]) -> str:
 
 
 def parse_deals(payload: Any, d: date, reason: str) -> list[dict[str, Any]]:
-    """NSE deals JSON → ``flagged_instrument_days`` row dicts for day ``d`` (defensive, E5).
+    """NSE deals JSON → ``flagged_instrument_days`` row dicts for day ``d`` (defensive).
 
     A row whose own trade-date parses to a DIFFERENT day is dropped (wrong window). ``details``
     carries the audit context (client/qty/price) as a compact JSON string — the flag itself is the
@@ -147,7 +146,7 @@ def parse_deals(payload: Any, d: date, reason: str) -> list[dict[str, Any]]:
 
 
 class DealsJob:
-    """§4.4 job 9 — bulk/block deals → ``flagged_instrument_days`` (volume-breakout suppression)."""
+    """Bulk/block deals → ``flagged_instrument_days`` (volume-breakout suppression)."""
 
     def __init__(
         self,
@@ -171,7 +170,7 @@ class DealsJob:
 
     async def run(self, d: date) -> DealsResult:
         """Fetch bulk + block deals for day ``d`` under per-source guards and upsert the flags
-        (idempotent on (symbol, d, reason)). Never raises into the scheduler (E5)."""
+        (idempotent on (symbol, d, reason)). Never raises into the scheduler."""
         all_rows: list[dict[str, Any]] = []
         failed: list[str] = []
         reasons: list[str] = []

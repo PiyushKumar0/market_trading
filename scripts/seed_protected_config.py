@@ -1,11 +1,10 @@
-"""First-run owner action: register the initial signatures of the protected config files (R4, §2.4).
+"""First-run owner action: register the initial signatures of the protected config files.
 
-``config/limits.yaml`` (§7.1) and ``config/envelope.yaml`` (§6.3) are loaded by the risk gate ONLY
+``config/limits.yaml`` and ``config/envelope.yaml`` are loaded by the risk gate ONLY
 when their on-disk SHA-256 matches the signature recorded in the SQLite ``protected_config`` table.
 That table is the sole authority for "is this config trusted?", and it is written ONLY by the
-owner-confirmed change flow (Telegram two-step / dashboard token) — never by Tier 1 or the learner
-(R4). Until a starter file is registered here, ``ProtectedStore.load_verified`` treats it as
-unregistered and refuses to load it (which, per §2.4, surfaces as FROZEN-on-flat-book at startup or a
+owner-confirmed change flow (Telegram two-step / dashboard token) — never by Tier 1 or the learner. Until a starter file is registered here, ``ProtectedStore.load_verified`` treats it as
+unregistered and refuses to load it (which surfaces as FROZEN-on-flat-book at startup or a
 kill with a live book — that single-rule consequence belongs to the gate, not this script).
 
 This CLI performs the one-time seeding. Because :meth:`ProtectedStore.register_initial` signs WHATEVER
@@ -13,10 +12,7 @@ bytes are currently on disk, running it is itself a trust assertion: it must hap
 owner has actually read the shipped ``limits.yaml`` / ``envelope.yaml``. We therefore gate the call
 behind an explicit interactive "yes, I reviewed these files" confirmation (or an explicit ``--yes``),
 and we build the :class:`OwnerConfirmation` proof token from that (Actor.OWNER, confirmed=True) — the
-same token the runtime owner-update path requires (R4/R10).
-
-Depends on: R4 (protected store / hash-verified config), §2.4 (integrity rule + owner-confirmed write
-flow), §6.3 (envelope), §7.1 (limits), D11/E7 (this is part of the Phase-0 first-run bring-up).
+same token the runtime owner-update path requires.
 
 Usage::
 
@@ -119,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"config dir : {cfg_dir}")
     print(f"sqlite     : {db_path}")
 
-    # Ensure the schema exists (the protected_config + config_audit tables, §4.2) before we touch it.
+    # Ensure the schema exists (the protected_config + config_audit tables) before we touch it.
     conn = connect(db_path)
     try:
         applied = apply_migrations(conn)
@@ -144,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             print("Nothing to do; all protected files already registered. Use --reseed to override.")
             return 0
 
-        # Gate the signing behind an explicit owner review confirmation (R4): register_initial signs
+        # Gate the signing behind an explicit owner review confirmation: register_initial signs
         # whatever bytes are on disk, so we must NOT do it without an affirmative owner assertion.
         if not args.yes and not _confirm_review(tuple(todo), cfg_dir):
             print("Aborted: review not confirmed. Nothing was registered.")

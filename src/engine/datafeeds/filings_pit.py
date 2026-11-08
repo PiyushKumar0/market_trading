@@ -1,4 +1,4 @@
-"""NSE insider trades → ``insider_trades`` (§2.8 job ``filings_pit``, ~18:35 — O14, E5).
+"""NSE insider trades → ``insider_trades`` (job ``filings_pit``, ~18:35).
 
 **Two NSE routes.** Insider (PIT) disclosures moved to SEBI's PIT V2.0 XBRL filings on 2026-05-03 (found
 2026-09-24 by capturing NSE's own insider-trading page). The old ``corporates-pit`` route
@@ -8,7 +8,7 @@
 disclosure, :func:`parse_pit_xbrl`). Only index constituents' XBRL is fetched, the same universe the
 BSE fresh feed resolves to.
 
-**Point-in-time discipline (§2.8 rule i):** ``broadcast_dt`` is the exchange dissemination time (the
+**Point-in-time discipline:** ``broadcast_dt`` is the exchange dissemination time (the
 listing's received time when that is missing; the two differ by at most 5 s), and every downstream
 as-of join keys on it, never the ``txn_from``/``txn_to`` period. The PK is a sha256 content hash of
 (symbol, person_name, broadcast_dt, txn_type, qty, value), so a re-ingested filing never duplicates.
@@ -19,17 +19,17 @@ come; :meth:`MarketStore.get_insider_trades` pairs the two copies of a trade and
 
 **Window.** Both routes return nothing without an explicit ``from_date``/``to_date`` (DD-MM-YYYY)
 window. The daily job's window is ``[watermark - PIT_RETRY_DAYS → run-day]`` where the watermark is
-the latest stored ``broadcast_dt`` **of this source's rows only** (§2.8.5, 2026-09-13 — the BSE fresh
+the latest stored ``broadcast_dt`` **of this source's rows only** (2026-09-13 — the BSE fresh
 feed writes into the same table every day and a whole-table watermark collapsed this window to
 ``[d-1, d]``), floored at :data:`MAX_WINDOW_DAYS` behind the run day and walked in
 :data:`PIT_WINDOW_DAYS` chunks. A filing whose XBRL link already has stored rows is not fetched again.
 History older than the floor is the backfill's job
 (``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
 
-**Failure model (E5).** A listing row without a symbol, broadcast time or XBRL link is skipped and
+**Failure model.** A listing row without a symbol, broadcast time or XBRL link is skipped and
 counted. A filing whose XBRL fails (fetch, parse or store) is skipped and counted, and fetched again on
 later runs while it stays inside the retry margin, so one bad filing never stalls the rest. A failed
-listing, or a run in which every XBRL fetch failed, alerts and returns a degraded result for the §2.6
+listing, or a run in which every XBRL fetch failed, alerts and returns a degraded result for the
 date-keyed catch-up to retry. Never raises into the scheduler.
 """
 
@@ -77,7 +77,7 @@ PIT_RETRY_DAYS = 7
 NSE_SOURCE = "nse"
 
 #: Widest span (days) ONE request asks for — the unit ``scripts/backfill_filings.py`` already walks
-#: this SAME endpoint in (imported there as ``_NSE_WINDOW_DAYS``, §2.8 observed safe; scripts/ can
+#: this SAME endpoint in (imported there as ``_NSE_WINDOW_DAYS``, observed safe; scripts/ can
 #: import src/, so the value is shared, not duplicated). NSE has never been observed to REFUSE a wider
 #: window — the 2026-09-12 probe answered 01-05 → 12-09 (134 days) and its 3 rows came from the START
 #: of that span, which argues against truncation without proving it — but a silent truncation to the
@@ -86,7 +86,7 @@ NSE_SOURCE = "nse"
 #: the backfill does.
 PIT_WINDOW_DAYS = 31
 
-#: Listing requests ONE run may issue, hence the window-START floor (§2.8.5, 2026-09-13). The window
+#: Listing requests ONE run may issue, hence the window-START floor (2026-09-13). The window
 #: opens at the per-SOURCE NSE watermark, which widens by a day for every day the feed stores nothing —
 #: unbounded without a floor. Window bounds are INCLUSIVE, so N chunks reach
 #: ``N * PIT_WINDOW_DAYS - 1`` days behind the run day. A residue older than the floor is an owner-run
@@ -95,7 +95,7 @@ PIT_WINDOW_DAYS = 31
 MAX_WINDOWS_PER_RUN = 6
 MAX_WINDOW_DAYS = PIT_WINDOW_DAYS * MAX_WINDOWS_PER_RUN - 1
 
-#: ≥1.5 s between consecutive requests to the cookie-gated www host (§2.8 observed safe). Public:
+#: ≥1.5 s between consecutive requests to the cookie-gated www host (observed safe). Public:
 #: ``scripts/backfill_filings.py`` imports it (with :func:`pit_windows` and :data:`PIT_WINDOW_DAYS`)
 #: to walk the same endpoint. ``_sleep`` is a module-level indirection so tests observe the pacing
 #: without waiting (the ``engine.core.nse_http`` idiom).
@@ -135,7 +135,7 @@ def pit_windows(frm: date, to: date, span_days: int = PIT_WINDOW_DAYS) -> list[t
 
 
 class FilingsPitResult(BaseModel):
-    """One run's outcome (never an exception, E5)."""
+    """One run's outcome (never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -178,7 +178,7 @@ def _parse_date(raw: Any) -> date | None:
 
 
 def _parse_dt(raw: Any) -> datetime | None:
-    """Exchange broadcast timestamp → tz-aware IST datetime (stdlib parse, §3.2 — never the LLM)."""
+    """Exchange broadcast timestamp → tz-aware IST datetime (stdlib parse — never the LLM)."""
     s = _clean(raw)
     for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y %H:%M", "%d-%b-%Y"):
         try:
@@ -198,7 +198,7 @@ def _dec(raw: Any) -> Decimal | None:
         return None
     # A bare ``NaN`` (or ``Infinity``) token survives ``json.loads`` and constructs a Decimal fine,
     # but every ORDERING comparison on it raises InvalidOperation (int(Decimal('Infinity')) raises
-    # OverflowError) — a raise that :func:`_int` and any downstream `v <= 0` would take out of the E5
+    # OverflowError) — a raise that :func:`_int` and any downstream `v <= 0` would take out of the never-raise
     # guard. Non-finite is "no consideration" (folded in from filings_pit_fresh, 2026-09-23).
     return v if v.is_finite() else None
 
@@ -231,7 +231,7 @@ def insider_id(
     symbol: str, person_name: str, broadcast_dt: datetime | None,
     txn_type: str, qty: int | None, value: Decimal | None,
 ) -> str:
-    """Content-hash PK: sha256 of (symbol, person_name, broadcast_dt, txn_type, qty, value) (§2.8.1).
+    """Content-hash PK: sha256 of (symbol, person_name, broadcast_dt, txn_type, qty, value).
 
     Stable across re-broadcasts of the SAME disclosure (dedupe) and distinct across genuinely
     different transactions. ``broadcast_dt`` is rendered ISO (minute-granular) — the point-in-time key.
@@ -250,7 +250,7 @@ def insider_id(
 def parse_pit(payload: Any) -> list[dict[str, Any]]:
     """NSE PIT JSON → ``insider_trades`` row dicts (defensive, skip-and-count).
 
-    Field map (probe-verified, §2.8): symbol; acqName→person_name; personCategory→person_category;
+    Field map (probe-verified): symbol; acqName→person_name; personCategory→person_category;
     acqMode→acq_mode; tdpTransactionType→txn_type; secAcq→qty (securities acquired/disposed);
     secVal→value; befAcqSharesPer/afterAcqSharesPer→before/after %; acqfromDt/acqtoDt→txn window;
     intimDt→intim_dt; date→broadcast_dt (the point-in-time timestamp); xbrl. A row without a symbol
@@ -429,7 +429,7 @@ async def ingest_pit_window(
 
 
 class FilingsPitJob:
-    """§2.8 job ``filings_pit`` — NSE PIT V2.0 insider trades → ``insider_trades`` (date-keyed, E5)."""
+    """Job ``filings_pit`` — NSE PIT V2.0 insider trades → ``insider_trades`` (date-keyed)."""
 
     def __init__(
         self,
@@ -487,7 +487,7 @@ class FilingsPitJob:
     async def run(self, d: date) -> FilingsPitResult:
         """Ingest the PIT V2.0 filings broadcast over ``[frm → d]`` in ≤:data:`PIT_WINDOW_DAYS`
         chunks (:meth:`_window_start`), skipping filings already stored. Idempotent on the
-        content-hash id; ``d`` is the run day (§2.6 date-keyed). Never raises into the scheduler (E5)
+        content-hash id; ``d`` is the run day (date-keyed). Never raises into the scheduler
         — the constituents and watermark reads are inside the guard too, so they degrade like a
         fetch failure."""
         # `frm` stands at the run day until the watermark is read, so a store fault reports the
@@ -511,7 +511,7 @@ class FilingsPitJob:
             )
             for win in pit_windows(frm, d):
                 if windows:
-                    await _sleep(PIT_PACE_S)  # never burst the cookie-gated www host (§2.8)
+                    await _sleep(PIT_PACE_S)  # never burst the cookie-gated www host
                 await ingest_pit_window(
                     self._http, self._store, *win, symbols, stats, done=done, timeout=self._timeout
                 )
@@ -546,7 +546,7 @@ class FilingsPitJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Filings are NEVER load-bearing (§2.8 rule iii, news-equal E5): a features/risk-context
+            # Filings are NEVER load-bearing: a features/risk-context
             # feed, not a safety-critical one — closest closed-catalog kind, warning severity.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Insider-trades (PIT) feed degraded",

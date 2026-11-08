@@ -1,10 +1,10 @@
-"""News Analyst agent definition (§5.4 / §2.7 step 4) — SYSTEM prompt, batch schema, output parser.
+"""News Analyst agent definition — SYSTEM prompt, batch schema, output parser.
 
-Byte-stable module constant, same as the other agents (D8): stability keeps calls replayable and the
+Byte-stable module constant, same as the other agents: stability keeps calls replayable and the
 cached prefix warm.
 
 The materiality rubric is anchored VERBATIM in the prompt: unanchored 0..1 "importance" scores drift
-between calls and the §7.1 ``catalyst_guard`` thresholds are calibrated against these anchors.
+between calls and the risk gate's ``catalyst_guard`` thresholds are calibrated against these anchors.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from engine.intelligence.schemas import ClusterScore, ClusterScoreBatch, parse_c
 #: config/agents.yaml key.
 AGENT_ID = "news_analyst"
 
-#: §5.4 batching cap — the assembler asserts it; the CALLER does the chunking.
+#: Batching cap — the assembler asserts it; the CALLER does the chunking.
 MAX_CLUSTERS_PER_CALL = 30
 
-#: Byte-stable system prompt (§5.4). NEVER interpolate into this string.
+#: Byte-stable system prompt. NEVER interpolate into this string.
 SYSTEM_PROMPT = """You are the news analyst for a single-owner NSE cash-equity trading platform.
 
 You are given a numbered list of headline CLUSTERS. Score each cluster exactly once and return one
@@ -75,11 +75,11 @@ HARD RULES
 
 
 def output_json_schema() -> dict[str, Any]:
-    """The structured-output schema for this agent: a batch of cluster scores (§5.4)."""
+    """The structured-output schema for this agent: a batch of cluster scores."""
     return ClusterScoreBatch.model_json_schema()
 
 
 def parse_output(raw: dict[str, Any] | list[Any] | str) -> tuple[list[ClusterScore], list[str]]:
     """Validate per item; returns ``(scores, dropped_cluster_ids)`` — one bad cluster never voids the
-    batch (D7). Dropped clusters stay unscored and are therefore excluded from origination (§2.7)."""
+    batch. Dropped clusters stay unscored and are therefore excluded from origination."""
     return parse_cluster_scores(raw)

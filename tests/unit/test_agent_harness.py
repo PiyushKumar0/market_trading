@@ -1,4 +1,4 @@
-"""AgentHarness (§3.2.6/§5.1): the single SDK call site — admission, retries, metering, audit.
+"""AgentHarness: the single SDK call site — admission, retries, metering, audit.
 
 The Claude Agent SDK is NEVER imported here. Both SDK seams (``query`` and the options class) are
 injected, so these tests exercise the real harness logic against fake message streams — which is also
@@ -239,7 +239,7 @@ def make_harness(defs, gov, clock, conn, query_fn, alert=None, options_cls=FakeO
 
 
 def enter_validator(clock):
-    """The real §8.1 client-side contract: parse + platform-stamp (never LLM-stamped time)."""
+    """The real client-side contract: parse + platform-stamp (never LLM-stamped time)."""
 
     def _validate(raw: str) -> Any:
         return parse_and_stamp(
@@ -264,10 +264,10 @@ def rows(conn) -> list:
     return conn.execute("SELECT * FROM agent_calls ORDER BY rowid").fetchall()
 
 
-# --------------------------------------------------------------------------- load_agent_defs (§9.1)
+# --------------------------------------------------------------------------- load_agent_defs
 def test_tools_enabled_without_explicit_allowlist_is_refused() -> None:
-    # §5.1 D5/D10: `tools_enabled: true` NEVER means "SDK defaults" — the harness refuses to run an
-    # agent definition that lacks an explicit allowlist. This is the §9.1 allowlist test.
+    # `tools_enabled: true` NEVER means "SDK defaults" — the harness refuses to run an
+    # agent definition that lacks an explicit allowlist. This is the allowlist test.
     cfg = {
         "agents": {
             "rogue": {"model": "sonnet-5.5", "shape": "agentic", "tools_enabled": True, "max_turns": 4}
@@ -278,7 +278,7 @@ def test_tools_enabled_without_explicit_allowlist_is_refused() -> None:
 
 
 def test_single_shot_defs_get_empty_allowlist(real_cfg) -> None:
-    # Against the SHIPPED config: every single-shot agent runs with no tools (D5).
+    # Against the SHIPPED config: every single-shot agent runs with no tools.
     single_shot = {k: v for k, v in real_cfg["agents"].items() if v["shape"] == "single_shot"}
     assert single_shot, "agents.yaml has no single_shot agents — fixture is vacuous"
     loaded = load_agent_defs({"agents": single_shot})
@@ -290,9 +290,9 @@ def test_single_shot_defs_get_empty_allowlist(real_cfg) -> None:
 
 
 def test_shipped_roster_loads_with_weekly_parked(real_cfg) -> None:
-    # The shipped roster loads whole: nightly_reviewer is single-shot in Phase-2 v1 (agents.yaml
-    # deviation note), and weekly_researcher is `enabled: false` until its §5.5 read-only MCP
-    # allowlist is wired (Phase 5) — a parked def is SKIPPED, never silently runnable (D5/D10).
+    # The shipped roster loads whole: nightly_reviewer is single-shot in RECOMMEND mode (agents.yaml
+    # deviation note), and weekly_researcher is `enabled: false` until its read-only MCP
+    # allowlist is wired (not built) — a parked def is SKIPPED, never silently runnable.
     defs = load_agent_defs(real_cfg)
     assert "weekly_researcher" not in defs
     nightly = defs["nightly_reviewer"]
@@ -361,11 +361,11 @@ async def test_single_shot_ok_persists_call_and_meters_budget(defs, gov, clock, 
     assert result.attempts == 1
     assert result.payload.tradingsymbol == "RELIANCE"
     assert result.payload.quantity == 10
-    # Platform-stamped, never LLM-stamped (§5.1 no LLM-originated time).
+    # Platform-stamped, never LLM-stamped (no LLM-originated time).
     assert result.payload.valid_until == clock.now() + timedelta(minutes=15)
     assert result.usage == TokenUsage(in_tokens=1200, out_tokens=300, cache_read=7000)
 
-    # --- audit row (R8) ---
+    # --- audit row ---
     (row,) = rows(conn)
     assert row["call_id"] == result.call_id
     assert row["agent_id"] == "intraday_analyst"
@@ -381,7 +381,7 @@ async def test_single_shot_ok_persists_call_and_meters_budget(defs, gov, clock, 
     assert "SYSTEM PROMPT (byte-stable)" in snapshot and "VOLATILE BLOCK LAST" in snapshot
     assert json.loads(row["output_json"])["tradingsymbol"] == "RELIANCE"
 
-    # --- governor ledger (D6) ---
+    # --- governor ledger ---
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert ledger["agent_id"] == "intraday_analyst"
     assert ledger["model"] == "sonnet-5.5"
@@ -407,7 +407,7 @@ async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov
     assert opts.max_turns == 4
     assert opts.system_prompt == "SYSTEM PROMPT (byte-stable)"
     assert opts.output_schema == {"type": "object"}
-    # System prompt went in the options, so the prompt is exactly the assembled context block (D8).
+    # System prompt went in the options, so the prompt is exactly the assembled context block.
     assert fake.calls[0].prompt == FakeContext().prompt_text
 
 
@@ -434,7 +434,7 @@ async def test_usage_extraction_from_result_message_only(defs, gov, clock, conn)
     assert result.usage == TokenUsage(in_tokens=900, out_tokens=250, cache_read=4096, cache_write=2048)
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert (ledger["cache_read"], ledger["cache_write"]) == (4096, 2048)
-    # Our D4 pricing owns the ledger; the SDK's own estimate is never written to it.
+    # Our pricing owns the ledger; the SDK's own estimate is never written to it.
     assert Decimal(ledger["cost_usd"]) == gov.price("sonnet-5.5", result.usage)
 
 
@@ -450,7 +450,7 @@ async def test_missing_usage_fields_default_to_zero_and_book_nothing(defs, gov, 
     assert rows(conn)[0]["in_tokens"] == 0
 
 
-# --------------------------------------------------------------------------- schema retries (D7)
+# --------------------------------------------------------------------------- schema retries
 async def test_schema_invalid_twice_then_valid(defs, gov, clock, conn, alert, alerts) -> None:
     good = json.dumps({"action": "no_action", "reason": "regime unclear"})
     fake = FakeQuery(
@@ -464,7 +464,7 @@ async def test_schema_invalid_twice_then_valid(defs, gov, clock, conn, alert, al
 
     assert result.ok and result.attempts == 3
     assert result.payload == {"action": "no_action", "reason": "regime unclear"}
-    assert len(fake.calls) == 3                       # 1 + 2 retries (D7)
+    assert len(fake.calls) == 3                       # 1 + 2 retries
 
     # Each retry is a FRESH query whose prompt carries the previous validation error verbatim.
     assert "Previous output failed validation" not in fake.calls[0].prompt
@@ -475,7 +475,7 @@ async def test_schema_invalid_twice_then_valid(defs, gov, clock, conn, alert, al
     assert fake.calls[2].prompt.startswith(FakeContext().prompt_text)
     assert fake.calls[2].prompt.count("Previous output failed validation") == 1
 
-    # One audit row per SDK call (each has its own prompt/usage/cost — R8 replayability).
+    # One audit row per SDK call (each has its own prompt/usage/cost — replayability).
     audit = rows(conn)
     assert [r["ok"] for r in audit] == [0, 0, 1]
     assert [r["fail_reason"] for r in audit] == ["schema_invalid", "schema_invalid", None]
@@ -493,7 +493,7 @@ async def test_schema_invalid_three_times_fails(defs, gov, clock, conn, alert, a
     assert not result.ok
     assert result.reason == "schema_invalid"
     assert "action must be 'no_action'" in result.detail
-    assert len(fake.calls) == 3                       # never a 4th (D7)
+    assert len(fake.calls) == 3                       # never a 4th
     audit = rows(conn)
     assert len(audit) == 3 and all(r["ok"] == 0 for r in audit)
     assert audit[-1]["call_id"] == result.call_id
@@ -642,7 +642,7 @@ async def test_builtin_base_set_is_emptied_for_single_shot(defs, gov, clock, con
 
 
 async def test_builtin_base_set_is_emptied_for_agentic_mcp_allowlist(defs, gov, clock, conn) -> None:
-    # `tools` governs built-ins only; the §5.5 MCP allowlist still goes out through allowed_tools.
+    # `tools` governs built-ins only; the MCP allowlist still goes out through allowed_tools.
     fake = FakeQuery([FakeAssistantMessage("{}"), FakeResultMessage({"input_tokens": 10, "output_tokens": 5})])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=SdkToolsOptions)
 
@@ -718,7 +718,7 @@ async def test_pinned_cli_path_is_sent_with_updater_off(defs, gov, clock, conn, 
     opts = fake.calls[0].options
     assert opts.cli_path == str(cli)
     assert opts.env == ISOLATION_ENV
-    # Literal names, so a rename of either knob in ISOLATION_ENV fails here (D10, CLI 2.1.288).
+    # Literal names, so a rename of either knob in ISOLATION_ENV fails here (CLI 2.1.288).
     assert opts.env["DISABLE_AUTOUPDATER"] == "1"
     assert opts.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert opts.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
@@ -747,7 +747,7 @@ def test_resolve_cli_path(tmp_path) -> None:
     assert resolve_cli_path({"llm": {"cli_path": absolute}}, tmp_path) == absolute
 
 
-# --------------------------------------------------------------------------- D10 isolation knobs
+# --------------------------------------------------------------------------- isolation knobs
 @dataclass
 class StrictOptions(FakeOptions):
     env: dict[str, str] | None = None
@@ -789,7 +789,7 @@ async def test_strict_mcp_config_sent_single_shot_and_agentic(defs, gov, clock, 
     one, many = fake.calls[0].options, fake.calls[1].options
     assert one.strict_mcp_config is True and one.env == ISOLATION_ENV
     assert many.strict_mcp_config is True and many.env == ISOLATION_ENV
-    assert many.allowed_tools == ["mcp__state__query"]   # strict MCP leaves the §5.5 allowlist alone
+    assert many.allowed_tools == ["mcp__state__query"]   # strict MCP leaves the MCP allowlist alone
 
 
 async def test_strict_mcp_falls_back_to_extra_args(defs, gov, clock, conn) -> None:
@@ -804,7 +804,7 @@ async def test_strict_mcp_falls_back_to_extra_args(defs, gov, clock, conn) -> No
 
 async def test_real_sdk_surface_translates_isolation_flags(defs, gov, clock, conn, tmp_path) -> None:
     """Producer→consumer seam on the installed SDK: the harness's options become the CLI flags the
-    D10 fix depends on. Offline — the command is built, no subprocess is spawned."""
+    isolation fix depends on. Offline — the command is built, no subprocess is spawned."""
     pytest.importorskip("claude_agent_sdk")
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
@@ -877,7 +877,7 @@ async def test_timeout_fails_without_retry(defs, gov, clock, conn, alert, alerts
     result = await harness.run_single_shot(quick, FakeContext(), enter_validator(clock))
 
     assert not result.ok and result.reason == "timeout"
-    assert len(fake.calls) == 1                        # timeouts are never retried (D7)
+    assert len(fake.calls) == 1                        # timeouts are never retried
     assert fake.closed == 1                            # the stream was closed, not leaked
     (row,) = rows(conn)
     assert row["ok"] == 0 and row["fail_reason"] == "timeout"
@@ -915,7 +915,7 @@ async def test_sdk_exceptions_map_to_failure_reasons(defs, gov, clock, conn, exc
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert not result.ok and result.reason == reason
-    assert len(fake.calls) == 1                        # no retry on transport failures (D7)
+    assert len(fake.calls) == 1                        # no retry on transport failures
     (row,) = rows(conn)
     assert row["ok"] == 0 and row["fail_reason"] == reason
 
@@ -937,10 +937,10 @@ async def test_credit_exhausted_trips_dg4(defs, clock, conn, calendar) -> None:
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert result.reason == "credit_exhausted"
-    # The ledger only sees calls that SUCCEEDED, so the billing error is the only DG4 signal (§5.6).
+    # The ledger only sees calls that SUCCEEDED, so the billing error is the only DG4 signal.
     assert gov.degrade_tier() == DegradeTier.DG4
     assert gov.can_invoke("intraday_analyst").allowed is False
-    # ...and the tier change is published, so the owner and the dashboard hear of it (R8).
+    # ...and the tier change is published, so the owner and the dashboard hear of it.
     assert [(e.old_tier, e.new_tier) for e in seen] == [(DegradeTier.DG0, DegradeTier.DG4)]
 
 
@@ -957,7 +957,7 @@ async def test_auth_failed_is_recorded_and_alert_names_the_relogin(
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert not result.ok and result.reason == "auth_failed"
-    assert len(fake.calls) == 1                        # never retried (D7)
+    assert len(fake.calls) == 1                        # never retried
     (row,) = rows(conn)
     assert row["fail_reason"] == "auth_failed"
     ((_severity, message),) = alerts
@@ -978,7 +978,7 @@ async def test_governor_block_makes_no_sdk_call(defs, gov, clock, conn, alert, a
     assert not result.ok and result.reason == "governor_blocked"
     assert result.detail == "DG4_zero_sdk_calls"
     assert fake.calls == []                            # the SDK was never touched
-    (row,) = rows(conn)                                # …but the refusal is still auditable (R8)
+    (row,) = rows(conn)                                # …but the refusal is still auditable
     assert row["ok"] == 0 and row["fail_reason"] == "governor_blocked"
     assert row["in_tokens"] == 0 and Decimal(row["cost_usd"]) == Decimal(0)
     assert conn.execute("SELECT COUNT(*) c FROM budget_ledger").fetchone()["c"] == 0
@@ -1056,7 +1056,7 @@ async def test_an_error_result_fails_with_the_clis_own_text(defs, gov, clock, co
 
 # --------------------------------------------------------------------------- tool-knob guarantees
 async def test_missing_tool_knob_refuses_tools_enabled_agent(defs, gov, clock, conn) -> None:
-    # Uniform D7 shape: the SDK-surface refusal is an ordinary Failed (callers degrade to
+    # Uniform no-action failure shape: the SDK-surface refusal is an ordinary Failed (callers degrade to
     # no-proposal + alert), never an exception leaning on bus isolation.
     fake = FakeQuery([FakeAssistantMessage("{}"), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)
@@ -1094,12 +1094,12 @@ async def test_system_prompt_falls_back_into_the_prompt_when_unsupported(defs, g
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert result.ok
-    # Stable system block FIRST, volatile context after it (D8 ordering survives the fallback).
+    # Stable system block FIRST, volatile context after it (the ordering survives the fallback).
     assert fake.calls[0].prompt.startswith("SYSTEM PROMPT (byte-stable)\n\n")
     assert fake.calls[0].prompt.endswith(FakeContext().prompt_text)
 
 
-# --------------------------------------------------------------------------- agentic runs (§5.5)
+# --------------------------------------------------------------------------- agentic runs
 async def test_agentic_run_aborts_when_billed_tokens_exceed_the_run_budget(defs, gov, clock, conn, alert, alerts) -> None:
     turn = {"input_tokens": 1000, "output_tokens": 300}
     fake = FakeQuery(
@@ -1122,7 +1122,7 @@ async def test_agentic_run_aborts_when_billed_tokens_exceed_the_run_budget(defs,
     (row,) = rows(conn)
     assert row["ok"] == 0 and row["fail_reason"] == "sdk_error"
     assert (row["in_tokens"], row["out_tokens"]) == (2000, 600)
-    # Tokens burned before the abort are still metered (D6) — the run was billed for them.
+    # Tokens burned before the abort are still metered — the run was billed for them.
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert ledger["out_tokens"] == 600
     assert alerts
@@ -1145,15 +1145,15 @@ async def test_agentic_run_within_budget_returns_ok(defs, gov, clock, conn) -> N
     assert result.payload == {"summary": "flat day", "param_suggestions": []}
     assert result.usage == TokenUsage(in_tokens=1100, out_tokens=160)
     opts = fake.calls[0].options
-    assert opts.max_turns == 3                          # hard turn cap from the def (D5)
-    assert opts.allowed_tools == ["mcp__state__query"]  # exactly the §5.5 allowlist
+    assert opts.max_turns == 3                          # hard turn cap from the def
+    assert opts.allowed_tools == ["mcp__state__query"]  # exactly the MCP allowlist
     assert "mcp__state__query" not in opts.disallowed_tools
     assert "Bash" in opts.disallowed_tools
     assert opts.setting_sources == []
 
 
 async def test_agentic_retries_are_bounded_by_the_same_run_budget(defs, gov, clock, conn) -> None:
-    # D7 retries apply to agentic runs too, but the §5.5 cap is CUMULATIVE over the run: the second
+    # Retries apply to agentic runs too, but the token cap is CUMULATIVE over the run: the second
     # attempt's tokens land on top of the first, so a retry can never buy a fresh budget.
     fake = FakeQuery(
         [
@@ -1201,7 +1201,7 @@ async def test_shape_guards(defs, gov, clock, conn) -> None:
         await harness.run_agentic(defs["intraday_analyst"], "task")
 
 
-# --------------------------------------------------------------------------- D11 sdk smoke
+# --------------------------------------------------------------------------- sdk smoke
 async def test_run_sdk_smoke_happy_path(defs, gov, clock, conn) -> None:
     from engine.intelligence.harness import run_sdk_smoke
 
@@ -1215,7 +1215,7 @@ async def test_run_sdk_smoke_happy_path(defs, gov, clock, conn) -> None:
 
 
 async def test_run_sdk_smoke_exercises_the_structured_output_path(defs, gov, clock, conn) -> None:
-    # D11 must smoke-test the path production agents actually use: every production call sends a
+    # The SDK smoke must test the path production agents actually use: every production call sends a
     # json_schema, so the smoke call sends one too (2026-07-28: a schema-less smoke passed WARN-only
     # while every real call failed on the untested structured-output path).
     from engine.intelligence.harness import run_sdk_smoke
@@ -1252,7 +1252,7 @@ def test_claude5_family_models_are_mapped() -> None:
 
 
 def test_every_mapped_model_is_priced(real_cfg) -> None:
-    # A mapped name with no D4 price loads fine and then fails every call in governor.price, after
+    # A mapped name with no price loads fine and then fails every call in governor.price, after
     # the SDK call has already been billed.
     assert set(MODEL_API_IDS) <= set(real_cfg["model_pricing_usd_per_mtok"])
 
@@ -1267,7 +1267,7 @@ def test_one_bad_def_quarantines_alone_not_the_roster() -> None:
                           "max_turns": 3, "run_budget_tokens": {"billed_in_max": 1, "billed_out_max": 1}},
     }}
     roster = load_agent_roster(cfg)
-    assert set(roster.defs) == {"good"}                       # the valid def stays live (D7)
+    assert set(roster.defs) == {"good"}                       # the valid def stays live
     assert set(roster.quarantined) == {"bad_model", "bad_allowlist"}
     assert "unknown model" in roster.quarantined["bad_model"]
     assert "allowed_tools" in roster.quarantined["bad_allowlist"]

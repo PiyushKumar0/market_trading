@@ -85,7 +85,7 @@ def _flat(sym: str, idx: int, price: str, *, high: str, v: int = 1000) -> DailyB
 
 def _prefix(sym: str) -> list[DailyBar]:
     """Sessions 0..20: dead flat at 100.00 with every high at 100.00, so H20 == 100.00 exactly and
-    every overnight gap is 0.00 — which makes the WO-19 stop-geometry floor 2.0 x median(0) = 0 and
+    every overnight gap is 0.00 — which makes the brk20 stop-geometry floor 2.0 x median(0) = 0 and
     therefore never the reason a fixture signal does or does not fire."""
     return [_flat(sym, i, "100.00", high="100.00") for i in range(SIGNAL_IDX)]
 
@@ -274,7 +274,7 @@ def test_unadjusted_window_is_the_live_brk20_sweep_window():
     today = date(2025, 6, 30)
     span = bt.UNADJUSTED_LOOKBACK_DAYS
     assert bt._unadjusted_at([], today) is False
-    assert bt._unadjusted_at([today], today) is False                       # today = the A12 skip's case
+    assert bt._unadjusted_at([today], today) is False                       # today = the skip's case
     assert bt._unadjusted_at([today - timedelta(days=1)], today) is True
     assert bt._unadjusted_at([today - timedelta(days=span)], today) is True
     assert bt._unadjusted_at([today - timedelta(days=span + 1)], today) is False
@@ -287,7 +287,7 @@ def test_cost_path_is_cnc_delivery_and_spread_inclusive():
     fees = float(cm.fee_breakeven_pct(bt.REFERENCE_NOTIONAL, "CNC"))
     mis = float(cm.breakeven_pct(bt.REFERENCE_NOTIONAL, "MIS"))
     assert bt.PRODUCT == "CNC"
-    assert full > fees                     # the measured bid-ask spread is included (WO-2)
+    assert full > fees                     # the measured bid-ask spread is included
     assert full > mis                      # delivery, the dearer surface — not the intraday one
     assert 0.15 < full < 0.60              # sanity band around the documented ~0.32% CNC round trip
 

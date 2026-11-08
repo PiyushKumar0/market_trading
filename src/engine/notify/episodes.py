@@ -1,4 +1,4 @@
-"""Alert-cadence throttle: one owner alert per EPISODE, not one per occurrence (WO-25b, 2026-08-24).
+"""Alert-cadence throttle: one owner alert per EPISODE, not one per occurrence (2026-08-24).
 
 The 200-deep Telegram outbox that starved a fresh owner ack was not built by important messages. It
 was built by repeats: 57 identical ``health problems: ['feed_stale']`` alerts in one morning (one per
@@ -22,7 +22,7 @@ Three properties are deliberate:
   window opened by the previous one.
 
 State is per-process and in-memory on purpose: a restart is itself a change of situation the owner
-should hear about, and nothing here is a safety input (R8 — alerting is best-effort by construction).
+should hear about, and nothing here is a safety input (alerting is best-effort by construction).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class AlertEpisodes:
     ``(agent_id, reason)`` tuple, typically. Keys are compared by equality, so anything hashable
     works; tuples are used so :meth:`reset` can retire every key belonging to one subject.
 
-    All times come from the caller's :class:`~engine.core.clock.Clock` (§3.2 convention) — this class
+    All times come from the caller's :class:`~engine.core.clock.Clock` — this class
     never reads a wall clock of its own, which is what makes the windows testable.
     """
 

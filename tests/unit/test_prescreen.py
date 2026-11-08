@@ -1,6 +1,6 @@
-"""``SignalPreScreen`` dedupe / per-day caps / publication + the scanner registry seam (§3.2.5).
+"""``SignalPreScreen`` dedupe / per-day caps / publication + the scanner registry seam.
 
-Stub scanners (NOT registered — the global ``SCANNER_REGISTRY`` stays exactly the four §6.1 price
+Stub scanners (NOT registered — the global ``SCANNER_REGISTRY`` stays exactly the four price
 baselines) emit one candidate per scanned bar so the pre-screen's own bookkeeping is what is under
 test, isolated from real rule logic (covered in ``test_scanners.py``).
 """
@@ -70,11 +70,11 @@ def _prescreen(scanners=None, bus=None, context_provider=None, **kw) -> SignalPr
     return SignalPreScreen(scanners or [_stub()], context_provider or _ctx, bus, **kw)
 
 
-# ---------------------------------------------------------------------------- dedupe (§3.2.5)
+# ---------------------------------------------------------------------------- dedupe
 def test_dedupe_same_symbol_strategy_day():
     ps = _prescreen()
     assert len(ps.on_bar(_bar(mm=0))) == 1
-    # The same (symbol, strategy) re-firing a minute later must NOT re-trigger Tier-1 (D5).
+    # The same (symbol, strategy) re-firing a minute later must NOT re-trigger Tier-1.
     assert ps.on_bar(_bar(mm=1)) == []
     # A different symbol is a different dedupe key.
     assert len(ps.on_bar(_bar(symbol="INFY", mm=2))) == 1
@@ -104,7 +104,7 @@ def _ext_cand(symbol: str, strategy_id: str = "brk20"):
 
 
 def test_admit_applies_the_same_dedupe_and_caps_as_the_bar_path():
-    """§3.2.5 (2026-08-04 brk20 addendum): externally-scanned candidates face the identical spine —
+    """2026-08-04 (brk20): externally-scanned candidates face the identical spine —
     same-day (symbol, strategy) dedupe and the shared daily cap — or the sweep is a cap bypass."""
     from datetime import date as _date
     ps = _prescreen(max_candidates_per_day=3)
@@ -157,7 +157,7 @@ def test_hydrate_charged_but_unseen_republishes_within_paid_quota():
 
 
 def test_hydrate_day_rolls_forward_normally():
-    """Hydrated state belongs to ITS day: the next session's first bar resets everything (§9.6)."""
+    """Hydrated state belongs to ITS day: the next session's first bar resets everything."""
     from datetime import date as _date
     ps = _prescreen(max_candidates_per_day=1)
     ps.hydrate(_date(2026, 6, 17), seen=[("TCS", "stub")], charged=[("TCS", "stub")])
@@ -169,12 +169,12 @@ def test_daily_cap_suppresses_after_limit():
     ps = _prescreen(max_candidates_per_day=2)
     assert len(ps.on_bar(_bar(symbol="AAA", mm=0))) == 1
     assert len(ps.on_bar(_bar(symbol="BBB", mm=1))) == 1
-    assert ps.on_bar(_bar(symbol="CCC", mm=2)) == []      # cap hit — Tier-1 spam bounded (D5)
+    assert ps.on_bar(_bar(symbol="CCC", mm=2)) == []      # cap hit — Tier-1 spam bounded
     assert len(ps.on_bar(_bar(symbol="CCC", day=18))) == 1  # new day, counter reset
 
 
 def test_per_strategy_cap_binds_before_daily_cap():
-    """The scalar form = the ``default``-only mapping (the shipped config used it before WO-1)."""
+    """The scalar form = the ``default``-only mapping (the shipped config used it before per-strategy caps)."""
     ps = _prescreen([_stub("s1"), _stub("s2")], max_candidates_per_day=20, max_per_strategy_day=1)
     assert len(ps.on_bar(_bar(symbol="AAA"))) == 2        # each strategy takes its 1
     assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []      # both strategies exhausted; day cap untouched
@@ -187,7 +187,7 @@ def test_cap_constructor_validation():
         _prescreen(max_per_strategy_day=0)
 
 
-# ------------------------------------------------------------------ sweep addendum (2026-07-29)
+# ------------------------------------------------------------------ sweep (2026-07-29)
 def test_rearm_gives_back_the_day_slot():
     """A never-evaluated drop re-arms the (symbol, strategy) day slot so a still-true condition
     can re-publish (2026-07-29: six candidates burned by a broken analyst were dedupe-blocked for
@@ -319,7 +319,7 @@ async def test_handle_bar_bus_adapter_scans_and_publishes():
     assert len(received) == 1
 
 
-# ---------------------------------------------------------------------------- determinism (§9.6)
+# ---------------------------------------------------------------------------- determinism
 def test_same_bar_same_decision_modulo_signal_id():
     a = _prescreen().on_bar(_bar())
     b = _prescreen().on_bar(_bar())
@@ -338,7 +338,7 @@ def test_build_enabled_scanners_order_types_and_params():
     scanners = build_enabled_scanners(["trend", "orb"], {"orb": {"vol_mult": 2.0}})
     assert [s.strategy_id for s in scanners] == ["trend", "orb"]
     assert scanners[1].params["vol_mult"] == 2.0
-    assert scanners[1].params["rr_target"] == 1.5         # untouched keys keep §6.3 defaults
+    assert scanners[1].params["rr_target"] == 1.5         # untouched keys keep their defaults
 
 
 def test_build_enabled_scanners_unknown_id_fails_loud():
@@ -371,7 +371,7 @@ def test_register_rejects_duplicate_strategy_id():
     assert register(OrbScanner) is OrbScanner             # re-registering the same class is idempotent
 
 
-# ======================================================================== WO-1: ranked admission
+# ======================================================================== ranked admission
 def _scored_stub(sid: str, scores: dict[str, float]):
     """A scanner emitting one candidate per bar with a per-SYMBOL score (never registered)."""
 
@@ -413,9 +413,9 @@ def _multi_stub(sid: str, scored_symbols: dict[str, float]):
 
 
 def test_burst_admits_the_top_scored_not_the_earliest():
-    """WO-1 (i): under a binding cap the batch is admitted SCORE-DESCENDING, so the best candidate
+    """Under a binding cap the batch is admitted SCORE-DESCENDING, so the best candidate
     of a burst takes the last free slot instead of whichever scanner happened to emit first.
-    Pre-WO-1 this admitted LOW/MID (arrival order) and dropped the two best."""
+    Before ranked admission this admitted LOW/MID (arrival order) and dropped the two best."""
     burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95, "HIGH": 0.80}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
     out = ps.on_bar(_bar(symbol="DRIVER"))
@@ -423,7 +423,7 @@ def test_burst_admits_the_top_scored_not_the_earliest():
 
 
 def test_burst_ties_keep_arrival_order_and_admission_stays_deterministic():
-    """Ties in score fall back to emission order (``sorted`` is stable), so §9.6 replay of the same
+    """Ties in score fall back to emission order (``sorted`` is stable), so replay of the same
     bar stream still reproduces the same decisions byte-for-byte."""
     burst = {"A": 0.50, "B": 0.50, "C": 0.90}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
@@ -431,8 +431,8 @@ def test_burst_ties_keep_arrival_order_and_admission_stays_deterministic():
 
 
 def test_admission_mode_arrival_is_the_rollback_to_pre_wo1_order():
-    """WO-1 risk note: the rollback is a config flag, not a revert. ``arrival`` restores the exact
-    pre-WO-1 behaviour — first emitted, first admitted, score ignored."""
+    """The rollback is a config flag, not a revert. ``arrival`` restores the exact
+    pre-ranking behaviour — first emitted, first admitted, score ignored."""
     burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2,
                     admission_mode="arrival")
@@ -460,9 +460,9 @@ def test_admit_batch_is_ranked_too():
     assert [c.symbol for c in out] == ["BBB", "CCC"]
 
 
-# ======================================================================== WO-1: per-strategy caps
+# ======================================================================== per-strategy caps
 def test_per_strategy_cap_mapping_binds_per_strategy():
-    """WO-1 (iii): the sub-cap becomes a per-strategy MAP; ``default`` binds any strategy without
+    """The sub-cap becomes a per-strategy MAP; ``default`` binds any strategy without
     its own line (the structural ceiling, a third of the day as shipped, for strategies added later)."""
     ps = _prescreen(
         [_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7}),
@@ -481,7 +481,7 @@ def test_per_strategy_cap_mapping_binds_per_strategy():
 
 
 def test_an_orb_flood_cannot_starve_rsi2():
-    """WO-1 acceptance: an orb flood must not consume slots rsi2 could have used. On 2026-08-11 orb
+    """An orb flood must not consume slots rsi2 could have used. On 2026-08-11 orb
     took 55% of the day's publications purely by arriving first; with orb capped at 6/20 the flood
     stops at its cap and rsi2's later, lower-scored candidates still publish."""
     orb_flood = {f"ORB{i}": 0.99 - i / 100 for i in range(30)}
@@ -535,7 +535,7 @@ def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
 
 def test_parked_strategy_logs_again_on_the_next_day(caplog):
     """Once per strategy per DAY: the day roll must clear both the counter and the log latch, or the
-    §7.1 catchup_safety_jobs lesson (a latch with no symmetric clear) repeats in the log path."""
+    catchup_safety_jobs lesson (a latch with no symmetric clear) repeats in the log path."""
     from datetime import date as _date
     ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
     with caplog.at_level("INFO"):
@@ -618,7 +618,7 @@ def test_a_mid_session_park_leaves_restored_pairs_on_the_dedupe_counter():
 def test_shipped_settings_park_orb():
     """``config/settings.yaml`` ships ``orb: 0`` (owner-directed 2026-09-12 after the 09-11 audit:
     101 of 229 analyst forwards since 08-17 produced zero entry proposals, and the three intraday
-    price-only families were refuted at retail cost). Re-enabling is a plan §8.6 decision, so this
+    price-only families were refuted at retail cost). Re-enabling is an owner decision, so this
     assertion is the tripwire on an accidental un-park."""
     from engine.core.config import load_settings
 
@@ -636,9 +636,9 @@ def test_shipped_settings_park_trend():
     assert caps["default"] >= 1                          # the park is orb's alone
 
 
-# ======================================================================== WO-9: funnel counters
+# ======================================================================== funnel counters
 def test_funnel_counters_track_raw_published_and_suppressed():
-    """WO-9: raw (what the scanners produced) vs published (what cleared dedupe/caps) is the top of
+    """Raw (what the scanners produced) vs published (what cleared dedupe/caps) is the top of
     the funnel; without it "the analyst never saw it" and "nothing fired" are indistinguishable."""
     from datetime import date as _date
     ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7})],
@@ -655,9 +655,9 @@ def test_funnel_counters_track_raw_published_and_suppressed():
 
 # ================================= raw counters survive a restart (2026-08-21, `funnel_raw_counts`)
 #
-# THE BUG this section pins. `raw` was the only WO-9 funnel number with no DB home, so a mid-session
+# THE BUG this section pins. `raw` was the only funnel number with no DB home, so a mid-session
 # restart zeroed it and the nightly `funnel_utilization` line reported `raw=None` ("unmeasured") for
-# the WHOLE day — on 4 of the last 6 trade days. That is WO-9's own "the analyst never saw it" vs
+# the WHOLE day — on 4 of the last 6 trade days. That is the funnel's own "the analyst never saw it" vs
 # "nothing fired" ambiguity, re-introduced by the restart. The counters are now seeded on every day
 # roll (the first roll of a fresh process included) from what the drain tick flushed.
 
@@ -711,7 +711,7 @@ def test_hydrate_seeds_the_raw_counters_too():
     assert ps.raw_counts(day) == {"orb": 40, "rsi2": 6}
 
 
-# ================================================ trade-window gate (§7.1, 2026-08-18 origination fix)
+# ================================================ trade-window gate (2026-08-18 origination fix)
 #
 # THE BUG this section pins. The caps bind on unique (symbol, strategy) pairs and are never refunded
 # ("the spam bound counts attempts, not outcomes" — SignalPreScreen.rearm). Before this gate the
@@ -774,7 +774,7 @@ def test_out_of_window_does_not_consume_the_per_strategy_sub_cap():
 
 
 def test_absent_window_fails_closed():
-    """No window ⇒ nothing originates: the R6/§2.7 fail-to-zero direction every other guard takes.
+    """No window ⇒ nothing originates: the fail-to-zero direction every other guard takes.
     A ``None`` here means "not a trading day" or an unreadable window, never "unrestricted"."""
     ps = _prescreen(context_provider=lambda bar: ScanContext())
     assert ps.on_bar(_bar()) == []
@@ -813,7 +813,7 @@ def test_admit_defaults_to_in_window_for_backward_compatibility():
 
 def test_window_suppression_is_counted_apart_from_cap_suppression():
     """A large suppressed_window is healthy budget protection; a large suppressed_cap is starvation.
-    Conflating them would make the WO-9 funnel line unreadable. `raw` still counts what fired."""
+    Conflating them would make the funnel line unreadable. `raw` still counts what fired."""
     ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8})], context_provider=_not_yet_open)
     ps.on_bar(_bar(hh=9, mm=52))
     counters = ps.funnel_counters()
@@ -824,7 +824,7 @@ def test_window_suppression_is_counted_apart_from_cap_suppression():
 
 
 def test_window_gate_uses_bar_time_not_wall_clock():
-    """§9.6: the pre-screen takes no Clock. The same bar stream must decide the same way whenever it
+    """The pre-screen takes no Clock. The same bar stream must decide the same way whenever it
     is replayed, so the gate reads bar.ts_minute against ctx.trade_window and nothing else."""
     a = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
     b = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
@@ -835,7 +835,7 @@ def test_window_gate_uses_bar_time_not_wall_clock():
 # ============================== one ranked admission across batch legs (2026-08-18, the `cat` loss)
 def test_admit_ranks_across_strategies_in_one_batch():
     """Live 2026-08-18: brk20 (0.552, 0.523) took the day's last slots and cat LT (0.82) was
-    suppressed 94 ms later, because run_scan_sweep made three SEPARATE admit calls and WO-1 ranks
+    suppressed 94 ms later, because run_scan_sweep made three SEPARATE admit calls and ranked admission ranks
     only WITHIN a batch. `cat` is single-shot (MAX_EVENT_AGE_SESSIONS = 1), so that loss is
     permanent. Concatenating the legs into ONE admit is what lets the best candidate win."""
     from datetime import date as _date
@@ -976,9 +976,9 @@ def test_displacement_is_budgeted_so_the_spam_bound_survives():
 
 
 def test_a_catalyst_candidate_is_never_evicted():
-    """2.7 anti-manipulation: ``_catalyst_refs`` is the news-entry budget and it only GROWS.
+    """Anti-manipulation: ``_catalyst_refs`` is the news-entry budget and it only GROWS.
     Displacing a catalyst-bearing candidate would decrement it and let news-originated entries churn
-    the guard, so they are excluded from the victim pool outright (D7 - the carve-out fails to LESS
+    the guard, so they are excluded from the victim pool outright (the carve-out fails to LESS
     activity). An ARRIVAL may still carry one; it simply faces the catalyst cap on its own."""
     ps = _prescreen([], max_per_strategy_day={"cat": 1}, catalyst_cap_fn=lambda: 5)
     day = _the_day()
@@ -992,14 +992,14 @@ def test_a_catalyst_candidate_is_never_evicted():
 
 
 def test_displacement_never_reaches_inside_one_batch():
-    """Displacement decides CROSS-batch competition; WO-1's ranking decides intra-batch competition.
+    """Displacement decides CROSS-batch competition; the ranking decides intra-batch competition.
     They must not overlap: the accepted list is what the caller PUBLISHES, so a candidate admitted
     and then evicted by a later member of its own batch would be published holding no slot. Only the
     ``arrival`` rollback can order a batch worst-first, and a rollback flag that quietly changed
     behaviour would not be one."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1}, admission_mode="arrival")
     admitted = ps.admit([_scored("LOW", 0.10), _scored("TOP", 0.95)], _the_day())
-    assert [c.symbol for c in admitted] == ["LOW"]              # pre-WO-1 order, cap bites at 1
+    assert [c.symbol for c in admitted] == ["LOW"]              # arrival order, cap bites at 1
     assert ps.take_displaced() == []
 
 
@@ -1064,7 +1064,7 @@ def test_displacement_margin_is_an_owner_knob_in_settings():
 def test_displacement_margin_none_is_the_rollback_flag():
     """``null`` in settings.yaml disables displacement entirely, restoring the pre-2026-08-27
     behaviour where whoever fires first keeps the strategy's slots for the whole session. The way
-    ``admission_mode='arrival'`` is WO-1's rollback: a flag, not a revert."""
+    ``admission_mode='arrival'`` is the ranking's rollback: a flag, not a revert."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1}, displacement_margin=None)
     day = _the_day()
     assert len(ps.admit([_scored("POLICYBZR", 0.10)], day)) == 1
@@ -1175,7 +1175,7 @@ def test_a_republished_pair_is_judged_on_its_newest_score():
     """``_admitted`` was written only on the FIRST charge, so a re-armed pair that re-published at a
     better level was still offered up for displacement at its stale score — the arrival was compared
     against a number no longer describing anything. The refresh is a fact about the candidate
-    stream, so §9.6 replay is untouched."""
+    stream, so replay is untouched."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     day = _the_day()
     assert len(ps.admit([_scored("SHRIRAMFIN", 0.30)], day)) == 1
@@ -1221,7 +1221,7 @@ def test_the_displacement_walk_is_skipped_when_displacement_is_off():
 
 
 def test_hydrate_restores_the_catalyst_budget_across_a_restart():
-    """Before this, ``hydrate`` deliberately left the §2.7 counter at zero, justified by
+    """Before this, ``hydrate`` deliberately left the catalyst counter at zero, justified by
     ``max_per_strategy_day['cat']`` being equal to the guard. Adding ``cat_reversal: 2`` broke that
     coincidence — the post-restart bound became 4 against a guard of 2. The journal has no ref
     column, so the set is reconstructed from the SYMBOLS of the charged catalyst-strategy pairs."""

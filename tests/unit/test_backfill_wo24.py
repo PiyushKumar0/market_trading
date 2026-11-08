@@ -1,6 +1,6 @@
-"""WO-24b (2026-08-21): where the warm-up/backfill fetch runs, and what bounds it.
+"""2026-08-21: where the warm-up/backfill fetch runs, and what bounds it.
 
-The WO-24 working hypothesis was that the 09:56 freeze came from a Kite historical call made while
+The working hypothesis was that the 09:56 freeze came from a Kite historical call made while
 holding the market store's serialization, with no timeout on it. The code says otherwise on both
 counts, and these two tests are what pin the shape that was actually found, so a future refactor
 cannot quietly introduce the hypothesised one:
@@ -70,7 +70,7 @@ async def test_a_hung_historical_fetch_never_blocks_a_concurrent_store_read(stor
     """The fetch is OUTSIDE the store's serialized section, and this is what that buys.
 
     With the warm-up fill parked inside a fetch that will never return, an unrelated store read
-    still answers. Had the fetch been made under the store's lock -- the WO-24 hypothesis -- this
+    still answers. Had the fetch been made under the store's lock -- the hypothesis -- this
     read would have queued behind it and the assertion below would time out, which is exactly the
     14-minute freeze the incident produced.
     """

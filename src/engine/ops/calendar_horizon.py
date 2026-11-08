@@ -1,4 +1,4 @@
-"""Calendar horizon monitor (plan Q0.4): the only alert for a verified calendar running out."""
+"""Calendar horizon monitor: the only alert for a verified calendar running out."""
 
 from __future__ import annotations
 

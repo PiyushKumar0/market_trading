@@ -1,4 +1,4 @@
-"""Token-budget governor (D6, §5.6/§11.2): the WEEKLY quota window, pricing, trading-session pace, the
+"""Token-budget governor: the WEEKLY quota window, pricing, trading-session pace, the
 degrade ladder, and the call-admission predicates consumers read.
 
 Every dollar figure here is produced through the real :meth:`BudgetGovernor.record` path. Exact
@@ -53,7 +53,7 @@ def calendar(clock) -> NSECalendar:
     return NSECalendar(config_dir() / "calendar", clock, strict=False)
 
 
-#: PINNED worked-example config (the §5.6 numbers as designed). The exact-boundary tests pin their
+#: PINNED worked-example config (the numbers as designed). The exact-boundary tests pin their
 #: arithmetic against THIS, deliberately NOT against config/agents.yaml — the live file is owner-tunable
 #: at will (the credit moved 100→120→550→200 across three rebalances and broke the old file-coupled
 #: suite), and a worked example that moves with owner edits proves nothing. ``prescreen_cap_per_day``
@@ -127,17 +127,17 @@ async def _collect(sink: list, event) -> None:
     sink.append(event)
 
 
-# --------------------------------------------------------------------------- pricing (D4/§11.2)
+# --------------------------------------------------------------------------- pricing
 async def test_price_miss_matches_worksheet_footnote(gov):
-    # §11.2 †: intraday analyst on a cache MISS — 7k cacheable prefix written at 1.25× input, 3k
+    # Worksheet footnote †: intraday analyst on a cache MISS — 7k cacheable prefix written at 1.25× input, 3k
     # remaining input, 1k output, sonnet-4.6 at $3/$15 per MTok.
     cost = gov.price("sonnet-4.6", TokenUsage(in_tokens=3000, out_tokens=1000, cache_write=7000))
     assert cost == Decimal("0.05025")             # 7000×3.75 + 3000×3 + 1000×15 micro-dollars
-    assert cost.quantize(Decimal("0.001")) == Decimal("0.050")   # the published §11.2 figure
+    assert cost.quantize(Decimal("0.001")) == Decimal("0.050")   # the published worksheet figure
 
 
 async def test_price_hit_matches_worksheet_footnote(gov):
-    # §11.2 ‡: same call on a cache HIT — the 7k prefix is read at 0.1× input instead.
+    # Worksheet footnote ‡: same call on a cache HIT — the 7k prefix is read at 0.1× input instead.
     cost = gov.price("sonnet-4.6", TokenUsage(in_tokens=3000, out_tokens=1000, cache_read=7000))
     assert cost == Decimal("0.0261")
     assert cost.quantize(Decimal("0.001")) == Decimal("0.026")
@@ -151,7 +151,7 @@ async def test_price_uses_per_model_rates(gov):
 
 
 async def test_unpriced_model_fails_loud(gov):
-    # A model missing from the D4 table would otherwise bill as $0 and blind the ladder all window.
+    # A model missing from the pricing table would otherwise bill as $0 and blind the ladder all window.
     with pytest.raises(ValueError, match="no D4 pricing"):
         gov.price("sonnet-9.9", TokenUsage(in_tokens=1, out_tokens=1))
 
@@ -170,7 +170,7 @@ async def test_live_agents_yaml_has_retired_the_monthly_key(real_cfg):
     assert "monthly_credit_usd" not in real_cfg["llm"]
 
 
-# --------------------------------------------------------------------------- window key (§5.6)
+# --------------------------------------------------------------------------- window key
 @pytest.mark.parametrize(
     "at,expected",
     [
@@ -244,7 +244,7 @@ async def test_record_appends_priced_ledger_row(gov, conn, clock):
     assert row["agent_id"] == "intraday_analyst"
     assert row["model"] == "sonnet-4.6"
     assert row["cache_write"] == 7000
-    assert Decimal(row["cost_usd"]) == Decimal("0.05025")   # TEXT column, decimal-as-string (§8.1)
+    assert Decimal(row["cost_usd"]) == Decimal("0.05025")   # TEXT column, decimal-as-string
     assert row["month"] == "2026-06"                       # history only — the ladder ranges on `at`
     assert row["at"] == clock.now().isoformat()
 
@@ -301,10 +301,10 @@ async def test_record_keys_the_window_from_its_own_timestamp(gov, conn):
     assert [r["month"] for r in conn.execute("SELECT month FROM budget_ledger")] == ["2026-06"]
 
 
-# --------------------------------------------------------------------------- pace (R6, sessions)
+# --------------------------------------------------------------------------- pace (sessions)
 async def test_boundary_thursdays_are_half_sessions(gov):
     assert gov.trading_sessions(JUN_WINDOW) == (JUN_SESSIONS_THROUGH_WED, JUN_SESSIONS_TOTAL)
-    # Calendar days would put Wed 06-17 at 6/7 of the window; sessions put it at 4.5/5 (§5.6).
+    # Calendar days would put Wed 06-17 at 6/7 of the window; sessions put it at 4.5/5.
     assert gov.pro_rata_to_date() == Decimal(100) * Decimal("4.5") / Decimal("5.0") == Decimal(90)
 
 
@@ -342,7 +342,7 @@ async def test_pro_rata_is_none_without_a_calendar(conn, clock, real_cfg, tmp_pa
 
 
 async def test_pro_rata_is_none_for_a_year_with_no_calendar_file(conn):
-    """R6 against the REAL calendar directory rather than an empty one: ``config/calendar`` ships
+    """The no-calendar fail-safe against the REAL calendar directory rather than an empty one: ``config/calendar`` ships
     2024/2025/2026 only, so a governor clocked in 2027 has no sessions at all — the same unmeasurable
     state, reached the way it will actually be reached (the engine outliving its calendar files)."""
     g = governor_at(conn, datetime(2027, 1, 14, 20, 0, tzinfo=IST))   # a Thursday, no 2027.yaml
@@ -534,7 +534,7 @@ async def test_allocation_exhaustion_blocks_even_with_the_degrade_test_lifted(co
     )
 
 
-# --------------------------------------------------------------------------- behaviour knobs (§5.6)
+# --------------------------------------------------------------------------- behaviour knobs
 async def test_behaviour_knobs_per_tier(fri_gov):
     knobs = lambda g: (g.prescreen_forward_cap(), g.news_batch_cadence_min())  # noqa: E731
     assert knobs(fri_gov) == (48, 30)
@@ -587,7 +587,7 @@ async def test_full_grade_knobs_come_from_agents_yaml(conn, clock, calendar, rea
 
 
 async def test_from_config_loads_agents_yaml(conn, clock, calendar):
-    # Amount-AGNOSTIC against the live owner-tunable file (credit is the owner's knob, D3/O6):
+    # Amount-AGNOSTIC against the live owner-tunable file (credit is the owner's knob):
     # whatever the shipped credit is, spending exactly that much in one window must reach DG4.
     gov = BudgetGovernor.from_config(conn, clock, calendar)
     # Fully config-agnostic (owner tunes models AND rates): every priced model must price > 0.
@@ -599,7 +599,7 @@ async def test_from_config_loads_agents_yaml(conn, clock, calendar):
     assert gov.degrade_tier() == DegradeTier.DG4
 
 
-# --------------------------------------------------------------------------- bus (§3.2.1, R8)
+# --------------------------------------------------------------------------- bus
 async def test_tier_change_publishes_exactly_once(conn, bus):
     seen: list[BudgetStateChanged] = []
 
@@ -663,7 +663,7 @@ async def test_window_rollover_resets_the_tier_and_clears_the_dg4_latch(conn, bu
 
     await spend(gov, "0.50")
     assert gov.degrade_tier() == DegradeTier.DG0
-    # The recovery is a tier CHANGE and must alert like any other (R8).
+    # The recovery is a tier CHANGE and must alert like any other.
     assert [(e.old_tier, e.new_tier) for e in seen] == [(DegradeTier.DG4, DegradeTier.DG0)]
     assert seen[0].window_key == "2026-06-18"
 

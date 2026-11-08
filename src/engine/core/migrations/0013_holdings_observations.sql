@@ -1,5 +1,5 @@
--- ------------------------- §3.6 holdings reconcile: a DURABLE record of what the broker held
--- 2026-09-12 (WO-D2, exit hygiene). The §3.6 reconcile already asked the right question hourly
+-- ------------------------- holdings reconcile: a DURABLE record of what the broker held
+-- 2026-09-12 (exit hygiene). The reconcile already asked the right question hourly
 -- ("does the broker still hold this tracked position?") and logged the right answer — but it kept
 -- that answer only in an in-memory ``{position_id: date}`` dedupe, so nothing outside the job could
 -- ever read it. The cost of that was measured on 2026-09-11: two positions the owner sold outside
@@ -18,8 +18,8 @@
 -- 14:00): the day's verdict must be the most recent observation, never the first one. Quantities are
 -- stored as INTEGER (holdings are whole shares) rather than the TEXT the price columns use.
 --
--- This table is NOT a risk input and does NOT close anything. §3.6 keeps the reconcile alert-only for
--- CLOSING a human-owned position — only the owner's ``/closed`` does that (§6.5). What the table
+-- This table is NOT a risk input and does NOT close anything. The reconcile stays alert-only for
+-- CLOSING a human-owned position — only the owner's ``/closed`` does that. What the table
 -- authorises is SILENCE: not making a call, not rendering a line.
 CREATE TABLE holdings_observations (
     position_id TEXT NOT NULL,

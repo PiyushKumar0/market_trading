@@ -1,9 +1,9 @@
--- Hindsight outcome of every published brk20/hi52/ins signal (review §9 #5/#6, 2026-10-29). HINDSIGHT:
+-- Hindsight outcome of every published brk20/hi52/ins signal (2026-10-29). HINDSIGHT:
 -- read by owner surfaces, verdict code and research only — never by a scanner, threshold, gate, prompt
 -- or promotion path (the rec_outcomes rule). Constructs:
 --   rule         — the strategy's measured construct: hi52/ins open of d; brk20 a touch of the resting level
 --                  on signal_d..signal_d+4 sessions (V2-5's y+1..y+5), first publication only; no stop/target
---   rule_blocked — the same brk20 construct for a crossing C2 blocked (brk20_regime_blocked)
+--   rule_blocked — the same brk20 construct for a crossing the brk20 regime gate blocked (brk20_regime_blocked)
 --   next_open    — open of the first session after d (strictly after the analyst's decision), every row
 -- T+k exits at the close of the k-th regular session counting the fill session as 1 (muhurat excluded).
 -- cost_pct is fixed when a row is first scored; fill and net_* freeze once set; a later pass may only
@@ -27,7 +27,7 @@ CREATE TABLE signal_outcomes (
     PRIMARY KEY (d, symbol, strategy_id, construct)
 );
 
--- C2's blocked arm (T5 writes it on the loop thread; one row per blocked crossing per signal session).
+-- The brk20 regime gate's blocked arm (written on the loop thread; one row per blocked crossing per signal session).
 CREATE TABLE brk20_regime_blocked (
     symbol      TEXT NOT NULL,
     signal_d    TEXT NOT NULL,      -- the sweep session y+1, as brk20_resting_levels.signal_d

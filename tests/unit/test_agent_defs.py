@@ -1,13 +1,13 @@
-"""Phase-2 agent definitions (§5.2–§5.5): prompt invariants + the LLM-side output schemas.
+"""Agent definitions: prompt invariants + the LLM-side output schemas.
 
 Two families of assertion:
 
 * **Prompt invariants.** Each ``SYSTEM_PROMPT`` is a byte-stable module constant — no interpolation
-  artifacts, no year/date baked in, and the §5 hard rules actually present. A prompt that varies
-  between calls silently doubles the intraday agent's cost (D8) and breaks replay (R8).
+  artifacts, no year/date baked in, and the hard rules actually present. A prompt that varies
+  between calls silently doubles the intraday agent's cost and breaks replay.
 * **Output-schema semantics.** ``parse_intraday`` stamps actions and passes ``no_action`` through;
-  ``parse_cluster_scores`` drops ONE bad cluster instead of voiding a 30-cluster batch (D7);
-  ``DayPlan`` enforces the §5.3 shape.
+  ``parse_cluster_scores`` drops ONE bad cluster instead of voiding a 30-cluster batch;
+  ``DayPlan`` enforces the day-plan shape.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ RAW_ENTER = {
     "signal_id": "sig-1",
     "strategy_id": "orb",
     "features_snapshot_id": "fs-1",
-    # values the model must not get to choose (§8.1) — overwritten by the stamp:
+    # values the model must not get to choose — overwritten by the stamp:
     "proposal_id": "model-invented",
     "agent_id": "model-invented",
     "inputs_digest": "model-invented",
@@ -83,7 +83,7 @@ def _cluster(cid: str, **overrides) -> dict:
 
 # --------------------------------------------------------------------------- agent identity
 def test_agent_ids_match_the_agents_yaml_keys():
-    """The governor's ledger, allocations and degrade ladder all key off these exact strings (§5.6)."""
+    """The governor's ledger, allocations and degrade ladder all key off these exact strings."""
     roster = yaml.safe_load((config_dir() / "agents.yaml").read_text(encoding="utf-8"))
     for module in AGENT_MODULES:
         assert module.AGENT_ID in roster["agents"], module.__name__
@@ -93,7 +93,7 @@ def test_agent_ids_match_the_agents_yaml_keys():
     }
 
 
-# --------------------------------------------------------------------------- prompt invariants (D8)
+# --------------------------------------------------------------------------- prompt invariants
 @pytest.mark.parametrize("module", AGENT_MODULES, ids=lambda m: m.AGENT_ID)
 def test_system_prompt_has_no_interpolation_artifacts(module):
     """No braces at all: a stray format placeholder is the failure mode that silently ships
@@ -106,7 +106,7 @@ def test_system_prompt_has_no_interpolation_artifacts(module):
 
 @pytest.mark.parametrize("module", AGENT_MODULES, ids=lambda m: m.AGENT_ID)
 def test_system_prompt_contains_no_date(module):
-    """§3.2/D8: dates live in the context block, never in the byte-stable prefix. (The pre-open
+    """Dates live in the context block, never in the byte-stable prefix. (The pre-open
     prompt's ``09:15`` is the auction fact itself — a time-of-day constant, not a stamped date.)"""
     prompt = module.SYSTEM_PROMPT
     assert re.search(r"\d{4}-\d{2}-\d{2}", prompt) is None
@@ -130,7 +130,7 @@ def test_system_prompt_states_the_never_rules(module):
     assert prompt.lower().count("never") >= 3
     assert "Never emit a date" in prompt
     assert "Emit ONLY JSON matching the supplied output schema" in prompt
-    assert "UNTRUSTED" in prompt                       # §2.4: news/text is evidence, not instruction
+    assert "UNTRUSTED" in prompt                       # news/text is evidence, not instruction
 
 
 def test_intraday_prompt_states_the_section_5_2_hard_rules():
@@ -144,7 +144,7 @@ def test_intraday_prompt_states_the_section_5_2_hard_rules():
 
 
 def test_intraday_prompt_binds_judgement_to_the_strategy_contract():
-    """WO-20b (2026-08-20): the rubric half of the zero-recommendation fix.
+    """2026-08-20: the rubric half of the zero-recommendation fix.
 
     Rule 12 used to assert that "the deterministic strategies earned their edge on price and volume
     alone, measured over years of history" — false for six of the seven legs, and it licensed one
@@ -171,7 +171,7 @@ def test_intraday_prompt_rules_stay_uniquely_numbered_one_to_fifteen():
 
 
 def test_preopen_prompt_is_grounded_in_auction_mechanics():
-    """A14/§5.3: the one confabulation this agent is most prone to is planning off an indicative tick."""
+    """The one confabulation this agent is most prone to is planning off an indicative tick."""
     prompt = preopen.SYSTEM_PROMPT
     assert "AUCTION ARTIFACTS" in prompt
     assert "The real open prints at 09:15" in prompt
@@ -224,7 +224,7 @@ def test_agent_output_schemas_are_exported():
     assert news_analyst.output_json_schema() == ClusterScoreBatch.model_json_schema()
 
 
-# --------------------------------------------------------------------------- parse_intraday (§5.2)
+# --------------------------------------------------------------------------- parse_intraday
 def test_parse_intraday_stamps_platform_fields_on_an_action():
     action = parse_intraday(RAW_ENTER, **STAMP)
 
@@ -258,12 +258,12 @@ def test_no_action_requires_a_real_reason():
 
 
 def test_parse_intraday_rejects_schema_invalid_output():
-    bad = {**RAW_ENTER, "quantity": 0}                         # gt=0 enforced client-side (§8.1)
+    bad = {**RAW_ENTER, "quantity": 0}                         # gt=0 enforced client-side
     with pytest.raises(ValidationError):
         parse_intraday(bad, **STAMP)
 
 
-# --------------------------------------------------------------------------- DayPlan (§5.3)
+# --------------------------------------------------------------------------- DayPlan
 def test_day_plan_round_trips_with_catalyst_focus():
     plan = DayPlan.model_validate({
         "regime": "trending, breadth positive",
@@ -294,7 +294,7 @@ def test_dayplan_has_no_no_trade_today():
     assert "no_trade_today" not in DayPlan.model_json_schema()["properties"]
 
 
-# --------------------------------------------------------------------------- ClusterScore (§5.4/D7)
+# --------------------------------------------------------------------------- ClusterScore
 def test_parse_cluster_scores_drops_only_the_bad_cluster():
     """D7: an out-of-enum event_type costs ONE cluster, never the other 29 in the batch."""
     raw = {"scores": [

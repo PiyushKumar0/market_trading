@@ -1,18 +1,17 @@
-"""PaperBroker fill-model config + math (WO-P3-2, 2026-09-10; plan 3.2.9 / 8.4 addendum).
+"""PaperBroker fill-model config + math (2026-09-10).
 
-The fill model is the conservatism contract of the paper tier (R9): every knob here exists so a
+The fill model is the conservatism contract of the paper tier: every knob here exists so a
 paper fill is never *better* than a live fill would plausibly have been. These tests pin:
 
 * the time-of-day bucket boundaries (open 09:15-10:00 / mid 10:00-14:30 / close 14:30-15:30) --
   start-inclusive, end-exclusive, with out-of-session times clamped to the CONSERVATIVE edge
   bucket rather than silently getting k=0;
 * half-spread resolution order (L1 depth -> per-symbol median -> tick-size fallback) and the
-  never-zero invariant (a zero half-spread is what makes a restart/backfill day non-conservative,
-  plan 3.2.9);
+  never-zero invariant (a zero half-spread is what makes a restart/backfill day non-conservative);
 * the ``estimated`` flag that marks every non-L1 half-spread;
 * slippage sign: it is always paid BY the taker (BUY fills higher, SELL fills lower);
 * the loader with ``config/fill_model.yaml`` ABSENT (conservative defaults) and PRESENT (the schema
-  the WO-P3-4 calibration job writes).
+  the fill-model calibration job writes).
 """
 
 from __future__ import annotations
@@ -118,7 +117,7 @@ def test_half_spread_median_of_zero_is_rejected_and_falls_back() -> None:
 def test_calibrated_median_is_floored_at_half_a_tick_not_at_the_two_tick_fallback() -> None:
     """The calibrated branch's floor is HALF A TICK -- the physical floor, not the 2-tick default.
 
-    Manager decision, 2026-09-10 (WO-P3-4 round 4). The measured per-symbol median tracks the real
+    Manager decision, 2026-09-10. The measured per-symbol median tracks the real
     L1 book to the paisa, and on this account's corpus most books are ONE tick wide, so a calibrated
     median that lands under ``half_spread_fallback_ticks x tick_size`` is evidence, not an error --
     the 2-tick fallback is an ignorance default for symbols with no measurement at all. What a
@@ -270,14 +269,14 @@ def test_a_non_mapping_yaml_is_refused(tmp_path) -> None:
 # --------------------------------------------------------------------- shipped-config cross-check
 def test_the_shipped_calibration_speaks_this_module_s_units() -> None:
     """The SHIPPED ``config/fill_model.yaml`` must mean by ``median_half_spread_pct`` what this
-    module reads, for EVERY calibrated symbol (WO-P3-4 round 4, 2026-09-10).
+    module reads, for EVERY calibrated symbol (2026-09-10).
 
     The producer (``scripts/calibrate_fill_model.py``) and this consumer are separate programs with
     separate loaders against one hand-written contract, and round 2 shipped them disagreeing by a
     factor of 100: the calibrator wrote a FRACTION of mid while ``half_spread()`` below divides by
     100. Every unit test on either side passed - each was self-consistent - and the paper broker
     would simply have charged 1/100th of the measured spread on every non-L1 tick, the exact
-    silent-optimism failure R9 exists to prevent. Only a test that loads the real artefact through
+    silent-optimism failure the conservatism contract exists to prevent. Only a test that loads the real artefact through
     the real loader can catch that, so this one does.
 
     Round 4 replaces what this used to assert. It sampled three symbols and required each to resolve

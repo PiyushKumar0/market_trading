@@ -1,4 +1,4 @@
-"""Plan Q2.6: the weekly owner summary job."""
+"""The weekly owner summary job."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Scope isolation (plan Q3.2, D1): paper rows move no real number, real rows move no paper number,
+"""Scope isolation: paper rows move no real number, real rows move no paper number,
 and the scope predicate has one source (``engine.core.scope``)."""
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def _rec(conn, rec_id, kind, symbol) -> None:
 
 # ------------------------------------------------------------------ the three seeders
 def seed_shared(conn) -> None:
-    """Proposals are unscoped: real and paper both judge the same one (Q4.9)."""
+    """Proposals are unscoped: real and paper both judge the same one."""
     for pid, symbol in (("pr-real", SYMBOL), ("pr-part", "PAPPART"), ("pr-pend", "PAPPEND"),
                         ("pr-dead", "PAPDEAD")):
         _insert(conn, "proposals", proposal_id=pid, agent_id="a", action="enter", inputs_digest="d",
@@ -174,8 +174,8 @@ async def test_paper_rows_change_no_real_output(conn, clock) -> None:
 
 
 def test_surveillance_alert_reads_open_real_positions_only(conn) -> None:
-    """A8 held-position alert input: OPEN real platform/recommended rows; never paper (D4), the
-    owner's external holdings (O5) or a closed position."""
+    """Held-position alert input: OPEN real platform/recommended rows; never paper, the
+    owner's external holdings or a closed position."""
     _position(conn, "r-rec", "RECCO", is_paper=0, opened=_at("09:31"))
     _position(conn, "r-plat", "PLATCO", is_paper=0, origin="platform", qty=None, opened=_at("09:32"))
     _position(conn, "r-ext", "EXTCO", is_paper=0, origin="external")
@@ -291,7 +291,7 @@ async def test_the_retest_and_the_sweep_read_real_held_symbols_and_only_the_tick
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
     """In the composed engine: the sweep's "you HOLD this" flag and the retest's held skip read REAL
-    held positions only (paper never counts, plan §1.4), while the ticker — and only the ticker —
+    held positions only (paper never counts), while the ticker — and only the ticker —
     carries every paper position too."""
     async with _sweep_world(tmp_path, monkeypatch, migrated_db_template,
                             state_db=lambda conn: _positions(conn, real=_CORE, paper=(_WIDE, "PAPONLY"))

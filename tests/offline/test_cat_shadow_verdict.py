@@ -81,9 +81,9 @@ def _decide(cohort, *, sessions: int = 40, admitted: int | None = None) -> tuple
                       threshold_20=cv.margin_threshold_pct(COST, 20))
 
 
-# ============================================================ 1. the WO-3 thresholds
+# ============================================================ 1. the margin-floor thresholds
 def test_the_margin_threshold_is_one_round_trip_per_twenty_sessions_of_hold():
-    """WO-3: net >= cost / 20 per day, so T+20 needs one full round trip and T+10 half of one."""
+    """Margin floor: net >= cost / 20 per day, so T+20 needs one full round trip and T+10 half of one."""
     assert MARGIN_FLOOR_DAYS == 20                       # the pre-registered denominator
     assert cv.HORIZONS == (10, 20)                       # no T+5 cell: nothing else is registered
     assert cv.margin_threshold_pct(0.5, 20) == pytest.approx(0.5)

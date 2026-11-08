@@ -1,4 +1,4 @@
-"""Personal AI trading platform engine (NSE / Zerodha Kite Connect). See IMPLEMENTATION_PLAN.md. Three-tier separation (R1): intelligence proposes, risk disposes, oms executes."""
+"""Personal AI trading platform engine (NSE / Zerodha Kite Connect). Three-tier separation: intelligence proposes, risk disposes, oms executes."""
 
 # Native import-order guard: installs an import hook that loads scikit-learn's OpenMP runtime before the
 # first numba/llvmlite/vectorbt/cvxpy/skfolio import, or vectorbt + skfolio segfault the process on

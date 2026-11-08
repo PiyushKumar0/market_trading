@@ -1,4 +1,4 @@
-"""Holdings reconcile for tracked CNC positions (§3.6, owner-directed 2026-09-07).
+"""Holdings reconcile for tracked CNC positions (owner-directed 2026-09-07).
 
 HDFCAMC and HINDZINC carried 39 expired exit recommendations across eleven sessions because nothing
 could tell "the owner is ignoring the exit" from "the owner sold and never sent ``/closed``". These
@@ -288,7 +288,7 @@ async def test_second_run_same_day_logs_again_but_alerts_once(conn, caplog) -> N
 # --------------------------------------------------------------------------- (vi) broker error
 @pytest.mark.asyncio
 async def test_broker_failure_degrades_to_a_warning_and_flags_nothing(conn, caplog) -> None:
-    """Diagnostic, never a gate input (§3.6): a dead token cannot be allowed to invent a story that
+    """Diagnostic, never a gate input: a dead token cannot be allowed to invent a story that
     every tracked position was sold. It returns ``error`` and pages nobody."""
     _position(conn, "pos-11", "HDFCAMC", 7)
     sink = _Sink()
@@ -321,8 +321,8 @@ async def test_any_broker_error_is_swallowed_too(conn) -> None:
 # --------------------------------------------------------------------------- (vii) scope
 @pytest.mark.asyncio
 async def test_mis_external_and_closed_positions_are_out_of_scope(conn) -> None:
-    """MIS never reaches holdings (intraday), ``external`` positions are not the platform's to track
-    (R5), and a CLOSED row is already reconciled. None of them may produce a page."""
+    """MIS never reaches holdings (intraday), ``external`` positions are not the platform's to track,
+    and a CLOSED row is already reconciled. None of them may produce a page."""
     _position(conn, "pos-mis", "HDFCAMC", 7, product="MIS")
     _position(conn, "pos-ext", "HINDZINC", 7, origin="external")
     _position(conn, "pos-closed", "TITAN", 7, state="CLOSED")
@@ -373,7 +373,7 @@ def test_reconcile_window_is_a_trading_day_between_0920_and_1530() -> None:
     assert in_reconcile_window(datetime(2026, 6, 20, 10, 5, tzinfo=IST), cal) is False   # Saturday
 
 
-# =========================================================================== WO-D2: the journal
+# =========================================================================== the journal
 #: conftest/NOW's trading date, and the two sessions before it (Mon 15 / Tue 16 / Wed 17 June 2026).
 TODAY = NOW.date()
 YESTERDAY = date(2026, 6, 16)
@@ -450,7 +450,7 @@ async def test_a_broker_failure_journals_nothing(conn) -> None:
     assert _observations(conn) == []
 
 
-# =========================================================================== WO-D2: the missing set
+# =========================================================================== the missing set
 def test_one_missing_day_is_not_enough(conn) -> None:
     """A single short reading has innocent explanations (settlement edge, renamed symbol, truncated
     payload) and the consequence is SILENCE about a live position - so one day never qualifies."""
@@ -541,11 +541,11 @@ async def test_the_job_feeds_its_own_missing_set_across_two_sessions(conn) -> No
     assert set(positions_missing_from_holdings(conn, TODAY)) == {"pos-m9"}
 
 
-# ================================================== WO-D2 fix: "short" and "gone" are not the same
+# ================================================== "short" and "gone" are not the same
 def test_a_partial_holding_is_short_but_not_gone(conn) -> None:
     """``require_zero`` is what separates a consequence that TELLS the owner something from one that
     makes the platform go QUIET. Held 3 of a tracked 7 on both days is a real unreported exit — the
-    §3.6 alert and the day plan must say so — but 3 shares of exposure still need their stop
+    reconcile alert and the day plan must say so — but 3 shares of exposure still need their stop
     watched, so it may not buy silence on the exit path."""
     _observe(conn, "pos-part", YESTERDAY, tracked=7, held=3)
     _observe(conn, "pos-part", TODAY, tracked=7, held=3)
@@ -624,12 +624,12 @@ def test_two_zero_days_are_gone_under_both_readings(conn) -> None:
     assert missing_holdings_observations(conn, TODAY)["pos-gone"].zero_sessions == 2
 
 
-# ================================================== WO-D2 fix: the systemic "nothing is held" shape
+# ================================================== the systemic "nothing is held" shape
 @pytest.mark.asyncio
 async def test_a_whole_book_reading_short_gets_its_own_log_line(conn, caplog) -> None:
     """A SUCCESSFUL holdings call that returns nothing useful (an API shape change, a truncated
     page, a token on the wrong account) looks position-by-position exactly like "the owner sold
-    everything" - and since WO-D2 two such runs silence the exit path on the whole tracked book. The
+    everything" - and two such runs silence the exit path on the whole tracked book. The
     per-position alert cannot show that; this line says "look at the FEED"."""
     _position(conn, "pos-a1", "HDFCAMC", 7)
     _position(conn, "pos-a2", "HINDZINC", 3)
@@ -657,7 +657,7 @@ async def test_one_position_short_beside_a_held_one_is_not_systemic(conn, caplog
     assert not [r for r in caplog.records if r.getMessage() == "holdings_reconcile_all_short"]
 
 
-# ================================================== WO-D2 fix: only TRADING days are journalled
+# ================================================== only TRADING days are journalled
 @pytest.mark.asyncio
 async def test_a_non_trading_day_run_alerts_but_journals_nothing(conn) -> None:
     """``post_login._step_holdings`` runs this job UNGATED (only the hourly tick applies
@@ -692,7 +692,7 @@ async def test_a_weekend_boot_cannot_complete_a_two_session_streak(conn) -> None
 
 
 def test_entry_rec_id_is_the_one_lookup_both_surfaces_use(conn) -> None:
-    """The 3.6 alert and the day plan's "sold outside the ledger" block must name the SAME id -
+    """The reconcile alert and the day plan's "sold outside the ledger" block must name the SAME id -
     they share this function (``HoldingsReconcileJob.run`` calls it directly)."""
     _position(conn, "pos-m10", "HDFCAMC", 7)
     _ledger(conn, "led-exit", "pos-m10", "REC-EXIT", entry_px=None,

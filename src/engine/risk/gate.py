@@ -1,35 +1,35 @@
-"""Tier-2 deterministic risk gate (§3.2.7 / §7.1 / §3.4) — the platform's core safety artifact.
+"""Tier-2 deterministic risk gate — the platform's core safety artifact.
 
 Two objects live here, deliberately split so the *decision* is pure and the *assembly* is the only
 part that touches I/O:
 
 - :class:`GateContext` — a FROZEN bag of PLAIN VALUES (numbers, flags, sets, maps). Every input any
-  §7.1 rule needs, already resolved. Because it holds no handles, :meth:`RiskGate.evaluate` is a pure
-  function of ``(action, ctx)`` and the whole limit table is table-testable (§9.1).
-- :class:`GateContextBuilder` — assembles that bag from DETERMINISTIC broker/exchange sources ONLY
-  (R1): ``InstrumentStore`` (tick/lot, F&O flag), the ``universe_daily`` snapshot (eligibility and
-  its A8 surveillance codes), ``sector_map``, ``earnings_calendar``, ``ExposureTracker``,
+  risk rule needs, already resolved. Because it holds no handles, :meth:`RiskGate.evaluate` is a pure
+  function of ``(action, ctx)`` and the whole limit table is table-testable.
+- :class:`GateContextBuilder` — assembles that bag from DETERMINISTIC broker/exchange sources ONLY:
+  ``InstrumentStore`` (tick/lot, F&O flag), the ``universe_daily`` snapshot (eligibility and
+  its surveillance codes), ``sector_map``, ``earnings_calendar``, ``ExposureTracker``,
   ``ModeManager`` (incl. the owner-set trade window), ``KillSwitch``, ``NSECalendar``, live LTP/feed-age callbacks and the
-  margins API. §9.1 pins that the media/origination tables (headline store, cluster store, aggregated
-  sentiment, the origination watchlist) are NOT readable from here — the §7.1 ``catalyst_guard`` block
+  margins API. It is pinned that the media/origination tables (headline store, cluster store, aggregated
+  sentiment, the origination watchlist) are NOT readable from here — the ``catalyst_guard`` block
   is stored in the protected table for governance but ENFORCED UPSTREAM in the deterministic
-  digest/pre-screen code (§3.2.4/§3.2.5), never inside this gate. A unit test greps this module's
+  digest/pre-screen code, never inside this gate. A unit test greps this module's
   source for those four table names precisely so the invariant cannot rot.
 
-``engine.risk`` imports NOTHING from ``engine.intelligence`` (R1, AST-enforced by
+``engine.risk`` imports NOTHING from ``engine.intelligence`` (AST-enforced by
 ``tests/unit/test_import_graph.py``): the action union and :class:`GateVerdict` come from
 ``engine.core.contracts``. Everything the builder only type-hints is imported under
 ``TYPE_CHECKING`` so importing the gate costs nothing beyond ``engine.core``, the OMS state
 vocabulary and the limit table.
 
-Verdict precedence (§3.2.7 monotone table): ``reject`` > ``owner_approval_required`` > ``shrink`` >
+Verdict precedence (monotone table): ``reject`` > ``owner_approval_required`` > ``shrink`` >
 ``approve``. The gate may only ever SHRINK an entry — :meth:`RiskGate.evaluate` asserts
-``approved_qty <= original_qty`` as a code invariant, and §9.1 asserts it as a property.
+``approved_qty <= original_qty`` as a code invariant, and a property test asserts it.
 
-SIZING REFERENCE (WO-4, 2026-08-13): a LIMIT proposal's ``entry_price`` is a STATED price, and by
+SIZING REFERENCE (2026-08-13): a LIMIT proposal's ``entry_price`` is a STATED price, and by
 the time the gate runs the market may have moved past it — sizing off it computes risk and notional
 from a price better than obtainable. :meth:`RiskGate._sizing_reference` is the ONE point where the
-price the §7.1 sizing rules consume is chosen; see its docstring for the rule and for why the
+price the sizing rules consume is chosen; see its docstring for the rule and for why the
 selection can only ever TIGHTEN a cap. The ``entry_sanity_band`` hard-reject is deliberately NOT
 routed through it — it band-checks the STATED entry against the live LTP, which is the whole point
 of that rule.
@@ -82,8 +82,7 @@ _log = get_logger("engine.risk.gate")
 
 Verdict = Literal["approve", "shrink", "reject", "owner_approval_required"]
 
-#: The two warm-up COVERAGE CLASSES an ENTER proposal can be judged on (2026-09-13 §2.6 step-6
-#: addendum). Spelled here rather than imported: Tier 2 never imports ``engine.ops`` — the warm-up
+#: The two warm-up COVERAGE CLASSES an ENTER proposal can be judged on (2026-09-13). Spelled here rather than imported: Tier 2 never imports ``engine.ops`` — the warm-up
 #: status arrives duck-typed through ``warmup_status_fn``, exactly like the ``"regime:"`` blocker
 #: prefix :meth:`GateContextBuilder._regime_ready` has always matched on. Keep identical to
 #: ``engine.ops.warmup.CLASS_INTRADAY`` / ``CLASS_DAILY``.
@@ -98,7 +97,7 @@ def _warmup_class_of(style: str) -> str:
     return WARMUP_CLASS_INTRADAY if style == WARMUP_CLASS_INTRADAY else WARMUP_CLASS_DAILY
 
 #: EXACTLY the ``rule_id``s :meth:`RiskGate.evaluate` emits for an ``enter`` proposal, in audit order
-#: (§3.4: every rule evaluated, pass or fail). §9.1 asserts set-equality against this tuple so adding
+#: (every rule evaluated, pass or fail). A test asserts set-equality against this tuple so adding
 #: a limit without a gate check — or a check without a documented id — fails loudly.
 DOCUMENTED_ENTER_RULES: tuple[str, ...] = (
     "mode_risk_state",
@@ -133,9 +132,9 @@ DOCUMENTED_ENTER_RULES: tuple[str, ...] = (
     "min_viable_size",
 )
 
-#: §7.1 ``rule_id``s that are deliberately NOT evaluated inside the gate, with their enforcement
-#: locus. The §9.1 completeness test partitions ``LimitsBlock``'s fields into this set and the §7.1
-#: ids the gate emits — so a NEW block in ``limits.yaml`` fails until it is either gate-checked or
+#: Risk-limit ``rule_id``s that are deliberately NOT evaluated inside the gate, with their enforcement
+#: locus. The completeness test partitions ``LimitsBlock``'s fields into this set and the
+#: risk-limit ids the gate emits — so a NEW block in ``limits.yaml`` fails until it is either gate-checked or
 #: consciously listed here.
 NOT_GATE_ENFORCED_LIMITS: Mapping[str, str] = {
     "daily_loss_hard": "ExposureTracker floor ladder + ModeManager.force_downgrade (§7.1/§3.5.3)",
@@ -146,30 +145,30 @@ NOT_GATE_ENFORCED_LIMITS: Mapping[str, str] = {
     "max_holding": "OMS square-off scheduler + startup age catch-up (§3.2.8/§2.6)",
 }
 
-#: Rules whose breach may be cured by SHRINKING the quantity rather than rejecting (§7.1
+#: Rules whose breach may be cured by SHRINKING the quantity rather than rejecting (the limit's
 #: ``on_breach``: ``shrink_else_reject`` / ``reject_or_shrink`` / ``shrink_to_cap_else_reject``).
 #: ``per_stock_exposure`` is shrinkable only on its CNC-notional leg — the "1 position per symbol"
 #: leg is a hard reject and is classified as such at evaluation time.
 #: ``capital_cap`` is the one DELIBERATE addition to the yaml markers (its ``on_breach`` reads
 #: ``reject_entry``): sizing down to the deployed-capital headroom is strictly safer than rejecting,
 #: and the shrink loop re-runs ``min_viable_size`` at the reduced size, so a shrink that stops
-#: clearing costs still ends in reject (R1/C3).
+#: clearing costs still ends in reject.
 SHRINKABLE_RULES: frozenset[str] = frozenset(
     {"capital_cap", "per_trade_risk", "per_stock_exposure", "max_leverage"}
 )
 
-#: Sentinel for the "no target" reject (C3): the analyst MUST emit a target or the edge is
+#: Sentinel for the "no target" reject (cost gate): the analyst MUST emit a target or the edge is
 #: unverifiable and the trade cannot be shown to clear costs — UNLESS the strategy carries a
 #: pre-registered measured edge (see :data:`_NO_TARGET_MEASURED_EDGE` and ``RiskGate``'s
 #: ``strategy_expected_edge_pct``).
 _NO_TARGET = "no target_price — expected edge unverifiable (C3)"
 
-#: The narrow, deliberate exception to :data:`_NO_TARGET`, added 2026-08-17 for the §6.1 ``ins`` leg.
+#: The narrow, deliberate exception to :data:`_NO_TARGET`, added 2026-08-17 for the ``ins`` leg.
 #:
-#: The C3 check needs ONE number: the expected favourable move, as a percentage. For every strategy
+#: The cost-gate check needs ONE number: the expected favourable move, as a percentage. For every strategy
 #: shipped before ``ins`` that number is derived from the proposal's own target — a target is the
 #: strategy's own statement of where it expects price to go, so deriving the edge from it is honest.
-#: ``ins`` has no target BY DESIGN: its exit is TIME (the §7.1 20-td swing cap = the validated T+20
+#: ``ins`` has no target BY DESIGN: its exit is TIME (the 20-td swing cap = the validated T+20
 #: horizon), and the drift it captures was measured, not predicted. Inventing a target purely to feed
 #: this check would push a fabricated price into the gate's arithmetic and into the owner's payload —
 #: strictly worse than using the measured number directly.
@@ -183,36 +182,36 @@ _NO_TARGET = "no target_price — expected edge unverifiable (C3)"
 #:   * A strategy with NO registered edge and no target still hard-fails, unchanged.
 _NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge (C3)"
 
-#: Sentinel for the SHADOW reject (C3): the strategy is registered in ``no_edge_shadow_strategies``,
-#: so C3 refuses it unconditionally — whatever ``target_price`` the proposal carries.
+#: Sentinel for the SHADOW reject (cost gate): the strategy is registered in ``no_edge_shadow_strategies``,
+#: so the cost gate refuses it unconditionally — whatever ``target_price`` the proposal carries.
 #:
-#: WHY THIS EXISTS (2026-08-27, shipped with §2.7 ``cat_reversal``). A shadow strategy accumulates a
-#: validation population and must reach RECOMMEND exactly never until its §8.6 owner gate. The
+#: WHY THIS EXISTS (2026-08-27, shipped with ``cat_reversal``). A shadow strategy accumulates a
+#: validation population and must reach RECOMMEND exactly never until its owner promotion gate. The
 #: mechanism relied on until now was INDIRECT: ship no ``expected_edge_pct``, and let the
 #: :data:`_NO_TARGET` branch below reject every candidate. That reasoning has a hole — the branch
 #: fires only when ``target_price is None``, but the ANALYST emits the ``EnterAction`` and the wire
 #: schema (``intelligence.schemas``) lets it supply a target; nothing between the candidate and this
 #: gate reconciles that field against the candidate's ``raw_levels.target``. An analyst that
-#: volunteers a target hands C3 a real edge basis and the shadow's defining property evaporates on a
+#: volunteers a target hands the cost gate a real edge basis and the shadow's defining property evaporates on a
 #: model whim.
 #:
 #: So the property is declared here instead of inferred: a registered id is rejected BEFORE the target
 #: is even read. It is Tier-2 owned, fails closed by construction, can only ever REJECT (it adds no
 #: path to approval), and no prompt, model output or upstream layer can bypass it. Promoting a
-#: strategy out of the shadow means removing it from this set at the §8.6 gate — a deliberate,
+#: strategy out of the shadow means removing it from this set at the owner promotion gate — a deliberate,
 #: reviewable edit, which is exactly the ceremony the promotion deserves.
 _SHADOW_NO_EDGE = "shadow strategy — no validated edge exists; C3 cannot be satisfied at any target"
 
 _HUNDRED = Decimal(100)
 _UNCLASSIFIED = "UNCLASSIFIED"
 
-#: ``orders.role`` values that are PROTECTIVE (R1/R3): never cancellable by a Tier-1 proposal.
+#: ``orders.role`` values that are PROTECTIVE: never cancellable by a Tier-1 proposal.
 PROTECTIVE_ORDER_ROLES: frozenset[str] = frozenset({"protective_sl", "target", "gtt_leg"})
 
-#: ``orders.state NOT IN`` this ⇔ the order is still working (§3.5.1).
+#: ``orders.state NOT IN`` this ⇔ the order is still working.
 TERMINAL_ORDER_STATES_SQL = "({})".format(",".join(f"'{s.value}'" for s in sorted(TERMINAL_ORDER_STATES)))
 
-#: Most-restrictive-wins (§3.5.3), as ``_RISK_RANK`` in ``engine.risk.causes``/``exposure``.
+#: Most-restrictive-wins, as ``_RISK_RANK`` in ``engine.risk.causes``/``exposure``.
 _RISK_ORDER = (RiskState.NORMAL, RiskState.FROZEN, RiskState.CLOSE_ONLY, RiskState.KILLED)
 
 
@@ -249,7 +248,7 @@ def _q(value: Decimal, places: str = "0.01") -> str:
 
 
 class SizingReference(NamedTuple):
-    """The prices the §7.1 sizing rules size off, chosen at ONE point (:meth:`RiskGate._sizing_reference`).
+    """The prices the sizing rules size off, chosen at ONE point (:meth:`RiskGate._sizing_reference`).
 
     Two fields rather than one because the two families of priced rules bind in OPPOSITE price
     directions, and a single scalar cannot be conservative for both on a SHORT:
@@ -269,23 +268,23 @@ class SizingReference(NamedTuple):
 
 # --------------------------------------------------------------------------- GateContext
 class GateContext(BaseModel):
-    """Every input the §7.1 rules need, resolved to PLAIN VALUES (§3.2.7).
+    """Every input the risk rules need, resolved to PLAIN VALUES.
 
     Frozen and handle-free on purpose: :meth:`RiskGate.evaluate` must be a pure function so the same
-    ``(action, ctx)`` always produces the same :class:`GateVerdict` (replay determinism, §9.1) and so
+    ``(action, ctx)`` always produces the same :class:`GateVerdict` (replay determinism) and so
     each rule can be exercised by flipping ONE field of a fully-passing baseline.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     # -- clock / control plane -------------------------------------------------------------
-    now: AwareDatetime                      # tz-aware IST, from Clock (§3.2) — never datetime.now()
+    now: AwareDatetime                      # tz-aware IST, from Clock — never datetime.now()
     mode: Mode
     risk_state: RiskState
     killed: bool = False
     degrade_tier: str = "DG0"
 
-    # -- session + owner-set window (§7.1 trade_window) ------------------------------------
+    # -- session + owner-set window (trade_window) ------------------------------------
     trade_window: TradeWindow | None = None
     # Informational only: no rule reads these; window bounds are validated against the session
     # when the owner sets them (ModeManager.validate_window).
@@ -294,9 +293,9 @@ class GateContext(BaseModel):
 
     # -- equity + day-scoped counters (ExposureTracker) ------------------------------------
     equity: Decimal
-    day_mtm_pct: Decimal                    # percent of the capital base (−5.0 == −5%, §7.1)
+    day_mtm_pct: Decimal                    # percent of the capital base (−5.0 == −5%)
     consecutive_losses: int = 0
-    entry_recs_today: int = 0               # Phase-2 max_new_trades_day basis (see the rule)
+    entry_recs_today: int = 0               # RECOMMEND-mode max_new_trades_day basis (see the rule)
 
     # -- open exposure ---------------------------------------------------------------------
     open_total: int = 0
@@ -304,8 +303,8 @@ class GateContext(BaseModel):
     open_cnc: int = 0
     #: Symbols of OPEN positions the platform has already told the owner to SELL (an exit
     #: recommendation delivered within :data:`_EXITING_LOOKBACK_DAYS`) — EXCLUDED from
-    #: ``open_total``/``open_mis``/``open_cnc`` and ``open_sector_counts`` by the builder (O16,
-    #: owner-directed 2026-09-07). Still members of ``open_symbols`` (one position per symbol).
+    #: ``open_total``/``open_mis``/``open_cnc`` and ``open_sector_counts`` by the builder
+    #: (owner-directed 2026-09-07). Still members of ``open_symbols`` (one position per symbol).
     exiting_symbols: frozenset[str] = frozenset()
     open_symbols: frozenset[str] = frozenset()
     pending_rec_symbols: frozenset[str] = frozenset()   # unexpired, unconfirmed entry recs
@@ -315,7 +314,7 @@ class GateContext(BaseModel):
     #: Max 20d daily-return Pearson correlation of the candidate vs each OPEN position (and pending
     #: rec) of its own sector, or of any sector when either is unknown (``_co_movement_peers``). ``None`` =
     #: no such position OR insufficient history — the rule then PASSES with an explicit note:
-    #: absence of data must never silently reject (R1 determinism over guesswork).
+    #: absence of data must never silently reject (determinism over guesswork).
     max_corr_with_open: Decimal | None = None
     deployed_capital: Decimal = Decimal(0)
 
@@ -390,9 +389,9 @@ class _Ledger:
 
 # --------------------------------------------------------------------------- the gate
 class RiskGate:
-    """The Tier-2 deterministic gate (§3.2.7). :meth:`evaluate` is PURE — no I/O, no clock reads
+    """The Tier-2 deterministic gate. :meth:`evaluate` is PURE — no I/O, no clock reads
     beyond the verdict stamp, no network. Every limit value comes from :class:`LimitTable`; nothing
-    here is hardcoded (R4)."""
+    here is hardcoded."""
 
     def __init__(
         self,
@@ -406,9 +405,9 @@ class RiskGate:
         """``strategy_expected_edge_pct`` maps ``strategy_id`` -> a pre-registered, owner-set expected
         edge in percent, consumed by ``min_viable_size`` ONLY for a proposal with no ``target_price``
         (see :data:`_NO_TARGET_MEASURED_EDGE`). Unset ⇒ the pre-2026-08-17 behaviour exactly: a
-        targetless entry is a hard C3 reject.
+        targetless entry is a hard cost-gate reject.
 
-        ``no_edge_shadow_strategies`` lists ``strategy_id``s in SHADOW mode: C3 rejects them
+        ``no_edge_shadow_strategies`` lists ``strategy_id``s in SHADOW mode: the cost gate rejects them
         unconditionally, whatever target the proposal carries (see :data:`_SHADOW_NO_EDGE`). Unset ⇒
         behaviour is byte-identical to before this parameter existed. An id in BOTH mappings is a
         deployment defect and the shadow wins — refusing is the safe reading of a contradiction."""
@@ -423,7 +422,7 @@ class RiskGate:
 
     # ------------------------------------------------------------------ dispatch
     def evaluate(self, action: ActionProposal, ctx: GateContext) -> GateVerdict:
-        """Evaluate ``action`` against ``ctx`` and return the full-audit :class:`GateVerdict` (§3.4)."""
+        """Evaluate ``action`` against ``ctx`` and return the full-audit :class:`GateVerdict`."""
         if isinstance(action, EnterAction):
             return self._evaluate_enter(action, ctx)
         if isinstance(action, ExitAction):
@@ -436,7 +435,7 @@ class RiskGate:
             return self._evaluate_cancel(action, ctx)
         raise TypeError(f"unsupported action type {type(action).__name__}")   # pragma: no cover
 
-    # ------------------------------------------------------------------ enter (§7.1)
+    # ------------------------------------------------------------------ enter
     def _evaluate_enter(self, action: EnterAction, ctx: GateContext) -> GateVerdict:
         table = self._limits.load()
         lim = table.limits
@@ -453,7 +452,7 @@ class RiskGate:
         entry_ref: Decimal | None = action.entry_price if action.entry_type == "LIMIT" else ctx.ltp
         if entry_ref is not None and entry_ref <= 0:
             entry_ref = None
-        # ...and the ONE point where the price the SIZING rules consume is chosen (WO-4).
+        # ...and the ONE point where the price the SIZING rules consume is chosen.
         sizing = self._sizing_reference(action, ctx, entry_ref)
         risk_ref = sizing.risk if sizing is not None else None
         notional_ref = sizing.notional if sizing is not None else None
@@ -484,7 +483,7 @@ class RiskGate:
         self._rule_circuit_proximity(led, lim)
         self._rule_order_surface(led)
 
-        # ---- SHRINK LOOP (R1): the gate may only ever reduce the quantity ----------------
+        # ---- SHRINK LOOP: the gate may only ever reduce the quantity ----------------
         qty_max = min(led.caps.values()) if led.caps else qty
         approved = min(qty, qty_max)
         if approved < 0:
@@ -496,7 +495,7 @@ class RiskGate:
         cost = self._rule_min_viable_size(led, action, ctx, risk_ref, approved, product)
 
         checks = [led.checks[rule_id] for rule_id in DOCUMENTED_ENTER_RULES]
-        assert len(checks) == len(led.checks), (          # noqa: S101 - developer invariant (§9.1)
+        assert len(checks) == len(led.checks), (          # noqa: S101 - developer invariant
             f"gate emitted undocumented rule_ids: {sorted(set(led.checks) - set(DOCUMENTED_ENTER_RULES))}"
         )
 
@@ -513,19 +512,19 @@ class RiskGate:
         else:
             verdict = "approve"
 
-        # The gate NEVER enlarges (R1). Code invariant; §9.1 also asserts it as a property.
+        # The gate NEVER enlarges. Code invariant; A property test also asserts it.
         assert approved <= qty, "RiskGate must never enlarge a proposal"    # noqa: S101
 
         return self._verdict(
             action, ctx, verdict, checks, reasons, original_qty=qty, approved_qty=approved, cost=cost
         )
 
-    # -- sizing-reference selection (WO-4) ----------------------------------------------------
+    # -- sizing-reference selection ----------------------------------------------------
     @staticmethod
     def _sizing_reference(
         action: EnterAction, ctx: GateContext, entry_ref: Decimal | None
     ) -> SizingReference | None:
-        """THE single point at which the price the §7.1 sizing rules size off is chosen (WO-4).
+        """THE single point at which the price the sizing rules size off is chosen.
 
         A LIMIT proposal states a price; the market does not owe it to us. When the live LTP has run
         PAST the stated entry, sizing off ``entry_price`` computes both the risk-at-stop and the
@@ -549,7 +548,7 @@ class RiskGate:
           ``margin_buffer`` can only rise and their caps can only fall. Taking ``min`` on the SHORT
           side here would be arithmetically defensible (a fill at 90 really does deploy 90/unit) but
           would LOOSEN those caps, and a gate change that can enlarge a size is not one this file
-          accepts — the conservative choice is the only one compatible with R1.
+          accepts — the conservative choice is the only one compatible with the three-tier rule.
 
         Unchanged paths: MARKET proposals (``entry_ref`` is already the live LTP, so both bases are
         it), a LIMIT with no usable LTP (nothing better than the stated price is known — and
@@ -635,7 +634,7 @@ class RiskGate:
     ) -> None:
         w = ctx.trade_window
         if w is None:
-            # Startup validation should have frozen a window (§3.2.12); with none set we fail closed.
+            # Startup validation should have frozen a window; with none set we fail closed.
             led.add("trade_window", False, "no owner-set trade window", "start <= now <= end",
                     "fail closed — startup validation should have seeded the window")
             return
@@ -727,11 +726,11 @@ class RiskGate:
             led.add("capital_cap", False, "unpriceable (no entry reference)",
                     f"deployed <= {_q(cap)}", "fail closed", shrinkable=True)
             return
-        # Phase 2 charges MIS at FULL notional on BOTH sides of the inequality — matching
-        # ExposureTracker.deployed_capital(), which has no per-stock leverage until Phase 3
+        # RECOMMEND mode charges MIS at FULL notional on BOTH sides of the inequality — matching
+        # ExposureTracker.deployed_capital(), which has no per-stock leverage until the order machinery exists
         # (2026-07-28 review: charging the NEW leg at notional/3 against open legs at 1x notional
         # made one MIS fill consume the whole cap). Conservative: never under-charges deployment.
-        per_unit = notional_ref                      # WO-4 notional basis (see _sizing_reference)
+        per_unit = notional_ref                      # notional basis (see _sizing_reference)
         qty_max = _floor_div(headroom, per_unit)
         led.cap("capital_cap", qty_max)
         new_deployed = Decimal(qty) * per_unit
@@ -762,7 +761,7 @@ class RiskGate:
                     f"qty x unit risk <= {_q(budget)}", "fail closed — unpriceable risk",
                     shrinkable=True)
             return
-        # WO-4: distance measured from the ADVERSE fill reference, not from the stated entry.
+        # Distance measured from the ADVERSE fill reference, not from the stated entry.
         unit_risk = abs(risk_ref - action.stop_price)
         if intraday:
             unit, basis = unit_risk, f"stop distance from {_q(risk_ref)}"
@@ -805,8 +804,8 @@ class RiskGate:
         ok = ctx.entry_recs_today < cap
         led.add(
             "max_new_trades_day", ok, str(ctx.entry_recs_today),
-            # Phase-2 semantics: in RECOMMEND no position is opened, so the churn cap counts ENTRY
-            # RECOMMENDATIONS issued today (§3.6) rather than positions opened.
+            # RECOMMEND-mode semantics: in RECOMMEND no position is opened, so the churn cap counts ENTRY
+            # RECOMMENDATIONS issued today rather than positions opened.
             f"< {cap} entry recommendations/day (C3 churn protection)",
             f"{cap - ctx.entry_recs_today} left",
         )
@@ -940,7 +939,7 @@ class RiskGate:
         )
 
     def _rule_readiness(self, led: _Ledger, ctx: GateContext, intraday: bool) -> None:
-        # Per-CLASS since 2026-09-13 (§2.6 step-6 addendum): an intraday proposal is judged on the
+        # Per-CLASS since 2026-09-13: an intraday proposal is judged on the
         # intraday minute-bar coverage, a swing/position one on the completed daily sessions. A
         # context built for the OTHER class cannot answer this proposal's question, so it fails
         # closed rather than borrowing the answer (the class the builder judged is pinned in ctx).
@@ -987,8 +986,8 @@ class RiskGate:
 
     def _rule_circuit_proximity(self, led: _Ledger, lim: Any) -> None:
         cp = lim.circuit_proximity
-        # The MIS-must-be-F&O leg (C7) is enforced by `instrument_eligible`. The band-proximity leg
-        # needs the exchange band feed, which lands in Phase 3 — reported as an explicit n/a so the
+        # The MIS-must-be-F&O leg is enforced by `instrument_eligible`. The band-proximity leg
+        # needs the exchange band feed, which is not built yet — reported as an explicit n/a so the
         # audit never reads as a verified pass.
         led.add(
             "circuit_proximity", True, "n/a (band data Phase 3)",
@@ -1039,10 +1038,10 @@ class RiskGate:
         self, led: _Ledger, action: EnterAction, ctx: GateContext, risk_ref: Decimal | None,
         approved: int, product: Literal["MIS", "CNC"],
     ) -> CostBreakdown | None:
-        """Post-shrink edge check (§7.1 ``min_viable_size``, C2/C3). Returns the CostBreakdown to
+        """Post-shrink edge check (``min_viable_size``). Returns the CostBreakdown to
         attach to the verdict when it could be computed at all.
 
-        Priced on the WO-4 risk basis — the edge that survives at the price the order can actually
+        Priced on the sizing-reference risk basis — the edge that survives at the price the order can actually
         be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
         limit = f"expected edge >= {need} x breakeven (C2/C3)"
@@ -1054,7 +1053,7 @@ class RiskGate:
                     "shadow mode: origination is journalled for validation, never recommended")
             return None
         # A targetless proposal is a hard reject UNLESS its strategy registered a measured edge
-        # (§6.1 `ins`, 2026-08-17 — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
+        # (`ins`, 2026-08-17 — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
         measured_edge = self._strategy_edge.get(action.strategy_id)
         if action.target_price is None and (measured_edge is None or measured_edge <= 0):
             led.add("min_viable_size", False, _NO_TARGET, limit,
@@ -1087,7 +1086,7 @@ class RiskGate:
         )
         return cost
 
-    # ------------------------------------------------------------------ exit (§3.2.7)
+    # ------------------------------------------------------------------ exit
     def _evaluate_exit(self, action: ExitAction, ctx: GateContext) -> GateVerdict:
         known = action.position_id in ctx.positions_known
         checks = [CheckResult(
@@ -1219,23 +1218,23 @@ class RiskGate:
 
 
 # --------------------------------------------------------------------------- context assembly
-#: O16 (owner-directed 2026-09-07): an OPEN position with an exit recommendation delivered within
+#: Owner decision 2026-09-07: an OPEN position with an exit recommendation delivered within
 #: this many calendar days is EXITING. Calendar days rather than sessions so a Friday exit still
 #: counts on Monday; the position review re-issues an exit once per session while a stop stays
-#: breached (one per session since 2026-09-12, WO-D2), so a genuinely exiting position never ages
+#: breached (one per session since 2026-09-12), so a genuinely exiting position never ages
 #: out of the window while it is still open. A position the broker no longer holds produces no exit
 #: at all and is excluded on the holdings journal instead — see :func:`_gone_symbols`.
 _EXITING_LOOKBACK_DAYS = 3
 
 
 def _gone_symbols(positions: Sequence[Mapping[str, Any]], missing_ids: Collection[str]) -> frozenset[str]:
-    """Open symbols whose position the BROKER has shown empty on two consecutive sessions (WO-D2).
+    """Open symbols whose position the BROKER has shown empty on two consecutive sessions.
 
-    The §3.6 holdings journal (``positions_missing_from_holdings(..., require_zero=True)``) says the
+    The holdings journal (``positions_missing_from_holdings(..., require_zero=True)``) says the
     owner sold these outside the ledger; the position-event path therefore stops recommending an
     exit from them, and without an exit recommendation :func:`_exiting_symbols` would drop them
-    after three calendar days — putting a position that does not exist back on the §7.1 position
-    and sector counts, the O16 shape with the sign reversed (caps tighter, not looser). Excluding
+    after three calendar days — putting a position that does not exist back on the position
+    and sector counts, the exit-pending shape with the sign reversed (caps tighter, not looser). Excluding
     them on the journal itself keeps the counts honest until the owner's ``/closed`` ends the row.
     Same scope as EXITING: counts only — the symbol still blocks a fresh BUY on itself (the ledger
     row is OPEN until the owner says otherwise) and deployed cash is untouched.
@@ -1251,7 +1250,7 @@ def _gone_symbols(positions: Sequence[Mapping[str, Any]], missing_ids: Collectio
 def _exiting_symbols(
     rec_rows: Sequence[Mapping[str, Any]], open_symbols: frozenset[str], now: datetime
 ) -> frozenset[str]:
-    """Open symbols the platform has already told the owner to SELL (O16).
+    """Open symbols the platform has already told the owner to SELL.
 
     "Keep sell recommendations separate from the buy limits": until 2026-09-07 a position the
     platform had recommended exiting kept occupying a position-count and a sector slot until the
@@ -1293,7 +1292,7 @@ def _active_counts(
     cnc: int,
     sector_counts: Mapping[str, int],
 ) -> tuple[int, int, int, dict[str, int]]:
-    """Position and sector counts with the EXITING positions taken out (O16), floored at zero."""
+    """Position and sector counts with the EXITING positions taken out, floored at zero."""
     sectors = dict(sector_counts)
     for row in positions:
         symbol = str(row["symbol"])
@@ -1325,7 +1324,7 @@ def _co_movement_peers(symbol: str, held: frozenset[str], sector_of: Mapping[str
     )
 
 
-#: The §3.2.4 focus-cap marker, duplicated from ``engine.universe.builder.EXCL_CAP`` for the same
+#: The focus-cap marker, duplicated from ``engine.universe.builder.EXCL_CAP`` for the same
 #: layering reason ``engine.marketdata.store`` duplicates it: the gate must not import the universe
 #: builder. A row excluded for the cap ALONE is eligible; any other reason, or the extended-leg
 #: markers, is not.
@@ -1334,13 +1333,13 @@ _EXCL_CAP_ONLY = ["watchlist_cap"]
 
 def _eligible_universe_row(rows: Sequence[Mapping[str, Any]], symbol: str) -> dict[str, Any] | None:
     """``symbol``'s ``universe_daily`` row iff it is in the ELIGIBLE set: ``included`` (the tick
-    watchlist) OR excluded for ``watchlist_cap`` alone (O15, 2026-09-04).
+    watchlist) OR excluded for ``watchlist_cap`` alone (owner decision 2026-09-04).
 
-    Until O15 the gate read ``included_only`` rows, which equalled the eligible set only because the
+    Until the owner's NIFTY 500 widening the gate read ``included_only`` rows, which equalled the eligible set only because the
     200 cap did not bind on a 200-name index. With NIFTY 500 eligible at ~350–450 names, that shortcut
     would have rejected every swing candidate from the capped tail as out-of-universe and made the
-    widening a no-op. The cap governs ticks; the RECOMMEND boundary is the eligible set by definition
-    (§3.2.4). Extended-leg rows (``not_in_index`` / legacy ``not_nifty200``) and rows carrying any
+    widening a no-op. The cap governs ticks; the RECOMMEND boundary is the eligible set by definition.
+    Extended-leg rows (``not_in_index`` / legacy ``not_nifty200``) and rows carrying any
     real exclusion stay out — the gate approves nothing the rule did not pass.
     """
     for row in rows:
@@ -1352,14 +1351,14 @@ def _eligible_universe_row(rows: Sequence[Mapping[str, Any]], symbol: str) -> di
     return None
 
 
-#: Prefix of the A8 exclusion codes (``engine.universe.builder.EXCL_GSM``…, written by
+#: Prefix of the surveillance exclusion codes (``engine.universe.builder.EXCL_GSM``…, written by
 #: ``SurveillanceLists.reasons_for``), duplicated for the same layering reason as ``_EXCL_CAP_ONLY``.
 _SURVEILLANCE_PREFIX = "surveillance_"
 
 
 def _surveillance_codes(rows: Sequence[Mapping[str, Any]], symbol: str) -> str | None:
-    """``symbol``'s A8 codes on its ``universe_daily`` row, comma-joined; ``None`` when unflagged or
-    absent. The universe build is the A8 authority (``instruments_daily.surveillance`` is never
+    """``symbol``'s surveillance codes on its ``universe_daily`` row, comma-joined; ``None`` when unflagged or
+    absent. The universe build is the surveillance authority (``instruments_daily.surveillance`` is never
     written). A flagged row is never eligible, so the ``surveillance`` rule changes no verdict; it
     makes an ineligible symbol's audit say why."""
     for row in rows:
@@ -1371,12 +1370,12 @@ def _surveillance_codes(rows: Sequence[Mapping[str, Any]], symbol: str) -> str |
 
 
 class GateContextBuilder:
-    """Assembles a :class:`GateContext` from DETERMINISTIC broker/exchange sources only (R1).
+    """Assembles a :class:`GateContext` from DETERMINISTIC broker/exchange sources only.
 
     The forbidden surface is as load-bearing as the allowed one: this class reads instruments,
     universe, surveillance, sector map, earnings calendar, positions, orders, recommendations,
     equity/exposure, the mode+kill state, the calendar/session and the live feed — and NOTHING from
-    the media/origination layer (§2.4 item 4, §9.1). The §7.1 origination guards are enforced
+    the media/origination layer. The origination guards are enforced
     upstream in the digest/pre-screen path.
 
     Parameters
@@ -1390,16 +1389,16 @@ class GateContextBuilder:
         ``ready_for(cls, symbol)`` (2026-09-13 / 2026-09-17), with the flat ``ready`` as the fallback
         for a status that has none. Unwired ⇒ not ready (fail closed).
     clock_skew_ok_fn:
-        Unwired ⇒ ``False`` — an unverifiable clock is never treated as "skew is fine" (R6).
+        Unwired ⇒ ``False`` — an unverifiable clock is never treated as "skew is fine".
     conn:
         The single sqlite connection (positions/orders/recommendations). Defaults to the one the
         :class:`~engine.risk.exposure.ExposureTracker` already holds so the composition root need
         not thread it twice.
     scope:
-        ``"paper"`` builds the paper book's context (plan Q3.2) over a paper-scope ``exposure``:
+        ``"paper"`` builds the paper book's context over a paper-scope ``exposure``:
         paper positions and orders, working paper entry orders as pending, ``PENDING_EXIT`` as
         exiting, no holdings journal, no margins, and the worse of the real risk state and the
-        active ``paper_halts`` (§1.5).
+        active ``paper_halts`` .
     """
 
     #: Class default: a builder assembled without ``__init__`` (the stubbed tests) reads as real.
@@ -1450,9 +1449,9 @@ class GateContextBuilder:
         self._conn = conn if conn is not None else getattr(exposure, "_conn", None)
         self._nifty50_fn = nifty50_fn
         self._expiry_day_fn = expiry_day_fn
-        # WO-D2 (2026-09-12): position ids the §3.6 holdings journal shows EMPTY on two consecutive
+        # 2026-09-12: position ids the holdings journal shows EMPTY on two consecutive
         # sessions. Injected rather than imported — the risk layer does not import engine.ops — and
-        # unwired ⇒ nothing is ever "gone", which is the pre-D2 behaviour.
+        # unwired ⇒ nothing is ever "gone", which is the behaviour from before this seam existed.
         self._missing_holdings_fn = missing_holdings_fn
         self._index_symbol = index_symbol
         self._corr_n = int(corr_lookback_sessions)
@@ -1465,8 +1464,7 @@ class GateContextBuilder:
         facts and the per-side/per-style branches (MIS vs CNC caps, windows, leverage) live in the
         RULES, so one context can be evaluated against any proposal for that symbol.
 
-        ``style`` is the ONE exception since 2026-09-13: warm-up coverage is answered per class
-        (§2.6 step-6 addendum), so an intraday candidate is judged on today's 1-minute coverage and a
+        ``style`` is the ONE exception since 2026-09-13: warm-up coverage is answered per class, so an intraday candidate is judged on today's 1-minute coverage and a
         swing/position one on the completed daily sessions — and since 2026-09-17 the answer is
         narrowed further to this ``symbol``, so one symbol's hole never refuses the rest of its
         class. The class judged is pinned into the context (``warmup_class``) — a context is still a
@@ -1504,11 +1502,11 @@ class GateContextBuilder:
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
         if real:
-            # O16 (2026-09-07): positions already recommended for EXIT hold no position-count or
+            # Owner decision 2026-09-07: positions already recommended for EXIT hold no position-count or
             # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
             # position per symbol) and deployed_capital keeps them (real cash).
             exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
-            # WO-D2 (2026-09-12): a position the broker has shown EMPTY on two consecutive sessions gets
+            # 2026-09-12: a position the broker has shown EMPTY on two consecutive sessions gets
             # no exit recommendation any more, so it would age out of the window above and re-take a
             # slot — it is excluded on the holdings journal instead (see _gone_symbols). A failing
             # journal read excludes nothing: the conservative direction for a count is to keep it.
@@ -1584,7 +1582,7 @@ class GateContextBuilder:
         return list(self._conn.execute(sql, tuple(params)).fetchall())
 
     def _missing_holdings(self) -> Collection[str]:
-        """Position ids the holdings journal shows empty on two sessions (WO-D2); ``()`` unwired
+        """Position ids the holdings journal shows empty on two sessions; ``()`` unwired
         or on any failure — the seam must never turn a journal error into a widened cap."""
         if self._missing_holdings_fn is None:
             return ()
@@ -1595,7 +1593,7 @@ class GateContextBuilder:
             return ()
 
     def _open_positions(self) -> list[sqlite3.Row]:
-        """Open PLATFORM positions of this scope (O5 excludes the owner's own ``external`` trades)."""
+        """Open PLATFORM positions of this scope (excludes the owner's own ``external`` trades)."""
         return self._rows(
             "SELECT position_id, symbol, side, product, qty, avg_entry, stop, target, state "
             f"FROM positions WHERE {HELD_STATES_SQL[self._scope]} "
@@ -1635,7 +1633,7 @@ class GateContextBuilder:
         return len(self._paper_entry_orders("substr(o.created_at, 1, 10) = ?", (d.isoformat(),)))
 
     def _risk_state(self) -> RiskState:
-        """The real risk state; for paper, the worse of it and the active ``paper_halts`` (§1.5).
+        """The real risk state; for paper, the worse of it and the active ``paper_halts``.
         A rung that is not a ``RiskState`` value fails closed to KILLED."""
         state = self._mode.risk_state()
         if self._scope == "real":
@@ -1660,7 +1658,7 @@ class GateContextBuilder:
         return data if isinstance(data, dict) else {}
 
     def _entry_recs_today(self, d: date) -> int:
-        """Entry recommendations ISSUED today (§3.6) — the Phase-2 ``max_new_trades_day`` basis: in
+        """Entry recommendations ISSUED today — the RECOMMEND-mode ``max_new_trades_day`` basis: in
         RECOMMEND no position is opened, so counting positions would never bind."""
         n = 0
         for row in self._recommendations():
@@ -1682,7 +1680,7 @@ class GateContextBuilder:
     # ------------------------------------------------------------------ store reads (executor)
     async def _universe_rows(self, d: date) -> list[dict[str, Any]]:
         """Day ``d``'s ``universe_daily`` rows: one read per candidate, feeding both
-        :func:`_eligible_universe_row` (O15) and :func:`_surveillance_codes` (A8)."""
+        :func:`_eligible_universe_row` and :func:`_surveillance_codes`."""
         return list(await self._store.arun(self._store.get_universe_daily, d))
 
     async def _results_day(self, symbol: str, d: date) -> bool:
@@ -1711,14 +1709,13 @@ class GateContextBuilder:
         return bool(ready_for(_warmup_class_of(style), symbol))
 
     def _regime_ready(self) -> bool:
-        """Regime readiness is the ``regime:`` slice of the warm-up blockers (§7.1
-        ``regime_data_ready`` is a separate rule from ``warmup_ready``)."""
+        """Regime readiness is the ``regime:`` slice of the warm-up blockers (``regime_data_ready`` is a separate rule from ``warmup_ready``)."""
         if self._warmup_status_fn is None:
             return False
         blockers = getattr(self._warmup_status_fn(), "blockers", []) or []
         return not any(str(b).startswith("regime:") for b in blockers)
 
-    # ------------------------------------------------------------------ co-movement (§7.1)
+    # ------------------------------------------------------------------ co-movement
     async def _max_corr(
         self, symbol: str, open_symbols: frozenset[str], d: date
     ) -> Decimal | None:

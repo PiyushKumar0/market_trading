@@ -1,10 +1,10 @@
-"""BackfillJob (§3.2.3 / §4.4 job 3 / §2.6 step 4): chunking, checkpoint resume, throttle wiring.
+"""BackfillJob: chunking, checkpoint resume, throttle wiring.
 
 Uses a fake kite client that records every historical() request, so chunk boundaries (the pinned
 Kite range caps: minute ≤60 days/request, day ≤2000 days/request), checkpoint resume after an
 interruption, and the src provenance of written bars are asserted exactly. Throttle: one test runs
 the REAL ``KiteClient`` facade with a spy limiter to prove every backfill request is acquired
-through the shared RateLimiter's ``historical`` bucket (A2 ≤3 req/s — pacing itself is covered by
+through the shared RateLimiter's ``historical`` bucket (≤3 req/s — pacing itself is covered by
 test_rate_limiter.py).
 """
 
@@ -158,7 +158,7 @@ async def test_checkpoint_advances_only_to_the_last_observed_candle(store, clock
     assert _checkpoint(conn, "TCS", "day") == start.isoformat()
 
 
-# ------------------------------------------------------------------ checkpoint resume (A2)
+# ------------------------------------------------------------------ checkpoint resume
 async def test_completed_run_is_a_resume_noop(store, clock, conn):
     kite = FakeKite(one_minute_candle)
     job = _job(store, kite, clock, conn)
@@ -268,7 +268,7 @@ async def test_warmup_gap_aborts_whole_run_on_token_rejection(store, clock, conn
     assert report.fetched == []
 
 
-# ------------------------------------------------------------------ throttle wiring (A2)
+# ------------------------------------------------------------------ throttle wiring
 class _SpyLimiter:
     def __init__(self) -> None:
         self.acquired: list[str] = []
@@ -285,7 +285,7 @@ class _FakeKC:
 
 
 async def test_every_request_goes_through_the_rate_limiter(store, clock, conn):
-    """BackfillJob → KiteClient.historical → RateLimiter.acquire('historical') — the ≤3 req/s A2
+    """BackfillJob → KiteClient.historical → RateLimiter.acquire('historical') — the ≤3 req/s
     budget is enforced by the shared limiter, one acquire per chunk request."""
     spy = _SpyLimiter()
     real_client = KiteClient(_FakeKC(), spy, clock)
@@ -294,7 +294,7 @@ async def test_every_request_goes_through_the_rate_limiter(store, clock, conn):
     assert spy.acquired == ["historical"] * 3
 
 
-# ------------------------------------------------------------------ §2.6 step 4: warmup_gap
+# ------------------------------------------------------------------ warmup_gap
 async def test_warmup_gap_fills_half_open_range_src_gap_backfilled(store, clock, conn):
     base = dt.datetime(2026, 6, 17, 10, 0, tzinfo=IST)
 
@@ -319,7 +319,7 @@ async def test_warmup_gap_fills_half_open_range_src_gap_backfilled(store, clock,
     bars = store.get_bars_1m("RELIANCE", base, base + dt.timedelta(minutes=10))
     assert [b.ts_minute for b in bars] == [frm, frm + dt.timedelta(minutes=1),
                                            frm + dt.timedelta(minutes=2)]
-    assert {b.src for b in bars} == {"gap_backfilled"}          # §2.6 offline-span provenance
+    assert {b.src for b in bars} == {"gap_backfilled"}          # offline-span provenance
     assert bars[0].close == Decimal("102.5")
 
     # warmup_gap is NOT checkpointed — every startup computes its own gap.
@@ -390,7 +390,7 @@ async def test_warmup_gap_confirms_upstream_empty_minutes(store, clock, conn):
     # No synthetic bar: bars_1m holds the four real minutes and nothing at 09:57.
     assert [b.ts_minute for b in store.get_bars_1m("PTCIL", frm, to)] == traded
     assert store.no_trade_minutes("PTCIL", frm, to) == {quiet}
-    # …and §2.6 now sees contiguous coverage — the symbol is no longer refused all session.
+    # …and the startup recovery now sees contiguous coverage — the symbol is no longer refused all session.
     assert store.coverage_gaps("PTCIL", frm, to) == []
     assert store.has_contiguous_coverage("PTCIL", frm, to) is True
 

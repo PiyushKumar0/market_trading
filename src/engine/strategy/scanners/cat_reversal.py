@@ -1,4 +1,4 @@
-"""``cat_reversal`` SHADOW — story-level directional REVERSAL as a catalyst (§2.7, 2026-08-27).
+"""``cat_reversal`` SHADOW — story-level directional REVERSAL as a catalyst (2026-08-27).
 
 A SEPARATE shadow rule, not a variant of ``cat``. The event it originates on is not "good news
 arrived" but "**this story's own earlier bearish claim was reversed**" — a resolved-uncertainty
@@ -28,13 +28,12 @@ touches THEM: this module never imports ``cat``'s params, never reads ``cat.stop
 OWN — a future tuning of one must not silently move the other), and adds no condition to ``cat``'s
 event definition. Its validation CLOCK, however, is no longer the one opened 2026-08-18: the
 recency-decay best-cluster selection shipped alongside this rule can widen ``cat``'s originating
-population mid-window, which restarts the clock under WO-18's own pre-registration (§2.7, 2026-08-28
-amendment). That restart is the decay change's, not this rule's.
+population mid-window, which restarts the clock under its own pre-registration (2026-08-28). That restart is the decay change's, not this rule's.
 
 The consequence, stated plainly because it is a real cost: a reversal row satisfies ``cat`` v2's
 event too (``originating`` ∧ ``long`` ∧ age ≤ 1), so ONE reversal story yields TWO candidates — one
 per strategy — competing for the SAME ``catalyst_guard.max_catalyst_entries_day`` budget of 2. That
-is the intended trade (§2.7: share the cap, never add a second one), and it is affordable only
+is the intended trade (share the cap, never add a second one), and it is affordable only
 because neither strategy can reach RECOMMEND: what a doubled story spends is analyst calls and
 prescreen slots, not exposure. Narrowing ``cat`` to exclude reversal rows would be the alternative,
 and it is refused — it would change ``cat``'s in-flight event definition and restart its clock.
@@ -54,10 +53,10 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
 
 ``reversal_of`` is computed deterministically in the digest (``news_pipeline.reversal_source``): the
 same ``(symbol, event_type)`` story contains an EARLIER cluster that NAMED the symbol (direct entity
-resolution, never sector/theme fan-out), cleared the §2.7 inclusion floor on its own undecayed
+resolution, never sector/theme fan-out), cleared the inclusion floor on its own undecayed
 materiality, and carried the opposite (short) direction under the same ``sentiment_min_long``
 classification. No LLM judges "is this a denial of that", and no cross-day DB
-lookup is involved — it is a pure function of the corpus and the run's ``ran_at`` (§9.1).
+lookup is involved — it is a pure function of the corpus and the run's ``ran_at``.
 
 LEVELS — ``ins``/``cat`` semantics, unchanged
 ----------------------------------------------
@@ -68,40 +67,40 @@ at sweep time. So, identically to ``ins`` and ``cat``:
   freshest committed price at admission, read from ``bars_1d`` by the caller. A pre-open REFERENCE
   for a next-open fill, never a limit the market owes us.
 * ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**, from this strategy's OWN
-  ``cat_reversal.stop_pct``. A **disaster stop**: §7.1 sizing needs a risk distance, so one must
-  exist, and the §7.1 ``per_trade_risk.overnight_gap_mult`` arithmetic applies to a swing entry
-  (2.5x when chosen, 2.0x since O17; the ``ins`` 2026-08-17 correction). It is NOT the rule's exit.
+  ``cat_reversal.stop_pct``. A **disaster stop**: per-trade risk sizing needs a risk distance, so one must
+  exist, and the ``per_trade_risk.overnight_gap_mult`` arithmetic applies to a swing entry
+  (2.5x when chosen, 2.0x since owner decision 2026-09-24; the ``ins`` 2026-08-17 correction). It is NOT the rule's exit.
 * ``target`` = ``None``. The rule has no price target and will not invent one.
-* **Exit is TIME**: hold ``cat_reversal.hold_sessions`` sessions; the D2 time exit
+* **Exit is TIME**: hold ``cat_reversal.hold_sessions`` sessions; the time exit
   (``RecommendationPipeline.time_exit_check``) is the exit path. No exit code lives here.
 
 Rounding order is pinned as for ``brk20``/``ins``/``cat``: ``entry``/``stop`` are tick-rounded and
 coherence is checked AFTER rounding, so a stop that collapses onto the entry emits nothing rather
-than shipping ``stop >= entry`` into the §7.1 ``levels_coherent`` check.
+than shipping ``stop >= entry`` into the gate's ``levels_coherent`` check.
 
 Score = the reversal cluster's **weighted materiality**, clamped to [0, 1] — the digest's own
 strength measure for the cluster that won the row. Scores are compared only WITHIN a strategy (the
-§5.2(a) quantile funnel), so this scale need agree with no other scanner's.
+quantile funnel), so this scale need agree with no other scanner's.
 
 WHY THIS SHIPS WITHOUT AN EDGE, AND WHY THAT IS ENFORCED RATHER THAN ASSUMED
 ----------------------------------------------------------------------------
 There is deliberately **no ``cat_reversal.expected_edge_pct``** — no validated edge exists, and
-measuring one is the entire point of the shadow. Inventing a number to feed the §7.1 C3 gate would
+measuring one is the entire point of the shadow. Inventing a number to feed the cost gate would
 put a fabricated value into the gate's arithmetic, the exact failure ``ins`` documents against.
 
 That absence is NOT what keeps the rule out of RECOMMEND. ``cat_reversal`` is registered in
-``ops.main.NO_EDGE_SHADOW_STRATEGIES``, so C3 rejects it unconditionally, before ``target_price`` is
+``ops.main.NO_EDGE_SHADOW_STRATEGIES``, so the cost gate rejects it unconditionally, before ``target_price`` is
 even read — see ``risk/gate.py`` :data:`~engine.risk.gate._SHADOW_NO_EDGE` for why the property is
 declared there rather than inferred from a missing ``expected_edge_pct``. The funnel still journals
 the signal at prescreen admission (that IS the validation population) and the analyst still writes
 its thesis (a validation covariate); nothing reaches RECOMMEND. Wiring an edge, and with it RECOMMEND
-eligibility, is the §8.6 owner gate, contingent on the verdict below.
+eligibility, is the owner promotion gate, contingent on the verdict below.
 
 VERDICT CRITERIA, PRE-REGISTERED NOW (before any signal accumulates — binding, and frozen for the
 whole shadow window exactly as ``cat``'s are; moving one re-opens multiplicity and restarts the clock)
 
 * **Horizons: T+5 and T+10 net drift**, at next-session-open fills with spread-inclusive CNC costs and
-  the WO-3 margin floor. Reasoning, since these deliberately differ from ``cat`` v2's T+10/T+20:
+  the margin floor. Reasoning, since these deliberately differ from ``cat`` v2's T+10/T+20:
   - **T+5** is the mechanism's own horizon. A denial/refutation resolves a KNOWN uncertainty, and
     resolved-uncertainty repricing is fast — the residual this rule can actually reach (see the
     docstring's second section) is days, not the 2-4 weeks of fundamental post-event drift. Measuring
@@ -118,7 +117,7 @@ whole shadow window exactly as ``cat``'s are; moving one re-opens multiplicity a
   ~0.3-0.6/session, and a session bar that assumed ``cat``'s rate would close the study on a handful
   of events.
 * **Verdict:** net ≤ the cost floor at BOTH horizons ⇒ ``cat_reversal`` origination is RETIRED and the
-  reversal flag stays context/audit-only. Clears ⇒ §8.6 owner review, which is also where an
+  reversal flag stays context/audit-only. Clears ⇒ owner review, which is also where an
   ``expected_edge_pct`` (and thus RECOMMEND eligibility) would be wired.
 * **Starvation:** < 1 admitted signal per 20 sessions, sustained across the first 60 sessions, is a
   STARVATION finding about the EVENT's rarity (or the news corpus), not about the rule's expectancy.
@@ -143,7 +142,7 @@ from engine.strategy.types import SignalCandidate
 
 STRATEGY_ID = "cat_reversal"
 
-#: The grade / direction the rule originates on — the DIGEST's verdicts (§2.7 step 5(ii)), re-checked
+#: The grade / direction the rule originates on — the DIGEST's verdicts, re-checked
 #: here only so a caller that fetches the table unfiltered cannot widen the rule.
 ORIGINATING_GRADE = "originating"
 LONG_DIRECTION = "long"
@@ -153,19 +152,19 @@ LONG_DIRECTION = "long"
 #: story would enter it twice and double-count it in the shadow's signal population.
 MAX_EVENT_AGE_SESSIONS = 1
 
-#: Owner knobs (``settings.yaml`` ``cat_reversal:`` block), NOT §6.3 envelope rows, and frozen for the
+#: Owner knobs (``settings.yaml`` ``cat_reversal:`` block), NOT envelope rows, and frozen for the
 #: whole shadow window. Deliberately a SEPARATE block from ``cat``'s: these are two experiments, and a
 #: future tuning of one must never silently move the other.
 DEFAULT_PARAMS: dict[str, float] = {
-    "stop_pct": 5.0,             # disaster stop; the §7.1 overnight_gap_mult arithmetic (ins reasoning)
-    "hold_sessions": 10,         # the intended exit if the §8.6 gate ever opens = the longer
+    "stop_pct": 5.0,             # disaster stop; the overnight_gap_mult arithmetic (ins reasoning)
+    "hold_sessions": 10,         # the intended exit if the owner promotion gate ever opens = the longer
                                  # pre-registered horizon (T+10). INERT during the shadow: nothing is
-                                 # ever held, because C3 rejects every candidate by construction.
+                                 # ever held, because the cost gate rejects every candidate by construction.
 }
 
 
 class WatchlistRow(NamedTuple):
-    """One ``catalyst_watchlist`` row (§2.7 step 5(ii)), plus the price the caller looked up.
+    """One ``catalyst_watchlist`` row, plus the price the caller looked up.
 
     Structurally ``cat.WatchlistRow`` plus ``reversal_of``, and deliberately its own type rather than
     a shared one: the two rules' event definitions are pre-registered separately and must be free to
@@ -178,7 +177,7 @@ class WatchlistRow(NamedTuple):
     ``reversal_of`` is the digest's ``reversal_of`` column: the cluster_id of the earlier
     opposite-direction cluster this story reversed, or ``None`` for an ordinary row.
 
-    ``entry_id`` becomes the candidate's ``catalyst_ref``: the §6.5 audit link back to the exact
+    ``entry_id`` becomes the candidate's ``catalyst_ref``: the audit link back to the exact
     graded row — and through its ``cluster_refs``, to the headlines behind it.
     """
 
@@ -226,7 +225,7 @@ def scan_entry(
 
     Fails to ``None`` on a missing/non-positive/non-finite reference price or on tick-rounding
     degeneracy (a stop that does not survive rounding as strictly below the entry) — never raises on
-    ordinary data (§3.2.5 fail-to-zero posture). Assumes eligibility: :func:`sweep_watchlist` applies
+    ordinary data (fail-to-zero posture). Assumes eligibility: :func:`sweep_watchlist` applies
     :func:`is_eligible` first, and grading itself happened upstream in the digest.
 
     The arithmetic itself is ``_shadow_catalyst.build_candidate``, shared with ``cat``; what stays
@@ -242,8 +241,8 @@ def scan_entry(
 def sweep_watchlist(
     rows: Sequence[WatchlistRow], *, params: Mapping[str, float] | None = None
 ) -> list[SignalCandidate]:
-    """Filter today's watchlist rows to the rule's event, then translate each; deterministic order
-    (§9.6): score desc, symbol asc — matching ``cat``/``ins``/``brk20`` so the ranked-admission path
+    """Filter today's watchlist rows to the rule's event, then translate each; deterministic order:
+    score desc, symbol asc — matching ``cat``/``ins``/``brk20`` so the ranked-admission path
     sees one convention.
 
     The eligibility filter lives HERE rather than in the caller's query because for this rule the

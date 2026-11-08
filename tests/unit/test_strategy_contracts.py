@@ -1,4 +1,4 @@
-"""Per-strategy evaluation contracts (WO-20a): the registry itself.
+"""Per-strategy evaluation contracts: the registry itself.
 
 The contract block is what the analyst judges a candidate *inside*, so the properties that matter
 here are coverage (every shipped leg has a frame), honesty (every frame states its evidence status),
@@ -15,7 +15,7 @@ import pytest
 
 from engine.strategy.contracts import STRATEGY_CONTRACTS, UNKNOWN_CONTRACT, contract_text
 
-#: Every §6.1 deterministic origination leg. A new scanner without a contract must fail HERE, at the
+#: Every deterministic origination leg. A new scanner without a contract must fail HERE, at the
 #: cheapest possible place, rather than reaching the analyst with an UNKNOWN frame in production.
 EXPECTED_STRATEGIES = {"orb", "rsi2", "trend", "mom", "cat", "brk20", "ins", "cat_reversal", "hi52"}
 
@@ -36,7 +36,7 @@ def test_each_contract_is_non_empty_and_states_its_evidence_status(strategy_id: 
 def test_the_ins_contract_carries_its_three_load_bearing_clauses():
     """The 2026-08-19 HCLTECH decline in three assertions.
 
-    ``ins`` is the only validated edge (WO-16), its validation used unconditional next-open entries
+    ``ins`` is the only validated edge, its validation used unconditional next-open entries
     with no price/volume/trend filter, and it ships ``target=None`` by design. The decline cited
     below-VWAP/downtrend/day-plan-avoid — i.e. the expected entry population for insider-buy
     crossings, which cluster in drawdowns — and "no target, so reward cannot be framed".
@@ -48,7 +48,7 @@ def test_the_ins_contract_carries_its_three_load_bearing_clauses():
 
 
 def test_the_hi52_contract_carries_the_clauses_the_promotion_rests_on():
-    """`hi52` left SHADOW on 2026-09-12 as a FORWARD TEST (plan §8.6), and three clauses in its
+    """`hi52` left SHADOW on 2026-09-12 as a FORWARD TEST, and three clauses in its
     frame are what make that honest rather than a quiet upgrade.
 
     (1) It ships ``target=None`` by design — the drift was measured over the 20-session horizon,
@@ -56,7 +56,7 @@ def test_the_hi52_contract_carries_the_clauses_the_promotion_rests_on():
     not a decline ground. (2) Approach shape is not one either: the rule ITSELF now gates on the
     smooth-approach and no-gap-day filters, and the 09-09 backtest measured that judging shape a
     second time adds nothing. (3) The decline grounds are therefore stated EXHAUSTIVELY, the `ins`
-    shape — the funnel autopsy's E3/E4 class is an open door on any leg that leaves them implicit.
+    shape — the funnel autopsy's failure class is an open door on any leg that leaves them implicit.
     And the evidence status must say FORWARD TEST: neither validated nor shadow.
     """
     text = STRATEGY_CONTRACTS["hi52"]

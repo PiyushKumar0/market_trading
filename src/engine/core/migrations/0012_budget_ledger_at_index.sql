@@ -1,4 +1,4 @@
--- ------------------------------------------- §5.6 budget governor: index the ledger's time column
+-- ------------------------------------------- budget governor: index the ledger's time column
 -- 2026-09-12 (owner-directed): the governor's period became the SUBSCRIPTION's quota week (Thursday
 -- 14:00 IST → Thursday 14:00 IST), not the calendar month, so every spend query changed shape from
 -- ``WHERE month = ?`` to ``WHERE at >= ? AND at < ?``. ``idx_budget_month`` cannot serve that range

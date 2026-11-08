@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""hi52 PRE-REGISTERED backtest harness (IMPLEMENTATION_PLAN.md `hi52` addendum, 2026-09-01).
+"""hi52 PRE-REGISTERED backtest harness (`hi52` pre-registration, 2026-09-01).
 
-This is the §8.6 owner-gate input for the ``hi52`` SHADOW rule. It is an **event study**, not a
+This is the owner promotion-gate input for the ``hi52`` SHADOW rule. It is an **event study**, not a
 portfolio simulator (see "Sizing" below), run over the full-market ``bars_1d`` bhavcopy history with
 the engine idle.
 
@@ -15,7 +15,7 @@ set is evaluated — :data:`PRE_REGISTERED_PARAMS`, byte-identical to the live r
 neutralized, which is what those defaults WERE until the 2026-09-12 promotion made them gating;
 see that constant). There is no grid, no ``--proximity-min``
 flag, no optimizer and no "best of" selection anywhere in this module: the trial count cited to the
-§6.4 deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`), which is the honest count,
+deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`), which is the honest count,
 and ``fold_pass_min(1) = 60%``. Adding a knob that changes the signal definition would silently
 convert N=1 into N=k and invalidate every deflated number this script prints — if the rule is to be
 re-parameterised, that is a NEW pre-registration, not a flag on this one.
@@ -25,25 +25,24 @@ re-parameterised, that is a NEW pre-registration, not a flag on this one.
 three signal-time filters whose thresholds were FIXED on 2026-09-09, from the 2026-09-03
 full-sample medians, and written into this file (:data:`V2_SMOOTH_UP_FRAC_MIN` 0.55,
 :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` 0.07, :data:`V2_GAP_MAX` 0.05) BEFORE the run that measures
-them — smooth approach AND no gap day AND index members only (IMPLEMENTATION_PLAN §6.1 ``hi52``
-addendum, "Decided 2026-09-09"). Nothing here selects between v1 and v2, nothing pools them and
+them — smooth approach AND no gap day AND index members only (decided 2026-09-09). Nothing here selects between v1 and v2, nothing pools them and
 nothing max-picks them: they are reported side by side. But v2 IS a second trial of the same
 family, so the honest count becomes **N = 2** (:func:`trial_count_for`) and a v2 run cites
-``fold_pass_min(2)`` to the §6.4 machinery. The v1 path is untouched: under ``--registration v1``
+``fold_pass_min(2)`` to the research-validation machinery. The v1 path is untouched: under ``--registration v1``
 (the default) not one v2 constant is read, and the measured population, every split cell and every
 CPCV number are exactly what they were before this flag existed — the only v1 output difference is
 that the meta/header now names the registration. The RANK construct is NOT part of v2: it stays
 the v1 construct under both registrations and is labelled so in the notes.
 
 The two reported constructs are NOT two trials of one hypothesis: they are the two DIFFERENT
-constructs the plan block names (the platform's discrete trigger, and the George & Hwang academic
+constructs the pre-registration names (the platform's discrete trigger, and the George & Hwang academic
 continuous rank), each reported separately and never pooled or max-picked.
 
 ===============================================================================================
 CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to state)
 ===============================================================================================
 * **Signal (a) — discrete fresh cross.** ``engine.strategy.scanners.hi52.scan_daily`` is IMPORTED
-  and called; the crossing arithmetic is never re-implemented here (the plan's "live code MUST
+  and called; the crossing arithmetic is never re-implemented here (the "live code MUST
   consume the same crossing function" discipline, inherited from the ``ins`` leg). Rows are
   :class:`engine.strategy.scanners.brk20.DailyRow`, exactly as the live sweep builds them.
   For tractability over ~2000 symbols x ~1650 sessions the script first computes a VECTORIZED
@@ -64,7 +63,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   input to a signal is strictly before the decision timestamp, and the first price the study can
   book is the first price an order placed after that close could actually reach.
 * **Exit.** The CLOSE of the horizon session — ``return = close(T+k) / open(T+1) - 1``. This is the
-  convention of record in this repo: ``scripts/event_study.py`` (WO-16 ``next_open`` default, the
+  convention of record in this repo: ``scripts/event_study.py`` (``next_open`` default, the
   ``ins``/filings study that produced the promoted +0.73%/+1.58% T+10/T+20 numbers) measures exactly
   ``close_(T+k) / open_(T+1)``. Horizons are TRADING SESSIONS: T+5, T+10, T+20.
 * **Event admission.** A signal is measured only if all of ``T+1 .. T+20`` exist in that symbol's
@@ -73,7 +72,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   therefore comparable (``event_study.measure_directional`` drops on the same rule).
 * **Costs.** ONE full round trip per trade, both legs, from the repo's single source of truth:
   ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread
-  (WO-2), charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
+  charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
   size). CNC/delivery, never MIS: hi52 is a 5-20 session swing rule and cash equities cannot be held
   overnight under MIS. ``breakeven_pct`` (not ``fee_breakeven_pct``) is deliberate — the fees-only
   view is the contract-note anchor, not a viability number, and spread is not modelled separately
@@ -107,10 +106,10 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   (skfolio ``CombinatorialPurgedCV``, 6 folds / 2 test folds) — over a per-signal-day series of
   cost-adjusted returns: day *t*'s observation is the mean NET %-return of the trades signalled on
   *t*, divided by the horizon in sessions, i.e. a per-session net return directly comparable with
-  the WO-3 margin floor. Purge and embargo are raised from the §6.4 default 5 to **the horizon
+  the margin floor. Purge and embargo are raised from the default 5 to **the horizon
   itself** (5/10/20 observations) because an event study at horizon N has N sessions of overlap
   between neighbouring signals; leaving them at 5 would leak a T+20 trade across the fold boundary.
-  Deflation/promotion is the repo's ``promotion_decision`` with ``n=1`` and the WO-3 margin floor,
+  Deflation/promotion is the repo's ``promotion_decision`` with ``n=1`` and the margin floor,
   with ``margin_floor_days`` set to the horizon (the floor's own derivation: "a position must, over
   the horizon it is ACTUALLY held, earn at least the one round trip it costs to hold it"). If
   skfolio is unavailable or the split is degenerate the script falls back to a self-implemented
@@ -208,7 +207,7 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 #: live rule, so the drift guard this constant exists for is unchanged.
 PRE_REGISTERED_PARAMS: dict[str, float] = dict(hi52.V1_PARAMS)
 
-#: Trial count cited to the §6.4 deflation machinery. ONE parameter set, no sweep (see the module
+#: Trial count cited to the deflation machinery. ONE parameter set, no sweep (see the module
 #: docstring). Not a knob.
 TRIAL_COUNT_N = 1
 
@@ -223,7 +222,7 @@ REGISTRATION_V2 = "v2"
 REGISTRATIONS: tuple[str, ...] = (REGISTRATION_V1, REGISTRATION_V2)
 
 #: v2's three signal-time thresholds. FIXED 2026-09-09 from the 2026-09-03 full-sample medians and
-#: written here BEFORE the run that measures them (plan §6.1 addendum) — they are knowable at signal
+#: written here BEFORE the run that measures them — they are knowable at signal
 #: time going forward, which is exactly what the DESCRIPTIVE median-based smooth/jumpy cut is not.
 #: Kept as LITERALS, never derived from ``hi52.DEFAULT_PARAMS``: this is the historical registration
 #: record, and a future retune of the live rule must break the coupling test rather than silently
@@ -240,7 +239,7 @@ V2_SMOOTH_MAX_DAY_MOVE_MAX = 0.07   # max |close/prev - 1| over the same 20 sess
 V2_GAP_MAX = GAP_DAY_PCT / 100.0
 
 #: v2 reject reasons. A signal failing several is counted ONCE, against the FIRST reason in this
-#: order (the order the plan states the filters in), so the three counts partition the rejects and
+#: order (the order the filters were registered in), so the three counts partition the rejects and
 #: ``total`` is the number of v1 signals v2 dropped — never a sum of overlapping tallies.
 V2_VETO_SMOOTH = "smooth"
 V2_VETO_GAP = "gap"
@@ -286,7 +285,7 @@ def trial_count_for(registration: str) -> int:
         ) from None
 
 HORIZONS: tuple[int, ...] = (5, 10, 20)          # trading sessions
-REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size (§6.4/§7.1)
+REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 RANK_TOP_DECILE = 0.10
 
@@ -456,8 +455,8 @@ def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set
 
     Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the CORE-index runtime cache
     beside the DB (``<data>/universe/core_index_cached.csv``) -> the committed NIFTY 500 seed. Both
-    file names, and the seed's index, changed with O15 (2026-09-04) when the eligible index became
-    config (NIFTY 500). O18 (2026-10-08) widened the eligible index to NIFTY Total Market, so
+    file names, and the seed's index, changed with owner decision 2026-09-04 when the eligible index became
+    config (NIFTY 500). Owner decision 2026-10-08 widened the eligible index to NIFTY Total Market, so
     ``index_cached.csv`` no longer holds the population hi52's edge was measured on; this reads the
     CORE list instead (``universe.core_index_*``, NIFTY 500), and a run against an older DB tree
     simply falls through to the committed seed. Parsing reuses the universe builder's own
@@ -638,7 +637,7 @@ def v2_admits(
 ) -> bool:
     """Whether the v2 registration admits the v1 signal at ``i`` (2026-09-09 pre-registration).
 
-    Three fixed signal-time filters, evaluated in the plan's own order and counted FIRST-MATCH so
+    Three fixed signal-time filters, evaluated in the pre-registered order and counted FIRST-MATCH so
     the reasons partition the rejects (see :data:`V2_VETO_REASONS`). A diagnostic that could not be
     computed (``nan``) is a REJECT, never a pass: v2's claim is that the filters were satisfied at
     signal time, and an unknowable value did not satisfy them.
@@ -801,7 +800,7 @@ def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date],
     """Per-SIGNAL-DAY cost-adjusted return series for one horizon.
 
     Day *t* = mean NET %-return of the trades signalled on *t*, divided by ``horizon`` sessions, so
-    the value is a per-session net return in percent — the same units the WO-3 margin floor
+    the value is a per-session net return in percent — the same units the margin floor
     (%/day) and ``ValidationPipeline``'s cost-adjusted daily series are quoted in.
     """
     by_day: dict[date, list[float]] = defaultdict(list)
@@ -816,9 +815,9 @@ def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date],
 def cpcv_report(
     trades: Sequence[Trade], horizon: int, cost_pct: float, trial_count: int = TRIAL_COUNT_N
 ) -> dict[str, Any]:
-    """CPCV + the §6.4/WO-3 deflated promotion decision for one construct at one horizon.
+    """CPCV + the deflated promotion decision for one construct at one horizon.
 
-    Purge and embargo are the HORIZON, not the §6.4 default 5: at horizon N a signal's trade overlaps
+    Purge and embargo are the HORIZON, not the default 5: at horizon N a signal's trade overlaps
     the next N sessions of signals, so a 5-observation purge leaks a T+20 trade straight across the
     fold boundary.
 
@@ -997,7 +996,7 @@ def run_study(
         if len(scored) < 10:                       # a decile of fewer than 10 names is not a decile
             continue
         n_rebalances_used += 1
-        scored.sort(key=lambda x: (-x[0], x[1]))   # deterministic: prox desc, symbol asc (§9.6)
+        scored.sort(key=lambda x: (-x[0], x[1]))   # deterministic: prox desc, symbol asc
         cut = max(1, int(math.ceil(len(scored) * RANK_TOP_DECILE)))
         for bucket, construct, sink in (
             (scored[:cut], CONSTRUCT_RANK_TOP, rank_top),
@@ -1040,7 +1039,7 @@ def run_study(
     # WHY registration-aware (2026-09-09): hard-coding "N=1" here contradicted the v2 note three
     # lines below, which cites N=2 — one report asserting both counts. The f-string reads the SAME
     # trial_count the CPCV blocks are deflated at, so the note cannot drift from the machinery. At
-    # trial_count = 1 it renders byte-for-byte the string this note has always been (plan §6.4).
+    # trial_count = 1 it renders byte-for-byte the string this note has always been.
     notes.append(
         f"NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N={trial_count} "
         f"(fold_pass_min = {fold_pass_min(trial_count):.0%})."
@@ -1205,7 +1204,7 @@ def run_study(
 
 
 # =============================================================================== rendering
-#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the §6.4
+#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the
 #: ``promotion_decision`` reasons use em dashes, the cost model quotes rupees). The JSON artifact
 #: keeps the original text verbatim; only the CONSOLE rendering is folded to ASCII, because a
 #: Windows console at cp1252 cannot print a rupee sign or an arrow and would kill the run on the
@@ -1393,7 +1392,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="reference per-trade notional the round-trip cost is quoted at")
     ap.add_argument("--symbols", default=None, help="comma-separated symbol subset (smoke runs)")
     ap.add_argument("--max-symbols", type=int, default=None, help="cap the symbol count (smoke runs)")
-    # ``--index-csv`` is the reading name since O15 (2026-09-04, index became config); the original
+    # ``--index-csv`` is the reading name since owner decision 2026-09-04 (index became config); the original
     # ``--nifty200-csv`` stays as an alias onto the SAME dest so recorded run commands, COMMANDS.md
     # entries and the harness tests keep working verbatim. dest is pinned because argparse would
     # otherwise derive it from the first option string and silently orphan ``args.nifty200_csv``.

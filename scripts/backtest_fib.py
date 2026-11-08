@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Fibonacci retracement study (IMPLEMENTATION_PLAN §3 "Fibonacci retracement study", registered 2026-11-04).
+"""Fibonacci retracement study (registered 2026-11-04).
 
 F1: a limit at a retracement depth of the 60-session up-leg (``edge/fib_pullback``, N = 3), with the
 non-Fibonacci neighbours as controls. F2: do completed pullbacks stop near the Fibonacci depths
-(``price_structure/fib``, N = 1). F3: Fibonacci confluence on C2's swing populations
+(``price_structure/fib``, N = 1). F3: Fibonacci confluence on the selection-filter study's swing populations
 (``selection_filter/<strategy>``). F4: brk20's limit at a Fibonacci retracement of the breakout leg against
 V2-5 (``entry_mechanism/brk20``, N = 6). Arm (ii) construct and cost throughout (``backtest_regime_filter``).
 Evidence only; SUPPORTED goes to the owner and wires nothing. Never run before the pre-registration is
@@ -36,7 +36,7 @@ rf = rc._load_script("backtest_regime_filter")
 hv = rc._load_script("backtest_hvol")
 bb = rc.bb
 
-#: The registration date (IMPLEMENTATION_PLAN §3), set by the commit that registers the study; until then
+#: The registration date, set by the commit that registers the study; until then
 #: every run is refused.
 REGISTERED: date | None = date(2026, 11, 4)
 SEED = 20261104

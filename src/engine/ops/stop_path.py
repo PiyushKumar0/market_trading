@@ -40,7 +40,7 @@ def make_stop_handler(
       0.85-1.4 s after ``stop_requested``, mid shutdown-backup, so the clean stop was never committed).
     * A signal AFTER the grace window: hard exit (the owner's deliberate second Ctrl-C for a wedged
       stop). State stays RUNNING (never committed STOPPED) so the next boot runs crash recovery — that is
-      BY DESIGN; R3 protection is broker-resident, not process-local.
+      BY DESIGN; protection is broker-resident, not process-local.
     """
     state: dict[str, float | int] = {"count": 0, "first_at": 0.0}
 
@@ -117,7 +117,7 @@ def hard_exit(code: int) -> NoReturn:
 
     After ``main()`` returns, interpreter shutdown joins non-daemon threads and ``concurrent.futures``'
     atexit hook joins executor workers WITHOUT a timeout. A single wedged worker (blocked DuckDB op, a
-    long feature snapshot, a hung HTTP call) then hangs the process forever — still holding the §2.6
+    long feature snapshot, a hung HTTP call) then hangs the process forever — still holding the
     instance lock and heartbeat, a zombie that blocks every future start until it is killed by hand
     (exactly what happened at 13:34). ``os._exit`` skips those joins entirely, so a wedged worker can
     never zombify the process. Runs ONLY from ``engine.ops.main.main()`` (never at import), so tests

@@ -1,8 +1,8 @@
-"""Order-surface guard (A7, §3.5.3 predicate (a) / B7): position-opening broker calls must be
+"""Order-surface guard: position-opening broker calls must be
 structurally impossible outside AUTO ∧ NORMAL ∧ in-window. ``KiteClient`` never imports
 ``engine.risk`` — the guard is a plain callback the wiring layer injects; here we use the composition
 root's own ``make_order_guard`` and prove every gated path routes through it before the rate limiter
-is even touched. D8: a client built without ``orders_enabled`` refuses every order/GTT call outright."""
+is even touched. A client built without ``orders_enabled`` refuses every order/GTT call outright."""
 
 from __future__ import annotations
 
@@ -115,7 +115,7 @@ async def test_orders_disabled_refuses_before_guard_and_limiter(clock, rate_limi
 # --------------------------------------------------------------------------- (1) entry blocked
 @pytest.mark.asyncio
 async def test_entry_blocked_in_recommend_mode(conn, clock, rate_limiter, mm, kill) -> None:
-    """B7: zero opening calls in Phase 2 — RECOMMEND is not AUTO, so entry is blocked."""
+    """Zero opening calls — RECOMMEND is not AUTO, so entry is blocked."""
     await mm.request_transition(Mode.RECOMMEND, Actor.OWNER)
     fake_kc = _FakeKC()
     client = _client(fake_kc, rate_limiter, clock, _guard(conn, mm, kill, clock))
@@ -175,7 +175,7 @@ async def test_entry_succeeds_in_auto_normal_in_window(conn, clock, rate_limiter
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start_mode", [None, Mode.RECOMMEND], ids=["off", "recommend"])
 async def test_risk_reducing_bypasses_mode_gate(conn, clock, rate_limiter, mm, kill, start_mode) -> None:
-    """R3 mode invariant: risk-reducing place/modify/cancel succeed regardless of mode — OFF and
+    """Mode invariant: risk-reducing place/modify/cancel succeed regardless of mode — OFF and
     RECOMMEND included — even outside the window and with no mode transition to AUTO."""
     if start_mode is not None:
         await mm.request_transition(start_mode, Actor.OWNER)

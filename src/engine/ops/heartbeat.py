@@ -1,24 +1,24 @@
-"""Liveness heartbeat writer + process-liveness probe (§2.2/§4.2, pinned).
+"""Liveness heartbeat writer + process-liveness probe.
 
 While the engine runs, ``engine_lifecycle.last_alive_at`` is refreshed every
 ``lifecycle.heartbeat_write_s`` (default 20 s) by a **dedicated OS thread doing a direct ``sqlite3``
-UPDATE — NOT the asyncio loop** (§2.2). A legitimately busy loop (multi-day catch-up backfill, a long
+UPDATE — NOT the asyncio loop**. A legitimately busy loop (multi-day catch-up backfill, a long
 DuckDB scan) therefore cannot starve the heartbeat and self-alarm the out-of-band watchdog. The thread
 owns its **own** sqlite3 connection (opened inside the thread; never shared with the loop's
-connection), started at §2.6 step-0 boot right after the atomic RUNNING commit and stopped with a
+connection), started at boot right after the atomic RUNNING commit and stopped with a
 clean ``join`` after the STOPPED commit at shutdown.
 
 A missed write is logged and retried on the next interval — the heartbeat must never crash the
 engine; the watchdog's ``down_stale_s`` (~3× the write interval) absorbs transient failures.
 
-Also home to :func:`pid_alive` — the OS process-liveness probe used by the §2.6 step-0
+Also home to :func:`pid_alive` — the OS process-liveness probe used by the boot-time
 single-instance guard (prior ``state ∈ {RUNNING, STOPPING}`` + prior pid ALIVE ⇒ refuse to start).
 On Windows this uses ``ctypes`` ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` +
 ``GetExitCodeProcess`` (a pid whose process has exited — or was never ours — probes dead); the POSIX
 fallback is ``os.kill(pid, 0)``. Documented caveats: pid reuse can rarely alias a dead engine to an
 unrelated live process (the guard then refuses a start that manual inspection must clear), and
 ``STILL_ACTIVE`` (259) is Windows' sentinel exit code. ``scripts/watchdog.py`` carries its own copy of
-this probe — it may import only ``core.secrets``/``core.config``/httpx/stdlib (§3.2.12), never
+this probe — it may import only ``core.secrets``/``core.config``/httpx/stdlib, never
 ``engine.ops``.
 """
 
@@ -39,7 +39,7 @@ _STILL_ACTIVE = 259  # Windows GetExitCodeProcess sentinel for a running process
 
 
 def pid_alive(pid: int | None) -> bool:
-    """True iff ``pid`` names a live OS process (§2.6 step-0 single-instance probe)."""
+    """True iff ``pid`` names a live OS process (boot-time single-instance probe)."""
     if not pid or pid <= 0:
         return False
     if sys.platform == "win32":
@@ -65,7 +65,7 @@ def pid_alive(pid: int | None) -> bool:
 
 
 class HeartbeatWriter:
-    """The dedicated-thread ``engine_lifecycle.last_alive_at`` writer (§2.2 pinned mechanism).
+    """The dedicated-thread ``engine_lifecycle.last_alive_at`` writer.
 
     Parameters
     ----------
@@ -73,7 +73,7 @@ class HeartbeatWriter:
         Path to ``state.db``. The thread opens its OWN connection against it (WAL mode set by the
         engine's main connection makes concurrent one-row UPDATEs safe).
     clock:
-        The single source of "now" (§3.2) — ``Clock.now()`` is a pure call, safe off-loop.
+        The single source of "now" — ``Clock.now()`` is a pure call, safe off-loop.
     interval_s:
         Write cadence (``lifecycle.heartbeat_write_s``).
     """
@@ -89,7 +89,7 @@ class HeartbeatWriter:
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
-        """Start the heartbeat thread (idempotent). Called at §2.6 step 0, right after the atomic
+        """Start the heartbeat thread (idempotent). Called at boot, right after the atomic
         RUNNING commit — the boot commit itself wrote the first fresh ``last_alive_at``."""
         if self._thread is not None and self._thread.is_alive():
             return
@@ -101,7 +101,7 @@ class HeartbeatWriter:
     def stop(self, timeout_s: float = 10.0) -> None:
         """Signal the thread and join it cleanly (idempotent). Called after the STOPPED commit —
         keeping the heartbeat alive through STOPPING means a long shutdown guard is never mistaken
-        for a wedge by the watchdog (§2.2)."""
+        for a wedge by the watchdog."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout_s)
@@ -118,7 +118,7 @@ class HeartbeatWriter:
     def _run(self) -> None:
         conn: sqlite3.Connection | None = None
         try:
-            # Own connection, opened inside the thread — never the loop's (§2.2). isolation_level=None
+            # Own connection, opened inside the thread — never the loop's. isolation_level=None
             # = autocommit: each one-row UPDATE commits on its own, so no implicit transaction is
             # ever left open across beats.
             conn = sqlite3.connect(self._db_path, timeout=5.0, isolation_level=None)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""``tdc`` PRE-REGISTERED backtest harness (IMPLEMENTATION_PLAN.md `tdc` pre-registration, 2026-09-04).
+"""``tdc`` PRE-REGISTERED backtest harness (pre-registered 2026-09-04).
 
-Trend-day continuation, intraday. This is the §8.6 owner-gate input for hypothesis **H1**:
+Trend-day continuation, intraday. This is the owner-promotion-gate input for hypothesis **H1**:
 
     on a session where a NIFTY200 stock shows ACCEPTANCE above its opening range with sustained
     PARTICIPATION and RELATIVE STRENGTH by late morning, the move continues into the close net of
@@ -12,19 +12,19 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
 :data:`PARAMS` dict and one :data:`VARIANTS` dict, both fixed at import time and both transcribed
-from the plan paragraph. Every variant in :data:`VARIANTS` is REPORTED; none is SELECTED, ranked,
-or promoted over another. The plan's robustness list (``T`` in {10:30, 12:00}; ``rvol_min`` in
+from the pre-registration. Every variant in :data:`VARIANTS` is REPORTED; none is SELECTED, ranked,
+or promoted over another. The pre-registered robustness list (``T`` in {10:30, 12:00}; ``rvol_min`` in
 {1.2, 2.0}; ``stop`` in {0.5%}) exists precisely so the reader can see whether H1's number is a
 knife edge - it is not a menu. The CLI exposes no flag that changes a signal parameter; adding one
 would silently convert this study from "one pre-registered rule plus its stated robustness checks"
 into a grid search, and would invalidate every number printed here.
 
-``promotable`` is the plan's own boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
+``promotable`` is the pre-registration's own boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
 ``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a refutation, and this
 script says so in exactly those terms; no other language about deployment appears anywhere in it.
 
 ===============================================================================================
-THE RULE (transcribed from the plan; every clause is evaluated at the T bar CLOSE)
+THE RULE (transcribed from the pre-registration; every clause is evaluated at the T bar CLOSE)
 ===============================================================================================
 For each eligible symbol on each session, at the decision bar ``T`` (default the 11:00 IST bar):
 
@@ -36,7 +36,7 @@ For each eligible symbol on each session, at the decision bar ``T`` (default the
   - ``OR high`` is ``max(high)`` over the bars ``09:15..09:29`` - the first fifteen 1m bars, i.e.
     the 09:15-09:30 opening range. ``ts_minute`` is the bar's minute START (``engine.core.types.Bar``),
     so the 09:29 bar is the last bar of that range and the 09:30 bar is not in it.
-  - PINNED INTERPRETATION (the plan's phrase "the last 15 one-minute closes all > VWAP" does not say
+  - PINNED INTERPRETATION (the pre-registration's phrase "the last 15 one-minute closes all > VWAP" does not say
     *which* VWAP): each of those 15 closes is compared with the RUNNING session VWAP AT ITS OWN
     MINUTE, ``close(m) > VWAP(m)``, not with the single value ``VWAP(T)``. That is the causal reading
     (every comparison uses only bars at or before its own minute), and it is what "acceptance" means
@@ -81,7 +81,7 @@ LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here 
 COSTS
 ===============================================================================================
 ``CostModel.breakeven_pct(notional, "MIS")`` - ONE full round trip, statutory fees PLUS the measured
-bid-ask spread (WO-2), at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
+bid-ask spread, at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
 on EACH side, charged as ``2 * tick / entry_px * 100`` percent, so the slippage term is larger for a
 cheap stock exactly as it is in life. MIS, never CNC: this is an intraday leg squared off the same
 session. ``breakeven_pct`` (not ``fee_breakeven_pct``) is deliberate - the fees-only view is the
@@ -90,9 +90,9 @@ the *queue* cost of crossing, the spread inside ``breakeven_pct`` is the quoted 
 leg, and both are real.
 
 ===============================================================================================
-INDEX PROXY (owner/manager-directed 2026-09-04, recorded as a deviation from the plan text)
+INDEX PROXY (owner/manager-directed 2026-09-04, recorded as a deviation from the pre-registered text)
 ===============================================================================================
-The plan says "NIFTY 50 1m for RS". ``bars_1m`` carries "NIFTY 50" only from 2026-07-22, while stock
+The pre-registration says "NIFTY 50 1m for RS". ``bars_1m`` carries "NIFTY 50" only from 2026-07-22, while stock
 1m history begins 2023-07-17. For sessions before the index series starts, condition (iii)'s index
 return is the EQUAL-WEIGHT MEAN of ``ret_from_open(T)`` across that session's own eligible universe.
 That is a proxy, not the index: it is equal- rather than free-float-weighted, and its constituent set
@@ -103,7 +103,7 @@ the subset of sessions where the true index series was used - the proxy's effect
 comparing the two, and no number in this report depends on the reader trusting the proxy.
 
 ===============================================================================================
-ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
+ATR% TERCILE SPLIT (pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
 ===============================================================================================
 The 2026-09-11 rebuttal argued that intraday alpha lives in high-beta / high-ATR names and that
 every refuted intraday family was measured on the POOLED NIFTY 200/500 universe. That claim is
@@ -176,8 +176,8 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.indicators import wilder_atr  # noqa: E402
 
 # ================================================================================================
-# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from IMPLEMENTATION_PLAN.md, the `tdc`
-# pre-registration paragraph (the one immediately before WO-20). Not a knob, not a grid, not
+# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from the `tdc`
+# pre-registration. Not a knob, not a grid, not
 # reachable from the CLI.
 # ================================================================================================
 PARAMS: dict[str, Any] = {
@@ -206,8 +206,8 @@ PARAMS: dict[str, Any] = {
     # --- splits
     "breadth_trend_day_min": 0.5,      # share of eligible universe above its OR high at T
     "sector_confirm_min_others": 2,    # variant C: OTHER same-sector passers required
-    "atr_lookback_sessions": 14,       # R3 split: DAILY sessions strictly before the signal day
-    # --- the plan's promotion rule (a boolean, not a recommendation)
+    "atr_lookback_sessions": 14,       # ATR% split: DAILY sessions strictly before the signal day
+    # --- the pre-registered promotion rule (a boolean, not a recommendation)
     "promote_min_n": 200,
     "promote_min_t": 2.0,
     "promote_min_cpcv_positive_share": 0.60,
@@ -218,7 +218,7 @@ PARAMS: dict[str, Any] = {
 
 # ================================================================================================
 # EVERY VARIANT IS REPORTED. NONE IS SELECTED. Each value is an override applied on top of PARAMS.
-# H1 is the hypothesis; B is the owner's observed pattern; the rest are the plan's stated robustness
+# H1 is the hypothesis; B is the owner's observed pattern; the rest are the pre-registration's stated robustness
 # checks; C is the manager-added sector-confirmation leg (computable because `sector_map` exists).
 # ================================================================================================
 VARIANTS: dict[str, dict[str, Any]] = {
@@ -267,8 +267,8 @@ ATR_SPLIT_DEFINITION = (
 #: the bars_1d pull to the measured symbols.
 ATR_DAILY_WARMUP_DAYS = 120
 
-#: The plan text's stated 1m floor. The store actually holds 1m bars from 2023-07-17; this date is
-#: kept only so the plan's literal window is reported as its own split cell.
+#: The pre-registration's stated 1m floor. The store actually holds 1m bars from 2023-07-17; this date is
+#: kept only so the pre-registration's literal window is reported as its own split cell.
 PLAN_STATED_1M_FLOOR = date(2025, 7, 10)
 
 _CV_SKFOLIO = "cpcv_skfolio_CombinatorialPurgedCV"
@@ -299,7 +299,7 @@ class Trade:
     catalyst_at_T: bool
     catalyst_split_covered: bool
     sector: str | None = None
-    #: R3 split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
+    #: ATR% tercile split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
     #: the sessions before the signal day, and the tercile cell it falls in (None = unclassified).
     atr_pct: float | None = None
     atr_cell: str | None = None
@@ -342,7 +342,7 @@ def _shift(s: str, minutes: int) -> str:
 def acceptance_window(decision_time: str, n_bars: int) -> tuple[str, str]:
     """The ``[start, end]`` inclusive minute range of the ``n_bars`` closes immediately BEFORE T.
 
-    For T = 11:00 and 15 bars this is ``("10:45", "10:59")`` - the plan's own window. It is derived
+    For T = 11:00 and 15 bars this is ``("10:45", "10:59")`` - the pre-registered window. It is derived
     from T rather than hard-coded so the T=10:30 / T=12:00 robustness cells shift with it.
     """
     return _shift(decision_time, -n_bars), _shift(decision_time, -1)
@@ -728,7 +728,7 @@ def rvol_medians(
     The window is the ``lookback`` sessions immediately preceding ``d`` in the GLOBAL session list -
     strictly prior, so today's own volume can never enter its own denominator. A symbol-day whose
     window holds fewer than ``min_valid`` usable priors gets NO entry here and is counted as a skip:
-    the plan says skip, not "use a thinner median".
+    the pre-registration says skip, not "use a thinner median".
     """
     pos = {d: i for i, d in enumerate(sessions)}
     out: dict[str, dict[date, float]] = {}
@@ -867,7 +867,7 @@ def daily_net_series(trades: Sequence[Trade]) -> tuple[list[date], np.ndarray]:
 def cpcv_positive_share(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
     """CPCV over the per-session net series; the reported share is (splits with test mean > 0) / all.
 
-    Purge and embargo are the ``engine.learning.validate`` §6.4 defaults (5 observations each), which
+    Purge and embargo are the ``engine.learning.validate`` defaults (5 observations each), which
     is what ``hi52`` inherited. ``hi52`` raised them to its holding horizon because a 20-session swing
     overlaps its neighbours; a ``tdc`` trade is opened and closed inside ONE session, so consecutive
     observations do not overlap at all and the default is already strictly more conservative than the
@@ -909,7 +909,7 @@ def cpcv_positive_share(trades: Sequence[Trade], params: dict[str, Any]) -> dict
 
 
 def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
-    """``n``, mean/median net %, win rate, t-stat, CPCV positive share, and the plan's boolean.
+    """``n``, mean/median net %, win rate, t-stat, CPCV positive share, and the pre-registration's boolean.
 
     ``t = mean / (sd / sqrt(n))`` with the SAMPLE standard deviation (ddof=1), over TRADES. The
     honest caveat is stated in the report rather than hidden: the day's five picks are correlated, so
@@ -946,7 +946,7 @@ def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
 def split_cells(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, list[Trade]]:
     """Every mandatory split, as named cells. The pooled number is never the only number.
 
-    The four ATR% cells (R3, 2026-09-12) are a PARTITION of the same trades: the three terciles plus
+    The four ATR% cells (2026-09-12) are a PARTITION of the same trades: the three terciles plus
     the symbol-days whose ATR% is not computable, so their counts sum to ``SPLIT_ALL`` exactly.
     """
     b = float(params["breadth_trend_day_min"])
@@ -1195,7 +1195,7 @@ def run_study(
                 },
             }
 
-    # ---------------------------------------------------------------- the ATR% tercile split (R3)
+    # ---------------------------------------------------------------- the ATR% tercile split
     # Runs AFTER every variant's trades exist and changes none of them: it only labels each trade
     # with the daily volatility of the sessions BEFORE its signal day. bars_1d is read here and
     # nowhere else in this study.

@@ -1,6 +1,6 @@
-"""Paper autopilot on/off and reset request over the single ``paper_state`` row (plan Q4.0).
+"""Paper autopilot on/off and reset request over the single ``paper_state`` row.
 
-The row is created disabled on first use. Reset is only recorded here; Q4.8 carries it out.
+The row is created disabled on first use. Reset is only recorded here; the paper-risk tick carries it out.
 """
 
 from __future__ import annotations

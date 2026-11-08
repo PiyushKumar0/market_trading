@@ -1,11 +1,11 @@
-"""Shared NSE HTTP hardening — cookie priming, browser headers, bounded retry (A3/A4, E5).
+"""Shared NSE HTTP hardening — cookie priming, browser headers, bounded retry.
 
 NSE's ``www.nseindia.com/api/*`` JSON endpoints mint anti-bot cookies (``nsit``/``nseappid``/
 ``bm_sv``/``ak_bmsc``) only after the homepage ``https://www.nseindia.com/`` has been fetched on the
 same client; without those cookies the edge returns a **deliberately-misleading 404** (not 403), which
-is exactly how ``corp_actions`` failed (see ``runbooks/boot-log-investigation-2026-07-10.md`` §A3). The
+is exactly how ``corp_actions`` failed. The
 archives host ``nsearchives.nseindia.com`` tarpits the default python-httpx UA and has no anti-bot
-cookie gate, but a slow file-drop can time out with no retry (``bhavcopy``, §A4).
+cookie gate, but a slow file-drop can time out with no retry (``bhavcopy``).
 
 :func:`nse_get` is the single funnel every best-effort NSE feed (``engine.datafeeds.*`` and
 ``engine.universe.surveillance``) fetches through. It lives in ``engine.core`` — the foundation layer
@@ -41,7 +41,7 @@ _NSE_HOME_URL = "https://www.nseindia.com/"
 _NSE_WWW_HOST = "www.nseindia.com"
 
 #: Canonical browser-shaped headers — the single source of truth (each feed imports THIS; no per-feed
-#: copy drifts). NSE rejects the default ``python-httpx`` UA outright (anti-bot [likely], §A3/A4).
+#: copy drifts). NSE rejects the default ``python-httpx`` UA outright (anti-bot [likely]).
 NSE_HEADERS = {
     "User-Agent": BROWSER_USER_AGENT,
     "Accept": "application/json, text/plain, */*",
@@ -49,7 +49,7 @@ NSE_HEADERS = {
     "Referer": "https://www.nseindia.com/",
 }
 
-#: The "deliberately-misleading" statuses NSE returns for an un-cookied ``/api/*`` request (§A3): a
+#: The "deliberately-misleading" statuses NSE returns for an un-cookied ``/api/*`` request: a
 #: 404 that is really "no cookies", not "no such resource" — so we re-prime + retry once before trusting it.
 _ANTIBOT_STATUSES = frozenset({401, 403, 404})
 
@@ -67,7 +67,7 @@ _sleep = asyncio.sleep
 async def _prime(http: httpx.AsyncClient) -> None:
     """Best-effort homepage GET to mint the anti-bot cookie jar; marks the client primed regardless.
 
-    A failed prime is swallowed + logged (never blocks the real fetch, E5): the subsequent ``/api``
+    A failed prime is swallowed + logged (never blocks the real fetch): the subsequent ``/api``
     GET may still 4xx, which the caller re-primes on. The client is marked primed either way so a
     down homepage cannot trigger a prime storm — the anti-bot retry path is the recovery route.
     """
@@ -83,12 +83,12 @@ async def _prime(http: httpx.AsyncClient) -> None:
 async def nse_get(
     http: httpx.AsyncClient, url: str, *, timeout: float, attempts: int = 3
 ) -> httpx.Response:
-    """GET ``url`` with browser headers, one-time cookie priming (www only), and bounded retry (A3/A4).
+    """GET ``url`` with browser headers, one-time cookie priming (www only), and bounded retry.
 
     ``attempts`` bounds the number of GETs of ``url`` (the anti-bot re-prime retry and the transient
     backoff retries all draw from this same budget). The final failure re-raises unchanged — the
     ``httpx`` exception on a persistent transient error, or ``HTTPStatusError`` via ``raise_for_status``
-    on a persistent 4xx/5xx — so each feed's existing except-degrade-alert path (E5) fires as before.
+    on a persistent 4xx/5xx — so each feed's existing except-degrade-alert path fires as before.
     """
     is_www = httpx.URL(url).host == _NSE_WWW_HOST
     reprimed = False  # the anti-bot re-prime fires at most once per call

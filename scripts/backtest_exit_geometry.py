@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""C1 exit-geometry study (IMPLEMENTATION_PLAN §6.1 "C1 EXIT-GEOMETRY STUDY — PRE-REGISTERED 2026-10-07").
+"""Exit-geometry study (pre-registered 2026-10-07).
 
 Per strategy (brk20 V2-N5 fills, hi52 v2, ins), three arms walked through ``exit_sim`` from the
 research fill: (i) the shipped stop/target re-anchored to the fill, (ii) time only (REFERENCE),
@@ -35,7 +35,7 @@ CATASTROPHE_ATR_MULT = Decimal("2.5")
 STRATEGIES = ("brk20", "hi52", "ins")
 
 DECISION_HORIZON = "T+20"
-# exit_sim horizon = sessions after the fill session; T+k counts the fill session as 1 (D2).
+# exit_sim horizon = sessions after the fill session; T+k counts the fill session as 1.
 HORIZONS = {"T+5": 4, "T+10": 9, DECISION_HORIZON: rc.HORIZON - 1}
 BRK20_REGISTERED = {"close(fill+20)": rc.HORIZON}
 

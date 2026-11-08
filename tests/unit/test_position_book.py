@@ -1,4 +1,4 @@
-"""Paper PositionBook (plan Q4.4): open and accrete, exit fills and closes, oversell, bookkeeping and void."""
+"""Paper PositionBook: open and accrete, exit fills and closes, oversell, bookkeeping and void."""
 
 from __future__ import annotations
 

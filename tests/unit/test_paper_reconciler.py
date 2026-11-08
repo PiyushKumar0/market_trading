@@ -1,4 +1,4 @@
-"""Paper Reconciler (plan Q4.7; R5): lost postbacks, unseen legs, orphans, protection, isolation."""
+"""Paper Reconciler: lost postbacks, unseen legs, orphans, protection, isolation."""
 
 from __future__ import annotations
 

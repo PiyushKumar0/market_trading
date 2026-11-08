@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""WO-17 pre-registered diagnostic CLI — stop geometry / adverse-excursion recovery on intraday longs.
+"""Pre-registered diagnostic CLI — stop geometry / adverse-excursion recovery on intraday longs.
 
     python scripts/experiment_stop_geometry.py --from 2025-07-10 --to 2026-08-13 \
         --symbols RELIANCE,TCS [--reports-dir data/reports]
@@ -8,7 +8,7 @@
 around :class:`engine.learning.stop_geometry.StopGeometryExperiment`; all the logic (and the whole
 pre-registration) lives in that module, which is where to read it. The CLI resolves the universe,
 opens the market store READ-ONLY, runs the diagnostic and writes ONE report pair
-(``data/reports/stop_geometry_<ts>.{json,md}``). It writes nothing to SQLite and — unlike the WO-10
+(``data/reports/stop_geometry_<ts>.{json,md}``). It writes nothing to SQLite and — unlike the VWAP-reversion
 experiment — never constructs a ``ValidationPipeline``: there is no CPCV, no margin floor, no
 ``param_sets`` row, so nothing downstream can promote this.
 

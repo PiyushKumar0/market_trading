@@ -1,4 +1,4 @@
-"""Owner I/O security + catalog shapes (§2.4/R10/§8): the Telegram owner-ID lock drops non-owner
+"""Owner I/O security + catalog shapes: the Telegram owner-ID lock drops non-owner
 updates, and the process-lifecycle catalog helpers produce the right typed messages."""
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class _MsgUpdate:
 
 
 class _FakeBot:
-    """Stand-in for app.bot: records set_my_commands calls; optionally raises to exercise the R8 guard."""
+    """Stand-in for app.bot: records set_my_commands calls; optionally raises to exercise the owner-alert guard."""
 
     def __init__(self, *, raises: bool = False) -> None:
         self.calls: list[tuple] = []
@@ -149,7 +149,7 @@ def test_help_text_lists_every_command() -> None:
             assert f"    {c.summary}" in lines                 # indented description line
         else:
             assert f"/{c.name} — {c.summary}" in lines         # exact stub line, no prefix collision
-    if any(not c.live for c in _COMMANDS):                     # every command is live as of Phase 2
+    if any(not c.live for c in _COMMANDS):                     # every command is live in RECOMMEND mode
         assert "Not yet available (Phase 2+):" in lines        # any stub stays clearly separated
     assert len(text) <= 4096                                   # fits a single Telegram message
 
@@ -175,7 +175,7 @@ async def test_cmd_help_replies_with_full_catalog(clock) -> None:
 
 @pytest.mark.asyncio
 async def test_stub_handler_replies_not_implemented(clock) -> None:
-    """Phase-2 stubs must reply the not-implemented text — the owner-visible contract of _stub."""
+    """RECOMMEND-mode stubs must reply the not-implemented text — the owner-visible contract of _stub."""
     bot = TelegramBot("dummy-token", owner_chat_id=1, clock=clock)
     msg = _CapturingMessage()
     await bot._stub("positions")(_MsgUpdate(msg), _FakeContext())
@@ -184,7 +184,7 @@ async def test_stub_handler_replies_not_implemented(clock) -> None:
 
 @pytest.mark.asyncio
 async def test_publish_command_menu_scopes_to_owner_chat(clock) -> None:
-    """The '/' menu is published scoped to the owner chat (R10), advertising only live commands."""
+    """The '/' menu is published scoped to the owner chat, advertising only live commands."""
     from telegram import BotCommandScopeChat
 
     bot = TelegramBot("dummy-token", owner_chat_id=-5586756347, clock=clock)

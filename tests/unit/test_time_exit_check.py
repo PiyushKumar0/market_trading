@@ -1,4 +1,4 @@
-"""Plan Q1.6: the D2 time exit (``RecommendationPipeline.time_exit_check``) and its job wiring."""
+"""The time exit (``RecommendationPipeline.time_exit_check``) and its job wiring."""
 
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ def _at(d: date, hh: int = 10, mm: int = 5) -> datetime:
 async def _taken(conn, ticker, book, cost_model, *, delivered: datetime, taken: datetime | None = None,
                  strategy: str = "hi52", style: str = "swing", exit_session=_LEGACY) -> None:
     """An entry rec delivered at ``delivered`` and ``/taken`` at ``taken``; ``_LEGACY`` stores a
-    pre-Q1.1 payload with no exit fields."""
+    legacy payload with no exit fields."""
     ticker.at = delivered
     stamp = {} if exit_session is _LEGACY else {"exit_session": exit_session}
     rec = make_rec(cost_model, created_at=delivered, style=style, product="CNC", targets=[],

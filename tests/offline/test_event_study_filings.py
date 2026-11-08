@@ -1,4 +1,4 @@
-"""§2.8.4 filings legs of ``scripts/event_study.py`` — PURE event-derivation + measurement, plus a
+"""Filings legs of ``scripts/event_study.py`` — PURE event-derivation + measurement, plus a
 tmp-store glue smoke (the real ``data/market.duckdb`` is never touched; every fixture is synthetic).
 
 Covers the spec's required cases: zero-reaction drop; pledge cohort split; gross-vs-net arithmetic
@@ -99,7 +99,7 @@ def test_measure_directional_gross_minus_cost_is_net():
     obs = es.measure_directional(rows, 3, symbol="X", kind="insider_buy",
                                  horizons=es.INSIDER_HORIZONS, cost_pct=cost)
     assert obs is not None
-    base = rows[4].open                    # WO-16 default: filled at the NEXT session's open
+    base = rows[4].open                    # default: filled at the NEXT session's open
     for k in es.INSIDER_HORIZONS:
         expected_gross = (rows[3 + k].close / base - 1.0) * 100.0
         assert abs(obs.gross[k] - expected_gross) < 1e-9
@@ -107,12 +107,12 @@ def test_measure_directional_gross_minus_cost_is_net():
     assert obs.event_date == rows[3].d     # the event stamp stays the PIT event session T
 
 
-# ====================================================== WO-16 entry fill: next_open vs close_t
+# ====================================================== entry fill: next_open vs close_t
 def test_measure_directional_next_open_is_default_and_excludes_the_overnight_gap():
     """A series whose whole move happens in the T->T+1 GAP: close_T fill books it, next_open cannot.
 
     Flat intraday sessions (open == close) with a one-off +10% overnight gap after T=3 make the two
-    conventions differ materially, which is exactly the WO-2-style regression this pins.
+    conventions differ materially, which is exactly the next-open fill-correction regression this pins.
     """
     closes = [100.0] * 4 + [110.0] * 26        # gap up between session 3 and 4, flat thereafter
     opens = list(closes)                       # open == close every session ⇒ zero intraday move
@@ -187,7 +187,7 @@ def test_aggregate_and_render_report_gross_and_net_columns():
     assert "Insider-buy leg" in md and "T+20" in md
     # empty filings legs degrade to an honest n=0 note
     assert "shp_quarterly empty" in md and "results_filings empty" in md
-    # WO-16 header: the spread is broken out, the fill convention and survivorship stated
+    # header: the spread is broken out, the fill convention and survivorship stated
     assert "0.2992% statutory fees + 0.0200% measured bid-ask SPREAD" in md
     assert "next session's OPEN" in md and "open_(T+1)" in md
     assert "Survivorship caveat" in md
@@ -239,7 +239,7 @@ def test_run_study_empty_filings_tables_degrade_to_honest_empty(tmp_path, clock)
         assert agg["legs"]["insider_buy"]["n_events"] == 0
         assert agg["n_events"] == 0                                  # nothing anywhere ⇒ honest whole-study empty
         md = es.render_markdown(agg, meta)
-        assert "NO EVENTS DETECTED" in md                            # unchanged C9 short-circuit, no crash
+        assert "NO EVENTS DETECTED" in md                            # unchanged short-circuit, no crash
     finally:
         store.close()
 

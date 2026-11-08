@@ -1,4 +1,4 @@
-"""WO-24 (2026-08-21): the RECOMMEND funnel can no longer freeze silently.
+"""2026-08-21: the RECOMMEND funnel can no longer freeze silently.
 
 THE INCIDENT. At 09:56:40 the platform's first-ever proposal reached
 ``RecommendationPipeline._gate_and_persist``. The proposal row was written, and the very next
@@ -12,7 +12,7 @@ Two halves are pinned here, deliberately as separate mechanisms:
 
 * **Fix A (deadline)** -- the context build is the only store-touching await on that path, so it now
   carries one. Blowing it re-arms the candidate's day slot, alerts the owner and RETURNS. It must
-  NOT reach the WO-20d guard: re-queueing a candidate whose store is dead just spends a second
+  NOT reach the re-queue guard: re-queueing a candidate whose store is dead just spends a second
   analyst call to learn the same thing.
 * **Fix C (sweep)** -- the deadline cannot cover a crash between the two writes, so the orphan a
   verdict-less proposal represents is swept for directly. Fix A is prevention; Fix C is the measure
@@ -155,7 +155,7 @@ def build_pipeline(
 
 
 def enter_json(*, signal_id: str, symbol: str = SYMBOL) -> dict:
-    """``ENTER_JSON`` re-identified for one candidate (the R1 coherence guard compares them)."""
+    """``ENTER_JSON`` re-identified for one candidate (the coherence guard compares them)."""
     return {**ENTER_JSON, "signal_id": signal_id, "tradingsymbol": symbol}
 
 
@@ -191,7 +191,7 @@ def test_the_deadline_constants_are_pinned_and_ordered():
     """90 s is far above a healthy build (a handful of point reads) and below the 3-minute drain
     cadence, so it can only fire on a real stall. And the orphan TTL must sit ABOVE the deadline:
     if it did not, the sweep would announce a proposal the timeout path is still in the middle of
-    alerting about, and every WO-24a incident would arrive as two messages."""
+    alerting about, and every such incident would arrive as two messages."""
     assert pipeline_mod._GATE_CONTEXT_DEADLINE_S == 90.0
     assert pipeline_mod._ORPHAN_TTL_MIN == 10
     assert pipeline_mod._ORPHAN_SWEEP_INTERVAL_MIN == 5
@@ -229,7 +229,7 @@ async def test_a_frozen_store_costs_one_candidate_and_the_drain_keeps_going(
 
     The 2026-08-21 shape: the deadline fires, the candidate's day slot goes back to the prescreen,
     the owner gets ONE loud message naming the symbol, no verdict and no recommendation are written
-    -- and, load-bearing, the candidate is NOT re-queued. The WO-20d guard would have put it at the
+    -- and, load-bearing, the candidate is NOT re-queued. The re-queue guard would have put it at the
     front of the queue for a retry that hits the same dead store; a second candidate arriving after
     the freeze is evaluated on the very next tick instead, which is exactly what did not happen for
     14 minutes on the day.
@@ -309,7 +309,7 @@ def timeout_alerts(parts) -> list:
 async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """The same dead store, reached through §5.2 (b) instead of (a). Unguarded, the timeout came out
+    """The same dead store, reached by a different path instead. Unguarded, the timeout came out
     of ``on_bar`` — i.e. out of the tick handler for EVERY symbol, not just this position."""
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     position_id = _open_position(conn, pclock)
@@ -349,7 +349,7 @@ async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
 async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fails_the_job(
     conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """The D2 time exit runs at 09:30 and as a catch-up, so an escaping timeout takes out the whole
+    """The time exit runs at 09:30 and as a catch-up, so an escaping timeout takes out the whole
     check — including the due positions BEHIND the one that stalled. Each is now its own alert, and
     the timeout is re-raised only once the check is done: a swallowed one would record a success
     watermark for ``time_exit_check`` and defer the exit by a session instead of the catch-up
@@ -474,7 +474,7 @@ async def test_a_proposal_that_reached_a_verdict_is_never_an_orphan(
 async def test_a_paper_verdict_never_completes_a_real_proposal(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """Plan Q3.2: the sweep reads REAL verdicts only, so a paper verdict cannot hide a real orphan."""
+    """The sweep reads REAL verdicts only, so a paper verdict cannot hide a real orphan."""
     pipeline, parts = build_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     long_ago = NOW - timedelta(hours=3)
     stranded = write_proposal(conn, created_at=long_ago)

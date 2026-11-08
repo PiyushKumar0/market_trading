@@ -1,4 +1,4 @@
-"""Platform equity, day-scoped counters, and the §7.1 floor ladder (ExposureTracker)."""
+"""Platform equity, day-scoped counters, and the floor ladder (ExposureTracker)."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _snapshot(conn, at: str, equity: str, realized: str | None = None, open_mtm:
 
 
 def _mixed_book(conn) -> None:
-    """Closed + open + external positions; the §7.1 worked example used across the equity tests."""
+    """Closed + open + external positions; the worked example used across the equity tests."""
     _position(conn, "c1", state="CLOSED", origin="platform", symbol="AAA",
               closed_at=f"{TODAY.isoformat()}T11:00:00+05:30", realized_pnl="500", costs="40")
     _position(conn, "c2", state="CLOSED", origin="recommended", symbol="BBB",
@@ -83,11 +83,11 @@ def _mixed_book(conn) -> None:
 MARKS = {"AAA": Decimal("110"), "BBB": Decimal("190"), "EXT": Decimal("60")}
 
 
-# ----------------------------------------------------------------- platform equity (§7.1)
+# ----------------------------------------------------------------- platform equity
 def test_equity_worked_example_excludes_external(conn, clock):
     _mixed_book(conn)
     tracker = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get)
-    # realized net: (500-40) + (-200-35) = 225; external's +10000 excluded (O5)
+    # realized net: (500-40) + (-200-35) = 225; external's +10000 excluded
     assert tracker.realized_net() == Decimal("225")
     # open MTM: long 10 @100 -> 110 = +100; short 5 @200 -> 190 = +50; external excluded
     assert tracker.open_mtm() == Decimal("150")
@@ -104,7 +104,7 @@ def test_open_mtm_falls_back_to_avg_entry_without_marks(conn, clock):
     assert partial.equity() == Decimal("20325")
 
 
-# ----------------------------------------------------------------- day MTM baseline (§2.6)
+# ----------------------------------------------------------------- day MTM baseline
 def test_day_mtm_uses_explicit_baseline(conn, clock):
     _mixed_book(conn)
     tracker = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get)
@@ -123,7 +123,7 @@ def test_day_baseline_rebuilds_from_last_prior_session_snapshot(conn, clock):
 
 
 def test_day_baseline_without_prior_snapshot_backs_out_todays_closes(conn, clock):
-    """First-ever run with positions already closed today (§2.6 step 2): the baseline is current
+    """First-ever run with positions already closed today: the baseline is current
     equity MINUS today's realized net, so an offline-realized P&L still counts toward day-MTM —
     a loss closed while the engine was down must be able to trip daily_loss_soft/hard."""
     _mixed_book(conn)
@@ -142,7 +142,7 @@ def test_day_mtm_counts_offline_loss_on_first_run(conn, clock):
     assert tracker.day_mtm() == Decimal("-945")
 
 
-# ----------------------------------------------------------------- base-agnostic brakes (O19 §3.1)
+# ----------------------------------------------------------------- base-agnostic brakes
 def test_a_base_change_is_not_day_pnl(conn, clock):
     """2026-09-07 replay: the base moved 20k -> 40k mid-session. Day MTM is the P&L move only."""
     base = {"v": Decimal("20000")}
@@ -265,7 +265,7 @@ def test_floors_and_day_loss_follow_a_live_base(conn, clock):
     assert t.evaluate_day_loss(Decimal("-5"), Decimal("-7")) == ["daily_loss_soft"]
 
 
-# ----------------------------------------------------------------- consecutive_losses rebuild (§7.1)
+# ----------------------------------------------------------------- consecutive_losses rebuild
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
@@ -285,7 +285,7 @@ def test_consecutive_losses_is_session_scoped_and_ignores_no_action(conn, clock)
     _ledger(conn, "y1", "loss", f"{YESTERDAY.isoformat()}T14:00:00+05:30")
     _ledger(conn, "y2", "loss", f"{YESTERDAY.isoformat()}T15:00:00+05:30")
     _ledger(conn, "t1", "loss", f"{TODAY.isoformat()}T10:00:00+05:30")
-    # An expired recommendation is not a close — it must not break the run (§3.6).
+    # An expired recommendation is not a close — it must not break the run.
     _ledger(conn, "t2", "no_action", f"{TODAY.isoformat()}T10:30:00+05:30")
     _ledger(conn, "t3", "loss", f"{TODAY.isoformat()}T11:00:00+05:30")
     tracker = ExposureTracker(conn, clock, CAPITAL)
@@ -323,7 +323,7 @@ def test_open_exposure_counters(conn, clock):
     assert tracker.per_sector_open({"AAA": "IT"}) == {"IT": 1, "UNCLASSIFIED": 2}
 
 
-# ----------------------------------------------------------------- minute persistence (§7.1)
+# ----------------------------------------------------------------- minute persistence
 def test_persist_snapshot_writes_minute_row_and_replaces(conn, clock):
     _mixed_book(conn)
     tracker = ExposureTracker(conn, clock, CAPITAL, mark_price=MARKS.get)
@@ -348,7 +348,7 @@ def test_persist_snapshot_writes_minute_row_and_replaces(conn, clock):
     assert Decimal(rows[0]["equity"]) == Decimal("20475")   # AAA marked 100→120: +100 on 10 shares
 
 
-# ----------------------------------------------------------------- floor ladder (§7.1)
+# ----------------------------------------------------------------- floor ladder
 def _equity_at(conn, equity: Decimal) -> None:
     """One closed platform position that lands equity exactly on ``equity`` (costs zero)."""
     _position(conn, "pnl", state="CLOSED", closed_at=f"{TODAY.isoformat()}T11:00:00+05:30",
@@ -461,14 +461,14 @@ def test_floor_limits_capital_base_override(conn, clock):
     assert tracker.evaluate_floors(limits) == []
 
 
-# ----------------------------------------------------------------- applying the ladder (§3.5.3)
+# ----------------------------------------------------------------- applying the ladder
 async def _auto(mm: ModeManager) -> None:
     await mm.request_transition(Mode.AUTO, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))
 
 
 @pytest.mark.asyncio
 async def test_apply_floor_breach_routes_through_latch_when_wired(conn, clock):
-    """With a RiskStateLatch wired, a floor rung latches as a per-rung CAUSE (§3.5.3) — so clearing
+    """With a RiskStateLatch wired, a floor rung latches as a per-rung CAUSE — so clearing
     an unrelated cause (owner /resume_entries) can never relax the floor-set CLOSE_ONLY."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
 
@@ -579,7 +579,7 @@ async def test_apply_is_idempotent_and_never_relaxes_state(conn, clock):
     breaches = tracker.evaluate_floors(FloorLimits())
 
     await tracker.apply_floor_breaches(breaches, mm, ks)
-    await tracker.apply_floor_breaches(breaches, mm, ks)   # a startup re-evaluation (§2.6)
+    await tracker.apply_floor_breaches(breaches, mm, ks)   # a startup re-evaluation
     assert (mm.mode(), mm.risk_state(), ks.is_killed()) == (Mode.OFF, RiskState.CLOSE_ONLY, True)
 
     # A milder rung firing under an already-KILLED state must not downgrade it to CLOSE_ONLY.

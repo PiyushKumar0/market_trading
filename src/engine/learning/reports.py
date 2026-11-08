@@ -1,14 +1,14 @@
-"""Walk-forward + CPCV report renderer (§6.4 step 2, §8.2, C9) — markdown + JSON artifacts.
+"""Walk-forward + CPCV report renderer — markdown + JSON artifacts.
 
 Renders a :class:`~engine.learning.validate.ValidationReport` (and, for the sweep leg, a
 :class:`~engine.learning.sweep.SweepReport`) to ``data/reports/<strategy>_<ts>.md`` + ``.json``.
 
-Honesty contract (C9 — a negative expectancy is a VALID deliverable, never massaged):
+Honesty contract (a negative expectancy is a VALID deliverable, never massaged):
 
 * the **promotion verdict and every reason it is not promotable** are the first thing in the report;
 * a **negative cost-adjusted expectancy is surfaced in a prominent banner**, not buried in a table;
 * the **cited trial count N** and the ``fold_pass_min(N)`` bar it must clear are always shown — an
-  absent N is called out as "NOT PROMOTABLE (no cited N)", exactly the §6.4 step-2 rule.
+  absent N is called out as "NOT PROMOTABLE (no cited N)", exactly the research-validation rule.
 
 The JSON artifact is the machine-readable record (``model_dump_json`` — dates/Decimals ISO/string
 serialized); the ``param_sets.validation_report`` column persists the same report body (validate.py).
@@ -47,8 +47,8 @@ def _slug_ts(generated_at) -> str:
 
 
 def _margin_floor_txt(report: ValidationReport) -> str:
-    """The WO-3 floor with the DENOMINATOR it was taken at — the horizon is a protocol choice
-    (20 sessions for a swing leg, the §7.1 120 for a positional one), so a report that printed only
+    """The margin floor with the DENOMINATOR it was taken at — the horizon is a protocol choice
+    (20 sessions for a swing leg, the 120 for a positional one), so a report that printed only
     the resulting %/day would not be reproducible from the artifact alone."""
     if report.margin_floor_pct_per_day is None:
         return "not evaluated (no round-trip cost floor supplied — fail-closed, see Reasons)"
@@ -65,13 +65,13 @@ def _margin_floor_txt(report: ValidationReport) -> str:
 
 # --------------------------------------------------------------------------- validation report
 def render_markdown(report: ValidationReport) -> str:
-    """Render a ``ValidationReport`` to markdown with the promotion verdict + negatives up top (C9)."""
+    """Render a ``ValidationReport`` to markdown with the promotion verdict + negatives up top."""
     lines: list[str] = []
     lines.append(f"# Validation report — `{report.strategy_id}`")
     lines.append("")
     lines.append(f"_Generated {report.generated_at.isoformat()} · param_set `{report.param_set_id}`_")
     lines.append("")
-    # WO-M (2026-09-13): the sweep-mechanics stamp travels with the VERDICT too — a verdict is only
+    # Sweep-mechanics fix (2026-09-13): the sweep-mechanics stamp travels with the VERDICT too — a verdict is only
     # comparable to another verdict produced the same way. Emitted ONLY when the ParamSet carries a
     # stamp: this pipeline also validates returns that never came out of SweepRunner at all (the
     # event-study harnesses build their own series and charge their own fills/costs), and printing
@@ -105,7 +105,7 @@ def render_markdown(report: ValidationReport) -> str:
         )
         lines.append("")
 
-    # ---- honest negative-expectancy banner (C9) ---------------------------------------------
+    # ---- honest negative-expectancy banner ---------------------------------------------
     if report.expectancy_pct is not None and report.expectancy_pct < 0.0:
         lines.append(
             f"> **NEGATIVE COST-ADJUSTED EXPECTANCY: {report.expectancy_pct:+.4f}% / day.** "
@@ -137,7 +137,7 @@ def render_markdown(report: ValidationReport) -> str:
     )
     lines.append("")
 
-    # ---- R2 realized-hold cells (REPORTING ONLY, 2026-09-12) ---------------------------------
+    # ---- Realized-hold cells (REPORTING ONLY, 2026-09-12) ---------------------------------
     # The bar above is quoted at a CAP (20 swing / 120 positional). These rows re-base the same
     # round-trip floor on the horizon this run was actually held for, so "passes the floor" can
     # never be read as comfortable without the reader seeing at what horizon.
@@ -276,7 +276,7 @@ def write_report(report: ValidationReport, reports_dir: str | Path) -> ReportArt
 
 # --------------------------------------------------------------------------- sweep report
 def render_sweep_markdown(report: SweepReport) -> str:
-    """Render a ``SweepReport`` — per-config stats + the cited trial count N (§6.4 step 1)."""
+    """Render a ``SweepReport`` — per-config stats + the cited trial count N."""
     lines: list[str] = []
     lines.append(f"# Sweep report — `{report.strategy_id}`")
     lines.append("")
@@ -299,17 +299,17 @@ def render_sweep_markdown(report: SweepReport) -> str:
         f"{report.per_side_fee_pct:.4f}%"
     )
     lines.append(f"- Best params (by CLOSED-trade expectancy): {report.best_params}")
-    # WO-M (2026-09-13): the one-line mechanics stamp. A sweep number is only meaningful with the
+    # Sweep-mechanics fix (2026-09-13): the one-line mechanics stamp. A sweep number is only meaningful with the
     # three settings it was produced under, and a pre-fix artifact carries no stamp at all — which
     # is how the two are told apart.
     lines.append(f"- **Mechanics**: `{report.mechanics or 'PRE-2026-09-13 (unstamped)'}`")
     lines.append("")
 
-    # ---- R2 (2026-09-12): what the winning config's trades actually looked like --------------
+    # ---- Added 2026-09-12: what the winning config's trades actually looked like --------------
     # The per-config table below reports one per-trade expectancy and no horizon at all, which is
     # how a run could be promoted against a floor spread over 120 sessions without anyone knowing
     # the median trade was held for 33 — and without the reader seeing that some of those "trades"
-    # were still open. Both go here, for the config the run selected. Since WO-M the headline is
+    # were still open. Both go here, for the config the run selected. Since the sweep-mechanics fix the headline is
     # the CLOSED-trade figure and the all-trades one is what is reported beside it.
     best_stat = next(
         (s for s in report.stats if report.best_params is not None and s.params == report.best_params),
@@ -371,7 +371,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
     for s in report.stats:
         params = ", ".join(f"{k}={s.params[k]}" for k in sorted(s.params))
         win = "—" if s.win_rate is None else f"{s.win_rate:.0%}"
-        # WO-M follow-up: the closed-only win rate sits FIRST, beside the closed-only expectancy it
+        # Sweep-mechanics follow-up: the closed-only win rate sits FIRST, beside the closed-only expectancy it
         # shares a population with — quoting "win rate X%, expectancy Y%" off this row must not mix
         # a mark-to-market hit rate with a realized per-trade mean.
         win_closed = "—" if s.win_rate_closed is None else f"{s.win_rate_closed:.0%}"
@@ -383,7 +383,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
             f"{_pct(s.total_return_pct)} | {sharpe} | {mdd} |"
         )
     lines.append("")
-    # WO-M (iii): the ranked column is the CLOSED one; the all-trades column is the pre-fix
+    # The ranked column is the CLOSED one; the all-trades column is the pre-fix
     # headline, kept visible so the size of that bias is readable per config instead of asserted.
     lines.append(
         "_`expectancy (CLOSED)` is the ranked/promotion statistic (mean net return over round trips "

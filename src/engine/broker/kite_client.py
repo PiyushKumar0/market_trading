@@ -1,32 +1,32 @@
-"""Thin async wrapper over pykiteconnect 5.2.0 ``KiteConnect`` (§3.2.2, A2/A9/A10).
+"""Thin async wrapper over pykiteconnect 5.2.0 ``KiteConnect``.
 
 ``KiteClient`` is the single typed surface the OMS / risk / marketdata tiers use to talk to Kite
 REST. It exists to enforce two cross-cutting invariants on *every* call, with no exceptions:
 
-* **A2 client-side rate limiting** — every method first ``await``s the injected
+* **Client-side rate limiting** — every method first ``await``s the injected
   :class:`~engine.broker.rate_limiter.RateLimiter` for the right ``endpoint_class``
   (``"orders"`` / ``"quote"`` / ``"historical"``). Order placement/modify/cancel additionally route
-  the caller's ``intent`` through the limiter so that the §7.1 ``order_rate`` split is honoured:
-  ``intent="entry"`` calls hard-stop at the 70/day cap (B3/R3) while protective / exit / square-off
+  the caller's ``intent`` through the limiter so that the ``order_rate`` split is honoured:
+  ``intent="entry"`` calls hard-stop at the 70/day cap while protective / exit / square-off
   callers pass ``intent="risk_reducing"`` to draw from the uncapped-but-paced reserved pool that is
   *never* budget-rejected. Reads (orders/positions/holdings/margins/gtts, quote, historical) pass
   ``intent="read"``: paced, never capped or counted.
-* **R8 structured logging** — every call logs an intent/result event (and re-raises, never swallows,
+* **Structured logging** — every call logs an intent/result event (and re-raises, never swallows,
   pykiteconnect errors after logging them).
 
 pykiteconnect is synchronous (``requests``-based), so each broker call is offloaded to the default
 executor via ``loop.run_in_executor`` to keep the asyncio event loop responsive. This module is the
-ONLY place that imports/uses the raw ``KiteConnect`` order surface (R5: the REST orderbook is the
+ONLY place that imports/uses the raw ``KiteConnect`` order surface (the REST orderbook is the
 source of truth; reconciliation lives above this layer).
 
-**A9 (market protection):** market and SL-M orders must always carry ``market_protection=-1`` so Kite
+**Market protection:** market and SL-M orders must always carry ``market_protection=-1`` so Kite
 applies its default protection band rather than letting a market order print at an arbitrary price.
 This client is a pass-through — the *OMS* is responsible for setting ``market_protection`` on the
 request it hands to :meth:`KiteClient.place_order`; the client forwards the request fields verbatim.
 
-Production builds this client with ``orders_enabled=False`` (D8), so only the read surface is live.
-Request validation / typed models live in the OMS and gate; the C6 pre-place margin check
-(``GateContextBuilder`` ``margins_fn``) is unwired until Phase 4 (live routing).
+Production builds this client with ``orders_enabled=False``, so only the read surface is live.
+Request validation / typed models live in the OMS and gate; the pre-place margin check
+(``GateContextBuilder`` ``margins_fn``) is unwired until live AUTO (live routing).
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ ReqLike = Any
 
 
 class OrderSurfaceViolation(RuntimeError):
-    """Raised to block a broker order call (§3.5.3 predicate (a), A7/B7; D8).
+    """Raised to block a broker order call.
 
     ``KiteClient`` does not import ``engine.risk`` — the guard is a plain callback wired by ops (mode
     manager + kill switch live above this layer). This exception type is the uniform signal a blocked
@@ -74,23 +74,23 @@ class KiteClient:
         :class:`~engine.broker.session.SessionManager`). Synchronous; all calls are run in an
         executor.
     rate_limiter:
-        The shared :class:`~engine.broker.rate_limiter.RateLimiter` (A2). Acquired before *every*
+        The shared :class:`~engine.broker.rate_limiter.RateLimiter`. Acquired before *every*
         broker call. Order calls pass ``endpoint_class="orders"`` plus the caller's ``intent``;
         quote/ltp use ``"quote"``; historical uses ``"historical"``.
     clock:
-        The single IST :class:`~engine.core.clock.Clock` (R6). Held for tz-aware timestamping of
+        The single IST :class:`~engine.core.clock.Clock`. Held for tz-aware timestamping of
         log/audit events; this client never reads ``datetime.now()`` directly.
     on_token_rejected:
         Optional async circuit-breaker fired the moment ANY broker call returns
         :class:`~kiteconnect.exceptions.TokenException` (2026-07-21 fix): the wiring layer points it
         at :meth:`~engine.broker.session.SessionManager.on_token_rejected` so a mid-day token death
         freezes entries + alerts the owner on the FIRST rejection instead of every subsequent call
-        failing silently. The hook is awaited then the original error is ALWAYS re-raised (R5/R8 —
-        never swallow); a hook failure is logged and never masks the broker error. The hook
+        failing silently. The hook is awaited then the original error is ALWAYS re-raised (never
+        swallow); a hook failure is logged and never masks the broker error. The hook
         receives the access token the failing request was sent with, so the session can ignore a
         rejection of a token a re-login has since superseded.
     order_guard:
-        Optional order-surface guard (A7, §3.5.3 predicate (a) / B7). Called synchronously with the
+        Optional order-surface guard. Called synchronously with the
         caller's ``intent`` (``"entry"`` or ``"risk_reducing"``) BEFORE the rate limiter is acquired,
         on every order-placing/modifying/cancelling path (``place_order``, ``modify_order``,
         ``cancel_order``, ``place_gtt``, ``modify_gtt``, ``delete_gtt``). It raises
@@ -100,7 +100,7 @@ class KiteClient:
         ``engine.broker`` may not import ``engine.risk``. Unwired (``None``) means no gating —
         unchanged behaviour for unit tests / scripts that construct a bare ``KiteClient``.
     orders_enabled:
-        D8: while False (the default, and the only value production passes) every order/GTT method
+        While False (the default, and the only value production passes) every order/GTT method
         raises :class:`OrderSurfaceViolation` before the guard and the rate limiter. Only tests pass
         True.
     """
@@ -124,7 +124,7 @@ class KiteClient:
 
     async def _fire_token_rejected(self, exc: BaseException, token: str | None) -> None:
         """If ``exc`` is a :class:`TokenException` and the circuit breaker is wired, fire it once —
-        inside its own try/except so a hook failure NEVER masks the original broker error (R5/R8).
+        inside its own try/except so a hook failure NEVER masks the original broker error.
         ``token`` is the access token the failed request was sent with (captured before the
         executor ran it). The caller re-raises ``exc`` unconditionally after this returns."""
         if isinstance(exc, TokenException) and self._on_token_rejected is not None:
@@ -139,11 +139,11 @@ class KiteClient:
         """Acquire the limiter, run the sync pykiteconnect call in an executor, log, re-raise.
 
         ``fn`` is a zero-arg callable wrapping the pykiteconnect method invocation. Any exception is
-        logged (with context) and re-raised — pykiteconnect errors are NEVER swallowed (R5/R8); the
+        logged (with context) and re-raised — pykiteconnect errors are NEVER swallowed; the
         OMS/session layers above decide how to react (e.g. token-rejected → freeze entries).
 
         Every caller is a non-placing read, so the limiter is acquired with ``intent="read"``:
-        paced on the endpoint bucket, never capped or counted against the §7.1 entry budget.
+        paced on the endpoint bucket, never capped or counted against the entry budget.
         """
         await self._rl.acquire(endpoint_class=endpoint_class, intent="read")
         loop = asyncio.get_running_loop()
@@ -166,13 +166,13 @@ class KiteClient:
         return result
 
     async def _order_call(self, op: str, intent: str, fn: Any, **log_fields: Any) -> Any:
-        """Like :meth:`_call` but acquires the ``orders`` bucket with the caller's ``intent`` (R3).
+        """Like :meth:`_call` but acquires the ``orders`` bucket with the caller's ``intent``.
 
         ``intent="entry"`` is the default and is hard-capped at 70/day; protective / exit / square-off
         callers pass ``intent="risk_reducing"`` for the uncapped-but-paced reserved pool (never
         budget-rejected). The split is enforced inside :meth:`RateLimiter.acquire`.
 
-        The order-surface guard (A7), if wired, runs FIRST — before the limiter is even touched — so a
+        The order-surface guard, if wired, runs FIRST — before the limiter is even touched — so a
         blocked call never consumes rate-limiter budget. This is the single chokepoint every
         order-placing/modifying/cancelling method routes through, so wiring the guard here covers all
         six (place_order, modify_order, cancel_order, place_gtt, modify_gtt, delete_gtt).
@@ -208,8 +208,7 @@ class KiteClient:
 
         The OMS is responsible for the field set Kite expects (``variety``, ``exchange``,
         ``tradingsymbol``, ``transaction_type``, ``quantity``, ``order_type``, ``product``,
-        ``price``, ``trigger_price``, and — for market / SL-M orders — ``market_protection=-1``
-        per A9). This client forwards whatever it is given without adding or mutating fields.
+        ``price``, ``trigger_price``, and — for market / SL-M orders — ``market_protection=-1``). This client forwards whatever it is given without adding or mutating fields.
         """
         if isinstance(req, dict):
             return dict(req)
@@ -223,12 +222,12 @@ class KiteClient:
     # -- orders (endpoint_class="orders") ---------------------------------------------------------
 
     async def place_order(self, req: ReqLike, intent: str = "entry") -> str:
-        """Place an order; returns the broker ``order_id`` (R5 source of truth is the orderbook).
+        """Place an order; returns the broker ``order_id`` (the orderbook is the source of truth).
 
         ``intent`` routes the limiter acquire (``"entry"`` default → 70/day cap; ``"risk_reducing"``
-        for protective/exit/square-off → reserved pool, never budget-rejected, R3).
+        for protective/exit/square-off → reserved pool, never budget-rejected).
 
-        **A9:** for ``MARKET`` / ``SL-M`` orders the request MUST already carry
+        **Market protection:** for ``MARKET`` / ``SL-M`` orders the request MUST already carry
         ``market_protection=-1`` — the *OMS* sets this; the client passes the request fields through
         unchanged (see :meth:`_as_params`).
         """
@@ -273,7 +272,7 @@ class KiteClient:
         return str(result)
 
     async def orders(self) -> list:
-        """Return the full REST orderbook — the authoritative order state (R5)."""
+        """Return the full REST orderbook — the authoritative order state."""
         return await self._call("orders", "orders", lambda: self._kc.orders())
 
     async def positions(self) -> Any:
@@ -285,8 +284,8 @@ class KiteClient:
         return await self._call("orders", "holdings", lambda: self._kc.holdings())
 
     async def margins(self) -> Any:
-        """Return account margins (C6 source). Only the daily token probe calls this today; the
-        pre-place margin check (``GateContextBuilder`` ``margins_fn``) is unwired until Phase 4 (live routing)."""
+        """Return account margins. Only the daily token probe calls this today; the
+        pre-place margin check (``GateContextBuilder`` ``margins_fn``) is unwired until live AUTO (live routing)."""
         return await self._call("orders", "margins", lambda: self._kc.margins())
 
     # -- GTT (endpoint_class="orders") ------------------------------------------------------------
@@ -295,8 +294,7 @@ class KiteClient:
         """Create a GTT trigger; returns the Kite ``trigger_id``.
 
         Kite caps active GTTs per account and the pool is SHARED with the owner's manual GTTs — the
-        OMS reserves headroom and surfaces a cap rejection as a distinct ``PROTECTION_FAILED`` reason
-        (§3.2.8). This client forwards the request verbatim.
+        OMS reserves headroom and surfaces a cap rejection as a distinct ``PROTECTION_FAILED`` reason. This client forwards the request verbatim.
         """
         params = self._as_params(req)
         result = await self._order_call(
@@ -333,7 +331,7 @@ class KiteClient:
     async def historical(
         self, token: int, frm: datetime, to: datetime, interval: str
     ) -> list:
-        """Fetch historical candles for ``token`` in ``[frm, to]`` at ``interval`` (≤3 req/s, A2).
+        """Fetch historical candles for ``token`` in ``[frm, to]`` at ``interval`` (≤3 req/s).
 
         ``frm``/``to`` are tz-aware IST datetimes supplied by the caller (sourced from
         :class:`~engine.core.clock.Clock`); pykiteconnect formats them for the API.
@@ -349,7 +347,7 @@ class KiteClient:
         )
 
     async def ltp(self, tokens: list[int]) -> dict[int, Decimal]:
-        """Last traded price per instrument token (``quote`` budget, A2).
+        """Last traded price per instrument token (``quote`` budget).
 
         Returns a ``{token: Decimal}`` map. Kite's ``ltp()`` keys results by an
         ``"<exchange>:<symbol>"`` style string and nests ``last_price``; we re-key by the integer
@@ -371,7 +369,7 @@ class KiteClient:
     async def instruments(self, exchange: str | None = None) -> list:
         """Full daily instruments dump for ``exchange`` (all exchanges if None).
 
-        Once-per-day reference download consumed by InstrumentStore.refresh (§3.2.2, A10).
+        Once-per-day reference download consumed by InstrumentStore.refresh.
         pykiteconnect's instruments() is a bulk CSV dump, not an order/quote/historical API
         call, but it still funnels through the single limiter/logging chokepoint using the
         conservative "quote" bucket - a once-a-day acquire never stalls.

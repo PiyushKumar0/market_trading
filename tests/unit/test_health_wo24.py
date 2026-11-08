@@ -1,4 +1,4 @@
-"""WO-24b-prime (2026-08-21): the store stall watchdog on the health pulse.
+"""The store stall watchdog on the health pulse (2026-08-21).
 
 The 09:56 freeze wedged every store-touching path for 14 minutes and left TWO live hypotheses
 standing, because nothing in the process was probing the resource they share. The health pulse,
@@ -140,7 +140,7 @@ def paged_monitor(store, *, at: Ticker) -> tuple[HealthMonitor, list[tuple[str, 
 async def test_a_stall_that_survives_a_second_pulse_pages_the_owner_as_a_health_problem():
     """2026-09-03: the stall was log-only (ERROR lines + a stack dump) -- the 08-21 and 08-25 freezes
     were read off the log after the fact. One timed-out ping is an observation; the SAME stall still
-    there on the next pulse is an incident, and it rides the WO-25b episode cadence: one page on the
+    there on the next pulse is an incident, and it rides the problem-set episode cadence: one page on the
     change, silence while unchanged (reminder after HEALTH_REPEAT_MIN), recovery announced once."""
     at = Ticker(NOW)
     store = HangingStore()
@@ -169,7 +169,7 @@ async def test_a_stall_that_survives_a_second_pulse_pages_the_owner_as_a_health_
 
 async def test_a_stall_out_of_session_never_pages():
     """The 22:30 tick compaction holds the store lock for minutes on a healthy engine and never runs
-    in session (WO-21), so the page is in-session only, exactly like feed_stale."""
+    in session, so the page is in-session only, exactly like feed_stale."""
     at = Ticker(NOW.replace(hour=22, minute=35))
     store = HangingStore()
     mon, alerts = paged_monitor(store, at=at)
@@ -227,7 +227,7 @@ async def test_a_ping_that_raises_after_a_stall_ends_the_episode(caplog):
 
 
 async def test_a_swallowed_probe_keeps_the_problem_up_until_it_returns():
-    """The WO-26a anomaly (08-25 shape): the re-probe on the 5th pending pulse gets a thread and
+    """The anomaly (08-25 shape): the re-probe on the 5th pending pulse gets a thread and
     answers while the first probe is still swallowed. That resets the stall count, but the pool is
     still losing threads -- so the problem stays up (no false 'all clear', no flap back and forth
     two pulses later) until the swallowed probe actually comes back."""
@@ -235,7 +235,7 @@ async def test_a_swallowed_probe_keeps_the_problem_up_until_it_returns():
     store = StuckThenFreshStore()
     mon, alerts = paged_monitor(store, at=at)
     try:
-        for i in range(6):                                     # pulse 6 = the WO-26a re-probe
+        for i in range(6):                                     # pulse 6 = the re-probe
             at.at = NOW + timedelta(seconds=60 * i)
             report = await mon.check(check_skew=False)
         assert store.pings == 2 and mon._store_stall_count == 0     # fresh probe answered

@@ -1,7 +1,7 @@
-"""UniverseBuilder (§3.2.4): the pinned universe rule with per-symbol exclusion reasons (auditable
-``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O`` (C7), the configured-index
-(NIFTY 500 since 2026-09-04, O15; NIFTY Total Market since 2026-10-08, O18) download → cache → seed
-ladder (E5), the O18 CORE-index stamp, and never-raise fail-closed behavior on total failure."""
+"""UniverseBuilder: the pinned universe rule with per-symbol exclusion reasons (auditable
+``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O``, the configured-index
+(NIFTY 500 since owner decision 2026-09-04; NIFTY Total Market since owner decision 2026-10-08) download → cache → seed
+ladder, the CORE-index stamp, and never-raise fail-closed behavior on total failure."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def make_builder(
     )
 
 
-# --------------------------------------------------------------------------- the pinned rule (§3.2.4)
+# --------------------------------------------------------------------------- the pinned rule
 async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
     """One symbol per rule leg: index ∩ MIS ∩ not-surveillance ∩ liquidity, all auditable."""
     settings = make_settings(tmp_path)
@@ -178,7 +178,7 @@ async def test_universe_rule_every_exclusion_reason(tmp_path, store, clock):
     }
     assert universe.median_traded_value["RELIANCE"] == Decimal("100000000.00")
 
-    # Persisted universe_daily rows are the audit trail (§4.3): every index symbol has a row.
+    # Persisted universe_daily rows are the audit trail: every index symbol has a row.
     rows = {r["symbol"]: r for r in store.get_universe_daily(D)}
     assert set(rows) == set(ALL_SYMBOLS)
     assert rows["RELIANCE"]["included"] is True and rows["RELIANCE"]["mis_candidate"] is True
@@ -205,7 +205,7 @@ async def test_symbol_accumulates_multiple_reasons(tmp_path, store, clock):
 
 
 async def test_watchlist_cap_keeps_top_by_traded_value(tmp_path, store, clock):
-    """§3.2.4 cap [tunable]: top-N eligible by median traded value; the rest audit as watchlist_cap."""
+    """Watchlist cap [tunable]: top-N eligible by median traded value; the rest audit as watchlist_cap."""
     settings = make_settings(tmp_path, universe_max_watchlist=1)
     seed_daily_bars(store, "RELIANCE", close="200.00", volume=1_000_000)     # ₹20cr median
     seed_daily_bars(store, "TCS", close="200.00", volume=500_000)            # ₹10cr median
@@ -222,7 +222,7 @@ async def test_watchlist_cap_keeps_top_by_traded_value(tmp_path, store, clock):
     assert rows["TCS"]["included"] is False and rows["TCS"]["exclusion_reasons"] == [EXCL_CAP]
 
 
-# ----------------------------------------------------------------- configured-index ladder (E5)
+# ----------------------------------------------------------------- configured-index ladder
 async def test_download_failure_falls_back_to_seed_and_alerts(tmp_path, store, clock):
     settings = make_settings(tmp_path)
     seed = tmp_path / "seed.csv"
@@ -235,7 +235,7 @@ async def test_download_failure_falls_back_to_seed_and_alerts(tmp_path, store, c
     universe = await builder.build(D)
 
     assert universe.index_source == "seed"
-    assert universe.degraded is True                   # not freshly downloaded (E5)
+    assert universe.degraded is True                   # not freshly downloaded
     assert "RELIANCE" in universe.symbols
     assert any("fallback" in m.title.lower() or "fallback" in m.body.lower() for m in msgs)
 
@@ -292,8 +292,8 @@ def test_parse_index_constituents_csv_requires_symbol_column():
 
 def test_committed_seed_is_real_and_parses():
     """The shipped seeds must always parse as usable fallbacks. The CORE seed is the NIFTY 500
-    file (O15 2026-09-04 made it the index seed; O18 2026-10-08 moved it to the core role) and the
-    index seed is NIFTY Total Market since O18. The core list must sit inside the index list —
+    file (owner decision 2026-09-04 made it the index seed; owner decision 2026-10-08 moved it to the core role) and the
+    index seed is NIFTY Total Market since that decision. The core list must sit inside the index list —
     a core name outside the index could never be eligible, so a mismatch would silently shrink
     every evidence-bound leg."""
     s = Settings()
@@ -377,7 +377,7 @@ async def test_core_index_stamps_rows_and_scopes_the_core_view(tmp_path, store, 
 
 
 async def test_core_index_unavailable_fails_closed_for_core_legs_only(tmp_path, store, clock):
-    """O18 fail-closed: core download, cache and seed all gone ⇒ every row non-core (the evidence
+    """Core-index fail-closed: core download, cache and seed all gone ⇒ every row non-core (the evidence
     legs originate nothing) + a CRITICAL alert, while the build, the eligible set and the gate's
     view carry on — degraded, never raised."""
     settings, transport = _core_setup(tmp_path, store, core_csv=None)
@@ -395,7 +395,7 @@ async def test_core_index_unavailable_fails_closed_for_core_legs_only(tmp_path, 
 
 async def test_core_index_same_url_reuses_the_index_every_member_core(tmp_path, store, clock):
     """The rollback line: core URL == index URL ⇒ no second download, every index member core,
-    the core view equals the eligible view (the pre-O18 shape)."""
+    the core view equals the eligible view (the shape before the 2026-10-08 widening)."""
     settings, _ = _core_setup(tmp_path, store, core_csv=None)
     settings.universe.core_index_source_url = settings.universe.index_source_url
     calls: list[str] = []
@@ -413,7 +413,7 @@ async def test_core_index_same_url_reuses_the_index_every_member_core(tmp_path, 
     assert store.get_core_eligible_symbols(D) == store.get_universe_eligible_symbols(D)
 
 
-# --------------------------------------------------------------------------- MIS leverage ingest (A8/E5)
+# --------------------------------------------------------------------------- MIS leverage ingest
 MARGINS_JSON = [
     {"tradingsymbol": "RELIANCE", "mis_multiplier": 5.0, "mis_margin": 20.0},
     {"tradingsymbol": "TCS", "mis_margin": 25.0},        # no multiplier: 100/25 = 4×
@@ -430,7 +430,7 @@ def test_parse_margins_payload_defensive():
 
 
 async def test_leverage_refresh_then_reuse_cache_on_failure(tmp_path, clock):
-    """E5 reuse-yesterday: a fetch failure serves the cached last-good file, degraded + alert."""
+    """Reuse-yesterday: a fetch failure serves the cached last-good file, degraded + alert."""
     cache = tmp_path / "mis_margins.json"
     ok = MisLeverageIngest(
         clock,
@@ -454,12 +454,12 @@ async def test_leverage_refresh_then_reuse_cache_on_failure(tmp_path, clock):
 
 
 async def test_leverage_failure_without_cache_fails_closed(tmp_path, clock):
-    """A8 conservative default: no fetch AND no cache ⇒ empty map ⇒ nothing is MIS-eligible."""
+    """Conservative default: no fetch AND no cache ⇒ empty map ⇒ nothing is MIS-eligible."""
     msgs, sink = collect_alerts()
     ingest = MisLeverageIngest(
         clock, failing_transport_client(), tmp_path / "missing.json", notify=sink
     )
-    snapshot = await ingest.refresh()                    # must not raise (E5)
+    snapshot = await ingest.refresh()                    # must not raise
     assert snapshot.degraded is True and snapshot.leverages == {}
     assert snapshot.is_mis_eligible("RELIANCE") is False
     assert msgs
@@ -470,7 +470,7 @@ def failing_transport_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=failing_transport())
 
 
-# ------------------------------------------------- §3.2.4 extended leg (batch universe, 2026-09-01)
+# ------------------------------------------------- extended leg (batch universe, 2026-09-01)
 def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master=None):
     """Builder wired for the extended leg: the index from the fixture CSV, plus non-index candidates
     across every extended rule leg (good / illiquid / surveilled / no-MIS / not-in-master / no-data)."""
@@ -501,11 +501,11 @@ def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master
 
 async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, store, clock):
     """Only criteria-PASSING non-index candidates get rows — included=False, reasons
-    ['not_in_index'] (the exact marker every batch reader keys on since O15, 2026-09-04); failing
+    ['not_in_index'] (the exact marker every batch reader keys on since the owner decision of 2026-09-04); failing
     candidates get NO row, and the eligible view stays index-scoped while the batch view widens."""
     from engine.marketdata import store as store_mod
 
-    assert EXCL_INDEX == "not_in_index"          # O15 rename of the pre-2026-09-04 'not_nifty200'
+    assert EXCL_INDEX == "not_in_index"          # Rename (owner decision) of the pre-2026-09-04 'not_nifty200'
     builder = _extended_setup(tmp_path, store, clock)
     universe = await builder.build(D)
 
@@ -529,7 +529,7 @@ async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, sto
 
 
 async def test_extended_leg_disabled_is_the_exact_rollback(tmp_path, store, clock):
-    """batch_universe_enabled=False restores the pre-addendum shape exactly — INCLUDING a same-day
+    """batch_universe_enabled=False restores the pre-extended-leg shape exactly — INCLUDING a same-day
     re-build over rows an earlier enabled build already persisted (2026-09-01 review: upserts never
     delete, so without the replace-write a flag flip mid-day would leave stale not_in_index rows
     feeding the batch view for the rest of the day)."""
@@ -575,12 +575,12 @@ def _wide_index_csv() -> str:
 
 
 async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, store, clock):
-    """O15 (2026-09-04): with the eligible set widened to NIFTY 500 the focus cap BINDS again —
-    ``universe_max_watchlist`` (a fixture cap of 200, the O15-era value; settings.yaml has been 300
+    """Owner decision 2026-09-04: with the eligible set widened to NIFTY 500 the focus cap BINDS again —
+    ``universe_max_watchlist`` (a fixture cap of 200, the value at that time; settings.yaml has been 300
     since 2026-09-07) is no longer ≥ the eligible set, as it was
     for NIFTY200 since 2026-08-20. Exactly 200 rows come back ``included``, chosen top-down by
     median traded value, and every one of the other 300 rule-passing names is persisted with the
-    single auditable reason ``watchlist_cap`` — never silently dropped (§4.3). The extended leg's
+    single auditable reason ``watchlist_cap`` — never silently dropped. The extended leg's
     candidate set still SUBTRACTS the index, so an index member that also sits in the MIS/equity
     master never earns a second, ``not_in_index`` row."""
     settings = make_settings(

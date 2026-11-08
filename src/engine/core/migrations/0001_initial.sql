@@ -1,9 +1,9 @@
--- 0001_initial.sql — SQLite transactional state, migrations v1 (§4.2 + §6.5).
+-- 0001_initial.sql — SQLite transactional state, migrations v1.
 -- All timestamps are ISO-8601 tz-aware IST strings produced via core.Clock (never naive). Money/prices
 -- are TEXT (Decimal-as-string — JSON/SQLite have no decimal type; avoids float corruption of ticks).
 -- JSON payloads stored as TEXT via the SQLite JSON1 functions.
 
--- ---------------------------------------------------------------- decision provenance chain (R1/R8)
+-- ---------------------------------------------------------------- decision provenance chain
 CREATE TABLE proposals (
     proposal_id    TEXT PRIMARY KEY,
     agent_id       TEXT NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE verdicts (
 );
 CREATE INDEX idx_verdicts_proposal ON verdicts(proposal_id);
 
--- ---------------------------------------------------------------- orders + transition audit (§3.5.1)
+-- ---------------------------------------------------------------- orders + transition audit
 CREATE TABLE orders (
     order_id          TEXT PRIMARY KEY,            -- platform ULID
     broker_order_id   TEXT,
@@ -31,7 +31,7 @@ CREATE TABLE orders (
     verdict_id        TEXT,
     role              TEXT NOT NULL CHECK (role IN
                           ('entry','protective_sl','target','squareoff','exit','gtt_leg')),
-    is_paper          INTEGER NOT NULL DEFAULT 0,  -- §3.5.3 routing; R9 live-vs-paper joins
+    is_paper          INTEGER NOT NULL DEFAULT 0,  -- routing; live-vs-paper joins
     state             TEXT NOT NULL,
     product           TEXT NOT NULL,
     side              TEXT,
@@ -39,7 +39,7 @@ CREATE TABLE orders (
     filled_qty        INTEGER DEFAULT 0,
     price             TEXT,
     trigger_price     TEXT,
-    modifications     INTEGER DEFAULT 0,           -- self-cap 20 (A2)
+    modifications     INTEGER DEFAULT 0,           -- self-cap 20
     reject_reason     TEXT,
     raw_broker_payload TEXT,
     created_at        TEXT,
@@ -59,7 +59,7 @@ CREATE TABLE order_events (
 );
 CREATE INDEX idx_order_events_order ON order_events(order_id);
 
--- ---------------------------------------------------------------- positions (§3.5.2)
+-- ---------------------------------------------------------------- positions
 CREATE TABLE positions (
     position_id       TEXT PRIMARY KEY,
     symbol            TEXT NOT NULL,
@@ -74,7 +74,7 @@ CREATE TABLE positions (
     protection_state  TEXT,                        -- PROTECTED | PROTECTION_PENDING | PROTECTION_FAILED
     is_paper          INTEGER NOT NULL DEFAULT 0,
     origin            TEXT NOT NULL CHECK (origin IN ('platform','external','recommended')),
-    close_reason      TEXT,                        -- §3.5.2 reasons (target|stop|square_off|broker_rms|...)
+    close_reason      TEXT,                        -- reasons (target|stop|square_off|broker_rms|...)
     opened_at         TEXT,
     closed_at         TEXT,
     realized_pnl      TEXT,
@@ -83,7 +83,7 @@ CREATE TABLE positions (
 CREATE INDEX idx_positions_state ON positions(state);
 CREATE INDEX idx_positions_symbol ON positions(symbol);
 
--- ---------------------------------------------------------------- GTT lifecycle (A12)
+-- ---------------------------------------------------------------- GTT lifecycle
 CREATE TABLE gtts (
     gtt_id              INTEGER PRIMARY KEY,
     position_id         TEXT,
@@ -94,11 +94,11 @@ CREATE TABLE gtts (
     ex_date_adjusted_for TEXT
 );
 
--- ---------------------------------------------------------------- sticky control-plane state (R5/R10)
+-- ---------------------------------------------------------------- sticky control-plane state
 CREATE TABLE mode_state (
     id          INTEGER PRIMARY KEY CHECK (id = 1),
     mode        TEXT NOT NULL,
-    routing     TEXT CHECK (routing IN ('paper','live')),   -- valid only with AUTO (§3.5.3)
+    routing     TEXT CHECK (routing IN ('paper','live')),   -- valid only with AUTO
     risk_state  TEXT NOT NULL,
     reason      TEXT,
     changed_by  TEXT,
@@ -107,7 +107,7 @@ CREATE TABLE mode_state (
 
 CREATE TABLE kill_state (
     id        INTEGER PRIMARY KEY CHECK (id = 1),
-    killed    INTEGER NOT NULL DEFAULT 0,                    -- checked before ANY order on startup (R10)
+    killed    INTEGER NOT NULL DEFAULT 0,                    -- checked before ANY order on startup
     reason    TEXT,
     at        TEXT,
     reset_by  TEXT,
@@ -115,7 +115,7 @@ CREATE TABLE kill_state (
 );
 
 CREATE TABLE trade_window_state (
-    id                  INTEGER PRIMARY KEY CHECK (id = 1),  -- sticky owner-set window (§7.1/§3.2.7)
+    id                  INTEGER PRIMARY KEY CHECK (id = 1),  -- sticky owner-set window
     start_ist           TEXT,
     end_ist             TEXT,
     squareoff_buffer_min INTEGER,
@@ -123,7 +123,7 @@ CREATE TABLE trade_window_state (
     changed_at          TEXT
 );
 
--- ---------------------------------------------------------------- startup catch-up watermarks (§2.6)
+-- ---------------------------------------------------------------- startup catch-up watermarks
 CREATE TABLE job_runs (
     job_id          TEXT NOT NULL,
     run_for_date    TEXT NOT NULL,
@@ -133,7 +133,7 @@ CREATE TABLE job_runs (
     PRIMARY KEY (job_id, run_for_date)
 );
 
--- ---------------------------------------------------------------- budget governor ledger (D6)
+-- ---------------------------------------------------------------- budget governor ledger
 CREATE TABLE budget_ledger (
     id          INTEGER PRIMARY KEY,
     agent_id    TEXT,
@@ -148,7 +148,7 @@ CREATE TABLE budget_ledger (
 );
 CREATE INDEX idx_budget_month ON budget_ledger(month, agent_id);
 
--- ---------------------------------------------------------------- protected store integrity (R4)
+-- ---------------------------------------------------------------- protected store integrity
 CREATE TABLE protected_config (
     name             TEXT PRIMARY KEY,             -- limits.yaml | envelope.yaml
     sha256           TEXT NOT NULL,
@@ -167,14 +167,14 @@ CREATE TABLE config_audit (
 
 CREATE TABLE owner_approvals (
     approval_id  TEXT PRIMARY KEY,
-    kind         TEXT,                             -- stop_widen | target_extend | ... (R1)
+    kind         TEXT,                             -- stop_widen | target_extend | ...
     payload      TEXT,
     status       TEXT,                             -- pending | approved | rejected
     requested_at TEXT,
     resolved_at  TEXT
 );
 
--- ---------------------------------------------------------------- learning ledger + satellites (§6.5)
+-- ---------------------------------------------------------------- learning ledger + satellites
 CREATE TABLE learning_ledger (
     entry_id            TEXT PRIMARY KEY,
     position_id         TEXT,
@@ -206,7 +206,7 @@ CREATE TABLE learning_ledger (
     ex_date_effect      INTEGER,
     flagged_day         INTEGER,
     regime_label        TEXT,
-    outcome_label       TEXT,                       -- win|loss|scratch|process_error|no_action (§3.6)
+    outcome_label       TEXT,                       -- win|loss|scratch|process_error|no_action
     created_at          TEXT,
     closed_at           TEXT
 );
@@ -218,9 +218,9 @@ CREATE TABLE param_sets (
     strategy_id       TEXT,
     params            TEXT,                         -- JSON
     status            TEXT CHECK (status IN ('candidate','shadow','champion','retired','rolled_back')),
-    validation_report TEXT,                         -- JSON; must cite trial count N (§6.4)
+    validation_report TEXT,                         -- JSON; must cite trial count N
     evaluated_at      TEXT,
-    enabled           INTEGER NOT NULL DEFAULT 1,   -- per-strategy freeze flag (§6.4 step 5)
+    enabled           INTEGER NOT NULL DEFAULT 1,   -- per-strategy freeze flag
     promoted_at       TEXT,
     retired_at        TEXT
 );
@@ -235,7 +235,7 @@ CREATE TABLE model_registry (
 );
 
 CREATE TABLE envelope_state (
-    parameter     TEXT PRIMARY KEY,                 -- the ONE learner-writable config surface (R4)
+    parameter     TEXT PRIMARY KEY,                 -- the ONE learner-writable config surface
     value         TEXT,
     bounds_sha256 TEXT NOT NULL,                    -- must match protected_config row for envelope.yaml
     set_by        TEXT CHECK (set_by IN ('default','owner','promotion')),
@@ -264,7 +264,7 @@ CREATE TABLE shadow_trades (
 );
 CREATE INDEX idx_shadow_param ON shadow_trades(param_set_id);
 
--- ---------------------------------------------------------------- RECOMMEND ledger (§3.6)
+-- ---------------------------------------------------------------- RECOMMEND ledger
 CREATE TABLE recommendations (
     rec_id           TEXT PRIMARY KEY,
     payload          TEXT,                          -- full Recommendation (JSON)
@@ -274,7 +274,7 @@ CREATE TABLE recommendations (
     outcome          TEXT                           -- JSON
 );
 
--- ---------------------------------------------------------------- backfill checkpoints (A2)
+-- ---------------------------------------------------------------- backfill checkpoints
 CREATE TABLE backfill_checkpoints (
     symbol       TEXT NOT NULL,
     interval     TEXT NOT NULL,
@@ -283,7 +283,7 @@ CREATE TABLE backfill_checkpoints (
 );
 
 -- ---------------------------------------------------------------- safe-default singletons
--- Fresh install defaults to OFF/NORMAL and NOT killed — the safe no-trading state (O2/R10).
+-- Fresh install defaults to OFF/NORMAL and NOT killed — the safe no-trading state.
 -- trade_window_state is intentionally left empty; lifecycle seeds it from settings.yaml on first run
 -- (NSECalendar falls back to the settings seed until a row exists).
 INSERT INTO mode_state (id, mode, routing, risk_state, reason, changed_by, changed_at)
@@ -292,13 +292,13 @@ VALUES (1, 'OFF', NULL, 'NORMAL', 'fresh_install_default', 'system', NULL);
 INSERT INTO kill_state (id, killed, reason, at, reset_by, reset_at)
 VALUES (1, 0, NULL, NULL, NULL, NULL);
 
--- ---------------------------------------------------------------- engine lifecycle (§4.2/§2.2)
+-- ---------------------------------------------------------------- engine lifecycle
 
 -- One row (id=1). Tri-state `state` REPLACES the old boolean "intend to run" sentinel (a boolean cannot
 -- distinguish "cleanly shutting down" from "running-and-wedged"); the alias "intend to run" == state!='STOPPED'
 -- gates NSSM restart-on-failure. Crash/interrupt is read off `state` (RUNNING|STOPPING + dead pid), never a
--- timestamp compare (§2.2/§2.6 step 0). Watchdog debounce (last_down_alert_at) lives in the watchdog's OWN
--- file (data/watchdog_state.json), NOT here — the watchdog is never a second writer to state.db (§2.2).
+-- timestamp compare. Watchdog debounce (last_down_alert_at) lives in the watchdog's OWN
+-- file (data/watchdog_state.json), NOT here — the watchdog is never a second writer to state.db.
 
 
 CREATE TABLE engine_lifecycle (
@@ -306,13 +306,13 @@ CREATE TABLE engine_lifecycle (
     state             TEXT NOT NULL DEFAULT 'STOPPED'
                           CHECK (state IN ('RUNNING','STOPPING','STOPPED')),  -- RUNNING=up; STOPPING=clean
                                                                               --   teardown; STOPPED=clean/idle
-    last_alive_at     TEXT,                          -- liveness heartbeat (dedicated OS thread, Phase 1)
+    last_alive_at     TEXT,                          -- liveness heartbeat (dedicated OS thread)
     pid               INTEGER,                        -- current owner pid; watchdog cross-checks it is ALIVE
     started_at        TEXT,
     last_clean_stop_at TEXT,
     version           TEXT
 );
 
--- Fresh install: nothing running/intended => STOPPED, the safe no-trading default (watchdog silent, §2.6).
+-- Fresh install: nothing running/intended => STOPPED, the safe no-trading default (watchdog silent).
 INSERT INTO engine_lifecycle (id, state, last_alive_at, pid, started_at, last_clean_stop_at, version)
 VALUES (1, 'STOPPED', NULL, NULL, NULL, NULL, NULL);

@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""§2.8 corporate-filings initial-history-seed CLI (stage 1 — ingest + backfill only).
+"""Corporate-filings initial-history-seed CLI (stage 1 — ingest + backfill only).
 
-The one-off owner tool that seeds the ~3-year filings history the §2.8.4 event study (stage 2) will
+The one-off owner tool that seeds the ~3-year filings history the filings event study (stage 2) will
 backtest. It drives the SAME defensive parse functions the nightly ``filings_*`` jobs use, but owns
 the windowing + checkpointing (exactly as ``scripts/backfill.py`` owns chunking while ``BackfillJob``
-owns the fetch). Point-in-time throughout (§2.8 rule i): every row keyed on its exchange broadcast
+owns the fetch). Point-in-time throughout: every row keyed on its exchange broadcast
 timestamp, never the period label.
 
     python scripts/backfill_filings.py seed [--from YYYY-MM-DD] [--symbols CSV]
@@ -13,12 +13,12 @@ timestamp, never the period label.
 
 Default ``--from`` is 3 years back; ``--to`` is always today. NSE endpoints (PIT, results,
 event-calendar) are walked in ≤31-day windows; BSE SHP is a per-symbol quarter loop. Every request is
-spaced ≥1.5 s (observed safe, §2.8). Resumable: each (feed, unit) checkpoint lives in ``state.db``
+spaced ≥1.5 s (observed safe). Resumable: each (feed, unit) checkpoint lives in ``state.db``
 ``filings_backfill_checkpoints`` (migration 0002), so a re-run skips completed windows/symbols —
 re-fetching is safe anyway (all writes are idempotent upserts). Prints a summary and writes
 ``data/reports/filings_backfill_report.json``.
 
-BSE caveat (§2.8): the SHP detail endpoint shapes were LIVE-VERIFIED 2026-07-16 (see ``filings_shp``
+BSE caveat: the SHP detail endpoint shapes were LIVE-VERIFIED 2026-07-16 (see ``filings_shp``
 module docstring); the leg stays defensive and degrades per-symbol without aborting the seed.
 
 Exit codes: 0 = ran clean; 1 = some units failed for non-setup reasons (re-run to resume); 2 =
@@ -76,7 +76,7 @@ _log = get_logger("scripts.backfill_filings")
 
 #: ``_PACE_S`` / ``_NSE_WINDOW_DAYS`` / ``_windows`` are local aliases of filings_pit's public
 #: ``PIT_PACE_S`` / ``PIT_WINDOW_DAYS`` / ``pit_windows`` — this script walks the SAME endpoint in the
-#: same unit (§2.8), so filings_pit is the one canonical copy.
+#: same unit, so filings_pit is the one canonical copy.
 _SEED_YEARS = 3
 
 
@@ -122,7 +122,7 @@ def _cp_clear_feed(conn: sqlite3.Connection, feed: str) -> int:
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
     """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols).
 
-    Cache/seed names track ``UniverseBuilder``; both were renamed off ``nifty200`` by O15
+    Cache/seed names track ``UniverseBuilder``; both were renamed off ``nifty200`` by owner decision
     (2026-09-04), when the eligible index became config (NIFTY 500)."""
     if symbols_arg:
         syms = sorted({s.strip().upper() for s in symbols_arg.split(",") if s.strip()})
@@ -221,7 +221,7 @@ async def _seed_nse_windowed(
 
 async def _seed_shp(conn, store, http, clock, symbols: list[str], frm: date, to: date, summary: dict) -> None:
     """Per-symbol BSE SHP quarter loop (checkpoint per symbol). Requires ``symbol_isin`` scrip codes;
-    a symbol without one is skipped-and-counted. BSE shape live-verified 2026-07-16; still degrades per-symbol (§2.8)."""
+    a symbol without one is skipped-and-counted. BSE shape live-verified 2026-07-16; still degrades per-symbol."""
     isin_map = await store.asymbol_isin_map()
     for symbol in symbols:
         if _cp_done(conn, "shp", symbol):
@@ -298,7 +298,7 @@ async def _execute(settings, clock: Clock, args, universe: list[str], source: st
 
         summary = _new_summary()
         async with httpx.AsyncClient(follow_redirects=True) as http:
-            # SHP needs BSE scrip codes: build symbol_isin first (at most one BSE master request, §2.8).
+            # SHP needs BSE scrip codes: build symbol_isin first (at most one BSE master request).
             if not args.skip_shp:
                 print(f"backfill_filings: building symbol_isin for {len(universe)} symbols ...")
                 isin_result = await IsinMapJob(settings, store, clock, http).run(universe)

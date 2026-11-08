@@ -1,25 +1,25 @@
-"""Nightly Post-Trade Reviewer job (§5.5 / §4.4 ``nightly_review``, 21:00 on trading days).
+"""Nightly Post-Trade Reviewer job (``nightly_review``, 21:00 on trading days).
 
-DESIGN DEVIATION (architect decision, Phase-2 v1 — see the module docstring of
+DESIGN DEVIATION (architect decision, v1 — see the module docstring of
 :mod:`engine.intelligence.agents.nightly` and the note beside ``nightly_reviewer`` in
-``config/agents.yaml``). §5.5 specifies an AGENTIC reviewer that pulls its own evidence through
-read-only MCP tools. v1 is SINGLE-SHOT over a context assembled deterministically HERE: at Phase-2
+``config/agents.yaml``). The design specifies an AGENTIC reviewer that pulls its own evidence through
+read-only MCP tools. v1 is SINGLE-SHOT over a context assembled deterministically HERE: at RECOMMEND-mode
 volume (a handful of recommendations a day, no auto trades) the entire reviewable day fits in one
 prompt, so the tool loop adds token cost and an unverified SDK MCP surface for no analytical gain.
-The §5.5 agentic shape and its toolset land in Phase 3. The §5.5 OUTPUT CONTRACT is unchanged, so the
+The agentic shape and its toolset land later. The OUTPUT CONTRACT is unchanged, so the
 upgrade replaces only the harness entry point — never the ``nightly_reviews`` row shape or its readers.
 
 Three properties this module is responsible for:
 
-* **The suggestible set is the envelope, and nothing else (R4/§6.3).** The context shows the model the
+* **The suggestible set is the envelope, and nothing else.** The context shows the model the
   ``envelope.yaml`` parameter names WITH their bounds, and every returned suggestion is re-checked
   against that same list after validation: an unknown name or an out-of-bounds value is DROPPED and
-  logged. Suggestions are evidence for §6.4 step 1 and for the owner's ``POST /config/params`` — no
+  logged. Suggestions are evidence for research validation and for the owner's ``POST /config/params`` — no
   code path in this module (or downstream of it) applies one.
 * **Assembly is deterministic and side-effect free.** :func:`build_review_context` is a pure read: it
-  never calls an LLM, never writes, and renders every temporal value as precomputed text (§3.2 — the
+  never calls an LLM, never writes, and renders every temporal value as precomputed text (the
   model never computes a date). A day with nothing in it renders as explicit "none" lines rather than
-  an empty prompt, so "quiet day" and "broken query" are distinguishable in the audit snapshot (R8).
+  an empty prompt, so "quiet day" and "broken query" are distinguishable in the audit snapshot.
 * **A failure is visible.** A governor block, a harness failure or an unverifiable envelope all resolve
   to a logged no-review — never a partial row, never a raised exception into the scheduler.
 """
@@ -53,7 +53,7 @@ _log = get_logger("engine.ops.nightly_review")
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
-#: The protected config that defines the ONLY suggestible parameter set (§6.3/R4).
+#: The protected config that defines the ONLY suggestible parameter set.
 ENVELOPE_FILE = "envelope.yaml"
 
 #: agents.yaml trigger name for this agent (its only one) — the governor's admission class.
@@ -68,7 +68,7 @@ _TRADES_TITLE = "closed trades (learning ledger)"
 _RECS_TITLE = "recommendations delivered"
 _ENVELOPE_TITLE = "suggestible parameters (envelope.yaml - the ONLY names you may propose)"
 
-#: WO-9 funnel section heading (also the log event's human anchor).
+#: Funnel section heading (also the log event's human anchor).
 FUNNEL_TITLE = "signal funnel utilization (3.2.5 admission -> 5.2(a) analyst slots)"
 
 #: Analyst-stage section heading (2026-08-14). The funnel above stops at "evaluated"; on the first
@@ -76,14 +76,14 @@ FUNNEL_TITLE = "signal funnel utilization (3.2.5 admission -> 5.2(a) analyst slo
 #: review said why — the reviewer flagged exactly that blind spot. This section is the why.
 DECLINES_TITLE = "analyst decisions on forwarded candidates (5.2(a) evaluated -> declined)"
 
-#: The §5.2(a) analyst id and its candidate-trigger call class, as written to ``agent_calls``.
+#: The analyst id and its candidate-trigger call class, as written to ``agent_calls``.
 _SIGNAL_AGENT_ID = "intraday_analyst"
 _SIGNAL_TRIGGER = "signal_candidate"
 
 #: How many of the day's declines are quoted, newest first, and how far each reason is truncated.
 #: Five is the reviewer's working set — enough to see whether the declines RHYME ("premature",
 #: "no volume") without turning the funnel section into a transcript; the full text of every call
-#: is in ``agent_calls`` for anyone who needs it (R8).
+#: is in ``agent_calls`` for anyone who needs it.
 DECLINE_REASONS_SHOWN = 5
 DECLINE_REASON_CHARS = 200
 
@@ -109,7 +109,7 @@ def _flag(value: Any) -> str:
 
 
 def _section(title: str, lines: Sequence[str]) -> str:
-    """``title: none`` when empty — an absent section must be visibly absent, not missing (D7)."""
+    """``title: none`` when empty — an absent section must be visibly absent, not missing."""
     if not lines:
         return f"{title}: {_NONE}"
     return "\n".join([f"{title}:", *lines])
@@ -118,7 +118,7 @@ def _section(title: str, lines: Sequence[str]) -> str:
 def _day_prefix(d: date) -> str:
     """Match an ISO-8601 IST timestamp column on its DATE prefix.
 
-    Every timestamp in the state DB is a Clock-produced IST string (§4.2), so the first ten
+    Every timestamp in the state DB is a Clock-produced IST string, so the first ten
     characters ARE the IST date — no tz arithmetic in SQL, and no naive datetime anywhere.
     """
     return d.isoformat()
@@ -126,7 +126,7 @@ def _day_prefix(d: date) -> str:
 
 # --------------------------------------------------------------------------- deterministic readers
 def _closed_trades(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
-    """Learning-ledger trades CLOSED on ``d`` (§6.5) with the position's symbol when it still exists.
+    """Learning-ledger trades CLOSED on ``d`` with the position's symbol when it still exists.
 
     ``no_action`` rows are expired or dismissed recommendations, not trades — see :func:`_expired_and_vetoed`.
     """
@@ -163,7 +163,7 @@ def _expired_and_vetoed(conn: sqlite3.Connection, d: date) -> tuple[int, int]:
 
 
 def _delivered_recommendations(conn: sqlite3.Connection, d: date) -> list[sqlite3.Row]:
-    """§3.6 recommendations DELIVERED on ``d``, with whatever the owner did about them."""
+    """Recommendations DELIVERED on ``d``, with whatever the owner did about them."""
     return conn.execute(
         """
         SELECT rec_id, payload, human_action, human_fill_price
@@ -199,7 +199,7 @@ def _rec_lines(rows: Sequence[sqlite3.Row]) -> list[str]:
             loaded = json.loads(r["payload"] or "{}")
             payload = loaded if isinstance(loaded, dict) else {}
         except (TypeError, ValueError):
-            # A malformed payload costs this line its detail, never the whole review (D7).
+            # A malformed payload costs this line its detail, never the whole review.
             _log.warning("nightly_rec_payload_unparseable", rec_id=r["rec_id"])
         lines.append(
             f"  - rec_id={_txt(r['rec_id'])} {_txt(payload.get('side'))} "
@@ -210,7 +210,7 @@ def _rec_lines(rows: Sequence[sqlite3.Row]) -> list[str]:
 
 
 def _verdict_lines(conn: sqlite3.Connection, d: date) -> list[str]:
-    """Proposal/verdict counts for ``d`` plus rejects grouped by the rule_id that FAILED (§7.1).
+    """Proposal/verdict counts for ``d`` plus rejects grouped by the rule_id that FAILED.
 
     The failing rule is the actionable half of a rejection — "3 rejects" says nothing, "3 rejects,
     all per_trade_risk" says the sizing model and the limit disagree.
@@ -254,7 +254,7 @@ def _verdict_lines(conn: sqlite3.Connection, d: date) -> list[str]:
 
 
 def paper_line(conn: sqlite3.Connection, d: date) -> str | None:
-    """``paper: day ₹X · since <epoch> ₹Y · open N · halts …`` (plan Q4.10): net P&L of the paper trades
+    """``paper: day ₹X · since <epoch> ₹Y · open N · halts …``: net P&L of the paper trades
     closed on ``d`` and in the current epoch, open positions, active halts. None if paper was never turned
     on or the line cannot be computed: the real summary still sends."""
     try:
@@ -279,7 +279,7 @@ def paper_line(conn: sqlite3.Connection, d: date) -> str | None:
 
 
 def _agent_failure_lines(conn: sqlite3.Connection, d: date) -> list[str]:
-    """Tier-1 calls that FAILED on ``d`` (R8 audit) — process evidence the reviewer must see."""
+    """Tier-1 calls that FAILED on ``d`` — process evidence the reviewer must see."""
     rows = conn.execute(
         """
         SELECT agent_id, fail_reason, COUNT(*) AS n
@@ -294,8 +294,8 @@ def _agent_failure_lines(conn: sqlite3.Connection, d: date) -> list[str]:
 
 
 def _day_spend(conn: sqlite3.Connection, d: date) -> Decimal:
-    """LLM spend booked on ``d`` (D6). Summed in PYTHON: ``SUM()`` on a TEXT money column coerces to
-    float and reintroduces exactly the binary-float error decimal-as-string exists to keep out (§8.1)."""
+    """LLM spend booked on ``d``. Summed in PYTHON: ``SUM()`` on a TEXT money column coerces to
+    float and reintroduces exactly the binary-float error decimal-as-string exists to keep out."""
     rows = conn.execute(
         "SELECT cost_usd FROM budget_ledger WHERE substr(at, 1, 10) = ?", (_day_prefix(d),)
     ).fetchall()
@@ -319,7 +319,7 @@ def _envelope_lines(bounds: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-# --------------------------------------------------------------------------- funnel telemetry (WO-9)
+# --------------------------------------------------------------------------- funnel telemetry
 def _round(value: float) -> float:
     """Scores are 0..1 informational strengths; two decimals is all the precision they carry."""
     return round(float(value), 2)
@@ -340,7 +340,7 @@ def _quantile(sorted_values: Sequence[float], q: float) -> float:
 
 @dataclass(frozen=True)
 class StrategyFunnel:
-    """One strategy's slice of the day's funnel (WO-9)."""
+    """One strategy's slice of the day's funnel."""
 
     strategy_id: str
     raw: int | None                              # None = the prescreen counters were not wired
@@ -354,7 +354,7 @@ class StrategyFunnel:
     @property
     def quantiles(self) -> tuple[float, float, float]:
         """(p25, median, p75) of this strategy's PUBLISHED scores — the distribution the forwarded
-        set has to beat for WO-1's live acceptance ("forwarded ≥ published median")."""
+        set has to beat for the ranked-forwarding live acceptance ("forwarded ≥ published median")."""
         return (
             _quantile(self.published_scores, 0.25),
             _quantile(self.published_scores, 0.50),
@@ -381,7 +381,7 @@ class StrategyFunnel:
 class FunnelSummary:
     """The whole day's origination funnel, assembled from the day-slot journal + the audit tables.
 
-    Every number here was previously reconstructable only by forensic DB reads (WO-9's evidence).
+    Every number here was previously reconstructable only by forensic DB reads.
     ``best_unforwarded_score`` is the point of the exercise: it is the direct, single-number answer
     to "did a good candidate never reach the analyst?" — starvation, measured rather than argued.
     """
@@ -451,7 +451,7 @@ def read_funnel_raw_counts(conn: sqlite3.Connection, d: date) -> dict[str, int]:
     The restart-proof half of the funnel's top row (2026-08-21): the pre-screen's raw counters are
     flushed here by the forward-drain tick and re-loaded from here whenever a fresh process rolls
     onto the day, so these rows hold the day's total across EVERY process that ran it. An unreadable
-    table costs the raw row, never the review (D7) — the same direction the day-slot read takes.
+    table costs the raw row, never the review — the same direction the day-slot read takes.
     Also the loader the composition root hands the pre-screen, which is why it lives at module scope.
     """
     try:
@@ -479,7 +479,7 @@ def build_funnel_summary(
     "unmeasured" for the whole day on 4 of the last 6 trade days before the table existed. The
     in-process value stays as the FALLBACK for a day with no persisted rows (a pre-2026-08-21 day,
     or a session whose counters never flushed), because a number we did not measure and a number
-    that was zero are different facts (D7) — with neither source, the raw row renders "unmeasured".
+    that was zero are different facts — with neither source, the raw row renders "unmeasured".
     """
     day = _day_prefix(d)
     try:
@@ -489,7 +489,7 @@ def build_funnel_summary(
             (day,),
         ).fetchall()
     except sqlite3.Error as exc:
-        # An unreadable journal costs the funnel section, never the review (D7).
+        # An unreadable journal costs the funnel section, never the review.
         _log.warning("funnel_journal_unreadable", d=day, error=f"{type(exc).__name__}: {exc}")
         rows = []
 
@@ -509,7 +509,7 @@ def build_funnel_summary(
             unsizeable_counts[sid] = unsizeable_counts.get(sid, 0) + 1
         n_forwarded = int(row["forwarded"] or 0)
         forwarded_calls[sid] = forwarded_calls.get(sid, 0) + n_forwarded
-        if row["score"] is None:                  # pre-WO-1 rows carry no score — counted, not faked
+        if row["score"] is None:                  # rows from before ranked forwarding carry no score — counted, not faked
             continue
         score = _round(row["score"])
         published[sid].append(score)
@@ -591,7 +591,7 @@ def _candidate_from_context(blob: Any) -> dict[str, Any]:
     ``NoActionOutput`` is ``{action, reason, confidence?, thesis?}`` with
     ``extra="forbid"``, so an ``ok=1`` no_action row cannot legally carry a tradingsymbol. The
     prompt is where the subject lives — ``for_signal`` writes the whole candidate as one
-    ``candidate: {...}`` line — and the prompt is archived verbatim for replay (R8). Unreadable or
+    ``candidate: {...}`` line — and the prompt is archived verbatim for replay. Unreadable or
     absent ⇒ ``{}``.
     """
     if not blob:
@@ -679,7 +679,7 @@ def build_analyst_declines(conn: sqlite3.Connection, d: date) -> AnalystDeclines
             (_SIGNAL_AGENT_ID, _SIGNAL_TRIGGER, day),
         ).fetchall()
     except sqlite3.Error as exc:
-        # An unreadable audit costs this section, never the review (the module's D7 convention).
+        # An unreadable audit costs this section, never the review (the module's never-fail-the-review convention).
         _log.warning("declines_audit_unreadable", d=day, error=f"{type(exc).__name__}: {exc}")
         rows = []
 
@@ -726,15 +726,15 @@ def _proposal_verdict_counts(conn: sqlite3.Connection, day: str) -> tuple[int, d
     return int(proposals), counts
 
 
-# --------------------------------------------------------------------------- envelope bounds (R4)
+# --------------------------------------------------------------------------- envelope bounds
 def load_envelope_bounds(store: Any | None) -> dict[str, Any]:
-    """The ``envelope.yaml`` ``parameters`` table: name -> ``{min, max, default, used_by}`` (§6.3).
+    """The ``envelope.yaml`` ``parameters`` table: name -> ``{min, max, default, used_by}``.
 
     ``store`` is a :class:`~engine.core.protected_store.ProtectedStore`. The bounds are read
-    HASH-VERIFIED at the point of use, exactly as the gate reads its limits (§2.4 item 1). A
+    HASH-VERIFIED at the point of use, exactly as the gate reads its limits. A
     verification failure yields an EMPTY table rather than an unverified fallback: with no verified
     envelope there is no legitimate suggestible set, so every suggestion is dropped and the review
-    still runs (fail to zero, never fail closed — D7). With no store wired at all (dev/tests) the
+    still runs (fail to zero, never fail closed). With no store wired at all (dev/tests) the
     file is read directly, which is a convenience path and is logged as one.
     """
     loader = getattr(store, "load_verified", None)
@@ -771,7 +771,7 @@ def build_review_context(
     the drop filter would be enforcing a rule the model was never told). When omitted it is loaded
     from ``store`` via :func:`load_envelope_bounds`.
 
-    The trading date itself is NOT in here: it belongs to the caller's stable block (D8 ordering).
+    The trading date itself is NOT in here: it belongs to the caller's stable block.
     """
     bounds = load_envelope_bounds(store) if envelope_names is None else envelope_names
 
@@ -786,7 +786,7 @@ def build_review_context(
     parts.append(f"recommendations expired unactioned (not trades): expired recs {expired}, vetoed {vetoed}")
     parts.append(_section(_RECS_TITLE, _rec_lines(recs)))
     parts.append(_section("proposals and gate verdicts", _verdict_lines(conn, d)))
-    # WO-9: the reviewer cannot reason about "was the day's best idea even looked at?" from
+    # The reviewer cannot reason about "was the day's best idea even looked at?" from
     # delivered recommendations alone — the funnel above them is where candidates are lost.
     parts.append(_section(
         FUNNEL_TITLE,
@@ -801,14 +801,14 @@ def build_review_context(
     return "\n".join(parts)
 
 
-# --------------------------------------------------------------------------- suggestion filter (R4)
+# --------------------------------------------------------------------------- suggestion filter
 def _filter_suggestions(
     suggestions: Sequence[ParamSuggestion], bounds: Mapping[str, Any]
 ) -> tuple[list[ParamSuggestion], list[tuple[ParamSuggestion, str]]]:
-    """Split suggestions into (kept, dropped-with-reason) against the envelope table (§6.3/R4).
+    """Split suggestions into (kept, dropped-with-reason) against the envelope table.
 
     Nothing here applies a value — this only decides what is worth PERSISTING as a suggestion for
-    §6.4 step 1 and the owner's ``/config/params`` view. A name outside the envelope or a value
+    research validation and the owner's ``/config/params`` view. A name outside the envelope or a value
     outside its bounds could never be legally set, so carrying it forward would only invite a human
     to try.
     """
@@ -832,29 +832,29 @@ def _filter_suggestions(
 
 # --------------------------------------------------------------------------- the job
 class NightlyReviewJob:
-    """Runs the §5.5 nightly review for one trading day and persists it to ``nightly_reviews``.
+    """Runs the nightly review for one trading day and persists it to ``nightly_reviews``.
 
     Parameters
     ----------
     store:
         :class:`~engine.core.protected_store.ProtectedStore` — the hash-verified source of the
-        ``envelope.yaml`` bounds that define the suggestible set (R4). May be ``None`` in dev.
+        ``envelope.yaml`` bounds that define the suggestible set. May be ``None`` in dev.
     conn:
         The SQLite state connection: the ledger, recommendations, proposals/verdicts, agent-call
         audit and budget ledger the review is assembled from, and where the review row lands.
     assembler:
-        Accepted for construction symmetry with the other Tier-1 jobs and RESERVED for the Phase-3
+        Accepted for construction symmetry with the other Tier-1 jobs and RESERVED for the later
         agentic upgrade. v1 assembles its own context here — the review has no market-data block, so
         nothing in :class:`~engine.intelligence.context.ContextAssembler` applies to it yet.
     harness / agent_defs / governor:
-        The single SDK call site, the loaded ``agents.yaml`` definitions, and the §5.6 admission +
+        The single SDK call site, the loaded ``agents.yaml`` definitions, and the budget admission +
         metering authority.
     clock / calendar:
-        The only sources of "now" and of trading-day facts (§3.2 no-naive-datetime).
+        The only sources of "now" and of trading-day facts (no naive datetimes).
     notify:
         Owner sink for the ``DAILY_SUMMARY`` message. Unwired ⇒ the review still persists.
     funnel_raw:
-        Optional ``day -> {strategy_id: raw candidate count}`` reader (WO-9), normally
+        Optional ``day -> {strategy_id: raw candidate count}`` reader, normally
         ``SignalPreScreen.raw_counts``. Since 2026-08-21 raw scanner output IS persisted
         (``funnel_raw_counts``) and :func:`build_funnel_summary` prefers those rows — this reader is
         the fallback for a day that has none, which is what makes an un-flushed or pre-2026-08-21
@@ -885,18 +885,18 @@ class NightlyReviewJob:
         self._notify = notify
         self._funnel_raw = funnel_raw
 
-    # ------------------------------------------------------------------ run (§5.5)
+    # ------------------------------------------------------------------ run
     async def run(self, d: date) -> AdvisoryOutcome:
         """Review day ``d``. ``RAN`` only when a review was validated AND persisted.
 
         Never raises into the scheduler: a missing definition, a governor block and a harness failure
         each resolve to a logged non-``RAN`` outcome that leaves ``nightly_reviews`` untouched for
-        ``d`` — so a retry (the §2.6 date-keyed catch-up) sees an un-reviewed day, not a half-reviewed
-        one. WO-14 (c): the outcome distinguishes ``BLOCKED`` (the governor declined — a correct,
+        ``d`` — so a retry (the date-keyed catch-up) sees an un-reviewed day, not a half-reviewed
+        one. The outcome distinguishes ``BLOCKED`` (the governor declined — a correct,
         non-retryable outcome; a blind retry loop here spends LLM budget) from ``FAILED`` (roster or
         harness failure — retryable, and the retry re-enters the governor check below).
         """
-        # WO-9: the one structured EOD funnel line, emitted BEFORE every early return. The
+        # The one structured EOD funnel line, emitted BEFORE every early return. The
         # measurement must not depend on the LLM call it measures — a governor-blocked night is
         # exactly the night you want the funnel numbers for.
         funnel = self._log_funnel(d)
@@ -904,12 +904,12 @@ class NightlyReviewJob:
         agent_def = self._defs.get(nightly.AGENT_ID)
         if agent_def is None:
             _log.error("nightly_review_no_agent_def", agent=nightly.AGENT_ID, d=d.isoformat())
-            return AdvisoryOutcome.FAILED   # roster gap = harness failure: retryable (WO-14 c)
+            return AdvisoryOutcome.FAILED   # roster gap = harness failure: retryable
 
         decision = self._governor.can_invoke(nightly.AGENT_ID)
         if not decision.allowed:
             # Checked BEFORE assembly so a blocked night costs no queries; the harness re-checks and
-            # would persist its own governor_blocked audit row if we called anyway (R8).
+            # would persist its own governor_blocked audit row if we called anyway.
             _log.warning(
                 "nightly_review_blocked",
                 d=d.isoformat(),
@@ -983,10 +983,10 @@ class NightlyReviewJob:
         await self._send(self._summary_message(d, stored, trades, expired, vetoed, recs, len(dropped)))
         return AdvisoryOutcome.RAN
 
-    # ------------------------------------------------------------------ funnel telemetry (WO-9)
+    # ------------------------------------------------------------------ funnel telemetry
     def _log_funnel(self, d: date) -> FunnelSummary:
         """Build ``d``'s funnel summary and emit it as ONE structured log line. Never raises: a
-        reporting read must not be able to cost the owner their nightly review (D7)."""
+        reporting read must not be able to cost the owner their nightly review."""
         raw: Mapping[str, int] | None = None
         if self._funnel_raw is not None:
             try:
@@ -1002,7 +1002,7 @@ class NightlyReviewJob:
     def _persist(self, d: date, review: NightlyReview) -> None:
         """One row per trading day. REPLACE, not append: a re-run for ``d`` (catch-up or a manual
         redo) must supersede the earlier review, and every call that produced either is already
-        preserved verbatim in ``agent_calls`` (R8)."""
+        preserved verbatim in ``agent_calls``."""
         payload = json.dumps(review.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
         with transaction(self._conn):
             self._conn.execute(
@@ -1010,14 +1010,14 @@ class NightlyReviewJob:
                 (d.isoformat(), payload, self._clock.now().isoformat()),
             )
 
-    # ------------------------------------------------------------------ owner messages (§3.2.11)
+    # ------------------------------------------------------------------ owner messages
     def _summary_message(
         self, d: date, review: NightlyReview, trades: int, expired: int, vetoed: int, recs: int, dropped: int
     ) -> CatalogMessage:
-        """The end-of-day owner digest (``DAILY_SUMMARY``, R8 catalog).
+        """The end-of-day owner digest (``DAILY_SUMMARY``, notification catalog).
 
         The suggestion COUNT ships, not the values: the owner applies a parameter through
-        ``POST /config/params`` after the §6.4 pipeline has had a look, never off a phone notification.
+        ``POST /config/params`` after the research-validation pipeline has had a look, never off a phone notification.
         """
         paper = paper_line(self._conn, d)
         return CatalogMessage(

@@ -214,7 +214,7 @@ def test_the_strategy_keyword_selects_another_strategy_s_rows_and_defaults_to_hi
 
 
 def test_the_sized_notional_is_the_7_1_cap_and_nothing_chosen_by_hand():
-    """§7.1 caps a swing position at `swing_position_pct`% of equity charged at `overnight_gap_mult`
+    """The risk gate caps a swing position at `swing_position_pct`% of equity charged at `overnight_gap_mult`
     × the stop distance, so the notional is `equity × 2% / (2.5 × 6%)` = equity/7.5 — the price
     cancels out of `qty_max × price`. Three readings of the same formula, at the three equities the
     promotion's paperwork quotes."""

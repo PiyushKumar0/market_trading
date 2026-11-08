@@ -1,4 +1,4 @@
-"""Per-strategy hold horizons (plan §1.10, Q1.1) and the session arithmetic their exit dates use."""
+"""Per-strategy hold horizons and the session arithmetic their exit dates use."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def is_time_exit(strategy_id: str) -> bool:
 
 
 def build_hold_fn(settings: Settings, limits: Any) -> HoldFn:
-    """``hold_fn(strategy_id, style)``: the declared hold capped at the style's §7.1 ``max_holding``
+    """``hold_fn(strategy_id, style)``: the declared hold capped at the style's risk-limit ``max_holding``
     (read from ``limits.load()`` per call), the cap itself for undeclared swing/position strategies,
     ``None`` for intraday."""
     declared = {

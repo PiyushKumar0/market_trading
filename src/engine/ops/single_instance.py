@@ -1,8 +1,8 @@
-"""OS-level single-instance lock — the §2.6 step-0 PRIMARY mutual-exclusion guard (O7/E4).
+"""OS-level single-instance lock — the PRIMARY mutual-exclusion guard.
 
 2026-07-21 incident: TWO engine instances ran concurrently against the single-writer stores (the
 sqlite ``state.db``, the DuckDB :class:`~engine.marketdata.store.MarketStore`, the :8400 login
-socket, the Telegram long-poll). The §2.6 step-0 guard in
+socket, the Telegram long-poll). The startup guard in
 :meth:`engine.ops.lifecycle.SessionLifecycle.startup` reads the ``engine_lifecycle`` row and refuses
 when a prior RUNNING/STOPPING pid is still alive — but it is a **check-then-act on a DB row whose
 RUNNING commit happens only deep into boot**. An instance that wedges BEFORE ``startup`` (the 10:35
@@ -64,7 +64,7 @@ _PID_OFFSET = 1
 
 
 class InstanceLock:
-    """Exclusive OS file lock enforcing a single engine instance (§2.6 step-0 PRIMARY guard).
+    """Exclusive OS file lock enforcing a single engine instance (PRIMARY guard).
 
     One :class:`InstanceLock` per ``<data_dir>/engine.lock``. Same data dir == same platform instance
     (``settings.resolved_data_dir()`` already honours ``MT_DATA_DIR``); this invents no new path

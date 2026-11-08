@@ -1,4 +1,4 @@
-"""TickerSupervisor respawn lifecycle (§2.2/§3.2.2, A4/R2): a respawn must cancel the old read loop
+"""TickerSupervisor respawn lifecycle: a respawn must cancel the old read loop
 before installing a fresh child, or the parked read task leaks (it runs forever).
 
 Also covers the 2026-07-22 cold-start defect family: the tick frame → bus → BarBuilder → store path
@@ -355,7 +355,7 @@ async def test_feed_stats_snapshot_counts_and_resets(clock):
 # returns ``datetime.fromtimestamp(0)``) sailed through every layer: the child ISO-serializes it,
 # ``_wire_timestamp`` IST-localizes it, and the Tick validator only checks tz-awareness — so it
 # landed in a ``date=1970-01-01`` tick partition (103 rows before they were quarantined by hand).
-# It is dropped: one WARNING, stream untouched. WO-24e (2026-08-21) split it onto its OWN drop
+# It is dropped: one WARNING, stream untouched. The 2026-08-21 change split it onto its OWN drop
 # path/counter (``implausible_timestamp``, no ERROR traceback) — distinct from a genuinely missing
 # timestamp, which still logs+counts as ``parse_error`` via the generic exception handler.
 
@@ -379,13 +379,13 @@ async def test_epoch_timestamp_tick_is_dropped_with_a_warning(clock, monkeypatch
         await asyncio.sleep(0)
 
     assert published == []                                     # never reaches BarBuilder/the store
-    assert sup.stats_snapshot()["frames_dropped"] == {"implausible_timestamp": 1}  # own drop path (WO-24e)
+    assert sup.stats_snapshot()["frames_dropped"] == {"implausible_timestamp": 1}  # own drop path
     warns = [kw for (lvl, ev, kw) in rec.calls if ev == "tick_timestamp_implausible"]
     assert len(warns) == 1
     assert warns[0]["symbol"] == "R"
     assert warns[0]["parsed"].startswith("1970-01-01")
     assert all(lvl == "warning" for (lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible")
-    # WO-24e: no ERROR-level traceback for this working-as-designed drop — the WARNING is the ONLY log line.
+    # No ERROR-level traceback for this working-as-designed drop — the WARNING is the ONLY log line.
     assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "ticker_tick_parse_error"] == []
     assert len(rec.calls) == 1
 
@@ -427,7 +427,7 @@ async def test_the_epoch_tick_never_stops_the_stream(clock):
 
     assert len(published) == 1 and published[0].ltp == Decimal("102.50")
     # Both frames were consumed off the wire (the drop is per-TICK, never a read-loop abort) and
-    # exactly one of them was dropped, on its own counter (WO-24e).
+    # exactly one of them was dropped, on its own counter.
     snap = sup.stats_snapshot()
     assert snap["ticks_received"] == 2
     assert snap["frames_dropped"] == {"implausible_timestamp": 1}
@@ -435,7 +435,7 @@ async def test_the_epoch_tick_never_stops_the_stream(clock):
 
 @pytest.mark.asyncio
 async def test_missing_timestamp_tick_still_takes_the_generic_parse_error_path(clock, monkeypatch):
-    """A genuinely ABSENT ``exchange_timestamp`` is a different defect than epoch-0 (WO-24e split
+    """A genuinely ABSENT ``exchange_timestamp`` is a different defect than epoch-0 (a later change split
     them): it still raises the plain ``ValueError`` from :func:`parse_tick_frame`, still logs
     ``ticker_tick_parse_error`` with a traceback, and still counts as ``parse_error`` — unchanged."""
     import engine.broker.ticker_supervisor as mod
@@ -556,13 +556,13 @@ async def test_warming_backoff_caps_and_escalates_once(monkeypatch):
     assert sup._wedge_respawns == 4
     assert len(notify.msgs) == 1                             # ... and escalation is one-shot
 
-    # Recovery resets the backoff + escalation so a later episode can escalate again (§2.6).
+    # Recovery resets the backoff + escalation so a later episode can escalate again.
     sup._set_state("HEALTHY")
     assert sup._wedge_respawns == 0
     assert sup._wedge_escalated is False
 
 
-# ================================================================== WO-26b: the false-STALE wedge
+# ================================================================== the false-STALE wedge
 # Three occurrences (2026-08-20 pm, 08-24 10:01, 08-25 11:28) of the same shape: HEALTHY→STALE while
 # the feed was perfect — ~46,000 ticks per 5 min and 1,010 bars written per interval kept flowing all
 # through a "STALE" that lasted 40 min / 2 h 14 min. Two independent defects produced it:
@@ -718,7 +718,7 @@ async def test_stale_recovers_to_healthy_when_frames_resume(clock):
 
 @pytest.mark.asyncio
 async def test_a_tick_promotes_warming_to_healthy(clock):
-    """WARMING is the other place the heartbeat frame used to be privileged (WO-26b).
+    """WARMING is the other place the heartbeat frame used to be privileged.
 
     A child whose heartbeat LoopingCall never started but whose ticks flow perfectly would sit in
     WARMING and be respawned every warming_timeout_s forever — throwing away a working feed."""
@@ -743,7 +743,7 @@ async def test_stale_recovers_on_a_heartbeat_frame_too(clock):
     assert sup.health().state == "HEALTHY"
 
 
-# ------------------------------------------- 3b. in-child KiteTicker reconnect (2026-09-09, §2.6 (i))
+# ------------------------------------------- 3b. in-child KiteTicker reconnect (2026-09-09)
 # KiteTicker reconnects INSIDE the child (`reconnect=True`; ticker/main.py `TickerApp._on_connect`
 # re-subscribes and re-asserts FULL mode, so Kite re-delivers the connect-time snapshot with
 # last-trade stamps) while the child keeps heartbeating. The supervisor therefore sees NO state
@@ -1046,7 +1046,7 @@ async def test_starvation_discount_still_kills_a_genuinely_dead_child(monkeypatc
 # ------------------------------------------------------------------ 6. the respawn deadlock itself
 @pytest.mark.asyncio
 async def test_respawn_terminates_the_child_before_cancelling_the_read_loop(clock, monkeypatch):
-    """Regression for the wedge that made kill_after a lie (WO-26b).
+    """Regression for the wedge that made kill_after a lie.
 
     `_read_loop`'s cleanup awaits `server.wait_closed()`, which under CPython ≥3.12 blocks until
     every accepted connection has dropped — the child link included. Cancelling the read loop BEFORE
@@ -1103,7 +1103,7 @@ async def test_stop_kills_the_child_between_the_two_cancels(clock, monkeypatch):
 @pytest.mark.asyncio
 async def test_stop_cancels_the_real_read_task(clock, monkeypatch):
     """`_cancel_monitor_task` must touch only the monitor task. Two leftover lines from the
-    pre-WO-26b combined `_cancel_supervision` (`self._read_task = None` plus a redundant
+    earlier combined `_cancel_supervision` (`self._read_task = None` plus a redundant
     `self._monitor_task = None`) cleared `_read_task` before step 3 ever ran, so `stop()`'s own
     `_cancel_read_task()` found nothing to cancel and the real read-loop task leaked on every
     normal stop — the opposite of what `stop()`'s docstring promises."""

@@ -1,4 +1,4 @@
-"""SectorMapJob (§4.4 job 13, R1/E5): first-wins sector classification over the pinned source
+"""SectorMapJob: first-wins sector classification over the pinned source
 order (PSU Bank before Bank before Financial Services), the owner-override and NSE-Industry
 supplement rungs (2026-09-21) beneath it, UNCLASSIFIED for whatever none of them claims, the
 per-source frozen-fallback + alert path, keep-previous-snapshot when nothing classifies, verbatim
@@ -143,7 +143,7 @@ def write_industry_csv(tmp_path, text: str, name="index_cached.csv") -> Path:
     return path
 
 
-# --------------------------------------------------------------------------- happy path (R1)
+# --------------------------------------------------------------------------- happy path
 async def test_run_classifies_first_wins_and_unclassified(tmp_path, store, clock):
     """SBIN is in BOTH the PSU-Bank and Bank lists — the pinned order classifies it PSU_BANK.
     A universe symbol in no index gets an explicit UNCLASSIFIED row (gate caps it at 1)."""
@@ -169,13 +169,13 @@ async def test_run_classifies_first_wins_and_unclassified(tmp_path, store, clock
 async def test_rerun_is_idempotent_and_snapshot_selectable_by_date(tmp_path, store, clock):
     job = make_job(tmp_path, store, clock, make_client())
     first = await job.run(D)
-    again = await job.run(D)                             # §2.6 run-latest-once: harmless re-run
+    again = await job.run(D)                             # run-latest-once: harmless re-run
     assert first.ok and again.ok
     assert len(store.get_sector_map(as_of=D)) == first.rows_written
     assert store.get_sector_map(as_of=D - timedelta(days=1)) == []   # no earlier snapshot
 
 
-# --------------------------------------------------------------------------- failure model (E5)
+# --------------------------------------------------------------------------- failure model
 async def test_failed_source_reuses_frozen_copy_and_alerts(tmp_path, store, clock):
     await make_job(tmp_path, store, clock, make_client()).run(D)     # seeds the frozen copies
 
@@ -341,7 +341,7 @@ async def test_override_unknown_sector_name_skipped_and_alerts(tmp_path, store, 
 
 
 async def test_missing_overrides_file_alerts_but_sector_part_proceeds(tmp_path, store, clock):
-    """Missing config/sector_overrides.yaml is E5 (§ module docstring: never load-bearing) — the
+    """Missing config/sector_overrides.yaml is never load-bearing (see the module docstring) — the
     real index-scrape classification proceeds unaffected, just without any override applied."""
     themes_path = tmp_path / "themes.yaml"
     themes_path.write_text(THEMES_YAML, encoding="utf-8")
@@ -452,7 +452,7 @@ async def test_industry_never_overrides_an_index_or_an_override_classification(t
 
 
 async def test_no_readable_industry_source_degrades_silently_to_unclassified(tmp_path, store, clock, caplog):
-    """E5 supplement, weaker than the override rung: a missing path and a path whose CSV has no
+    """The industry supplement, weaker than the override rung: a missing path and a path whose CSV has no
     Industry column are both just "no fallback this run" — the run stays ok, nothing raises, the
     symbol keeps the pre-2026-09-21 UNCLASSIFIED behaviour, and NO owner alert fires (the log line
     ``sector_industry_source_unavailable`` is the whole signal)."""
@@ -470,7 +470,7 @@ async def test_no_readable_industry_source_degrades_silently_to_unclassified(tmp
     assert result.ok is True and result.industry_classified == 0
     rows = {r["symbol"]: r["sector"] for r in store.get_sector_map(as_of=D)}
     assert rows["AAA"] == UNCLASSIFIED
-    assert msgs == []                                    # E5 supplement: logged, never alerted
+    assert msgs == []                                    # industry supplement: logged, never alerted
     events = [r.getMessage() for r in caplog.records]
     assert "sector_industry_source_unavailable" in events
     assert "sector_industry_source_unreadable" in events  # the no-Industry-column candidate
@@ -540,7 +540,7 @@ def test_source_order_is_most_specific_first():
 
 def test_committed_theme_seed_loads_verbatim():
     """The shipped config/themes.yaml parses; symbols lists are owner-approved verbatim (empty
-    until the owner applies weekly-researcher suggestions, §5.5)."""
+    until the owner applies weekly-researcher suggestions)."""
     rows = load_theme_seed(repo_root() / "config" / "themes.yaml")
     assert {r["theme"] for r in rows} >= {"ev_mobility", "defence", "railways"}
     for row in rows:
@@ -556,4 +556,4 @@ def test_load_theme_seed_rejects_non_mapping(tmp_path):
 
 
 def test_unclassified_constant_matches_plan():
-    assert sm.UNCLASSIFIED == "UNCLASSIFIED"             # §4.4 job 13 vocabulary, gate-visible
+    assert sm.UNCLASSIFIED == "UNCLASSIFIED"             # sector-map job vocabulary, gate-visible

@@ -1,7 +1,7 @@
-"""The routing-agnostic broker surface (WO-P3-2, 2026-09-10; plan 3.2.9 / 3.5.3).
+"""The routing-agnostic broker surface (2026-09-10).
 
 The OMS must not know whether it is talking to Kite or to the PaperBroker -- ``ModeManager.routing()``
-picks one and hands it over (WO-P3-5). That is only safe if the two are structurally
+picks one and hands it over. That is only safe if the two are structurally
 interchangeable, so this test asserts it MECHANICALLY rather than by convention: every method of
 :class:`~engine.paper.surface.BrokerSurface` must exist on BOTH ``KiteClient`` and ``PaperBroker``,
 be a coroutine function, and carry identical parameter names / kinds / defaults.

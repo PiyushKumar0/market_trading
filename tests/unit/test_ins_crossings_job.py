@@ -1,7 +1,7 @@
-"""§6.1 `ins` EOD job + morning admission — the crossing seam, the pending journal, the once-only bound.
+"""`ins` EOD job + morning admission — the crossing seam, the pending journal, the once-only bound.
 
 The load-bearing test in this file is :func:`test_golden_live_job_and_validated_study_agree`: the live
-job and the WO-16 study must produce the SAME crossings from the same fixture, because the whole
+job and the validated study must produce the SAME crossings from the same fixture, because the whole
 justification for shipping `ins` is evidence measured by that study. A drift between the two would
 mean trading a population the evidence never measured. It is pinned two ways — by FUNCTION IDENTITY
 (one definition, not two copies that happen to agree today) and by BEHAVIOUR on a shared fixture.
@@ -89,7 +89,7 @@ class _FakeStore:
         self.bars_calls: list[str] = []
 
     def get_universe_eligible_symbols(self, d: date) -> list[str]:
-        # 2026-09-01: the predicate lives in the store. O18 (2026-10-08): the job no longer reads
+        # 2026-09-01: the predicate lives in the store. Owner decision 2026-10-08: the job no longer reads
         # this view; it is kept so a regression back to it shows up as the non-core names leaking.
         return sorted(self.universe + self.non_core)
 
@@ -160,8 +160,8 @@ def _pending_rows(conn) -> list[dict[str, Any]]:
 # =========================================================================== THE GOLDEN SEAM TEST
 def test_golden_shared_crossing_function_is_one_definition_not_a_copy():
     """Identity, not equality: the study, the engine event builder and the live job must all resolve
-    to the SAME function object. Two copies that agree today are exactly the drift the §6.1 addendum
-    forbids ("the live code MUST consume the same crossing function the validated study runs")."""
+    to the SAME function object. Two copies that agree today are exactly the drift the strategy rules
+    forbid ("the live code MUST consume the same crossing function the validated study runs")."""
     assert es.insider_cluster_events is insider_crossings.insider_cluster_events
     assert filings_events.insider_cluster_events is insider_crossings.insider_cluster_events
     assert es.is_open_market_buy is insider_crossings.is_open_market_buy
@@ -172,10 +172,10 @@ def test_golden_shared_crossing_function_is_one_definition_not_a_copy():
 
 
 def test_golden_live_job_and_validated_study_agree(conn, calendar):
-    """BEHAVIOURAL half of the golden test, on one shared fixture: every crossing session the WO-16
+    """BEHAVIOURAL half of the golden test, on one shared fixture: every crossing session the validated
     study reports is a crossing session the live job reports, for the same filings and sessions."""
     # A fixture with three crossings separated by genuine RE-ARMS (each cluster must age out of the
-    # 10-session trailing window before the next can fire), plus an ESOP row the §2.8.2 taxonomy must
+    # 10-session trailing window before the next can fire), plus an ESOP row the filings-layer taxonomy must
     # exclude however large. The spacing is the point: it exercises the hysteresis, not just the sum.
     filings = [
         _buy(SESSIONS[2], 6_000_000),
@@ -266,7 +266,7 @@ def test_job_only_journals_crossings_dated_the_run_day(conn, calendar):
 
 
 def test_job_is_idempotent_per_day(conn, calendar):
-    """A §2.6 catch-up replay / missed-job sweep / manual --once must UPSERT, never queue a duplicate
+    """A catch-up replay / missed-job sweep / manual --once must UPSERT, never queue a duplicate
     candidate: the (for_session, symbol) primary key is the structural bound."""
     store = _store_with_crossing_today()
     job = InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD)
@@ -296,7 +296,7 @@ def test_a_rerun_never_un_consumes_an_already_admitted_row(conn, calendar):
 
 
 def test_esop_rows_never_produce_a_crossing(conn, calendar):
-    """§2.8.2 taxonomy, end-to-end through the live job: an ESOP allotment is not an open-market buy
+    """Filings-layer taxonomy, end-to-end through the live job: an ESOP allotment is not an open-market buy
     however large, so it can never originate an `ins` candidate."""
     filings = [
         _buy(SESSIONS[-1], 900_000_000, mode="ESOP Allotment"),
@@ -322,7 +322,7 @@ def test_out_of_universe_symbols_are_ignored(conn, calendar):
 
 
 def test_eligible_but_non_core_symbols_are_ignored(conn, calendar):
-    """O18 (2026-10-08): the index widened to NIFTY Total Market, but the registered `ins` edge was
+    """Owner decision 2026-10-08: the index widened to NIFTY Total Market, but the registered `ins` edge was
     measured on NIFTY 500-class names, so an ELIGIBLE microcap (non-core) filing a ₹1.2cr buy never
     becomes a crossing — the job reads the core view, not the eligible one."""
     filings = [_buy(SESSIONS[-2], 6_000_000, symbol="MICRO"), _buy(SESSIONS[-1], 6_000_000, symbol="MICRO")]
@@ -352,7 +352,7 @@ def test_missing_run_day_bar_is_counted_never_invented(conn, calendar):
 
 
 def test_no_universe_for_the_day_sinks_the_watermark(conn, calendar):
-    """``ok=False`` = the day could not be EVALUATED, so the §2.6 sweep retries it. Distinct from an
+    """``ok=False`` = the day could not be EVALUATED, so the catch-up sweep retries it. Distinct from an
     evaluated day with zero crossings, which is a real answer."""
     store = _FakeStore(universe=[], filings=[], closes={})
     result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
@@ -369,7 +369,7 @@ def test_zero_crossings_on_an_evaluated_day_is_ok_true(conn, calendar):
 
 # =========================================================================== starvation visibility
 def test_run_logs_fresh_feed_counts_next_to_crossings_found(conn, calendar, caplog):
-    """The plan's binding starvation-visibility requirement: one line must distinguish "the BSE fresh
+    """The binding starvation-visibility requirement: one line must distinguish "the BSE fresh
     feed delivered nothing" (STARVATION — the live-reachability caveat biting) from "a genuinely quiet
     day". A bare crossings=0 cannot."""
     store = _store_with_crossing_today()
@@ -406,7 +406,7 @@ def _coverage_store(symbols_with_filings: int, universe_size: int) -> _FakeStore
 
 
 def _record(caplog, event: str):
-    """The single LogRecord for ``event`` (structured fields ride as record attributes, R8)."""
+    """The single LogRecord for ``event`` (structured fields ride as record attributes)."""
     hits = [r for r in caplog.records if r.getMessage() == event]
     assert len(hits) == 1, [r.getMessage() for r in caplog.records]
     return hits[0]
@@ -545,7 +545,7 @@ def test_admission_survives_a_malformed_row(conn, calendar):
 
 
 def test_prescreen_per_strategy_cap_binds_ins(conn, calendar):
-    """`ins` goes through ``SignalPreScreen.admit`` like brk20, so the §3.2.5 per-strategy cap binds —
+    """`ins` goes through ``SignalPreScreen.admit`` like brk20, so the prescreen's per-strategy cap binds —
     the batch path is not a cap bypass. Shipped cap: 4/day."""
     from engine.strategy.prescreen import SignalPreScreen
     from engine.strategy.scanners import ins
@@ -586,9 +586,9 @@ def test_shipped_settings_cap_ins(conn):
     assert caps["ins"] < caps["default"]
 
 
-# =========================================================================== the exit path (§7.1)
+# =========================================================================== the exit path
 def test_time_exit_needs_no_ins_specific_code():
-    """§6.1: the D2 time exit IS the `ins` exit path — `ins` ships NO exit code.
+    """The time exit IS the `ins` exit path — `ins` ships NO exit code.
 
     1. ``RecommendationPipeline.time_exit_check`` and its exit-session resolver name no strategy;
        the hold comes from the hold map.

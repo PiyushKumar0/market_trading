@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""G1 initial-history-seed CLI (§3.1, §4.4 job 3, §2.6 step 4, A2) — drives ``BackfillJob``.
+"""Initial-history-seed CLI — drives ``BackfillJob``.
 
 The one-off owner tool the RUNBOOK "Historical backfill procedure" calls "Seed the full history
 once": it pulls official Kite candles for the trading universe through the SAME chunked, checkpointed,
 resumable :class:`~engine.marketdata.backfill.BackfillJob` the engine's nightly ``daily_bars`` job
-uses (A2 ≤3 req/s, paced inside ``KiteClient``). The initial minute history is a multi-evening job;
+uses (≤3 req/s, paced inside ``KiteClient``). The initial minute history is a multi-evening job;
 every re-run resumes exactly where it stopped because each ``(symbol, interval)`` checkpoint is
-persisted in ``state.db`` ``backfill_checkpoints``. A11: Kite candles are already corp-action adjusted
+persisted in ``state.db`` ``backfill_checkpoints``. Kite candles are already corp-action adjusted
 and are written verbatim — no re-adjustment happens anywhere (that concern lives inside ``BackfillJob``).
 
     python scripts/backfill.py seed   [--daily-years N] [--minute-years N] [--skip-daily] [--skip-minute] \
@@ -75,7 +75,7 @@ _log = get_logger("scripts.backfill")
 # INDEX_SYMBOL / VIX_SYMBOL are canonically DEFINED in engine.ops.main and nowhere
 # else; importing that module would boot the whole composition graph, so the two names are duplicated
 # here (kept in sync with engine.ops.main.INDEX_SYMBOL / VIX_SYMBOL). They are the bars_1d symbols the
-# regime features read (§7.1 regime_data_ready): the seed's DAILY set includes them, the MINUTE set
+# regime features read (the risk gate's regime_data_ready): the seed's DAILY set includes them, the MINUTE set
 # does not — matching the engine's own backfill_hook / daily_bars job.
 INDEX_SYMBOL = "NIFTY 50"
 VIX_SYMBOL = "INDIA VIX"
@@ -141,7 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 # --------------------------------------------------------------------------- universe resolution
 def _dedup(items: list[str]) -> list[str]:
-    """Order-preserving de-duplication (§ universe resolution: index symbols appended, deduped)."""
+    """Order-preserving de-duplication (universe resolution: index symbols appended, deduped)."""
     seen: set[str] = set()
     out: list[str] = []
     for item in items:
@@ -156,7 +156,7 @@ def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str
 
     Ladder: ``--symbols`` override → runtime cache ``<data>/universe/index_cached.csv`` (the exact
     name ``UniverseBuilder`` writes) → committed seed ``universe.index_seed_path``. Both were
-    renamed off ``nifty200`` by O15 (2026-09-04), when the eligible index became config (NIFTY 500).
+    renamed off ``nifty200`` by owner decision (2026-09-04), when the eligible index became config (NIFTY 500).
     Returns ``([], "")`` if nothing resolves so the caller can print an actionable error and exit 2.
     """
     if symbols_arg:
@@ -291,7 +291,7 @@ def _print_symbol_list(items: list[str], limit: int = 50) -> None:
 
 
 def _run_status(settings, clock: Clock, symbols_arg: str | None) -> int:
-    """G1 completeness evidence (safe while the engine is live): read-only SQLite, never DuckDB."""
+    """Completeness evidence (safe while the engine is live): read-only SQLite, never DuckDB."""
     today = clock.today()
     print(f"backfill status @ {today.isoformat()}  (state.db: {settings.sqlite_path()})")
 
@@ -373,7 +373,7 @@ def _looks_like_token_problem(exc: Exception) -> bool:
 
 
 def _reset_checkpoints(conn: sqlite3.Connection, plans: list[IntervalPlan]) -> int:
-    """DELETE the (symbol, interval) checkpoints for every symbol about to run, per interval (A2)."""
+    """DELETE the (symbol, interval) checkpoints for every symbol about to run, per interval."""
     total = 0
     for plan in plans:
         if not plan.symbols:

@@ -1,9 +1,9 @@
-"""§2.8 stage-3 BSE FRESH insider feed (``filings_pit_fresh``): defensive parse over the probe-verified
+"""Stage-3 BSE FRESH insider feed (``filings_pit_fresh``): defensive parse over the probe-verified
 ``getCorp_Regulation_ng/w`` shape, the equity filter (startswith 'equity'), scrip->symbol resolution +
 skip counting, txn_type mapping (incl. Revoke / Pledge pass-through), source-tagged (``bse:``) content-
 hash ids, the ~25-row-cap per-day subdivision, store round-trip + idempotency, the 2026-09-12
 per-run scrip-map rebuild (stored codes union the index-CSV x BSE-bulk-master join) with its
-per-stage funnel counts, and the E5 degrade-never-raise contract.
+per-stage funnel counts, and the degrade-never-raise contract.
 
 Fixtures (``fixtures/filings_pit_fresh.json``) are lifted VERBATIM from the 2026-07-19 BSE probe
 captures (``bse_insider_out/01_default_isdefault1.json`` + ``14_reliance_2023_2024.json``). The live
@@ -128,7 +128,7 @@ def stepping_clock():
 
 
 def _record(caplog, event: str):
-    """The single LogRecord for ``event`` (structured fields ride as record attributes, R8)."""
+    """The single LogRecord for ``event`` (structured fields ride as record attributes)."""
     hits = [r for r in caplog.records if r.getMessage() == event]
     assert len(hits) == 1, [r.getMessage() for r in caplog.records]
     return hits[0]
@@ -246,7 +246,7 @@ def _cap_rows(n: int) -> list[dict]:
 
 
 async def test_windowed_cap_triggers_per_day_subdivision(seeded_store, clock, settings):
-    """An Isdefault=2 window returning >= 25 rows is assumed truncated -> refetched per-day (§2.8)."""
+    """An Isdefault=2 window returning >= 25 rows is assumed truncated -> refetched per-day."""
     per_day: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -267,13 +267,13 @@ async def test_windowed_cap_triggers_per_day_subdivision(seeded_store, clock, se
     assert result.ok is True
 
 
-# =========================================================================== E5 degrade
+# =========================================================================== degrade
 async def test_both_surfaces_fail_degrades_and_warns(seeded_store, clock, settings, instant_backoff):
     msgs, sink = collect_alerts()
     result = await FilingsPitFreshJob(
         seeded_store, clock, failing_client(), settings=settings, notify=sink
     ).run(D)
-    assert result.ok is False and result.degraded is True         # never raises (E5)
+    assert result.ok is False and result.degraded is True         # never raises
     assert result.failed_sources == ("isdefault1", "isdefault2")
     assert result.rows_written == 0
     assert msgs and msgs[0].data["job_id"] == "filings_pit_fresh"
@@ -281,7 +281,7 @@ async def test_both_surfaces_fail_degrades_and_warns(seeded_store, clock, settin
     assert fresh.BSE_FRESH_URL.startswith("https://api.bseindia.com/")
 
 
-# =================================================== per-run scrip-map rebuild (2026-09-12 §2.8)
+# =================================================== per-run scrip-map rebuild (2026-09-12)
 async def test_scrip_map_rebuild_resolves_rows_the_stored_map_alone_drops(
     seeded_store, clock, settings, monkeypatch
 ):
@@ -338,8 +338,8 @@ async def test_stored_code_wins_over_a_disagreeing_master(seeded_store, clock, s
 async def test_scrip_master_failure_degrades_to_stored_map_and_alerts_once(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """A failed master leg silently reverts the feed to the 199-code coverage that starved §6.1 `ins`
-    for two months, and §6.1's own ``ins_feed_coverage_low`` measures the 120-day CORPUS, so it
+    """A failed master leg silently reverts the feed to the 199-code coverage that starved `ins`
+    for two months, and its own ``ins_feed_coverage_low`` measures the 120-day CORPUS, so it
     cannot see it. The map stage therefore owns the detection: it warns, and alerts ONCE on the
     transition (a replay must not storm). Rows keep flowing, so ``ok`` stays true."""
     monkeypatch.setattr(
@@ -402,7 +402,7 @@ async def test_master_shape_change_is_degraded_not_a_silent_revert(
 ):
     """BSE renames SCRIP_CD/ISIN_NUMBER: a 200 that parses to nothing. The old code called that a
     success (``degraded=False``) and reverted to the stored codes with the run line certifying a
-    healthy map — the exact regression this work order exists to make visible."""
+    healthy map — the exact regression this change exists to make visible."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -533,7 +533,7 @@ async def test_two_constituents_on_one_isin_are_not_counted_as_shadowed(
 
 def test_non_finite_considerations_read_as_no_value():
     """A bare ``NaN`` token survives json.loads and constructs a Decimal; every ordering comparison
-    on it raises — outside the E5 guard, in the ins-eligible tally. Non-finite is 'no value'."""
+    on it raises — outside the degrade guard, in the ins-eligible tally. Non-finite is 'no value'."""
     assert fresh._dec("NaN") is None
     assert fresh._dec(float("nan")) is None
     assert fresh._dec("Infinity") is None
@@ -649,7 +649,7 @@ async def test_stage_counts_close_and_count_ins_eligible_buys(seeded_store, cloc
     )
     assert result.rows_resolved == 10 and result.rows_parsed == 5 and result.rows_written == 5
     # Of the 5 deduped rows, GOLDLINE (Market Purchase) and RELIANCE (Off Market) are the open-market
-    # BUYs — the Revoke, the ESOP Sell and the Pledge are not what §6.1 `ins` aggregates. But the
+    # BUYs — the Revoke, the ESOP Sell and the Pledge are not what `ins` aggregates. But the
     # counter must match what the RULE can act on, and insider_cluster_events drops a filing with no
     # positive value AFTER the predicate passes: RELIANCE's buy is zero-consideration, so the rule
     # sees one. A counter that said 2 would overstate on exactly the shape that starves it silently.
@@ -662,7 +662,7 @@ async def test_stage_counts_close_and_count_ins_eligible_buys(seeded_store, cloc
 
 
 async def test_run_line_carries_the_whole_funnel(seeded_store, clock, settings, caplog):
-    """The work order's measurability deliverable is the LOG LINE, not the result model: a rename or
+    """The measurability deliverable is the LOG LINE, not the result model: a rename or
     a dropped kwarg on ``filings_pit_fresh_ingested`` would leave every result-field assertion green
     while the next starvation became invisible on the one line built to expose it."""
     with caplog.at_level("INFO"):

@@ -1,28 +1,28 @@
-"""NSE results filings → ``results_filings`` + historical board-meeting dates (§2.8 job
-``filings_results``, ~18:45 — O14, E5), and their quarterly line items (job ``results_line_items``).
+"""NSE results filings → ``results_filings`` + historical board-meeting dates (job
+``filings_results``, ~18:45), and their quarterly line items (job ``results_line_items``).
 
 ``filings_results`` runs three legs under their OWN guards (one failing never blocks another — the
-§4.4 job-9 deals pattern):
+deals-job pattern):
 
 1. **Results filings** — ``corporates-financial-results?period=Quarterly`` filing METADATA (period,
    audited/consolidated flags, ``broadCastDate``/``exchdisstime``, XBRL link) → ``results_filings``.
    This endpoint's newest period is the Dec-2024 quarter; it now only carries late filings of old
    periods. The date filter keys off the BROADCAST date (correct for point-in-time — a
-   2023-broadcast filing for FY2021 was observed live; period labels lie, §2.8 rule i).
+   2023-broadcast filing for FY2021 was observed live; period labels lie).
 2. **Integrated filings** — SEBI's Integrated Filing (Financials) listing, where every result from
    the Mar-2025 quarter on is filed (probe-verified 2026-09-24): same metadata, same table.
 3. **Board-meeting dates (past + future)** — merged into the existing ``earnings_calendar`` table via
    the provider's historical leg (:meth:`EarningsCalendarJob.run_range`), the historical results-date
-   source the §2.7 event study lacked. The provider's forward-looking daily job contract is untouched.
+   source the event study lacked. The provider's forward-looking daily job contract is untouched.
 
 The listing legs' incremental window keys off the latest stored ``results_filings.broadcast_dt``
 watermark (deep history is the backfill's job). A run whose newest stored period is older than
 :data:`RESULTS_STALE_AFTER_DAYS` is degraded + alerted: a listing that returns nothing new still
 "succeeds", which is how the switch to Integrated Filing went unnoticed for 18 months.
 
-``results_line_items`` (§2.8.4 stage 2) fetches each pending filing's XBRL and stores its quarterly
+``results_line_items`` (stage 2) fetches each pending filing's XBRL and stores its quarterly
 ``revenue``/``pat``, a bounded batch per run. Defensive parse (skip-and-count), idempotent upsert,
-never raises into the scheduler (E5).
+never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_results")
 
-#: NSE quarterly financial-results API (equities). [VERIFY Phase-1]; anti-bot [likely].
+#: NSE quarterly financial-results API (equities). [VERIFY]; anti-bot [likely].
 NSE_RESULTS_URL = "https://www.nseindia.com/api/corporates-financial-results"
 
 #: SEBI Integrated Filing (Financials) listing — the home of every result since the Mar-2025 quarter.
@@ -77,7 +77,7 @@ _PROFIT_TAGS = (
 
 #: The event-calendar historical leg's daily window around the run day — a modest past leg captures
 #: just-announced board meetings; the forward leg captures the near-term results calendar. The deep
-#: multi-year event-calendar history is the backfill's job, not the nightly incremental (§2.8).
+#: multi-year event-calendar history is the backfill's job, not the nightly incremental.
 EVENT_CALENDAR_PAST_DAYS = 7
 EVENT_CALENDAR_FUTURE_DAYS = 45
 
@@ -85,7 +85,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 def results_url(frm: date, to: date) -> str:
-    """Quarterly-results URL for the explicit broadcast-date window ``[frm, to]`` (DD-MM-YYYY, §2.8)."""
+    """Quarterly-results URL for the explicit broadcast-date window ``[frm, to]`` (DD-MM-YYYY)."""
     return (
         f"{NSE_RESULTS_URL}?index=equities&period=Quarterly"
         f"&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
@@ -93,7 +93,7 @@ def results_url(frm: date, to: date) -> str:
 
 
 class FilingsResultsResult(BaseModel):
-    """One run's outcome (never an exception, E5). ``ok`` = both results listings ingested;
+    """One run's outcome (never an exception). ``ok`` = both results listings ingested;
     ``degraded`` = a leg failed (its existing rows stay in force, the catch-up retries) or the stored
     periods are stale (``failed_legs`` then names ``stale``)."""
 
@@ -148,7 +148,7 @@ def _parse_dt(raw: Any) -> datetime | None:
 
 
 def _is_consolidated(raw: Any) -> bool:
-    """"Consolidated" → True, "Non-Consolidated" → False (both stored; consolidated preferred, §2.8)."""
+    """"Consolidated" → True, "Non-Consolidated" → False (both stored; consolidated preferred)."""
     low = _clean(raw).lower()
     return "consolidated" in low and not low.startswith("non")
 
@@ -166,7 +166,7 @@ def _is_audited(raw: Any) -> bool | None:
 def parse_results(payload: Any) -> list[dict[str, Any]]:
     """NSE financial-results JSON → ``results_filings`` row dicts (defensive, skip-and-count).
 
-    Field map (probe-verified, §2.8): symbol; toDate→period_end (the quarter end — the PK component);
+    Field map (probe-verified): symbol; toDate→period_end (the quarter end — the PK component);
     consolidated flag; audited flag; broadCastDate→broadcast_dt (the point-in-time key); exchdisstime→
     exchdiss_dt; xbrl. Line items (revenue/pat/eps) are NULL in stage 1. A row without a symbol or an
     unparseable period_end is skipped (never key a filing on a missing period).
@@ -189,7 +189,7 @@ def parse_results(payload: Any) -> list[dict[str, Any]]:
                 "broadcast_dt": _parse_dt(keys.get("broadcastdate")),
                 "exchdiss_dt": _parse_dt(keys.get("exchdisstime")),
                 "xbrl": _clean(keys.get("xbrl")) or None,
-                "revenue": None,   # stage-2 line items (§2.8.4)
+                "revenue": None,   # stage-2 line items
                 "pat": None,
                 "eps": None,
             }
@@ -310,11 +310,11 @@ def parse_xbrl_line_items(content: bytes | str, period_end: date) -> tuple[Decim
 
 
 class FilingsResultsJob:
-    """§2.8 job ``filings_results`` — results filings + historical board-meeting dates (date-keyed, E5).
+    """Job ``filings_results`` — results filings + historical board-meeting dates (date-keyed).
 
     ``earnings`` is the existing :class:`EarningsCalendarJob` provider; this job calls its historical
     leg (``run_range``) so the board-meeting dates land in the SAME ``earnings_calendar`` table without
-    changing that provider's daily forward-looking job contract (§2.8). ``earnings=None`` runs the
+    changing that provider's daily forward-looking job contract. ``earnings=None`` runs the
     results leg only.
     """
 
@@ -342,7 +342,7 @@ class FilingsResultsJob:
 
     async def run(self, d: date) -> FilingsResultsResult:
         """Ingest results filings over ``[watermark → d]`` and (if wired) the event calendar over the
-        surrounding window, under per-leg guards. ``d`` is the run day. Never raises (E5)."""
+        surrounding window, under per-leg guards. ``d`` is the run day. Never raises."""
         watermark = await self._store.alatest_results_broadcast()
         frm = min(watermark.date(), d) if watermark is not None else d
         failed: list[str] = []
@@ -416,8 +416,8 @@ class FilingsResultsJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Filings are NEVER load-bearing (§2.8 rule iii): features/risk-context, not safety —
-            # warning severity, not entry-blocking (contrast the earnings-calendar SAFETY job, R2).
+            # Filings are NEVER load-bearing: features/risk-context, not safety —
+            # warning severity, not entry-blocking (contrast the earnings-calendar SAFETY job).
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Results-filings feed degraded",
             body=(
@@ -448,7 +448,7 @@ class ResultsLineItemsResult(BaseModel):
 
 
 class ResultsLineItemsJob:
-    """§2.8.4 stage 2 — quarterly revenue/PAT from each pending filing's XBRL, for the batch universe
+    """Stage 2 — quarterly revenue/PAT from each pending filing's XBRL, for the batch universe
     (the symbols the news resolver can attach), at most ``per_run`` fetches per run, newest first."""
 
     def __init__(

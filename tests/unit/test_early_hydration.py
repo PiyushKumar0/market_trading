@@ -1,9 +1,9 @@
-"""Early hydration login hook (§2.6 "Early-hydration addendum", owner-directed 2026-09-09).
+"""Early hydration login hook (owner-directed 2026-09-09).
 
 The owner leaves at 08:15 and boots the PC 09:30–10:00 — the pre-open chain then fires after the
-trade window opens and the G2 digest-before-open criterion reads 61%. On the days they log in early
+trade window opens and the digest-before-open criterion reads 61%. On the days they log in early
 (~06:30), :class:`EarlyHydration` turns that login into the pre-open chain: trading day + before
-session open ⇒ wait for ``scheduler.start()`` (WO-15: never run the chain ahead of arming) ⇒ wait for
+session open ⇒ wait for ``scheduler.start()`` (never run the chain ahead of arming) ⇒ wait for
 the sibling ``PostLoginRecovery`` task ⇒ ``CatchUpRunner.hydrate_ahead`` ⇒ one owner line.
 
 These tests pin the DECISION table (the hydration itself is pinned in ``test_catchup_runner.py``):
@@ -92,7 +92,7 @@ async def test_the_early_hook_hydrates_once_the_scheduler_is_armed(
     calendar, method: str, reason: str
 ) -> None:
     """The whole point: a 06:32 login runs the pre-open chain hours ahead of its clock — but only
-    behind an armed scheduler (WO-15), so it WAITS while the boot is still coming up.
+    behind an armed scheduler, so it WAITS while the boot is still coming up.
 
     ``on_boot`` (2026-09-21) runs the identical chain once at process boot, under the same gates: on
     2026-09-16 the engine booted 06:58 with no Kite login until 10:04, the PC slept 08:00-10:00 through

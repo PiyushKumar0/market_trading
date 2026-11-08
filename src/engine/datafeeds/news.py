@@ -1,26 +1,26 @@
-"""News ingest — §2.7 step 1 / §3.2.4 ``NewsIngest`` / §4.4 job 10 (E5/E6 — never load-bearing).
+"""News ingest — ``NewsIngest`` (never load-bearing).
 
 HEADLINE-LEVEL ONLY: title, source domain, url, published_at. Article bodies are NEVER fetched —
-cheap, and keeps the prompt-injection surface headline-sized (A3r). Output is UNTRUSTED Tier-1 input
-only (§2.4): every ``news`` row is written ``untrusted=true`` (forced by ``MarketStore.insert_news``).
+cheap, and keeps the prompt-injection surface headline-sized. Output is UNTRUSTED Tier-1 input
+only: every ``news`` row is written ``untrusted=true`` (forced by ``MarketStore.insert_news``).
 
 Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner config change, config_audit):
 
 - **RSS**, a config-driven name → ``{url, poll_s}`` map (``news.feeds.rss``; seeds: ET Markets at
   5 min + Livemint markets/companies at 15 min). Parsed with stdlib ``xml.etree.ElementTree`` over an
-  injected ``httpx.AsyncClient`` (convention 11 — E5 best-effort). Moneycontrol RSS was removed
+  injected ``httpx.AsyncClient`` (convention 11 — best-effort). Moneycontrol RSS was removed
   2026-08-04: the feed has been frozen since ~2024-04 (391 polls, zero inserts) and its silence left
-  the corpus single-source, which no §2.7 corroboration gate can pass.
+  the corpus single-source, which no corroboration gate can pass.
   Malformed items are tolerated: an item without a title or an absolute link is skipped; an item with
   a missing/unparsable ``pubDate`` keeps the headline with ``published_at`` = ingest time (Clock) —
   conservative-recent, never a naive datetime.
 - **GDELT DOC 2.0** ``artlist`` JSON (15-min update granularity): the pinned query from settings plus
   a client-side domain filter to major Indian financial press (:data:`GDELT_DOMAIN_ALLOWLIST`).
   The ``timespan`` request parameter is the lookback window — the SAME poll with a widened
-  ``timespan`` is the §4.4 job 10 off-period startup backfill (RSS feeds have a fixed publisher-side
+  ``timespan`` is the off-period startup backfill (RSS feeds have a fixed publisher-side
   lookback; GDELT is the only feed with a controllable window, capped at
-  ``news.gdelt_backfill_max_days`` ≈ the ~3-month DOC window, E6).
-- **NSE corporate announcements** (``nse_ann``, §2.7 amendment 2026-09-04): the exchange as a source.
+  ``news.gdelt_backfill_max_days`` ≈ the ~3-month DOC window).
+- **NSE corporate announcements** (``nse_ann``, 2026-09-04): the exchange as a source.
   The 30-session coverage audit found only 47% of each day's top-10 movers had ANY cluster naming
   them, while the filings that moved them (UNITDSPR's Reg-30 disclosure, HINDZINC's LoI ~2 h ahead of
   the press) sat unread on ``corporate-announcements``. Items become ordinary ``news`` rows with
@@ -32,9 +32,9 @@ Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner confi
 Dedupe is by URL: within the polled batch here, and against the ``news`` table by
 ``MarketStore.insert_news`` (idempotent re-polls / overlapping windows / startup backfill).
 
-Failure model (E5): every feed fetch is individually guarded — a dead feed logs a structured warning
+Failure model: every feed fetch is individually guarded — a dead feed logs a structured warning
 and contributes zero headlines; :meth:`NewsIngest.poll` never raises into the caller's loop. Feeds
-down ⇒ clusters age out ⇒ empty watchlist (§2.7 fail-safe ladder); no news failure can FREEZE
+down ⇒ clusters age out ⇒ empty watchlist; no news failure can FREEZE
 anything.
 """
 
@@ -65,8 +65,8 @@ _log = get_logger("engine.datafeeds.news")
 #: GDELT DOC 2.0 API endpoint (the query itself is config — ``news.feeds.gdelt_doc_query``).
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-#: §3.2.4 / §4.4 job 10: GDELT results are domain-filtered to major Indian financial press.
-#: Module-pinned (not settings) in Phase 1 — widening it is a code change the owner reviews, same
+#: GDELT results are domain-filtered to major Indian financial press.
+#: Module-pinned (not settings) — widening it is a code change the owner reviews, same
 #: posture as the feed set being config_audit'd. Compared against the normalized registrable host
 #: (lowercase, ``www.`` stripped).
 GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
@@ -106,7 +106,7 @@ NSE_ANN_KEY = "nse_ann"
 #:
 #: ``desc`` is the SUBJECT (the announcement category ``news.feeds.nse_announcements.drop_subjects``
 #: filters on); ``attchmntText`` is the one-line disclosure body. There is no ``subject`` key in this
-#: payload — the plan's "subject-or-attachment-text" is exactly this pair.
+#: payload — "subject-or-attachment-text" is exactly this pair.
 NSE_ANN_FIELDS: tuple[str, ...] = (
     "symbol", "desc", "attchmntText", "attchmntFile", "sort_date", "exchdisstime", "an_dt", "seq_id",
 )
@@ -136,23 +136,22 @@ _ANN_DT_FIELDS: tuple[tuple[str, str], ...] = (
     ("an_dt", "%d-%b-%Y %H:%M:%S"),
 )
 
-#: §2.7: stored titles are headline-sized (A3r) — the disclosure body can run to a paragraph.
+#: Stored titles are headline-sized — the disclosure body can run to a paragraph.
 NSE_ANN_TITLE_MAX = 300
 
 
 def _clean_title(title: str) -> str:
     """Whitespace-collapse + HTML-unescape. ET double-escapes entities in RSS ("F&amp;amp;O"
     survives XML parsing as "F&amp;O") — stored titles must hold the human form ("F&O", "M&M")
-    or drop-pattern and alias matching silently miss (G1 seed-6 row 23)."""
+    or drop-pattern and alias matching silently miss."""
     return html.unescape(" ".join(title.split()))
 
 
 class Headline(BaseModel):
-    """One ingested headline (§3.2.4 ``NewsIngest.poll`` output; §4.3 ``news`` row shape).
+    """One ingested headline (``NewsIngest.poll`` output; ``news`` row shape).
 
-    HEADLINE-LEVEL ONLY (A3r): no body, no summary. ``published_at`` is tz-aware IST always
-    (§3.2 convention). ``headline_id`` is the platform-assigned ULID minted at ingest — the key
-    ``HeadlineClusterer`` uses to link ``news.cluster_id`` (§2.7 step 2).
+    HEADLINE-LEVEL ONLY: no body, no summary. ``published_at`` is tz-aware IST always. ``headline_id`` is the platform-assigned ULID minted at ingest — the key
+    ``HeadlineClusterer`` uses to link ``news.cluster_id``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -178,7 +177,7 @@ def _domain(url: str) -> str:
 
 
 class NewsIngest:
-    """§3.2.4 ``NewsIngest`` — best-effort headline poller writing ``news`` rows (untrusted, §2.4).
+    """``NewsIngest`` — best-effort headline poller writing ``news`` rows (untrusted).
 
     Parameters
     ----------
@@ -187,9 +186,9 @@ class NewsIngest:
     store:
         The single-writer :class:`MarketStore` (convention 12) — all persistence goes through it.
     clock:
-        Single source of "now" (§3.2) — the fallback ``published_at`` stamp and lookback anchor.
+        Single source of "now" — the fallback ``published_at`` stamp and lookback anchor.
     http:
-        Injected ``httpx.AsyncClient`` (convention 11 / E5). Owned by the caller; never closed here.
+        Injected ``httpx.AsyncClient`` (convention 11). Owned by the caller; never closed here.
     """
 
     def __init__(
@@ -220,16 +219,16 @@ class NewsIngest:
 
         ``feeds`` selects a subset of the valid keys — every ``news.feeds.rss`` name plus
         :data:`GDELT_KEY` and :data:`NSE_ANN_KEY` (None = all of them) — so the scheduler can honor
-        the distinct §3.2.4 per-feed cadences. ``lookback_h`` widens the GDELT ``timespan`` window —
-        the off-period backfill knob (§4.4 job 10); None = the routine window (2× ``gdelt_poll_s``, so
+        the distinct per-feed cadences. ``lookback_h`` widens the GDELT ``timespan`` window —
+        the off-period backfill knob; None = the routine window (2× ``gdelt_poll_s``, so
         consecutive polls overlap and boundary items are never missed — URL dedupe absorbs the overlap).
 
         :data:`NSE_ANN_KEY` stays a VALID key even when the feed is disabled (it just fetches
         nothing): an owner toggling config off must not turn an armed poll into a ValueError.
 
-        Never raises for a feed failure (E5): each source is fetched under its own guard and a dead
+        Never raises for a feed failure: each source is fetched under its own guard and a dead
         feed just contributes nothing. Returns only the headlines actually INSERTED (post-dedupe),
-        each carrying its minted ``headline_id`` — the §2.7 step-2 clusterer input.
+        each carrying its minted ``headline_id`` — the clusterer input.
         """
         valid = tuple(self._cfg.feeds.rss) + (GDELT_KEY, NSE_ANN_KEY)
         selected = tuple(feeds) if feeds is not None else valid
@@ -246,9 +245,9 @@ class NewsIngest:
         if NSE_ANN_KEY in selected and self._cfg.feeds.nse_announcements.enabled:
             batch += await self._fetch_guarded(NSE_ANN_KEY, self._fetch_nse_ann())
 
-        # §3.2.4/§4.4 job 10 drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are
+        # Drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are
         # not news headlines — they carry zero event content, burn scorer budget, and their template
-        # tokens glued different companies into one cluster (the G1 contamination finding). Owner-
+        # tokens glued different companies into one cluster (the contamination finding). Owner-
         # editable in settings (news.drop_title_patterns), case-insensitive substring match.
         patterns = [p.lower() for p in (self._cfg.drop_title_patterns or [])]
         if patterns:
@@ -276,17 +275,17 @@ class NewsIngest:
         return inserted
 
     async def backfill(self, *, lookback_h: float | None = None) -> list[Headline]:
-        """§4.4 job 10 off-period startup backfill: the SAME poll with widened lookback windows.
+        """Off-period startup backfill: the SAME poll with widened lookback windows.
 
         RSS feeds surface their whole publisher-side lookback on every fetch; GDELT gets
         ``news.backfill_lookback_h`` (or the caller's wider ``lookback_h``, e.g. sized to the actual
         off period), capped at ``news.gdelt_backfill_max_days`` (~3-month DOC window — headlines older
-        than that are lost permanently, acceptable per E5/E6: catalysts past
+        than that are lost permanently, acceptable: catalysts past
         ``cat.max_event_age_days`` are ineligible anyway).
         """
         return await self.poll(lookback_h=lookback_h or float(self._cfg.backfill_lookback_h))
 
-    # ------------------------------------------------------------------ fetchers (each E5-guarded)
+    # ------------------------------------------------------------------ fetchers (each guarded)
     async def _fetch_guarded(self, feed: str, coro: Any) -> list[Headline]:
         """Run one feed fetch; on ANY failure log + return [] — a feed error never reaches the caller."""
         try:
@@ -360,7 +359,7 @@ class NewsIngest:
                     skipped += 1
                     continue
                 if domain not in GDELT_DOMAIN_ALLOWLIST:
-                    skipped += 1  # outside the Indian-financial-press allowlist (§3.2.4)
+                    skipped += 1  # outside the Indian-financial-press allowlist
                     continue
                 headlines.append(
                     Headline(
@@ -386,7 +385,7 @@ class NewsIngest:
         return self._clock.now()
 
     def _gdelt_timespan(self, lookback_h: float | None) -> str:
-        """GDELT ``timespan`` for the lookback window, capped at ``gdelt_backfill_max_days`` (E6)."""
+        """GDELT ``timespan`` for the lookback window, capped at ``gdelt_backfill_max_days``."""
         if lookback_h is None:
             lookback_h = 2.0 * self._cfg.gdelt_poll_s / 3600.0  # 2× cadence ⇒ overlapping windows
         capped_h = min(float(lookback_h), self._cfg.gdelt_backfill_max_days * 24.0)
@@ -399,11 +398,11 @@ class NewsIngest:
         return f"{math.ceil(hours / 24)}d"
 
     async def _fetch_nse_ann(self) -> list[Headline]:
-        """NSE ``corporate-announcements`` → token-prefixed headlines (§2.7 amendment 2026-09-04).
+        """NSE ``corporate-announcements`` → token-prefixed headlines (2026-09-04).
 
         Fetched through :func:`engine.core.nse_http.nse_get`, never a bare GET: the ``/api`` edge is
-        cookie-gated and answers an un-primed request with a MISLEADING 404 (§A3). The endpoint URL
-        is the one the §2.8 ISIN job already uses — one constant, one probe-verified contract.
+        cookie-gated and answers an un-primed request with a MISLEADING 404. The endpoint URL
+        is the one the ISIN job already uses — one constant, one probe-verified contract.
 
         A row is unusable without ``symbol`` (the token IS the resolution) and is skipped; every
         other field degrades: no attachment ⇒ the deterministic :data:`NSE_ANN_ITEM_URL`, no

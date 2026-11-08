@@ -1,10 +1,10 @@
-"""Wire-frame schema round-trip (§2.2/§3.2.2): ticker/main.py serializer ↔ ticker_supervisor reader.
+"""Wire-frame schema round-trip: ticker/main.py serializer ↔ ticker_supervisor reader.
 
 The tick/order/hello/heartbeat payload schemas are PINNED (ticker/main.py module docstring);
 ``engine.broker.ticker_supervisor.parse_tick_frame`` is the exact mirror. These tests drive the real
 child-side serializer and the real engine-side parser against each other — prices must round-trip
-Decimal-exact (A13 cumulative volume verbatim; §3.2 money convention), timestamps naive-IST-ISO on
-the wire → tz-aware IST in core. Plus the §2.4 handshake gate on the supervisor's loopback server.
+Decimal-exact (cumulative volume verbatim; money convention), timestamps naive-IST-ISO on
+the wire → tz-aware IST in core. Plus the handshake gate on the supervisor's loopback server.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ _KITE_TICK = {
     "last_price": 2338.55,
     "last_traded_quantity": 5,
     "average_traded_price": 2337.1234,
-    "volume_traded": 1_368_065,                        # CUMULATIVE day volume (A13)
+    "volume_traded": 1_368_065,                        # CUMULATIVE day volume
     "total_buy_quantity": 260622,
     "total_sell_quantity": 429140,
     "ohlc": {"open": 2320.0, "high": 2340.1, "low": 2318.05, "close": 2325.35},
@@ -130,7 +130,7 @@ def test_frame_tick_pins_the_wire_schema():
     assert frame["last_price"] == "2338.55"
     assert frame["average_traded_price"] == "2337.1234"
     assert frame["ohlc"] == {"open": "2320.0", "high": "2340.1", "low": "2318.05", "close": "2325.35"}
-    # Cumulative day volume verbatim (A13) — an int, never stringified.
+    # Cumulative day volume verbatim — an int, never stringified.
     assert frame["volume_traded"] == 1_368_065
     # Timestamps: ISO strings of the NAIVE IST wall time KiteTicker parsed.
     assert frame["exchange_timestamp"] == "2026-06-17T10:04:59"
@@ -167,7 +167,7 @@ def test_tick_round_trip_wire_to_core_tick():
     assert tick.tradingsymbol == "RELIANCE"
     assert tick.instrument_token == 408065
     assert tick.ltp == Decimal("2338.55")                      # exact, not float-drifted
-    assert tick.volume_traded == 1_368_065                     # cumulative, verbatim (A13)
+    assert tick.volume_traded == 1_368_065                     # cumulative, verbatim
     assert tick.exchange_ts == dt.datetime(2026, 6, 17, 10, 4, 59, tzinfo=IST)
     assert tick.exchange_ts.tzinfo is not None
     assert tick.ohlc_open == Decimal("2320.0")
@@ -190,7 +190,7 @@ def test_parse_tick_frame_rejects_an_epoch_exchange_timestamp():
     used to parse cleanly into a tz-aware 1970 datetime — valid to the Tick model, and a
     ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp.
 
-    WO-24e (2026-08-21): this is now its OWN drop path — ``_ImplausibleTimestamp``, a ``ValueError``
+    2026-08-21: this is now its OWN drop path — ``_ImplausibleTimestamp``, a ``ValueError``
     subclass — distinct from a genuinely MISSING field (still the plain ``ValueError`` below)."""
     epoch_wire = dt.datetime.fromtimestamp(0).isoformat()      # what ticker/main.py would forward
     broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": epoch_wire}
@@ -214,12 +214,12 @@ def test_exchange_timestamp_plausibility_floor(wire: str, ok: bool):
             tzinfo=IST
         )
     else:
-        with pytest.raises(_ImplausibleTimestamp):               # WO-24e: own subclass, below the floor
+        with pytest.raises(_ImplausibleTimestamp):               # own subclass, below the floor
             parse_tick_frame(frame, "X")
 
 
 def test_parse_tick_frame_missing_exchange_timestamp_is_plain_valueerror_not_implausible():
-    """WO-24e: an ABSENT ``exchange_timestamp`` is a different defect than epoch-0 — it stays the
+    """An ABSENT ``exchange_timestamp`` is a different defect than epoch-0 — it stays the
     plain ``ValueError`` (generic parse_error path), never ``_ImplausibleTimestamp``."""
     broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": None}
     with pytest.raises(ValueError, match="missing exchange_timestamp") as exc_info:
@@ -264,7 +264,7 @@ def test_heartbeat_carries_ws_state_and_tick_age():
     assert isinstance(hb2["last_tick_age_s"], float) and hb2["last_tick_age_s"] >= 0.0
 
 
-# ------------------------------------- in-child reconnect signal (2026-09-09, plan §2.6 hardening (i))
+# ------------------------------------- in-child reconnect signal (2026-09-09)
 def test_heartbeat_carries_the_connect_seq_and_it_bumps_on_every_connect():
     """`connect_seq` is the engine's in-band reconnect signal: a per-child counter on EVERY heartbeat.
 
@@ -415,7 +415,7 @@ async def test_supervisor_parses_frames_and_publishes(clock, bus):
         # Unresolvable token ⇒ dropped (logged), never published, never crashes the loop.
         unknown = {**_app()._frame_tick(_KITE_TICK), "instrument_token": 999}
         await _send(writer, unknown)
-        # Order frames pass VERBATIM (A3) on order.update.
+        # Order frames pass VERBATIM on order.update.
         postback = {"order_id": "230817000000001", "status": "COMPLETE", "filled_quantity": 10}
         await _send(writer, {"type": "order", "data": postback})
         await _wait_for(lambda: len(orders) == 1)
@@ -439,7 +439,7 @@ async def test_supervisor_parses_frames_and_publishes(clock, bus):
 
 @pytest.mark.asyncio
 async def test_supervisor_rejects_bad_handshake(clock, bus):
-    """A frame minted without this spawn's secret is dropped before any tick is honoured (§2.4)."""
+    """A frame minted without this spawn's secret is dropped before any tick is honoured."""
     ticks: list[Tick] = []
 
     async def on_tick(evt):

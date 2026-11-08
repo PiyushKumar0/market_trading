@@ -1,4 +1,4 @@
-"""The one NIFTY 50 regime predicate (rsi2's index leg, C2's rule, the brk20 sweep gate)."""
+"""The one NIFTY 50 regime predicate (rsi2's index leg, the regime gate's rule, the brk20 sweep gate)."""
 
 from __future__ import annotations
 

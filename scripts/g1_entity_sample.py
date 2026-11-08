@@ -1,4 +1,4 @@
-"""G1 entity-resolution precision sample (§8.2 / §9.1): 50 live headlines for owner review.
+"""Entity-resolution precision sample: 50 live headlines for owner review.
 
 Pulls a stratified random sample from the live news corpus and renders a markdown checklist of
 headline → resolver verdict, for the human precision audit the gate requires (≥95% of resolved

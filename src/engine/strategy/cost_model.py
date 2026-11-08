@@ -1,15 +1,15 @@
-"""Round-trip transaction-cost model (§3.2.5, C1–C4) — the single source of truth for trade friction.
+"""Round-trip transaction-cost model — the single source of truth for trade friction.
 
-Used IDENTICALLY by backtests, the Tier-2 gate (§7.1 ``min_viable_size``), and recommendations (C3).
-Every rate comes from ``config/costs.yaml`` (C2) — there are ZERO hardcoded rates in this module; the
-yaml is re-scraped before each release (``scripts/rescrape_costs.py``) and the §9.1 unit tests assert
-the C3 worked examples to the paisa against it:
+Used IDENTICALLY by backtests, the Tier-2 gate (``min_viable_size``), and recommendations.
+Every rate comes from ``config/costs.yaml`` — there are ZERO hardcoded rates in this module; the
+yaml is re-scraped before each release (``scripts/rescrape_costs.py``) and the unit tests assert
+the worked examples to the paisa against it:
 
 * intraday ₹20,000 round trip ≈ ₹21 (breakeven ~0.106%)
 * delivery ₹20,000 ≈ ₹60 (dominated by ₹40 STT + ₹15.34 DP)
 * 5× MIS ₹1,00,000 notional ≈ ₹83 (~0.083% of notional = ~0.41% of capital per turn)
 
-**Two cost classes, one surface (WO-2, 2026-08-13).** Statutory *fees* (brokerage/STT/txn/SEBI/
+**Two cost classes, one surface (2026-08-13).** Statutory *fees* (brokerage/STT/txn/SEBI/
 stamp/GST/DP) are what the broker bills — contract-note verifiable, and the three worked examples
 above are FEES ONLY, unchanged to the paisa. The bid-ask *spread* is market friction the broker
 never bills but every round trip pays; it is modelled as one extra component, ``spread``, from the
@@ -18,11 +18,11 @@ measured ``costs.yaml`` ``spread_pct`` (see that file for the 48-symbol-day prov
 ≈ mid − spread/2), so a round trip pays exactly ``spread_pct`` of notional.
 
 * :meth:`CostModel.round_trip` / :meth:`CostModel.breakeven_pct` — **fees + spread**, the full
-  friction. This is the LIVE surface: §7.1 ``min_viable_size`` (``risk/gate.py`` ``_rule_min_viable_size``
+  friction. This is the LIVE surface: ``min_viable_size`` (``risk/gate.py`` ``_rule_min_viable_size``
   → ``round_trip`` + ``expected_edge_pct``) and :meth:`min_viable_qty` inherit the spread automatically,
   which strictly TIGHTENS the viability check (an edge must now also pay the spread).
 * :meth:`CostModel.fee_breakeven_pct` — **statutory fees only**, the contract-note anchor. Used by
-  the §6.4 sweeps (which charge spread separately as vectorbt slippage, so it is never double-counted)
+  the research sweeps (which charge spread separately as vectorbt slippage, so it is never double-counted)
   and by the ``reference_roundtrips`` assertions.
 
 Rounding contract (the "to the paisa" convention): each charge component is computed exactly in
@@ -33,7 +33,7 @@ adds up. ``breakeven_pct`` = 100 × total/notional, quantized to 6 dp. ``spread`
 rounding contract and is NEVER a GST base (it is not a broker charge; ``gst.applies_to`` cannot name
 it — :attr:`_GST_BASE_KEYS` rejects unknown classes).
 
-Multi-scrip model (C4): ``n_scrips_sell_day`` splits ``notional`` across that many equal-notional
+Multi-scrip model: ``n_scrips_sell_day`` splits ``notional`` across that many equal-notional
 scrips sold the same day. The DP charge is PER SCRIP PER SELL DAY (delivery sells only), so splitting
 a small delivery book across scrips is disproportionately expensive; brokerage is per ORDER, so the
 MIS ₹20/order cap is applied per slice. Proportional charges (STT/txn/SEBI/stamp) are unaffected by
@@ -68,7 +68,7 @@ _HUNDRED = Decimal("100")
 #: components amortize), so a size not viable at this qty is not viable at any realistic size.
 _QTY_CEILING = 1_000_000_000
 
-#: yaml ``gst.applies_to`` names -> CostBreakdown component keys (§3.4 pins the component vocabulary).
+#: yaml ``gst.applies_to`` names -> CostBreakdown component keys.
 _GST_BASE_KEYS = {
     "brokerage": "brokerage",
     "exchange_txn_charge": "txn",
@@ -90,7 +90,7 @@ def _dec(value: Any) -> Decimal:
 
 
 class CostRates(BaseModel):
-    """Typed, frozen view of ``config/costs.yaml`` (C2). All ``*_pct`` fields are PERCENTAGES
+    """Typed, frozen view of ``config/costs.yaml``. All ``*_pct`` fields are PERCENTAGES
     (``0.03`` means 0.03%), exactly as published on the Zerodha charges page."""
 
     model_config = ConfigDict(frozen=True)
@@ -113,15 +113,15 @@ class CostRates(BaseModel):
     gst_pct: Decimal
     gst_base_components: tuple[str, ...]          # component keys GST applies to (from gst.applies_to)
     dp_per_scrip_per_sell_day_inr: Decimal
-    spread_pct: Decimal                           # FULL measured bid-ask spread, % of price (WO-2)
-    reference_roundtrips: tuple[dict, ...] = ()   # the C3 worked examples the tests assert against
+    spread_pct: Decimal                           # FULL measured bid-ask spread, % of price
+    reference_roundtrips: tuple[dict, ...] = ()   # the worked examples the tests assert against
                                                   # (FEES ONLY — spread excluded, see costs.yaml)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> CostRates:
         """Map the nested costs.yaml structure onto the flat typed model. Unknown ``gst.applies_to``
         entries are a hard error — a re-scrape that introduces a new charge class must be modelled
-        deliberately, never silently dropped (C2)."""
+        deliberately, never silently dropped."""
         gst_bases = []
         for name in raw["gst"]["applies_to"]:
             if name not in _GST_BASE_KEYS:
@@ -132,7 +132,7 @@ class CostRates(BaseModel):
             raise ValueError("costs.yaml sebi_charge.applies_to changed — update CostModel deliberately")
         if "spread_pct" not in raw:
             # Never default silently: a missing spread measurement would quietly restore the
-            # zero-spread cost surface WO-2 removed (F4) and re-loosen the live viability check.
+            # zero-spread cost surface the spread correction removed and re-loosen the live viability check.
             raise ValueError(
                 "costs.yaml is missing spread_pct — the measured bid-ask spread (WO-2). Add it "
                 "with its measurement provenance; it is NOT defaulted."
@@ -174,7 +174,7 @@ def load_cost_rates(path: Path | None = None) -> CostRates:
 
 
 class CostModel:
-    """C1/C2/C3 — single source of truth for round-trip costs, breakeven, and minimum viable size.
+    """Single source of truth for round-trip costs, breakeven, and minimum viable size.
 
     Parameters
     ----------
@@ -182,11 +182,11 @@ class CostModel:
         The typed ``config/costs.yaml`` view (:func:`load_cost_rates`).
     instruments:
         The daily :class:`InstrumentStore` — :meth:`min_viable_qty` snaps every level with its
-        ``round_to_tick`` (A10 banded tick sizes; never inline tick math). Optional so pure
+        ``round_to_tick`` (banded tick sizes; never inline tick math). Optional so pure
         round-trip/breakeven math (backtest pricing) needs no broker surface.
     edge_multiple_min:
-        §7.1 ``min_viable_size`` multiple (default 2.0). The live value is the ONE learner-movable
-        gate knob and comes from the hash-verified ``limits.yaml``/``envelope.yaml`` (R4) — the
+        ``min_viable_size`` multiple (default 2.0). The live value is the ONE learner-movable
+        gate knob and comes from the hash-verified ``limits.yaml``/``envelope.yaml`` — the
         composition root passes it in; this class never reads protected config itself.
     """
 
@@ -233,24 +233,24 @@ class CostModel:
     def half_spread_pct(self) -> Decimal:
         """Per-LEG spread cost, in percent of price: half the quoted spread (fill at mid ± ½ spread).
 
-        This is the number a per-order slippage model wants (the §6.4 sweeps pass it to vectorbt as
+        This is the number a per-order slippage model wants (the research sweeps pass it to vectorbt as
         ``slippage``); :meth:`round_trip` charges both legs, i.e. the full :attr:`spread_pct`.
         """
         return self._rates.spread_pct / Decimal("2")
 
-    # ------------------------------------------------------------------ pinned surface (§3.2.5)
+    # ------------------------------------------------------------------ pinned surface
     def round_trip(
         self, notional: Decimal, product: Literal["MIS", "CNC"], n_scrips_sell_day: int = 1
     ) -> CostBreakdown:
-        """Full round-trip (buy + sell) FRICTION for ``notional`` under ``product`` (C1/C3).
+        """Full round-trip (buy + sell) FRICTION for ``notional`` under ``product``.
 
-        Friction = statutory fees **+ the measured bid-ask spread** (WO-2): the ``spread`` component
+        Friction = statutory fees **+ the measured bid-ask spread**: the ``spread`` component
         is ``spread_pct`` × notional — half the quoted spread on each of the two legs. The fee
         components are unchanged and still contract-note exact; :meth:`fee_breakeven_pct` exposes the
-        fees-only view for the C3 worked examples and for callers (the sweeps) that charge spread
+        fees-only view for the worked examples and for callers (the sweeps) that charge spread
         separately.
 
-        ``n_scrips_sell_day`` models the C4 multi-scrip case: the notional split across that many
+        ``n_scrips_sell_day`` models the multi-scrip case: the notional split across that many
         equal slices sold the same day (DP charged per scrip; brokerage capped per order). Spread is
         proportional, so — like STT/txn/SEBI/stamp — it is unaffected by the split. The
         ``expected_edge_pct``/``edge_multiple`` fields are 0 on this call ("not evaluated") — the
@@ -272,18 +272,18 @@ class CostModel:
         )
 
     def breakeven_pct(self, notional: Decimal, product: str) -> Decimal:
-        """Percentage move needed to cover a single-scrip round trip at ``notional`` (C3).
+        """Percentage move needed to cover a single-scrip round trip at ``notional``.
 
-        Includes the spread (WO-2) — this is the number the §7.1 viability check must clear.
+        Includes the spread — this is the number the viability check must clear.
         """
         return self.round_trip(self._validate_notional(notional), self._validate_product(product)).breakeven_pct
 
     def fee_breakeven_pct(
         self, notional: Decimal, product: str, n_scrips_sell_day: int = 1
     ) -> Decimal:
-        """Breakeven from STATUTORY FEES ONLY — spread excluded (the contract-note anchor, C3).
+        """Breakeven from STATUTORY FEES ONLY — spread excluded (the contract-note anchor).
 
-        Use this ONLY where spread is modelled separately (the §6.4 sweeps charge it as vectorbt
+        Use this ONLY where spread is modelled separately (the research sweeps charge it as vectorbt
         slippage, so charging it here too would double-count) or where the question is literally
         "what will the broker bill". **Never** use it for a viability/edge decision — that is
         :meth:`breakeven_pct`, which is the full friction.
@@ -296,24 +296,24 @@ class CostModel:
     def min_viable_qty(
         self, symbol: str, entry: Decimal, stop: Decimal, target: Decimal, product: str
     ) -> int:
-        """Smallest qty whose expected edge covers ``edge_multiple_min`` × breakeven (§7.1, R1/C3).
+        """Smallest qty whose expected edge covers ``edge_multiple_min`` × breakeven.
 
-        The breakeven here is the FULL friction (fees + spread, WO-2), so the required size rises
+        The breakeven here is the FULL friction (fees + spread), so the required size rises
         wherever the spread is a material share of the edge — the intended conservative direction.
         Note the spread is PROPORTIONAL: unlike the flat DP/brokerage components it does not amortize
         with size, so it raises the floor a trade must clear at *every* size (monotonicity — on which
         the binary search below depends — is preserved: fees are non-increasing in notional and the
         spread term is constant).
 
-        Levels are first snapped to ``symbol``'s banded tick via ``InstrumentStore.round_to_tick``
-        (A10). Direction is inferred from the stop (stop below entry ⇒ long, above ⇒ short) and
-        ``expected_edge_pct`` is the §3.2.5-PINNED unweighted formula — (first target − entry)/entry,
+        Levels are first snapped to ``symbol``'s banded tick via ``InstrumentStore.round_to_tick``.
+        Direction is inferred from the stop (stop below entry ⇒ long, above ⇒ short) and
+        ``expected_edge_pct`` is the PINNED unweighted formula — (first target − entry)/entry,
         applied as the favorable-move magnitude in that direction. It DELIBERATELY excludes any
         hit-probability weighting (simple, auditable); **changing this formula is a strategy-logic
-        change requiring owner approval (R4)** — do not "improve" it here.
+        change requiring owner approval** — do not "improve" it here.
 
         Returns 0 when NO size is viable (edge ≤ 0, or below the proportional-cost floor) — the
-        caller must reject (§7.1 ``min_viable_size``: gate shrink-then-recheck ends in reject).
+        caller must reject (``min_viable_size``: gate shrink-then-recheck ends in reject).
         Raises ``ValueError`` for incoherent levels (stop == entry) and ``RuntimeError`` if built
         without an :class:`InstrumentStore`.
         """
@@ -346,7 +346,7 @@ class CostModel:
 
     # ------------------------------------------------------------------ gate/sizing helpers
     def expected_edge_pct(self, entry: Decimal, stop: Decimal, target: Decimal) -> Decimal:
-        """The §3.2.5-pinned unweighted expected edge, in percent (see :meth:`min_viable_qty`).
+        """The pinned unweighted expected edge, in percent (see :meth:`min_viable_qty`).
 
         Long (stop < entry): 100 × (target − entry)/entry; short (stop > entry): the same magnitude
         with the sides mirrored, 100 × (entry − target)/entry. A target on the wrong side of entry
@@ -361,7 +361,7 @@ class CostModel:
         return (entry - target) / entry * _HUNDRED
 
     def with_edge(self, breakdown: CostBreakdown, expected_edge_pct: Decimal) -> CostBreakdown:
-        """Return a copy of ``breakdown`` with the edge fields populated (GateVerdict.cost, §3.4)."""
+        """Return a copy of ``breakdown`` with the edge fields populated (GateVerdict.cost)."""
         multiple = (
             (expected_edge_pct / breakdown.breakeven_pct).quantize(_EDGE_Q, rounding=ROUND_HALF_UP)
             if breakdown.breakeven_pct > 0
@@ -406,13 +406,13 @@ class CostModel:
             brokerage = 2 * n_scrips * per_order
             stt = notional * (r.stt_delivery_buy_pct + r.stt_delivery_sell_pct) / _HUNDRED
             stamp = notional * r.stamp_delivery_buy_pct / _HUNDRED
-            dp = n_scrips * r.dp_per_scrip_per_sell_day_inr     # per scrip per SELL day (C4)
+            dp = n_scrips * r.dp_per_scrip_per_sell_day_inr     # per scrip per SELL day
         txn = 2 * notional * r.txn_nse_pct_per_side / _HUNDRED
         sebi = 2 * (notional / _CRORE) * r.sebi_per_crore_inr
         raw = {"brokerage": brokerage, "stt": stt, "txn": txn, "sebi": sebi, "stamp": stamp, "dp": dp}
         gst = r.gst_pct / _HUNDRED * sum((raw[k] for k in r.gst_base_components), Decimal("0"))
-        # Spread (WO-2): half the quoted spread per leg × 2 legs = the full spread_pct of notional.
-        # Proportional ⇒ unaffected by the C4 scrip split, and NEVER a GST base (not a broker charge)
+        # Spread: half the quoted spread per leg × 2 legs = the full spread_pct of notional.
+        # Proportional ⇒ unaffected by the scrip split, and NEVER a GST base (not a broker charge)
         # — kept out of ``raw`` so it can never be reachable from ``gst.applies_to``.
         spread = notional * r.spread_pct / _HUNDRED
         ordered = (

@@ -1,4 +1,4 @@
-"""SCAN_SWEEP owner-message rendering (§3.2.5 sweep addendum; 2026-07-29 owner feedback).
+"""SCAN_SWEEP owner-message rendering (2026-07-29 owner feedback).
 
 Pins the four readability requirements: trade types grouped intraday/swing, every setup carries its
 full plan (entry + stop + target or exit rule), friendly strategy names instead of scanner ids, and

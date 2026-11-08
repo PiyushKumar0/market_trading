@@ -1,4 +1,4 @@
-"""Pure exit simulator shared by rec outcomes, the paper catch-up and research (plan Q2.1).
+"""Pure exit simulator shared by rec outcomes, the paper catch-up and research.
 
 Each session in the stream is either 1m bars (``at`` a tz-aware minute start) or one daily bar
 (``at`` a date). Percentages are percent of the fill price.

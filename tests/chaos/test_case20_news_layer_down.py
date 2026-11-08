@@ -1,16 +1,16 @@
-"""§9.4 chaos case 20 — news feeds dead / News Analyst down / DG3 during pre-open (§2.7).
+"""Chaos case 20 — news feeds dead / News Analyst down / DG3 during pre-open.
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 20), "Must hold", verbatim:
+Drill-catalog row (case 20), "Must hold", verbatim:
 
-    **Two distinct rungs, one convention (§3.2.4):** feeds/scorer dead but digest RUNS ⇒
-    empty-but-fresh digest, `CATALYST_WATCHLIST(0, 0)` (+ the D7 per-call Failed alert from the
+    **Two distinct rungs, one convention:** feeds/scorer dead but digest RUNS ⇒
+    empty-but-fresh digest, `CATALYST_WATCHLIST(0, 0)` (+ the per-call Failed alert from the
     scorer itself), `cat` simply originates nothing; digest STALE (> `digest_stale_max_h`) or MISSING
     ⇒ `cat` disabled + `CATALYST_DISABLED(reason)`. Either way: **all other scanners, agents, and
-    recommendations unaffected; no FROZEN state** — news is never load-bearing (E5); **non-`cat`
+    recommendations unaffected; no FROZEN state** — news is never load-bearing; **non-`cat`
     candidate ranking is identical with the news layer up-but-quiet vs down (neutral feature
-    defaults, §6.2)**; next healthy pre-open restores `cat` with no owner action
+    defaults)**; next healthy pre-open restores `cat` with no owner action
 
-Composition — :class:`NewsWorld`, the §2.7 pipeline exactly as ``engine.ops.main`` runs it at
+Composition — :class:`NewsWorld`, the news pipeline exactly as ``engine.ops.main`` runs it at
 pre-open: REAL ``NewsIngest`` (RSS + GDELT) → ``HeadlineClusterer.run`` → ``EntityResolver.aload/run``
 → ``NewsScoringJob.run_batch(force=True)`` (the ``job_news_chain`` closure, main.py:1133-1158) →
 ``CatalystDigestJob.run`` + the CATALYST_* owner messages (the ``job_catalyst_digest`` closure,
@@ -26,15 +26,15 @@ News Analyst's answers), and the Telegram transport. Storage faults are injected
 Clauses asserted:
 
 * rung (i) — feeds dead / scorer dead / DG3: digest RUNS empty-but-FRESH, ``CATALYST_WATCHLIST(0, 0)``,
-  the scorer's own D7 Failed alert (scorer-dead variant), ``cat`` originates nothing, no FROZEN,
+  the scorer's own Failed alert (scorer-dead variant), ``cat`` originates nothing, no FROZEN,
   other agents still admitted — ``test_feeds_or_scorer_dead_digest_runs_empty_but_fresh``
 * rung (ii) — digest MISSING / STALE because today's run failed: ``CATALYST_DISABLED(reason)``,
   ``cat`` originates nothing, no FROZEN — ``test_digest_failure_disables_cat_with_catalyst_disabled``
 * rung (ii) — a STALE digest that nobody re-ran (late boot: the window-open sweep beats the catch-up
   digest) still originates nothing — ``test_stale_digest_at_sweep_time_originates_nothing`` — and the
   sweep sends ``CATALYST_DISABLED`` once a day — ``test_stale_digest_at_sweep_time_alerts_catalyst_disabled``
-  (CD-4, fixed 2026-09-24)
-* non-``cat`` ranking identical, news up-but-quiet vs down (§6.2 neutral defaults), the other
+  (fixed 2026-09-24)
+* non-``cat`` ranking identical, news up-but-quiet vs down (neutral defaults), the other
   scanners unaffected — ``test_non_cat_candidates_identical_news_quiet_vs_down`` (real
   ``LiveScanContextProvider`` + ``FeatureEngine`` + the enabled per-bar scanners over identical bars)
 * next healthy pre-open restores ``cat`` with no owner action —
@@ -154,7 +154,7 @@ class _ResultMessage:
 
 
 class _Options:
-    """Stand-in for ``ClaudeAgentOptions`` (every knob the harness probes for, §5.1/D10)."""
+    """Stand-in for ``ClaudeAgentOptions`` (every knob the harness probes for)."""
 
     def __init__(self, model=None, system_prompt=None, setting_sources=None, max_output_tokens=None,
                  max_turns=None, allowed_tools=None, disallowed_tools=None, output_schema=None) -> None:
@@ -172,7 +172,7 @@ Analyst = Callable[[str, str], list[dict[str, Any]]]
 
 
 def score(cid: str, **fields: Any) -> dict[str, Any]:
-    """One raw §5.4 score item (pre-validation), defaults = a routine market-noise cluster."""
+    """One raw score item (pre-validation), defaults = a routine market-noise cluster."""
     item = {"cluster_id": cid, "scope": "market", "entities": [], "sectors": [], "themes": [],
             "sentiment": 0.0, "materiality": 0.1, "event_type": "other", "novelty": 0.3}
     item.update(fields)
@@ -229,7 +229,7 @@ class _App:
 
 # =========================================================================== world
 class NewsWorld:
-    """One engine's §2.7 news layer + the ``cat`` sweep leg over temp stores (see module docstring)."""
+    """One engine's news layer + the ``cat`` sweep leg over temp stores (see module docstring)."""
 
     def __init__(self, conn, root: Path, sdk: NewsSDK, *, now: datetime,
                  universe: tuple[str, ...] = UNIVERSE, aliases: dict[str, str] | None = None) -> None:
@@ -387,7 +387,7 @@ class NewsWorld:
         return result
 
     async def preopen(self, d: date) -> Any:
-        """The day's pre-open: news chain ~08:25, digest ~08:35 (§10.1). Returns the digest result,
+        """The day's pre-open: news chain ~08:25, digest ~08:35. Returns the digest result,
         or the exception the digest job raised (the job watermark records it as failed)."""
         self.set_time(at(d, 8, 25))
         await self.news_chain()
@@ -410,8 +410,7 @@ class NewsWorld:
         return [c for c in self.prescreen.admit(raw, d, in_window=in_window) if c.strategy_id == cat.STRATEGY_ID]
 
     async def window_open_sweep(self, d: date) -> list[SignalCandidate]:
-        """``_scan_sweep`` at the window edge: the ``cat`` leg, then the no-digest-today alert (§2.7
-        rung ii)."""
+        """``_scan_sweep`` at the window edge: the ``cat`` leg, then the no-digest-today alert (rung ii)."""
         admitted = self.cat_sweep(d)
         await self.catalyst_disabled.if_no_digest_today(self.store, d)
         return admitted
@@ -499,8 +498,8 @@ async def test_healthy_preopen_control_originates_cat(make_world) -> None:
 async def test_feeds_or_scorer_dead_digest_runs_empty_but_fresh(make_world, failure: str) -> None:
     """Rung (i): the digest still RUNS and yields an EMPTY-but-FRESH watchlist — owner told
     ``CATALYST_WATCHLIST(0, 0)``, never ``CATALYST_DISABLED`` — so ``cat`` simply originates nothing.
-    The scorer-dead variant also carries the scorer's own D7 per-call Failed alert; under DG3 the
-    news analyst is refused by the governor before any SDK call (§5.6)."""
+    The scorer-dead variant also carries the scorer's own per-call Failed alert; under DG3 the
+    news analyst is refused by the governor before any SDK call."""
     sdk = NewsSDK(dead=RuntimeError("claude CLI process died (exit 1)")) if failure == "scorer_dead" else NewsSDK()
     w = await make_world(sdk)
     publish_reliance_story(w)
@@ -529,7 +528,7 @@ async def test_feeds_or_scorer_dead_digest_runs_empty_but_fresh(make_world, fail
         assert w.sdk.calls == 1
         failed = [b for _, t, b in w.messages(MessageKind.LIMIT_BREACH)
                   if t == "alert" and "agent news_analyst failed: sdk_error" in b]
-        assert failed, w.messages()                             # the D7 per-call Failed alert
+        assert failed, w.messages()                             # the per-call Failed alert
     if failure == "dg3":
         assert w.sdk.calls == 0                                 # governor refused before the SDK
         assert any("DG3" in t for _, t, _ in w.messages(MessageKind.BUDGET_WARNING))
@@ -601,7 +600,7 @@ async def test_stale_digest_at_sweep_time_originates_nothing(make_world) -> None
 
 async def test_stale_digest_at_sweep_time_alerts_catalyst_disabled(make_world) -> None:
     """Rung (ii): STALE ⇒ ``cat`` disabled **+ ``CATALYST_DISABLED(reason)``** — the owner is told
-    (CD-4, fixed 2026-09-24: only a raising digest run used to alert)."""
+    (fixed 2026-09-24: only a raising digest run used to alert)."""
     w = await _late_boot_stale_world(make_world)
     assert await w.window_open_sweep(WED) == []
     disabled = w.messages(MessageKind.CATALYST_DISABLED)
@@ -717,7 +716,7 @@ async def _scan_world(conn, root: Path, *, news_quiet: bool) -> tuple[list[Signa
 
 
 async def test_non_cat_candidates_identical_news_quiet_vs_down(conn, tmp_path) -> None:
-    """§6.2: the non-``cat`` scanners publish the SAME candidates in the SAME order with the SAME
+    """The non-``cat`` scanners publish the SAME candidates in the SAME order with the SAME
     scores and levels whether the news layer is up-but-quiet or down, and every candidate's feature
     snapshot carries the pinned neutral news block (only ``sentiment_available`` records which)."""
     quiet, quiet_feats = await _scan_world(conn, tmp_path / "quiet", news_quiet=True)
@@ -739,5 +738,5 @@ async def test_non_cat_candidates_identical_news_quiet_vs_down(conn, tmp_path) -
         assert down_feats[sym]["sentiment_available"] is False      # no digest at all
         non_news = {k for k in quiet_feats[sym] if k not in ABSENT_NEWS_DEFAULTS}
         assert {k: quiet_feats[sym][k] for k in non_news} == {k: down_feats[sym][k] for k in non_news}
-    # sanity: the snapshots really are JSON-clean scalars (never NaN), as §6.2 pins
+    # sanity: the snapshots really are JSON-clean scalars (never NaN)
     json.dumps(quiet_feats, allow_nan=False)

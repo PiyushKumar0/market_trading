@@ -1,16 +1,15 @@
-"""Golden replay day (WO-P3-3, plan §9.3/§9.6, 2026-09-10) — ``engine.paper.replay.ReplayHarness``.
+"""Golden replay day (2026-09-10) — ``engine.paper.replay.ReplayHarness``.
 
-§9.6 is the requirement this file exists for: *same inputs ⇒ byte-identical decision log*. For the
-foundation tranche the "decision log" is the harness digest — the finalized bars plus the
+The requirement this file exists for is: *same inputs ⇒ byte-identical decision log*. For now the "decision log" is the harness digest — the finalized bars plus the
 ``order.update`` frame stream the harness collected, with platform-minted ULIDs masked (the ONE
-accepted non-determinism, §8.4 addendum). Everything else asserted here is a behaviour the digest
+accepted non-determinism). Everything else asserted here is a behaviour the digest
 would hide if it drifted:
 
 (a) two runs over the same partitions ⇒ identical digest AND identical bar lists; the day's sort key
     is TOTAL, so rows tying on ``(exchange_ts, tradingsymbol, volume_traded, ltp)`` and differing
     only in their L1 quote still deliver in one fixed order
-(b) pre-open ticks build no bar; the open bar's open is the first IN-SESSION print (A14)
-(c) the post-close tick builds no bar and is counted (WO-5 symmetry)
+(b) pre-open ticks build no bar; the open bar's open is the first IN-SESSION print
+(c) the post-close tick builds no bar and is counted (post-close symmetry)
 (d) the attached broker sees every in-session tick and every bar, in order, with the clock standing
     at the tick's own ``exchange_ts`` — nothing in a replay may read wall time
 (e) the harness OWNS the publish collector: the REAL ``PaperBroker`` is constructed with
@@ -26,7 +25,7 @@ would hide if it drifted:
     slice — counted, not timed — and never holds the loop for a second
 (h) multi-day: per-day bar counts, disjoint and complete days, and day order that does not matter
 (i) the live ``market.duckdb`` is never opened, even when one is sitting in the archive root
-(j) performance smoke on the WARM run (§8.4 "a session-day in minutes")
+(j) performance smoke on the WARM run ("a session-day in minutes")
 
 No pytest marker: ``pyproject.toml`` defines only ``needs_heavy_deps`` (duckdb/pandas are core deps,
 not the heavy tier), so a replay marker would have to be registered first — out of scope here.
@@ -137,7 +136,7 @@ def _await(coro):
 
 # ------------------------------------------------------------------ lockstep with the store's schema
 def test_tick_column_lockstep() -> None:
-    """The harness and the fixture must read/write exactly the columns the STORE writes (§4.3).
+    """The harness and the fixture must read/write exactly the columns the STORE writes.
 
     A column added to ``store._TICK_COLUMNS`` without being added here would make the harness replay
     a silently narrower tick than the engine records."""
@@ -151,12 +150,12 @@ def test_sort_key_covers_every_tick_column() -> None:
     """The day's ``ORDER BY`` must be a permutation of the columns — that is what makes it TOTAL.
 
     A column added to the dataset and to ``TICK_COLUMNS`` but not to the sort key would leave rows
-    differing only in it free to swap between runs (§9.6)."""
+    differing only in it free to swap between runs."""
     assert sorted(ORDER_BY_COLUMNS) == sorted(TICK_COLUMNS)
     assert ORDER_BY_COLUMNS[:2] == ("exchange_ts", "tradingsymbol")
 
 
-# ------------------------------------------------------------------ (a) determinism (§9.6 golden day)
+# ------------------------------------------------------------------ (a) determinism (golden day)
 def test_two_runs_are_byte_identical(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
     h1, r1, _ = _run(synthetic_day, tmp_path / "run1")
     h2, r2, _ = _run(synthetic_day, tmp_path / "run2")
@@ -170,7 +169,7 @@ def test_two_runs_are_byte_identical(synthetic_day: SyntheticDay, tmp_path: Path
 
 def test_tied_rows_deliver_in_total_key_order(tie_day: tuple[Path, Any], tmp_path: Path) -> None:
     """Two prints tying on ``(exchange_ts, tradingsymbol, volume_traded, ltp)`` and differing only in
-    ``bid``/``ask`` must deliver in ONE fixed order, run after run (§9.6).
+    ``bid``/``ask`` must deliver in ONE fixed order, run after run.
 
     The fixture writes them to Parquet highest-bid-first, so a sort that only knew the four keys is
     free to hand them back in file order; the total key of ``ORDER_BY_COLUMNS`` orders them by bid.
@@ -221,7 +220,7 @@ def test_symbol_filter_restricts_the_read(synthetic_day: SyntheticDay, tmp_path:
     assert report.ticks_read == synthetic_day.total_ticks // len(synthetic_day.symbols)
 
 
-# ------------------------------------------------------------------ (b) A14 pre-open semantics
+# ------------------------------------------------------------------ (b) pre-open semantics
 def test_pre_open_builds_no_bar_and_open_is_first_session_print(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
@@ -233,7 +232,7 @@ def test_pre_open_builds_no_bar_and_open_is_first_session_print(
 
     for symbol in synthetic_day.symbols:
         first = next(b for b in bars if b.symbol == symbol and b.ts_minute == open_at)
-        # A14 as BarBuilder implements it: the open is the first IN-SESSION print, and the auction
+        # The pre-open rule as BarBuilder implements it: the open is the first IN-SESSION print, and the auction
         # price rides along in its own column on the 09:15 row only.
         assert first.open == synthetic_day.first_session_ltp[symbol]
         assert first.open != synthetic_day.auction_open[symbol]
@@ -257,7 +256,7 @@ def test_gap_minute_produces_no_bar(synthetic_day: SyntheticDay, tmp_path: Path)
     assert [b for b in bars if b.ts_minute == synthetic_day.gap_minute + timedelta(minutes=1)]
 
 
-# ------------------------------------------------------------------ (c) WO-5 post-close symmetry
+# ------------------------------------------------------------------ (c) post-close symmetry
 def test_post_close_tick_builds_no_bar_and_is_counted(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
@@ -375,7 +374,7 @@ def _scripted_paper_run(
 def test_real_paper_broker_postbacks_reach_the_report_and_digest(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
-    """The harness OWNS the publish collector (§8.4 addendum) AND drives the order itself (§9.6).
+    """The harness OWNS the publish collector AND drives the order itself.
 
     Two failures are pinned here. The first was a ``postback_log()`` getattr seam that matched
     nothing the PaperBroker exposes: it degraded to ``[]`` and reported a bars-only digest as a
@@ -592,9 +591,9 @@ def test_changing_ulid_does_not_move_the_digest(
 
 # ------------------------------------------------------------------ (f) streamed, loop not blocked
 def test_run_never_blocks_the_event_loop(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
-    """A heartbeat coroutine ticking every 50 ms alongside ``run()`` sees no gap over 1 s (§8.4).
+    """A heartbeat coroutine ticking every 50 ms alongside ``run()`` sees no gap over 1 s.
 
-    This is the streaming/cooperative-yield contract as the work order states it: the day is fed in
+    This is the streaming/cooperative-yield contract: the day is fed in
     bounded chunks with an ``await`` between them, so anything else on the loop keeps running, and
     the paper leg (test_paper_e2e) is async end to end.
 
@@ -756,7 +755,7 @@ def test_multi_day_run_is_per_day_and_order_independent(
 def test_replay_never_opens_the_live_market_duckdb(
     synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every DuckDB connection a RUN opens is ``:memory:`` (§4.1 single-writer, §8.4 addendum).
+    """Every DuckDB connection a RUN opens is ``:memory:`` (single-writer).
 
     The archive root gets a real ``market.duckdb`` file first, so "it did not open it" is a fact
     about the harness and not about the file being absent. The scratch store's own connection is
@@ -789,13 +788,13 @@ def test_replay_never_opens_the_live_market_duckdb(
     assert set(seen) == {":memory:"}, f"replay opened a file-backed DuckDB: {seen}"
 
 
-# ------------------------------------------------------------------ (i) performance smoke (§8.4)
+# ------------------------------------------------------------------ (i) performance smoke
 def test_replay_is_fast_enough(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
-    """WARM-run wall-clock bound. DuckDB's per-process start-up and the §4.2 schema DDL are burned by
+    """WARM-run wall-clock bound. DuckDB's per-process start-up and the schema DDL are burned by
     the session ``_warm_duckdb`` fixture, so this measures the replay loop and nothing else.
 
     Measured 2026-09-10 on this box: 0.73 s warm for 6,795 ticks / 1,122 bars (the same day before
-    the fix round: 7.65 s warm, 24 s cold). The 25 s bound is the §8.4 "a session-day in minutes"
+    the fix round: 7.65 s warm, 24 s cold). The 25 s bound is the "a session-day in minutes"
     contract with room for a loaded CI box — it is deliberately NOT the regression pin, because a
     wall-clock number on a shared runner is a statement about the runner. The two pathologies this
     round removed are pinned by counting instead, next door.
@@ -808,7 +807,7 @@ def test_replay_is_fast_enough(synthetic_day: SyntheticDay, tmp_path: Path) -> N
 def test_paper_bridge_keeps_the_day_fast_and_the_loop_free(
     synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plan Q4.1: the PaperRuntime bridge in front of a real PaperBroker, driven by the golden day,
+    """The PaperRuntime bridge in front of a real PaperBroker, driven by the golden day,
     stays inside the (i) wall-clock bound and never holds the loop for a second (f).
 
     The slice is cut to ~3 stream minutes so session prep, which completes on a loop turn, ends
@@ -917,10 +916,10 @@ def test_hot_path_work_is_per_minute_not_per_tick(
 
 # ------------------------------------------------------------------ guardrails
 def test_digest_reflects_bar_content_but_not_auction_open() -> None:
-    """The digest must move when a bar moves — and must NOT move for a field the work order left out.
+    """The digest must move when a bar moves — and must NOT move for a field the digest leaves out.
 
     ``auction_open`` is deliberately outside the canonical serialisation (the pinned field list is
-    symbol/minute/OHLC/volume/src); A14 is asserted directly by ``test_pre_open_…`` instead, where a
+    symbol/minute/OHLC/volume/src); the pre-open rule is asserted directly by ``test_pre_open_…`` instead, where a
     drift is readable. Pinning that decision here stops it from being "fixed" by accident."""
     from engine.paper.replay import _digest
 
@@ -943,7 +942,7 @@ def test_scratch_dir_inside_the_archive_is_refused(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
     """The harness must never be able to write into the archive it is reading (it runs beside the
-    live engine, §8.4 addendum)."""
+    live engine)."""
     with pytest.raises(ValueError, match="scratch"):
         ReplayHarness(synthetic_day.root, synthetic_day.root / "scratch")
 
@@ -965,7 +964,7 @@ def test_buffered_bar_writes_match_a_direct_write(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
     """The bars go through the REAL BarBuilder into a REAL MarketStore, and the harness's write
-    buffer does not change a byte of what lands there (§8.4 addendum bar-write buffering).
+    buffer does not change a byte of what lands there.
 
     The reference store is written from the same bar list in batches of 37 — a size chosen to fall
     on completely different boundaries than the harness's 500 — so what is being asserted is that

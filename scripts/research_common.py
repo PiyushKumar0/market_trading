@@ -1,4 +1,4 @@
-"""Shared loaders and conventions for the plan-2026-10-06 M5 studies (IMPLEMENTATION_PLAN §6.1, C1/C2/C3).
+"""Shared loaders and conventions for the registered research studies.
 
 Every population is built by the registered study's own helpers, imported from the sibling scripts.
 Reads a research snapshot read-only; refuses the live store and refuses to run in market hours.
@@ -58,12 +58,12 @@ es = _load_script("event_study")
 
 PRODUCT = "CNC"
 NOTIONAL = Decimal("20000")
-HORIZON = 20                      # T+20: the close of the 20th session counting the fill session as 1 (D2)
+HORIZON = 20                      # T+20: the close of the 20th session counting the fill session as 1
 PURGE = EMBARGO = HORIZON
 HELD_OUT_FROM = date(2026, 1, 1)
 FULL_HISTORY_START = date(2000, 1, 1)
 BRK20_UNIVERSE_AS_OF = date(2026, 9, 11)   # universe_daily day the 2026-09-12 registration read
-INS_REGISTERED_WINDOW = (date(2023, 8, 1), date(2026, 7, 16))   # event_study_20260814T023244 (C1 "the event study's window")
+INS_REGISTERED_WINDOW = (date(2023, 8, 1), date(2026, 7, 16))   # event_study_20260814T023244 (the event study's window)
 ATR_PERIOD = 14
 MARKET_OPEN, MARKET_CLOSE = time(9, 15), time(15, 30)
 SURVIVORSHIP_LABEL = "SURVIVORSHIP-TAINTED PROXY (current membership applied backwards)"
@@ -280,7 +280,7 @@ def load_limits() -> LimitTable:
 
 
 def sized_notional(fill: Decimal, stop: Decimal | None, limits: LimitTable) -> Decimal | None:
-    """§7.1 swing sizing at the capital base: risk budget over gap-multiplied stop distance, capped
+    """Swing sizing at the capital base: risk budget over gap-multiplied stop distance, capped
     by the per-stock CNC notional and the deployed-capital cap. ``None`` when unsizable."""
     if stop is None or stop >= fill:
         return None
@@ -305,7 +305,7 @@ def trade_stats(trades: list[Trade]) -> dict[str, Any]:
 
 
 def geometry(trades: list[Trade], cost: float) -> dict[str, Any]:
-    """Median GROSS at T+20 against one round trip, with the WO-3 margin floor per session."""
+    """Median GROSS at T+20 against one round trip, with the margin floor per session."""
     gross = [t.gross for t in trades]
     med = statistics.median(gross) if gross else None
     return {

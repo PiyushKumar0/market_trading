@@ -161,7 +161,7 @@ def _tape() -> list[Bar]:
     return bars
 
 
-# --------------------------------------------------------------------------- the DAILY tape (R3)
+# --------------------------------------------------------------------------- the DAILY tape
 #: Constant per-symbol daily bars, so every true range is the plain high-low.
 DAILY_OHLC: dict[str, tuple[float, float, float]] = {      # symbol -> (high, low, close)
     "WINNER": (102.0, 100.0, 101.0),

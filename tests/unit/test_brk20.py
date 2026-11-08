@@ -1,12 +1,12 @@
-"""brk20 (§6.1 addendum, 2026-08-04) — 20d-high daily-close breakout, full eligible universe.
+"""brk20 (2026-08-04) — 20d-high daily-close breakout, full eligible universe.
 
 PINNED worked example: 20 flat sessions with high 100.0, then a fresh close above. All math is
 hand-computed against the module's own DEFAULT_PARAMS-independent inputs (params passed
 explicitly — owner envelope changes must never break these tests).
 
-WO-19 (2026-08-19) added the overnight-gap stop-geometry floor. The legacy fixtures deliberately
+The overnight-gap stop-geometry floor was added 2026-08-19. The legacy fixtures deliberately
 carry a QUIET gap history (~0.05%/night ⇒ floor ~0.10% of entry) so the floor is never the thing
-under test there and the pre-WO-19 geometry assertions stay field-exact; the floor's own fixtures
+under test there and the pre-floor geometry assertions stay field-exact; the floor's own fixtures
 build their gap histories explicitly."""
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def _series_with_breakout(breakout_volume: float = 2000.0) -> list[DailyRow]:
 def _gapped(rows: list[DailyRow], gap_pct: float) -> list[DailyRow]:
     """Rewrite every row's ``open`` so EACH session-pair gaps by exactly ``gap_pct`` percent.
 
-    The window median is then ``gap_pct`` by construction and the WO-19 floor is 2 x that — no
+    The window median is then ``gap_pct`` by construction and the stop-geometry floor is 2 x that — no
     dependence on which pairs land inside the lookback, which is what makes the geometry fixtures
     hand-computable. ``rows[0].open`` is untouched: it is only ever a pair's ``prev``, and a
     ``prev`` contributes its CLOSE."""
@@ -60,14 +60,14 @@ def _reopen(rows: list[DailyRow], idxs: range, gap_pct: float) -> list[DailyRow]
 
 def _breakout_at_risk_pct(risk_pct: float, *, gap_pct: float = 0.5) -> list[DailyRow]:
     """A fresh volume-confirmed breakout over the 100.0 level whose risk unit R is ``risk_pct`` of
-    entry, on a history gapping ``gap_pct`` a night (default 0.5% ⇒ WO-19 floor = 1.0% of entry)."""
+    entry, on a history gapping ``gap_pct`` a night (default 0.5% ⇒ stop-geometry floor = 1.0% of entry)."""
     close_y = 100.0 * (1.0 + risk_pct / 100.0)
     rows = _flat(21) + [DailyRow(high=close_y + 0.5, close=close_y, volume=2000.0, open=99.05)]
     return _gapped(rows, gap_pct)
 
 
 def test_pinned_breakout_math():
-    """WO-4 LIMIT-AT-LEVEL geometry: the plan is anchored on the BROKEN LEVEL (100), not on
+    """LIMIT-AT-LEVEL geometry: the plan is anchored on the BROKEN LEVEL (100), not on
     yesterday's unobtainable close (103), with the rule's own risk unit R = close(y) - H20 = 3
     translated down onto it."""
     cand = scan_daily("BPCL", _series_with_breakout(), today=TODAY, params=P)
@@ -93,10 +93,10 @@ def test_fractional_rr_target_is_not_truncated():
 
 
 def test_entry_is_the_level_never_yesterdays_close():
-    """WO-4/F5, the defect this rule existed to carry: ``entry`` must never be ``close(y)``.
+    """The defect this rule existed to carry: ``entry`` must never be ``close(y)``.
 
     Swept over breakout margins so the assertion cannot pass by coincidence on one series, and the
-    §7.1 ``levels_coherent`` shape (stop < entry < target) is asserted at every point."""
+    ``levels_coherent`` shape (stop < entry < target) is asserted at every point."""
     for close in (100.5, 101.0, 103.0, 107.5, 110.0):
         rows = _flat(21) + [DailyRow(high=close + 0.5, close=close, volume=2000.0, open=99.05)]
         cand = scan_daily("X", rows, today=TODAY, params=P)
@@ -107,7 +107,7 @@ def test_entry_is_the_level_never_yesterdays_close():
         # R preserved: entry - stop == close(y) - H20, and R:R == rr_target.
         assert lv.entry - lv.stop == Decimal(str(close)) - Decimal("100.00")
         assert lv.target - lv.entry == 2 * (lv.entry - lv.stop)
-        assert lv.stop < lv.entry < lv.target                 # §7.1 levels_coherent shape
+        assert lv.stop < lv.entry < lv.target                 # levels_coherent shape
 
 
 def test_breakout_margin_lost_to_tick_rounding_emits_nothing():
@@ -176,10 +176,10 @@ def test_default_params_are_the_pinned_defaults():
     }
 
 
-# ============================================================ WO-19 stop-geometry floor (2026-08-19)
+# ============================================================ stop-geometry floor (2026-08-19)
 def test_floor_knobs_are_structurally_outside_the_learnable_envelope():
     """The separation is the governance mechanism, not a convention: a learner shrinking the floor
-    re-opens the IDEA/LENSKART degeneracy, so the knobs must not be reachable through the §6.3
+    re-opens the IDEA/LENSKART degeneracy, so the knobs must not be reachable through the parameter
     envelope dict at all."""
     assert brk20.FLOOR_PARAMS == {
         "gap_floor_mult": 2.0, "gap_lookback_sessions": 20, "gap_min_sessions": 10,
@@ -191,7 +191,7 @@ def test_floor_knobs_are_structurally_outside_the_learnable_envelope():
 
 
 def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
-    """(a) Regression: the pre-WO-19 candidate is reproduced FIELD-EXACT on a realistic 0.5%/night
+    """(a) Regression: the pre-floor candidate is reproduced FIELD-EXACT on a realistic 0.5%/night
     gap history — R = 3.00 = 3.0% of entry vs a 1.0% floor, so the floor is passed, not dodged."""
     rows = _gapped(_series_with_breakout(), 0.5)
     counts: dict[str, int] = {}
@@ -205,7 +205,7 @@ def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
 
 
 def test_live_2026_08_19_geometries():
-    """(b) The four live geometries that motivated WO-19, on a 0.5%/night history ⇒ floor 1.0% of
+    """(b) The four live geometries that motivated the stop-geometry floor, on a 0.5%/night history ⇒ floor 1.0% of
     entry, which lands between the survivor and the three degenerates.
 
     BOSCHLTD-class R ~2.1% of entry ships; MFSL 0.61%, MCX 0.54% and LENSKART 0.17% — three of that
@@ -317,7 +317,7 @@ def test_accumulator_defaults_to_none_and_scan_stays_pure():
 
 
 def test_sweep_threads_the_accumulator_and_keeps_its_ordering():
-    """(g) sweep_daily's §9.6 ordering is untouched by the new argument, and one accumulator
+    """(g) sweep_daily's deterministic ordering is untouched by the new argument, and one accumulator
     aggregates every symbol's veto classes — the counts ops/main.py logs per run."""
     dirty = _gapped(_series_with_breakout(), 0.5)
     for i in range(2, 8):
@@ -339,7 +339,7 @@ def test_sweep_threads_the_accumulator_and_keeps_its_ordering():
     assert [c.symbol for c in sweep_daily(histories, today=TODAY, params=P)] == ["MID", "ALPHA", "ZED"]
 
 
-# =================================== WO-19 floor — adversarial-review coverage-gap closures (2026-08-19)
+# =================================== stop-geometry floor — adversarial-review coverage-gap closures (2026-08-19)
 # The review confirmed the production rule correct but found four test-coverage gaps in the fixtures
 # above: every floor fixture is an UP gap only, every floor fixture is a CONSTANT gap history (median
 # indistinguishable from mean), nothing proves veto_counts stays empty on non-floor refusals, and only

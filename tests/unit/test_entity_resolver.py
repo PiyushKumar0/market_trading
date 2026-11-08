@@ -1,4 +1,4 @@
-"""EntityResolver (§2.7 step 3 / §3.2.4 pinned rule / §9.1): case-insensitive WHOLE-WORD PHRASE
+"""EntityResolver: case-insensitive WHOLE-WORD PHRASE
 containment; alias seed = instruments-dump names with the pinned legal-suffix list stripped MINUS the
 curated common-English-word stoplist; AMBIGUOUS (multi-symbol alias OR different companies' aliases on
 overlapping title spans) ⇒ NO match, never a guess; out-of-universe recorded, never traded;
@@ -42,7 +42,7 @@ def store(tmp_path, clock):
 
 # --------------------------------------------------------------------------- alias seed (pinned lists)
 def test_pinned_legal_suffix_list():
-    """The §3.2.4 suffix list, as normalized tokens ('&' is non-alphanumeric so '& CO' ⇒ 'co')."""
+    """The pinned suffix list, as normalized tokens ('&' is non-alphanumeric so '& CO' ⇒ 'co')."""
     assert set(LEGAL_SUFFIX_TOKENS) == {
         "ltd", "limited", "pvt", "private", "co", "corp", "corporation",
         "india", "industries", "enterprises",
@@ -50,7 +50,7 @@ def test_pinned_legal_suffix_list():
 
 
 def test_stoplist_contains_the_plan_named_common_words():
-    # §3.2.4: TRENT/IDEA/… owner-reviewed in Phase 1; "dollar" owner-marked at the G1 gate (seed-7).
+    # TRENT/IDEA/… owner-reviewed; "dollar" owner-marked in the owner's alias review.
     assert {"trent", "idea", "dollar"} <= set(ALIAS_STOPLIST)
 
 
@@ -81,7 +81,7 @@ def test_seed_from_instruments_dump_applies_suffixes_and_stoplist(store, clock):
         ("COAL INDIA LTD", "COALINDIA"), # final 'coal' stage stoplisted; 'coal india' stage kept
         {"name": "", "tradingsymbol": "NONAME", "exchange": "NSE", "instrument_type": "EQ"},  # malformed row skipped
     ])
-    assert seeded == 7  # every non-stoplisted strip stage seeds (G1 seed-5 row 20)
+    assert seeded == 7  # every non-stoplisted strip stage seeds
 
     rows = store.get_entity_aliases()
     assert {(r["alias"], r["tradingsymbol"]) for r in rows} == {
@@ -94,7 +94,7 @@ def test_seed_from_instruments_dump_applies_suffixes_and_stoplist(store, clock):
 
     rc = resolver.resolve(_cluster("Infosys wins large European banking deal"))
     assert rc.symbols == ["INFY"]
-    # The G1 seed-5 row-20 regression: "Coal India" resolves even though bare "coal" is stoplisted…
+    # The Coal India regression: "Coal India" resolves even though bare "coal" is stoplisted…
     rc = resolver.resolve(_cluster("Q1 Results today: Coal India among 68 companies to report"))
     assert rc.symbols == ["COALINDIA"]
     # …while a commodity headline still never false-positives on the stoplisted word.
@@ -146,7 +146,7 @@ def test_overlapping_spans_of_different_companies_resolve_to_nothing():
 
 
 def test_contained_span_is_subsumed_by_the_longer_match():
-    """§3.2.4 subsumption (G1 seed-6 row 47): the most specific phrase wins over a strictly
+    """Subsumption: the most specific phrase wins over a strictly
     contained sub-phrase of a DIFFERENT company — 'Inox' inside 'PVR Inox' must not poison it."""
     resolver = EntityResolver(aliases={"pvr inox": "PVRINOX", "inox": "INOXINDIA"})
     rc = resolver.resolve(_cluster("PVR Inox Q1 Results: Co swings to black"))
@@ -206,13 +206,13 @@ def test_out_of_universe_recorded_never_traded():
     rc = resolver.resolve(_cluster("Paytm and Infosys announce payments tie-up"))
     assert rc.symbols == ["INFY"]                # in-universe resolves
     (u,) = rc.unresolved
-    assert u.reason == "out_of_universe"         # out-of-universe recorded (§5.5 loop) …
+    assert u.reason == "out_of_universe"         # out-of-universe recorded …
     assert u.entity_text == "paytm"
     assert u.candidate_symbols == ("PAYTM",)     # … and never reaches symbols[]
 
 
 def test_unknown_universe_defers_filtering():
-    """universe=None (before the 08:30 build) ⇒ no filtering here; the step-5 digest re-checks."""
+    """universe=None (before the 08:30 build) ⇒ no filtering here; the digest re-checks."""
     resolver = EntityResolver(aliases={"paytm": "PAYTM"}, universe=None)
     rc = resolver.resolve(_cluster("Paytm shares climb 5 percent"))
     assert rc.symbols == ["PAYTM"]
@@ -300,7 +300,7 @@ async def test_all_excluded_universe_fails_closed(store, clock):
 
 async def test_no_universe_rows_for_the_day_stays_unknown(store, clock):
     """No ``universe_daily`` rows at all for ``d`` (pre-08:30 build) still means "unknown" — the
-    out-of-universe filter stays disabled here; the step-5 digest re-checks."""
+    out-of-universe filter stays disabled here; the digest re-checks."""
     d = clock.today()
     store.upsert_entity_aliases([{"alias": "infosys", "tradingsymbol": "INFY"}])
     resolver = EntityResolver(store, clock)
@@ -334,7 +334,7 @@ def test_sector_and_theme_tags_use_the_same_whole_word_rule():
 
 def test_sector_keywords_exclude_industry_derived_buckets():
     """sector_map's NSE-Industry fallback (2026-09-21) mints buckets like CAPITAL_GOODS, SERVICES
-    and DIVERSIFIED so the §7.1 exposure caps and the sector features see a real group — but the
+    and DIVERSIFIED so the exposure caps and the sector features see a real group — but the
     news keyword vocabulary stays restricted to the ten index sector names: "services" or
     "diversified" as a headline keyword would false-tag a large share of the corpus."""
     resolver = EntityResolver(
@@ -344,7 +344,7 @@ def test_sector_keywords_exclude_industry_derived_buckets():
     assert resolver.resolve(_cluster("Capital goods orders jump as IT hiring slows")).sectors == ["IT"]
 
 
-# --------------------------------------------------------------------------- Phase-2 seam
+# --------------------------------------------------------------------------- extra-texts seam
 def test_extra_texts_reenter_the_same_rule_and_log_no_match():
     """News-Analyst-emitted entity STRINGS re-enter this resolver — the LLM never assigns a symbol."""
     resolver = EntityResolver(aliases={"hindustan unilever": "HINDUNILVR"})
@@ -358,7 +358,7 @@ def test_extra_texts_reenter_the_same_rule_and_log_no_match():
     assert u.entity_text == "Totally Unknown Corp"
 
 
-# ------------------------------------------------- explicit exchange token (§2.7 amendment 2026-09-04)
+# ------------------------------------------------- explicit exchange token (2026-09-04)
 def test_exchange_token_resolves_directly_without_any_alias():
     """An NSE filing carries its own symbol; the `[NSE:<SYM>]` token the ingest prefixes is an
     EXACT identification, so it resolves without the alias seed ever having heard of the name."""
@@ -429,7 +429,7 @@ def test_plain_headlines_are_unchanged_by_the_token_rule():
 
 
 def test_exchange_token_in_extra_texts_resolves_and_is_not_a_no_match():
-    """The clusterer's alternative seam (§2.7): a token-bearing MEMBER title handed in as an extra
+    """The clusterer's alternative seam: a token-bearing MEMBER title handed in as an extra
     text resolves the same way — and must not be logged as ``no_match``."""
     resolver = EntityResolver(universe={"HINDZINC"})
     rc = resolver.resolve(
@@ -472,9 +472,9 @@ async def test_run_persists_tags_logs_unresolved_and_preserves_scores(store, clo
     }
 
     (row,) = store.get_news_clusters()
-    assert row["symbols"] == ["INFY"]                         # EntityResolver output ONLY (§4.3)
+    assert row["symbols"] == ["INFY"]                         # EntityResolver output ONLY
     assert row["themes"] == ["defence"]
-    assert row["sentiment"] == pytest.approx(0.7)             # step-4 scores never clobbered (R8)
+    assert row["sentiment"] == pytest.approx(0.7)             # scores never clobbered
     assert row["untrusted"] is True
 
     logged = store.get_unresolved_entities()
@@ -493,9 +493,9 @@ async def test_pure_resolver_requires_store_for_run_and_load(clock):
         await resolver.run([])
 
 
-# --------------------------------------------------------------------------- G1 verdict fixes (2026-08-03)
+# --------------------------------------------------------------------------- verdict fixes (2026-08-03)
 def test_stoplisted_alias_is_filtered_on_load_not_only_at_seed(store, clock):
-    """A persisted alias later added to ALIAS_STOPLIST ("bse": venue mentions, G1 rows 17/21) must
+    """A persisted alias later added to ALIAS_STOPLIST ("bse": venue mentions) must
     stop matching on the next load — no store surgery required while the engine holds the lock."""
     store.upsert_entity_aliases([
         {"alias": "bse", "tradingsymbol": "BSE", "source": "seed", "added_at": clock.now()},
@@ -510,8 +510,8 @@ def test_stoplisted_alias_is_filtered_on_load_not_only_at_seed(store, clock):
 
 
 def test_curated_aliases_seed_and_resolve(store, clock):
-    """config/aliases.yaml curated additions (owner-set, §6.3): colloquial names the legal-name seed
-    can never produce — Groww's legal name is Billionbrains Garage Ventures (G1 verdict row 50)."""
+    """config/aliases.yaml curated additions (owner-set): colloquial names the legal-name seed
+    can never produce — Groww's legal name is Billionbrains Garage Ventures."""
     r = EntityResolver(store, clock)
     applied = r.seed_curated_aliases({"aliases": [
         {"alias": "Groww", "tradingsymbol": "GROWW"},
@@ -536,7 +536,7 @@ def test_real_aliases_yaml_parses_and_applies(store, clock):
 
 
 def test_conglomerate_surname_prefix_is_ambiguous_by_construction(store, clock):
-    """G1 seed-6 rows 6/19/25: 'ADANI ENTERPRISES' strips to bare 'adani', which used to grab
+    """'ADANI ENTERPRISES' strips to bare 'adani', which used to grab
     EVERY Adani-subsidiary headline for ADANIENT. A stripped-stage alias that token-prefixes
     another company's alias now unions those symbols in — bare 'Adani' refuses with candidates,
     while span subsumption still resolves the specific subsidiary phrase."""
@@ -558,7 +558,7 @@ def test_conglomerate_surname_prefix_is_ambiguous_by_construction(store, clock):
 
 
 def test_curated_rows_override_seed_rows_at_load(store, clock):
-    """§6.3 owner-sets: an alias with any curated row loads ONLY the curated symbol(s) —
+    """Owner-sets: an alias with any curated row loads ONLY the curated symbol(s) —
     'Reliance' pins RELIANCE even though the seed's prefix union made it multi-symbol."""
     resolver = EntityResolver(store, clock)
     resolver.seed_aliases([

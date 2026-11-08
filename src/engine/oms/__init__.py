@@ -1,4 +1,4 @@
-"""Tier 3 (deterministic). Order/position state machines (3.5), broker-resident protection (R3), reconciliation (R5), square-off (A7), GTT lifecycle (A12). Never imports intelligence (R1)."""
+"""Tier 3 (deterministic). Order/position state machines, broker-resident protection, reconciliation, square-off, GTT lifecycle. Never imports intelligence."""
 
 from engine.oms.correlation import (
     DEFAULT_MAX_ENTRIES,

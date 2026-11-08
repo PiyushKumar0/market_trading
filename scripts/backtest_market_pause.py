@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Market-wide pause study (IMPLEMENTATION_PLAN §3 "Market-wide pause study", review §9 #1, D-J).
+"""Market-wide pause study.
 
-Per strategy (hi52, ins), C2's populations, arm (ii) construct and cost (``backtest_regime_filter``), split at the
+Per strategy (hi52, ins), the regime-filter study's populations, arm (ii) construct and cost (``backtest_regime_filter``), split at the
 signal session y: PAUSE if the core equal-weight return compounded over the 20 sessions ending at y is < 0,
 otherwise TRADE. The EW series is ``research_common.core_ew``, a survivorship-tainted proxy. Family
-``regime_filter/<strategy>`` = C2 plus this rule, N = 2. Evidence only; SUPPORTED goes to the owner and wires
+``regime_filter/<strategy>`` = the regime-filter study plus this rule, N = 2. Evidence only; SUPPORTED goes to the owner and wires
 nothing. Never run before the pre-registration is committed. Exit codes: 0 ran, 2 refused.
 """
 
@@ -23,7 +23,7 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 
 rf = rc._load_script("backtest_regime_filter")
 
-#: The registration date (IMPLEMENTATION_PLAN §3), set by the commit that registers the rule; until then
+#: The registration date, set by the commit that registers the rule; until then
 #: every run is refused.
 REGISTERED: date | None = date(2026, 10, 29)
 STRATEGIES = ("hi52", "ins")

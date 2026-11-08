@@ -1,4 +1,4 @@
-"""Nightly Post-Trade Reviewer (§5.5): deterministic context assembly, the R4 suggestion filter,
+"""Nightly Post-Trade Reviewer: deterministic context assembly, the suggestion filter,
 and the persist/notify contract.
 
 The harness is faked (the SDK is never reachable from the unit tier) but the VALIDATOR the job hands
@@ -46,7 +46,7 @@ from engine.strategy.types import RawLevels, SignalCandidate
 D = date(2026, 6, 17)          # the conftest FIXED_NOW trading day
 EMPTY_DAY = date(2026, 6, 18)
 
-# A two-row slice of the real envelope.yaml table — the ONLY suggestible set for these tests (§6.3).
+# A two-row slice of the real envelope.yaml table — the ONLY suggestible set for these tests.
 BOUNDS: dict[str, Any] = {
     "cat.rr_target": {"min": 1.0, "max": 3.0, "default": 1.5, "used_by": "cat"},
     "orb.orb_minutes": {"min": 15, "max": 45, "default": 30, "used_by": "orb"},
@@ -67,7 +67,7 @@ REVIEW = {
 
 # --------------------------------------------------------------------------- fakes
 class FakeProtectedStore:
-    """Stands in for ProtectedStore: hash verification is its own module's test (§2.4)."""
+    """Stands in for ProtectedStore: hash verification is its own module's test."""
 
     def __init__(self, parameters: dict[str, Any] | None = None, error: Exception | None = None) -> None:
         self._parameters = BOUNDS if parameters is None else parameters
@@ -148,7 +148,7 @@ def make_job(conn, gov, clock, calendar, agent_defs, harness, notify=None, store
     return NightlyReviewJob(
         store if store is not None else FakeProtectedStore(),
         conn,
-        None,                       # assembler: reserved for the Phase-3 agentic upgrade
+        None,                       # assembler: reserved for the agentic upgrade (not built)
         harness,                    # type: ignore[arg-type]
         agent_defs,
         gov,
@@ -248,7 +248,7 @@ def seed_day(conn, d: date = D) -> None:
 
 # =========================================================================== build_review_context
 def test_context_renders_the_seeded_day(conn) -> None:
-    # §5.5: the reviewer sees the ledger, the recommendations, the gate's rejects BY FAILING RULE,
+    # The reviewer sees the ledger, the recommendations, the gate's rejects BY FAILING RULE,
     # the failed Tier-1 calls, the day's spend and the envelope — assembled deterministically here.
     seed_day(conn)
     text = build_review_context(conn, None, D, BOUNDS)
@@ -276,7 +276,7 @@ def test_context_renders_the_seeded_day(conn) -> None:
     assert "suggestible parameters (envelope.yaml - the ONLY names you may propose):" in text
     assert "  - cat.rr_target: min=1.0 max=3.0 default=1.5" in text
     assert "  - orb.orb_minutes: min=15 max=45 default=30" in text
-    # No date anywhere in the volatile block: the trading date lives in the caller's stable block (D8).
+    # No date anywhere in the volatile block: the trading date lives in the caller's stable block.
     assert D.isoformat() not in text
 
 
@@ -359,14 +359,14 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
     assert payload["trade_attributions"] == REVIEW["trade_attributions"]
     assert rows[0]["created_at"] == clock.now().isoformat()
 
-    # The call went out as the shipped single-shot def under the schedule admission class (§5.5 v1).
+    # The call went out as the shipped single-shot def under the schedule admission class.
     assert len(harness.calls) == 1
     call = harness.calls[0]
     assert call.agent_def.agent_id == "nightly_reviewer"
     assert call.agent_def.shape == "single_shot"
     assert call.call_class == "schedule"
     assert call.json_schema == nightly.output_json_schema()
-    # D8 ordering: byte-stable system prompt, stable date block first, volatile review last.
+    # Prompt ordering: byte-stable system prompt, stable date block first, volatile review last.
     assert call.context.system_prompt == nightly.SYSTEM_PROMPT
     assert call.context.stable_block.splitlines()[1] == "trading date: 2026-06-17 (Wednesday)"
     assert call.context.prompt().startswith(call.context.stable_block)
@@ -390,7 +390,7 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
 async def test_out_of_envelope_and_out_of_bounds_suggestions_are_dropped(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # R4/§6.3: the model may only suggest names it was SHOWN, inside the bounds it was shown. A knob
+    # The model may only suggest names it was SHOWN, inside the bounds it was shown. A knob
     # outside the envelope (here a risk limit) or a value outside its range never reaches
     # GET /config/params — and neither is ever APPLIED by any path in this module.
     review = dict(REVIEW)
@@ -434,13 +434,13 @@ async def test_no_envelope_means_every_suggestion_is_dropped(
 async def test_governor_block_makes_no_call_and_writes_no_row(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # §5.6 DG4 (credit exhausted / SDK billing error) => zero SDK calls. The block is checked before
+    # DG4 (credit exhausted / SDK billing error) => zero SDK calls. The block is checked before
     # any context assembly, so a blocked night costs nothing at all.
     gov.note_billing_error("test billing error")
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is AdvisoryOutcome.BLOCKED   # WO-14 (c): correct outcome, no retry
+    assert await job.run(D) is AdvisoryOutcome.BLOCKED   # correct outcome, no retry
     assert harness.calls == []
     assert reviews(conn) == []
 
@@ -456,7 +456,7 @@ async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
     )
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
 
-    assert await job.run(D) is AdvisoryOutcome.FAILED    # WO-14 (c): retryable (harness failure)
+    assert await job.run(D) is AdvisoryOutcome.FAILED    # retryable (harness failure)
     assert reviews(conn) == []
     assert len(sent) == 1
     assert sent[0].kind == MessageKind.DAILY_SUMMARY
@@ -482,8 +482,8 @@ async def test_a_dead_login_is_left_to_the_harness_alert(
 
 @pytest.mark.asyncio
 async def test_rerun_replaces_the_row_for_that_day(conn, gov, clock, calendar, agent_defs) -> None:
-    # The §2.6 date-keyed catch-up may replay a missed day, and the owner may redo one. One row per
-    # trading day; every call that produced either review stays in agent_calls (R8).
+    # The date-keyed catch-up may replay a missed day, and the owner may redo one. One row per
+    # trading day; every call that produced either review stays in agent_calls.
     first = FakeHarness(raw=json.dumps(REVIEW))
     assert await make_job(conn, gov, clock, calendar, agent_defs, first).run(D) is AdvisoryOutcome.RAN
 
@@ -508,12 +508,12 @@ async def test_review_persists_without_a_notify_sink(conn, gov, clock, calendar,
 async def test_missing_agent_def_is_a_logged_no_review(conn, gov, clock, calendar) -> None:
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, {}, harness)
-    assert await job.run(D) is AdvisoryOutcome.FAILED    # roster gap = harness failure (WO-14 c)
+    assert await job.run(D) is AdvisoryOutcome.FAILED    # roster gap = harness failure
     assert harness.calls == []
     assert reviews(conn) == []
 
 
-# =========================================================================== WO-9 funnel telemetry
+# =========================================================================== funnel telemetry
 def seed_funnel(conn, d: date = D) -> None:
     """A day-slot journal shaped like a real starved session: orb published three and got two
     analyst slots, rsi2 published two and got one, and the day's best UNFORWARDED score (0.85)
@@ -548,7 +548,7 @@ def seed_funnel(conn, d: date = D) -> None:
 
 
 def test_funnel_summary_aggregates_the_whole_day(conn) -> None:
-    """WO-9: the funnel is raw -> published -> forwarded -> evaluated -> proposals -> verdicts, and
+    """The funnel is raw -> published -> forwarded -> evaluated -> proposals -> verdicts, and
     the number that says "a good candidate never reached the analyst" is best_unforwarded_score."""
     seed_day(conn)
     seed_funnel(conn)
@@ -599,7 +599,7 @@ def test_funnel_summary_splits_unsizeable_from_unforwarded(conn) -> None:
 
 
 def test_funnel_summary_of_an_empty_day_is_explicitly_empty(conn) -> None:
-    """A quiet day and a broken query must stay distinguishable (the module's D7 convention)."""
+    """A quiet day and a broken query must stay distinguishable (the module's convention)."""
     summary = build_funnel_summary(conn, EMPTY_DAY)
     assert (summary.published, summary.forwarded, summary.evaluated) == (0, 0, 0)
     assert summary.raw is None                       # never measured is not the same as zero
@@ -718,7 +718,7 @@ async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
 async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
     conn, gov, clock, calendar
 ) -> None:
-    """WO-9 acceptance: the funnel line is emitted BEFORE any early return, so a governor-blocked
+    """Acceptance: the funnel line is emitted BEFORE any early return, so a governor-blocked
     or agent-def-less night still leaves the day's funnel numbers in the log — the measurement must
     not depend on the LLM call it is measuring."""
     seed_funnel(conn)
@@ -774,7 +774,7 @@ def seed_declines(conn, d: date = D) -> None:
              json.dumps({"action": "no_action", "reason": reason, "regime_note": ""}),
              f"{d.isoformat()}T{hhmm}:00+05:30"),
         )
-    # A malformed output on an ok=1 row: counted, never raised (D7).
+    # A malformed output on an ok=1 row: counted, never raised.
     conn.execute(
         "INSERT INTO agent_calls "
         "(call_id, agent_id, trigger, model, context_gz, output_json, ok, at) "
@@ -806,7 +806,7 @@ def seed_declines(conn, d: date = D) -> None:
 
 
 def test_declines_are_counted_per_strategy_with_the_recent_reasons(conn) -> None:
-    """The stage the WO-9 funnel stopped short of: 8 slots spent, 6 declines, 1 proposal, and the
+    """The stage the funnel stopped short of: 8 slots spent, 6 declines, 1 proposal, and the
     per-strategy split that says whether ONE scanner is producing setups the analyst always
     refuses. Identity comes from the archived prompt — a no_action payload carries none."""
     seed_declines(conn)
@@ -827,7 +827,7 @@ def test_declines_are_counted_per_strategy_with_the_recent_reasons(conn) -> None
 
 
 def test_a_malformed_output_is_counted_not_raised(conn) -> None:
-    """D7, and the reason this reader parses defensively at all: the row that cannot be read is the
+    """The reason this reader parses defensively at all: the row that cannot be read is the
     row most likely to be the interesting one, so it is COUNTED and the section still renders."""
     conn.execute(
         "INSERT INTO agent_calls (call_id, agent_id, trigger, model, output_json, ok, at) "
@@ -873,14 +873,14 @@ def test_declines_section_is_in_the_review_context(conn) -> None:
 
 
 def test_a_day_with_no_analyst_calls_renders_none(conn) -> None:
-    """A quiet day and a broken query stay distinguishable (the module's D7 convention) — the block
+    """A quiet day and a broken query stay distinguishable (the module's convention) — the block
     says "none" rather than reporting zero declines out of zero evaluations as a finding."""
     assert build_analyst_declines(conn, EMPTY_DAY).lines() == []
     text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
     assert f"{DECLINES_TITLE}: none" in text
 
 
-# =========================================================================== the paper line (plan Q4.10)
+# =========================================================================== the paper line
 def paper_on(conn, epoch: str | None = None) -> None:
     conn.execute("INSERT INTO paper_state (id, enabled, changed_at, epoch_started_at) VALUES (1, 1, ?, ?)",
                  (f"{D.isoformat()}T09:00:00+05:30", epoch))

@@ -1,6 +1,6 @@
-"""Phase-2 dashboard API routes (§3.2.11 C3): real reads/writes over risk/oms/learning/intelligence
+"""Dashboard API routes: real reads/writes over risk/oms/learning/intelligence
 state via the app's OPTIONAL collaborators (``conn``/``store``/``exposure``/``governor``/
-``limits_engine``), with every route degrading to its Phase-0/1 stub shape when its own collaborator is
+``limits_engine``), with every route degrading to its stub shape when its own collaborator is
 unwired. Mirrors ``test_api_auth.py``'s ``TestClient`` pattern; inserts rows directly into ``conn``
 (migrated by the shared ``conn`` fixture, tests/conftest.py) rather than going through write paths that
 don't exist yet."""
@@ -236,7 +236,7 @@ def _paper_at_40k(conn, clock) -> PaperControl:
 
 
 def test_paper_route_shows_history_at_the_live_capital_base(tmp_path, conn, clock) -> None:
-    """O19 §7: snapshots stored at 40,000, the verified limits now at 60,000 — the route reads the live base."""
+    """The owner's dashboard capital change: snapshots stored at 40,000, the verified limits now at 60,000 — the route reads the live base."""
     cfg = tmp_path / "config"
     cfg.mkdir()
     text = (REAL_CONFIG / "limits.yaml").read_text(encoding="utf-8")
@@ -333,7 +333,7 @@ def test_decisions_left_join_verdict_and_verdicts_route(conn, clock) -> None:
 
 
 def test_decisions_and_verdicts_keep_one_row_per_proposal_with_the_paper_verdict_beside_it(conn, clock) -> None:
-    """Plan Q3.2: the real gate's verdict stays where it was; the paper gate's is a separate field."""
+    """The real gate's verdict stays where it was; the paper gate's is a separate field."""
     _insert_proposal(conn, "prop-1", created_at="2026-06-17T09:20:00+05:30")
     _insert_verdict(conn, "verd-1", "prop-1", verdict="reject", payload={"reasons": ["capital_cap"]})
     _insert_proposal(conn, "prop-2", created_at="2026-06-17T09:25:00+05:30")
@@ -439,7 +439,7 @@ def test_risk_headroom_wired_with_exposure_and_caps(conn, clock, exposure, limit
     assert headroom["open_positions"] == {"total": 1, "mis": 1, "cnc": 0}
     assert headroom["consecutive_losses"] == 0
     assert headroom["deployed_capital"] == "1000"  # 10 * 100
-    # O16 2026-09-07: base 40000 / caps 6-2-4 — read off the loaded table instead of pinning literals.
+    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — read off the loaded table instead of pinning literals.
     table = limits_engine.table()
     assert headroom["caps"]["max_deployed_capital_inr"] == str(table.limits.capital_cap.max_deployed_capital_inr)
     assert headroom["caps"]["max_open_positions_total"] == table.limits.max_open_positions.total
@@ -513,7 +513,7 @@ async def test_budget_wired_per_agent_and_degrade_tier(conn, clock, governor) ->
     # Amount-AGNOSTIC vs the owner-tunable agents.yaml (2026-08-03 rebalance lesson): the route's
     # contract is that it serves the GOVERNOR's allocation, not any particular dollar figure.
     assert Decimal(body["budget"]["allocations_usd"]["weekly_researcher"]) == governor.allocations()["weekly_researcher"]
-    # The quota WINDOW, not a month (§5.6, 2026-09-12): the owner surface must say WHICH week the
+    # The quota WINDOW, not a month (2026-09-12): the owner surface must say WHICH week the
     # spend belongs to, and the cap the tier is currently imposing.
     assert body["budget"]["window_key"] == governor.window_key()
     start, end = governor.window_bounds()
@@ -631,7 +631,7 @@ def test_post_kill_single_step_flips_state_reset_stays_409(conn, clock, kill_swi
 
     reset = client.post("/kill/reset", headers=AUTH)
     assert reset.status_code == 409
-    assert kill_switch.is_killed() is True  # unchanged — no dashboard two-step in Phase 2
+    assert kill_switch.is_killed() is True  # unchanged — no dashboard two-step in RECOMMEND mode
 
 
 # --------------------------------------------------------------------------- /ws/live
@@ -660,8 +660,8 @@ def test_ws_live_broadcasts_bus_event(conn, clock, bus) -> None:
         assert frame["at"] is not None
 
 
-# --------------------------------------------------------------------------- /news/watchlist (D3)
-# The dashboard's news panel (§3.2.11 O8/R8) reads today's §2.7 catalyst watchlist + the digest
+# --------------------------------------------------------------------------- /news/watchlist
+# The dashboard's news panel reads today's catalyst watchlist + the digest
 # freshness label. The route is duck-typed on ``store``: a MarketStore answers it, a ProtectedStore (or
 # no store) degrades to the empty shape with ``status: null``.
 @pytest.fixture
@@ -722,7 +722,7 @@ def test_news_watchlist_wired_rows_levels_and_digest_freshness(clock, market_sto
     orig = rows["AAA"]
     assert orig["event_type"] == "order_win"
     assert orig["materiality"] == 0.72
-    # Levels are Decimal in the store and must cross the wire as STRINGS (§8.1), never floats.
+    # Levels are Decimal in the store and must cross the wire as STRINGS, never floats.
     assert orig["confirm_trigger"] == "1410.50"
     assert orig["stop_band_low"] == "1380.00"
     assert orig["target_band_high"] == "1460.00"
@@ -732,7 +732,7 @@ def test_news_watchlist_wired_rows_levels_and_digest_freshness(clock, market_sto
     assert digest["status"] == "fresh"          # stamp == frozen now => age 0
     assert digest["age_h"] == 0.0
     assert digest["as_of"] == clock.now().isoformat()
-    assert digest["stale_max_h"] == 20          # config/limits.yaml catalyst_guard (§7.1)
+    assert digest["stale_max_h"] == 20          # config/limits.yaml catalyst_guard
 
 
 def test_news_watchlist_digest_stale_and_missing(clock, market_store, limits_engine) -> None:
@@ -755,7 +755,7 @@ def test_news_watchlist_digest_stale_and_missing(clock, market_store, limits_eng
     assert stale["age_h"] == 30.0
 
 
-# --------------------------------------------------------------------------- /recommendations (D3)
+# --------------------------------------------------------------------------- /recommendations
 # /decisions is the proposal→verdict provenance view and carries no Recommendation payload; the
 # dashboard's recommendation panel reads the delivered artifact + the owner's human_action from here.
 def test_recommendations_unwired_returns_stub_shape() -> None:
@@ -818,7 +818,7 @@ def test_recommendations_shape_is_unchanged_by_the_q1_payload_fields(conn, clock
     assert rec["recommendation"] == payload
 
 
-# --------------------------------------------------------------------------- POST /db/query (§3.2.11)
+# --------------------------------------------------------------------------- POST /db/query
 def test_scorecard_route_unwired_and_wired_shapes(conn, clock, monkeypatch) -> None:
     seen = spy_as_of(monkeypatch)
     unwired = _client().get("/scorecard", headers=AUTH).json()
@@ -943,7 +943,7 @@ def test_db_query_market_roundtrip_encodes_decimal_and_date(clock, market_store)
     assert body["columns"] == ["symbol", "d", "confirm_trigger"]
     assert (body["row_count"], body["truncated"]) == (2, False)
     assert body["elapsed_ms"] >= 0
-    # DECIMAL crosses as a STRING (§8.1 — a float would corrupt the level), DATE as ISO-8601.
+    # DECIMAL crosses as a STRING (a float would corrupt the level), DATE as ISO-8601.
     assert body["rows"] == [["AAA", d.isoformat(), "1410.50"], ["BBB", d.isoformat(), None]]
 
     # EXPLAIN is the one non-SELECT statement type enumerated as read-only (a plan is what the owner
@@ -1010,7 +1010,7 @@ def test_db_query_timeout_interrupts_the_query_and_answers_504(clock, market_sto
 
 
 def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> None:
-    """2026-08-18 (the 53 GB incident) generalized by §3.2.11: the LIVE store connection carries an
+    """2026-08-18 (the 53 GB incident) generalized: the LIVE store connection carries an
     explicit DuckDB memory_limit, so nothing — this endpoint's arbitrary SELECTs included — can commit
     the machine. Asserted numerically because DuckDB renders the limit in GiB (mirrors
     test_tick_compaction.py::test_compaction_connection_is_memory_bounded)."""
@@ -1025,7 +1025,7 @@ def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> No
     assert float(value) <= 8.0, limit
 
 
-# --------------------------------------------------------------------------- /config/capital (O19 Task 5b)
+# --------------------------------------------------------------------------- /config/capital
 def _capital_client(tmp_path, conn, *, wired: bool = True, at=None):
     """A client over a temp-config ProtectedStore + LimitsEngine (capital pinned at 40000), a clock
     AFTER the 2026-06-17 close (the shared ``clock`` fixture sits inside the session) and a real

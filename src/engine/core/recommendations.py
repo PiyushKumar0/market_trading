@@ -1,4 +1,4 @@
-"""Shared recommendation-lifecycle predicate (§3.6).
+"""Shared recommendation-lifecycle predicate.
 
 Lives in ``core`` rather than ``ops.pipeline`` — home of the canonical consumer,
 ``RecommendationBook.expire_stale`` — because the other two consumers sit BELOW ``ops`` in the import
@@ -20,7 +20,7 @@ def parse_valid_until(raw: Any) -> datetime | None:
     """A recommendation's ``payload.valid_until`` as a tz-aware datetime, or ``None``.
 
     ``None`` covers three cases every caller here treats identically: absent, unparseable, and naive.
-    A naive timestamp is itself a bug upstream (§3.2 requires tz-aware IST throughout) and is treated
+    A naive timestamp is itself a bug upstream (tz-aware IST is required throughout) and is treated
     as "cannot tell" rather than risked in a comparison against an aware ``now``.
     """
     if not raw:
@@ -52,14 +52,14 @@ def recommendation_expired(valid_until: Any, now: datetime) -> bool:
 
 
 def pending_entry_symbols(rows: Iterable[Mapping[str, Any]], now: datetime) -> frozenset[str]:
-    """Symbols carrying an UNEXPIRED, UNACTIONED entry recommendation (§3.6).
+    """Symbols carrying an UNEXPIRED, UNACTIONED entry recommendation.
 
     ``rows`` are ``recommendations`` table rows (anything supporting ``row["payload"]`` /
     ``row["human_action"]`` — a ``sqlite3.Row`` in practice). Shared by two callers that must agree
-    exactly: the gate's own ``GateContext.pending_rec_symbols`` (``risk.gate``, for the O16
+    exactly: the gate's own ``GateContext.pending_rec_symbols`` (``risk.gate``, for the
     sector/correlation-room math) and the brk20 retest re-arm screen (``ops.main``), which must
     refuse what the gate would refuse (``per_stock_exposure: already held or pending`` is a HARD
-    reason, uncurable by shrinking) BEFORE a §3.2.5 day slot and an analyst call are spent rather
+    reason, uncurable by shrinking) BEFORE a prescreen day slot and an analyst call are spent rather
     than after.
 
     A row with ANY ``human_action`` (taken / expired / dismissed / closed) is skipped here

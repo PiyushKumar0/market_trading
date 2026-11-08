@@ -1,10 +1,10 @@
-"""Recorded ticks → the real BarBuilder → a scratch store, deterministically (§3.2.9, §8.4, §9.6).
+"""Recorded ticks → the real BarBuilder → a scratch store, deterministically.
 
-``ReplayHarness`` is WO-P3-3 of the §8.4 Phase-3 decomposition addendum (2026-09-10): the foundation
-leg of "backtest = paper = live, one code path" (E1/R9). It replays a recorded trading day out of the
-§4.3 tick Parquet dataset through the SAME :class:`~engine.marketdata.bar_builder.BarBuilder` the live
+``ReplayHarness`` (added 2026-09-10) is the foundation
+leg of "backtest = paper = live, one code path". It replays a recorded trading day out of the
+tick Parquet dataset through the SAME :class:`~engine.marketdata.bar_builder.BarBuilder` the live
 engine runs, into a SCRATCH :class:`~engine.marketdata.store.MarketStore`, with an optional broker
-attached, and emits a :class:`ReplayReport` whose ``digest`` is the §9.6 golden-day artefact: *same
+attached, and emits a :class:`ReplayReport` whose ``digest`` is the golden-day artefact: *same
 inputs ⇒ byte-identical output*.
 
 Seven properties are load-bearing, and each is a deliberate design constraint rather than an
@@ -12,11 +12,11 @@ implementation detail:
 
 1. **It never opens ``market.duckdb``.** The archive is read through the harness's OWN
    ``duckdb.connect(":memory:")`` against ``read_parquet`` globs. DuckDB is single-writer and the live
-   engine holds that file (§4.1); a replay that took the store's lock could not run beside a trading
+   engine holds that file; a replay that took the store's lock could not run beside a trading
    session, which is exactly when you want to run one. ``MarketStore.get_ticks`` is therefore NOT used
    here despite doing the same job — it reads through the live connection and its lock.
-2. **The day is STREAMED in bounded chunks, never materialised whole** (§3.2 hot-path invariants,
-   §8.4 performance bar). The read is still ONE ordered query, but it is consumed with
+2. **The day is STREAMED in bounded chunks, never materialised whole** (hot-path invariants,
+   performance bar). The read is still ONE ordered query, but it is consumed with
    ``fetchmany(20_000)`` on a private single-worker executor thread that hands chunks to the event
    loop through a bounded queue; peak resident memory is O(chunk), not O(day). A recorded tick costs
    ~2.2 KB as a live ``Tick`` — a 300-symbol session-day materialised twice (rows, then models) is
@@ -35,7 +35,7 @@ implementation detail:
    rejected below.
 4. **The clock IS the tick stream.** :class:`ReplayClock` is a ``Clock`` whose ``time_source`` closes
    over the current tick's ``exchange_ts``, advanced BEFORE the tick is delivered. Nothing in a replay
-   may read wall time — that is what makes the golden decision log reproducible (§9.1), and the
+   may read wall time — that is what makes the golden decision log reproducible, and the
    ``Clock`` seam is precisely why the platform has never scattered ``datetime.now()`` calls.
 5. **The harness OWNS the publish collector.** :meth:`ReplayHarness.publish` is the
    ``publish(topic, event)`` callable a broker is constructed with (``PaperBroker(publish=...)``);
@@ -44,8 +44,8 @@ implementation detail:
    matches nothing degrades to an empty list and reports a bars-only digest as though it covered
    orders. If a broker ends the run with a non-empty orderbook and the harness collected zero frames,
    that is a wiring bug and :class:`ReplayContractError` is raised — a silent bars-only digest is
-   refused (§8.4 addendum).
-6. **ULIDs are the one accepted non-determinism** (§8.4 addendum). Platform-minted ids differ between
+   refused.
+6. **ULIDs are the one accepted non-determinism**. Platform-minted ids differ between
    two runs of identical inputs by construction, so every ULID-shaped token is masked before hashing
    (:func:`mask_ulids`).
 7. **Replay behaviour is a function of the STREAM, never of task scheduling** (fix round,
@@ -60,9 +60,9 @@ implementation detail:
    (nothing forbids them), but nothing the digest covers is allowed to depend on WHEN they do.
 
 **Scope of v1.** The strategy → gate → OMS leg is driven from outside, through ``schedule()`` /
-``at_tick()`` (tests/replay/test_paper_e2e.py, plan Q4.12); there is no order origination here
+``at_tick()`` (tests/replay/test_paper_e2e.py); there is no order origination here
 and nothing in this module is reachable from the RECOMMEND pipeline. ``config_overlay`` is kept only
-to match the §3.2.9 plan-pinned signature and is recorded on the report for provenance; nothing
+to match the pinned signature and is recorded on the report for provenance; nothing
 consumes it.
 Raw ticks are never re-persisted: they were just read FROM the Parquet dataset, so staging them back
 into a scratch copy of it is a pure round trip, and ``BarBuilder.on_tick`` only *stages* — the flush
@@ -70,7 +70,7 @@ lives on the async ``on_tick_event`` seam the harness does not use, so a staged 
 grow for the whole day. There is no flag for it (the v1 flag deferred every byte of that work to
 teardown, which is a memory leak wearing a feature's clothes).
 
-**Bar capture — which seam, and why.** The work order allowed either a bus subscriber or the
+**Bar capture — which seam, and why.** The design allowed either a bus subscriber or the
 builder's finalize path. A bus subscriber is out: ``BarBuilder`` publishes bars with
 ``EventBus.publish``, which is *fire-and-forget* — inside a running loop it schedules handler tasks
 that do not run until the next ``await``, so a collector on the bus would batch a chunk's bars at the
@@ -82,7 +82,7 @@ Which leaves the finalize path — and specifically the **store write**, ``inser
 ``_advance()`` internally on EVERY path, so most bars are finalized inside ``on_tick`` and never come
 back through the harness's own ``advance()`` call at all. Capturing ``advance()``'s return value
 alone loses them (measured: 6 of 1,122 bars survived). ``_write_and_publish`` persists the batch
-BEFORE notifying anyone (§3.2.3), so the store seam sees every finalized bar exactly once, in
+BEFORE notifying anyone, so the store seam sees every finalized bar exactly once, in
 finalization order, at the instant of finalization — which is precisely the capture point the
 interleaving needs. :class:`_BufferedBarStore` is therefore both the write buffer and the capture
 hook, and the broker gets each bar from there, still ahead of the tick that triggered it.
@@ -115,10 +115,10 @@ from typing import Any, Protocol
 import duckdb
 from pydantic import BaseModel, ConfigDict
 
-# The order-postback wire contract now lives in ``engine.core.contracts`` (WO-P3-2 fix round,
+# The order-postback wire contract now lives in ``engine.core.contracts`` (fix round,
 # 2026-09-10): the move this import block anticipated has landed, so ``engine.paper`` imports it from
 # ``core`` like everything else and the package no longer reaches into ``engine.broker`` at all
-# (§3.2.9, enforced by tests/unit/test_import_graph.py).
+# (enforced by tests/unit/test_import_graph.py).
 from engine.core.clock import IST, Clock
 from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.log import get_logger
@@ -134,7 +134,7 @@ from engine.marketdata.store import MarketStore
 _log = get_logger("engine.paper.replay")
 
 #: Columns read from every tick Parquet fragment, in the order the store WRITES them. Mirrors
-#: ``store._TICK_COLUMNS`` (§4.3); ``tests/replay/test_golden_day.py`` asserts the two are equal, so a
+#: ``store._TICK_COLUMNS``; ``tests/replay/test_golden_day.py`` asserts the two are equal, so a
 #: column added to the dataset cannot silently narrow what a replay sees.
 TICK_COLUMNS: tuple[str, ...] = (
     "instrument_token", "tradingsymbol", "ltp", "volume_traded", "exchange_ts",
@@ -154,7 +154,7 @@ ORDER_BY_COLUMNS: tuple[str, ...] = (
     "instrument_token", "ohlc_open", "ohlc_high", "ohlc_low", "ohlc_close",
 )
 
-#: Memory ceiling for the harness's private DuckDB instance (§3.2.11 — "every DuckDB instance in this
+#: Memory ceiling for the harness's private DuckDB instance ("every DuckDB instance in this
 #: platform carries a stated ceiling", generalizing the 53 GB incident of 2026-08-17). Half the live
 #: store's 8 GB on purpose: a replay is a maintenance-class job and must never be able to compete for
 #: RAM with the session that may be trading beside it. Past the limit DuckDB spills to its temp dir.
@@ -192,16 +192,16 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=IST)
 #: this platform will ever see. The leading-char restriction is what keeps the mask from eating an
 #: unrelated 26-character uppercase token. Bounded by non-alphanumerics so it cannot match INSIDE a
 #: longer identifier. Accepted residual: masking is lossy by construction — two logs differing only
-#: in a masked token hash the same, which is the entire point (§8.4 "accepted non-determinism").
+#: in a masked token hash the same, which is the entire point ("accepted non-determinism").
 _ULID_RE = re.compile(r"(?<![0-9A-Za-z])[0-7][0-9A-HJKMNP-TV-Z]{25}(?![0-9A-Za-z])")
 
 #: Version tag hashed into every digest. Bump it when the canonical serialisation changes, so a
-#: golden-day mismatch reads as "the format moved" rather than "behaviour drifted" (§9.6).
+#: golden-day mismatch reads as "the format moved" rather than "behaviour drifted".
 DIGEST_VERSION = "replay-digest-v1"
 
 
 class ReplayContractError(RuntimeError):
-    """The replay produced a report that would MISREPRESENT what it covered (§8.4 addendum).
+    """The replay produced a report that would MISREPRESENT what it covered.
 
     Raised when an attached broker ends the run holding orders while the harness collected zero
     ``order.update`` frames: the broker was constructed with someone else's ``publish``, so the
@@ -211,7 +211,7 @@ class ReplayContractError(RuntimeError):
 
 
 def mask_ulids(text: str) -> str:
-    """Replace every ULID-shaped token in ``text`` with ``<ULID>`` (§8.4 accepted non-determinism)."""
+    """Replace every ULID-shaped token in ``text`` with ``<ULID>`` (accepted non-determinism)."""
     return _ULID_RE.sub("<ULID>", text)
 
 
@@ -221,7 +221,7 @@ class ReplayBroker(Protocol):
     Deliberately a Protocol and NOT an import of ``engine.paper.broker``: the harness must be usable — and testable — with a stub. Two methods,
     and the contract around them:
 
-    * ``on_tick`` receives **in-session prints only**. Pre-open (A14) and post-close (WO-5) ticks
+    * ``on_tick`` receives **in-session prints only**. Pre-open and post-close ticks
       reach the ``BarBuilder`` — the pre-open ones carry the auction open — but never the broker: a
       print that cannot legally trade in the continuous session must not be able to fill an order.
       The report's three tick counters partition the stream so this is auditable, not assumed.
@@ -231,10 +231,10 @@ class ReplayBroker(Protocol):
     Postbacks are NOT pulled from the broker. A broker publishes them through the ``publish``
     callable it was constructed with, which is :meth:`ReplayHarness.publish`.
 
-    **Known blind spot (§9.3).** A time-sorted replay can never exercise ``BarBuilder``'s late-tick /
-    amendment path (A13): a minute is finalized only once the clock passes ``minute + 1 min +
+    **Known blind spot.** A time-sorted replay can never exercise ``BarBuilder``'s late-tick /
+    amendment path: a minute is finalized only once the clock passes ``minute + 1 min +
     grace``, and every later tick in a sorted stream carries a strictly later timestamp, so no tick
-    can ever arrive for an already-finalized minute. That path needs its own §9.3 fixture with a
+    can ever arrive for an already-finalized minute. That path needs its own fixture with a
     deliberately out-of-order stream; it is not reachable from here and this harness must not be read
     as covering it.
     """
@@ -245,7 +245,7 @@ class ReplayBroker(Protocol):
 
 
 class ReplayClock(Clock):
-    """A :class:`~engine.core.clock.Clock` whose "now" is the replayed tick stream (§9.1).
+    """A :class:`~engine.core.clock.Clock` whose "now" is the replayed tick stream.
 
     The ``time_source`` closes over :attr:`_at`, which :meth:`advance_to` moves forward before each
     tick is delivered. Monotonic by contract: the harness sorts the requested days and orders each
@@ -268,12 +268,12 @@ class ReplayClock(Clock):
 
 
 class ReplayReport(BaseModel):
-    """Outcome of one :meth:`ReplayHarness.run` (§3.2.9 ``ReplayReport``).
+    """Outcome of one :meth:`ReplayHarness.run` (``ReplayReport``).
 
     ``ticks_read`` is every row read from the archive; ``ticks_delivered`` is the subset handed to the
     attached broker, i.e. the IN-SESSION prints. The three tick counters partition ``ticks_read``
     exactly (``pre_open_excluded + post_close_dropped + ticks_delivered == ticks_read``) — the
-    BarBuilder still sees every tick, because the pre-open prints carry the A14 auction open.
+    BarBuilder still sees every tick, because the pre-open prints carry the auction open.
 
     ``postbacks`` / ``orders`` / ``fills`` are derived from the ``order.update`` frames the harness
     collected (see :meth:`ReplayHarness.publish`), NOT read off the broker: ``postbacks`` counts
@@ -309,12 +309,12 @@ class ReplayReport(BaseModel):
 
 
 def _canonical_bar(bar: Bar) -> str:
-    """The §9.6 canonical serialisation of one built bar.
+    """The canonical serialisation of one built bar.
 
-    Field list pinned by the work order: symbol, minute, OHLC, volume, src. ``auction_open`` is
-    deliberately outside the digest — it is asserted directly by the golden test (A14) rather than
+    Field list pinned: symbol, minute, OHLC, volume, src. ``auction_open`` is
+    deliberately outside the digest — it is asserted directly by the golden test rather than
     folded into a hash where a drift would be unreadable. ``str(Decimal)`` preserves the stored scale
-    exactly (``Decimal('101.00')`` → ``"101.00"``), so no float ever reaches the hash (§3.2 money).
+    exactly (``Decimal('101.00')`` → ``"101.00"``), so no float ever reaches the hash (money convention).
     """
     return "|".join((
         bar.symbol, bar.ts_minute.isoformat(), str(bar.open), str(bar.high),
@@ -360,7 +360,7 @@ def _order_counts(frames: Sequence[Any]) -> tuple[int, int]:
 
 
 def _digest(bars: Sequence[Bar], postbacks: Sequence[Any]) -> str:
-    """sha256 over the canonical bar stream + ``order.update`` frame stream, ULIDs masked (§9.6)."""
+    """sha256 over the canonical bar stream + ``order.update`` frame stream, ULIDs masked."""
     lines = [DIGEST_VERSION, f"bars:{len(bars)}"]
     lines.extend(_canonical_bar(b) for b in bars)
     lines.append(f"postbacks:{len(postbacks)}")
@@ -373,7 +373,7 @@ class _BufferedBarStore:
     """The harness's seam onto ``BarBuilder``'s bar output: capture hook + write buffer.
 
     **Capture.** ``_write_and_publish`` calls ``insert_bars_1m`` with every finalized batch, before
-    notifying anything (§3.2.3) — so this is where the harness sees each bar, exactly once, in
+    notifying anything — so this is where the harness sees each bar, exactly once, in
     finalization order. ``on_bars`` is invoked synchronously with the batch, ahead of the buffering,
     which is what keeps the tick↔bar interleaving the broker's fill model reads. See the module
     docstring for why ``advance()``'s return value is NOT that seam.
@@ -425,12 +425,12 @@ class _BufferedBarStore:
 
 
 class ReplayHarness:
-    """Replay recorded tick days through the real bar path into a scratch store (§3.2.9).
+    """Replay recorded tick days through the real bar path into a scratch store.
 
     Parameters
     ----------
     parquet_root:
-        Root of the §4.3 Parquet datasets — the harness reads ``<root>/ticks/date=…/symbol=…``. This
+        Root of the Parquet datasets — the harness reads ``<root>/ticks/date=…/symbol=…``. This
         is the LIVE archive in normal use and is opened **read-only, through the harness's own
         in-memory DuckDB**; nothing here writes to it.
     scratch_dir:
@@ -510,7 +510,7 @@ class ReplayHarness:
         self._topic = getattr(broker, "topic", ORDER_UPDATE_TOPIC)
 
     def publish(self, topic: str, event: BaseModel) -> None:
-        """The event-bus ``publish`` seam a replayed broker is constructed with (§3.2.9).
+        """The event-bus ``publish`` seam a replayed broker is constructed with.
 
         ``PaperBroker(publish=harness.publish)``. Every frame on the attached broker's topic
         (default :data:`ORDER_UPDATE_TOPIC`) is recorded here — this collector is what the digest hashes and what ``ReplayReport.postbacks`` counts.
@@ -523,7 +523,7 @@ class ReplayHarness:
         if topic == self._topic:
             self._frames.append(event)  # type: ignore[arg-type]
 
-    # ------------------------------------------------------------------ scripted actions (§9.6)
+    # ------------------------------------------------------------------ scripted actions
     def schedule(self, at: datetime, fn: Callable[[], Any]) -> None:
         """Run ``fn`` immediately before the first tick whose ``exchange_ts >= at`` is fed.
 
@@ -616,7 +616,7 @@ class ReplayHarness:
         """The ``order.update`` frames collected by :meth:`publish` during the most recent run."""
         return list(self._frames)
 
-    # ------------------------------------------------------------------ the run (§3.2.9)
+    # ------------------------------------------------------------------ the run
     async def run(
         self,
         days: list[date],
@@ -710,7 +710,7 @@ class ReplayHarness:
             return None
 
     async def _assert_postbacks_collected(self, book_at_start: int | None) -> None:
-        """Refuse a bars-only digest from a run that had a broker doing order work (§8.4 addendum).
+        """Refuse a bars-only digest from a run that had a broker doing order work.
 
         The check is "the broker's orderbook GREW during this run but nothing was published", which
         is exactly the wiring bug: a broker constructed with someone else's ``publish``. A broker
@@ -737,7 +737,7 @@ class ReplayHarness:
                 "about orders (§8.4)"
             )
 
-    # ------------------------------------------------------------------ data path (streamed, §8.4)
+    # ------------------------------------------------------------------ data path (streamed)
     def _day_globs(self, day: date, symbols: tuple[str, ...] | None) -> list[str]:
         """Parquet globs for ``day``, narrowed to ``symbols`` when given.
 
@@ -838,7 +838,7 @@ class ReplayHarness:
         binds them as such. That last point is why this does NOT go through a pandas frame as first
         sketched: ``duckdb`` `.df()` converts ``DECIMAL`` to ``float64`` (verified 2026-09-10 —
         ``CAST(101.05 AS DECIMAL(12,2))`` came back ``np.float64``), which would put a float on every
-        price and break §3.2's money convention on the way in.
+        price and break the money convention on the way in.
         """
         build = Tick.model_construct
         return [
@@ -927,7 +927,7 @@ class ReplayHarness:
                         if tod < self._session_open:
                             pre_open += 1       # A14: no bar, but it carries the auction open
                         elif tod > self._session_close:
-                            post_close += 1     # WO-5: no bar; counted, never traded
+                            post_close += 1     # no bar; counted, never traded
                         else:
                             delivered += 1
                             if self._broker is not None:

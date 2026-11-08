@@ -1,4 +1,4 @@
-"""§10.5 DuckDB leg (2026-10-11): ``MarketStore.export_snapshot`` and the ``market_backup`` lane job.
+"""DuckDB leg (2026-10-11): ``MarketStore.export_snapshot`` and the ``market_backup`` lane job.
 
 Nothing backed up ``market.duckdb`` (5.96 GB, 25 tables, several irreplaceable: LLM-scored news
 clusters, feature snapshots the learning ledger references, point-in-time universe history). Windows

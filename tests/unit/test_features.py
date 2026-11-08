@@ -1,5 +1,5 @@
-"""FeatureEngine (§3.2.5/§6.2 v2): deterministic daily + intraday features on synthetic bars —
-same input => byte-identical rows (§9.6), the PINNED absent-news defaults, the v2 version stamp
+"""FeatureEngine (v2): deterministic daily + intraday features on synthetic bars —
+same input => byte-identical rows, the PINNED absent-news defaults, the v2 version stamp
 (sentiment/catalyst block) on every row/snapshot, market context wiring, and the canonical snapshot
 serialization contract."""
 
@@ -105,7 +105,7 @@ def seeded(store, clock):
     store.upsert_sector_map(D, [{"symbol": "AAA", "sector": "IT"}, {"symbol": "BBB", "sector": "IT"}])
     store.upsert_instruments_daily([
         {"d": D, "instrument_token": 1, "tradingsymbol": "AAA"},
-        # Production never writes this column (A8 lives in universe_daily); seeded to pin the read.
+        # Production never writes this column (surveillance lives in universe_daily); seeded to pin the read.
         {"d": D, "instrument_token": 2, "tradingsymbol": "BBB", "surveillance": "GSM Stage 1"},
     ])
     store.upsert_earnings_calendar([{"symbol": "AAA", "event_date": D}])
@@ -119,10 +119,10 @@ def _rows_by_symbol(store) -> dict[str, dict]:
 
 
 def _seed_sentiment_layer(store, clock):
-    """§2.7 digest outputs (sentiment_agg + theme_map + catalyst_watchlist) for the ``seeded``
+    """Digest outputs (sentiment_agg + theme_map + catalyst_watchlist) for the ``seeded``
     universe: AAA (sector IT) gets a symbol row AND is on today's watchlist (`originating`, graded);
     BBB (also sector IT) gets no symbol row and no watchlist row — only the sector/market fan-out and
-    one matching theme, so the two symbols' §6.2 v2 blocks diverge on every axis."""
+    one matching theme, so the two symbols' v2 blocks diverge on every axis."""
     as_of = clock.now() - timedelta(hours=2)
     store.upsert_sentiment_agg([
         {"scope": "symbol", "scope_key": "AAA", "as_of": as_of, "value": 0.42},
@@ -191,7 +191,7 @@ def test_daily_market_context(engine, store, seeded):
         assert feats["vix_delta_1d"] == pytest.approx(vix[-1] - vix[-2])
         assert feats["advance_decline"] == 0.0                    # AAA advanced, BBB declined
         assert feats["expiry_day"] is False                       # mid-June is never month-end expiry
-    # Sector "index" return = equal-weight constituent mean (deterministic §6.2 proxy).
+    # Sector "index" return = equal-weight constituent mean (deterministic proxy).
     a, b = by_symbol["AAA"], by_symbol["BBB"]
     assert a["sector"] == b["sector"] == "IT"
     assert a["sector_ret_1d"] == pytest.approx((a["ret_1d"] + b["ret_1d"]) / 2)
@@ -199,7 +199,7 @@ def test_daily_market_context(engine, store, seeded):
 
 
 def test_daily_advance_decline_reflects_asymmetric_breadth(engine, store):
-    """§6.2 advance-decline must carry the correct SIGN and MAGNITUDE on an asymmetric day. The
+    """Advance-decline must carry the correct SIGN and MAGNITUDE on an asymmetric day. The
     symmetric AAA/BBB fixture yields 0.0 — a value a sign-inverted ``(dec − adv)/N`` or a hardcoded
     ``0.0`` stub both reproduce. Three advancers + one decliner pins it to +0.5, so an inverted sign
     (−0.5) or a constant zero fails here."""
@@ -226,7 +226,7 @@ def test_daily_advance_decline_reflects_asymmetric_breadth(engine, store):
 
 
 def test_trend_state_branches_up_down_flat_and_warmup():
-    """§6.2 ``nifty_trend_state`` — the market-context fixture only ever exercises the rising (+1)
+    """``nifty_trend_state`` — the market-context fixture only ever exercises the rising (+1)
     branch, so a constant-1 stub or a broken bear/flat branch would slip through. Assert all three
     branches directly plus the 200-session warm-up: +1 close > SMA50 > SMA200, −1 the mirror, 0
     otherwise, None until 200 closes exist."""
@@ -264,7 +264,7 @@ def test_daily_per_symbol_context_flags(engine, store, seeded):
 
 
 def test_absent_news_defaults_are_pinned_and_in_distribution(engine, store, seeded):
-    """§6.2 pinned: sentiment* = 0, on_watchlist = false, materiality = 0, sentiment_available =
+    """Pinned: sentiment* = 0, on_watchlist = false, materiality = 0, sentiment_available =
     false — present on EVERY row when no digest has ever run, never None/NaN (chaos case 20). The
     catalyst DESCRIPTIVE fields (not pinned scalars) fall back to None like any warm-up feature."""
     engine.daily_snapshot(D)
@@ -288,7 +288,7 @@ def test_daily_snapshot_deterministic_and_idempotent(engine, store, seeded):
     first = {r["symbol"]: r["features"] for r in store.get_features_daily(D)}
     engine.daily_snapshot(D)
     second = {r["symbol"]: r["features"] for r in store.get_features_daily(D)}
-    assert first == second                                        # byte-identical JSON (§9.6)
+    assert first == second                                        # byte-identical JSON
     assert len(store.get_features_daily(D)) == 2
 
 
@@ -364,7 +364,7 @@ def test_daily_prox_high_features_use_partial_window_when_history_is_short(engin
 
 
 def test_daily_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
-    """§6.2 v2: real decay-weighted sentiment_agg values + today's catalyst_watchlist row land on
+    """v2: real decay-weighted sentiment_agg values + today's catalyst_watchlist row land on
     the row — the pinned absent-news defaults are a per-field FALLBACK, not the only path. AAA and
     BBB (same IT sector) diverge on every sentiment/catalyst axis, proving the lookups are keyed
     correctly (not just echoing the pinned defaults)."""
@@ -436,7 +436,7 @@ def test_intraday_snapshot_math_version_and_persistence(engine, store, clock, se
     f = vec.features
     assert set(f) == set(INTRADAY_FEATURE_KEYS)
     assert f["bar_count"] == 50 and f["minutes_elapsed"] == 50
-    # Opening range = first 30 minutes (09:15-09:45 window, §6.1 anchor), complete by 10:05.
+    # Opening range = first 30 minutes (09:15-09:45 window), complete by 10:05.
     assert f["or_complete"] is True
     assert f["or_high"] == pytest.approx(float(bars[29].high))
     assert f["or_low"] == pytest.approx(float(bars[0].low))
@@ -455,7 +455,7 @@ def test_intraday_snapshot_math_version_and_persistence(engine, store, clock, se
     # Relative volume vs the 20d median DAILY volume strictly before today.
     daily_vols = [b.volume for b in seeded["AAA"] if b.d < D][-20:]
     assert f["rel_volume"] == pytest.approx(50_000 / statistics.median(daily_vols))
-    # Persisted under its ULID key (§4.3): round-trips exactly and is referenced later.
+    # Persisted under its ULID key: round-trips exactly and is referenced later.
     loaded = load_snapshot(store, vec.features_snapshot_id)
     assert loaded is not None
     assert loaded.features == f and loaded.feature_set_version == 2 and loaded.symbol == "AAA"
@@ -464,7 +464,7 @@ def test_intraday_snapshot_math_version_and_persistence(engine, store, clock, se
 def test_intraday_snapshot_deterministic_features_fresh_ids(engine, store, clock, seeded):
     _seed_intraday(store, clock, "AAA")
     v1, v2 = engine.intraday_snapshot("AAA"), engine.intraday_snapshot("AAA")
-    assert v1.features == v2.features                             # same inputs => same features (§9.6)
+    assert v1.features == v2.features                             # same inputs => same features
     assert v1.features_snapshot_id != v2.features_snapshot_id     # identity is minted per snapshot
 
 
@@ -479,7 +479,7 @@ def test_intraday_snapshot_no_bars_is_warmup_not_error(engine, store):
     assert load_snapshot(store, vec.features_snapshot_id) is not None
 
 
-# ------------------------------------------- WO-21: time-of-day-normalized relative volume (§6.2)
+# ------------------------------------------- time-of-day-normalized relative volume
 #: Stamped on the 10:05 bar of every seeded historical session. 10:05 is exactly the cutoff and the
 #: cutoff is EXCLUSIVE, so this volume must never reach a denominator — if it does, every ratio
 #: collapses by ~6 orders of magnitude and the assertions below say so loudly.
@@ -511,7 +511,7 @@ def _seed_hist_intraday(store, clock, symbol: str, vol_by_day: dict[date, int]) 
 
 
 def test_rel_volume_tod_is_the_median_pace_at_the_same_elapsed_minute(engine, store, clock, seeded):
-    """WO-21: today's cumulative volume ÷ the MEDIAN cumulative volume of the same 20 sessions
+    """Today's cumulative volume ÷ the MEDIAN cumulative volume of the same 20 sessions
     through the SAME 50 elapsed minutes. 1.0 = a typical pace for this time of day — the number a
     reader means by "relative volume", which ``rel_volume``'s full-day denominator never was."""
     _seed_intraday(store, clock, "AAA")                           # today: 50 bars x 1000 = 50_000
@@ -543,7 +543,7 @@ def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, calendar,
     assert f9["rel_volume"] is not None                           # independent denominators
 
     _seed_hist_intraday(store, clock, "AAA", {days[-10]: 500})     # the tenth session flips it on
-    # WO-27: the 20-session baseline is day-cached, so an engine that already built it does not see
+    # The 20-session baseline is day-cached, so an engine that already built it does not see
     # a mid-session reseed — which is the point (those sessions are completed and cannot change in
     # production). A fresh engine is the honest stand-in for "the tenth session existed all along".
     f10 = FeatureEngine(store, clock, calendar).intraday_snapshot("AAA").features
@@ -590,7 +590,7 @@ def test_rel_volume_tod_skips_the_ranged_read_without_todays_bars(
 
 
 def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
-    """§6.2 v2: the same sentiment_agg + catalyst_watchlist block lands on the intraday
+    """v2: the same sentiment_agg + catalyst_watchlist block lands on the intraday
     microstructure snapshot as on the daily row (shared context helper)."""
     _seed_intraday(store, clock, "AAA")
     _seed_sentiment_layer(store, clock)
@@ -609,14 +609,14 @@ def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, 
     assert f["catalyst_event_age_h"] == pytest.approx(5.5)
 
 
-# ---------------------------------------- WO-27: the scan-path read budget (2026-08-26 open stall)
+# ---------------------------------------- the scan-path read budget (2026-08-26 open stall)
 class _StatementSpy:
     """Census of every DuckDB statement the store issues while the spy is installed.
 
     Wraps ``MarketStore._execute_locked`` — the single funnel ``_execute``, ``_fetchall``,
     ``_fetch_dicts`` and the simple writes all pass through — rather than individual read methods, so
     a read introduced by some future helper cannot slip past these assertions the way a per-method spy
-    would let it. It was ``_execute`` until 2026-09-09, when the §2.6 slow-statement telemetry moved
+    would let it. It was ``_execute`` until 2026-09-09, when the slow-statement telemetry moved
     the read helpers onto the silent ``_execute_locked`` (one ``_lock`` hold must log exactly one
     note, and nesting the logging ``_execute`` inside a hold logged two).
 
@@ -624,7 +624,7 @@ class _StatementSpy:
     reaches ``_execute_locked``, one level down the same funnel. The WRITE census is WIDER: the
     telemetry also routed ``_bulk_write``'s ``INSERT … SELECT`` and ``_flush_locked``'s per-partition
     ``COPY`` through ``_execute_locked``, and both used to call ``con.execute`` directly and so were
-    invisible to the old ``_execute`` spy. The WO-27 assertions below are read-budget assertions, so
+    invisible to the old ``_execute`` spy. The assertions below are read-budget assertions, so
     they are unaffected; a future write-count assertion must expect bulk writes and tick flushes too.
     """
 
@@ -683,10 +683,10 @@ def hot_path(engine, store, clock, seeded) -> list[Bar]:
 
 
 def test_steady_state_scan_snapshot_issues_zero_reads(engine, store, monkeypatch, hot_path):
-    """The WO-27 result contract. ``intraday_snapshot`` runs inside ``SignalPreScreen._scan``'s lock,
+    """The scan-path read-budget result contract. ``intraday_snapshot`` runs inside ``SignalPreScreen._scan``'s lock,
     so every store read there is held across the pre-screen lock AND the store's connection lock — at
     the 2026-08-26 09:36 open ~20 executor threads were queued behind one ``get_catalyst_watchlist``
-    from this path. After warm-up a snapshot must read NOTHING; the only statement left is the §4.3
+    from this path. After warm-up a snapshot must read NOTHING; the only statement left is the
     audit-chain INSERT that IS the snapshot."""
     spy = _StatementSpy(store, monkeypatch)
 
@@ -836,9 +836,9 @@ def test_clean_features_scalars_only_never_nan():
         "nan": float("nan"), "inf": float("inf"), "np": np.float64(1.5),
         "dec": Decimal("2338.55"), "b": True, "s": "GSM", "n": None, "i": 7,
     })
-    assert cleaned["nan"] is None and cleaned["inf"] is None      # warm-up NaN/inf -> None (§6.2)
+    assert cleaned["nan"] is None and cleaned["inf"] is None      # warm-up NaN/inf -> None
     assert cleaned["np"] == 1.5 and isinstance(cleaned["np"], float)
-    assert cleaned["dec"] == "2338.55"                            # Decimals as strings (§4.3)
+    assert cleaned["dec"] == "2338.55"                            # Decimals as strings
     assert cleaned["b"] is True and cleaned["s"] == "GSM" and cleaned["n"] is None and cleaned["i"] == 7
     with pytest.raises(TypeError):
         clean_features({"bad": [1, 2]})

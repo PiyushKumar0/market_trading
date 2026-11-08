@@ -1,4 +1,4 @@
-"""Plan §9.4 cases with no rewrite for the paper autopilot, each kept skipped with its reason (plan Q4.5).
+"""Drill-catalog cases with no rewrite for the paper autopilot, each kept skipped with its reason.
 
 Case 11 is rewritten for paper in ``test_case11_gtt_fired_rejected_or_unfilled.py``.
 """

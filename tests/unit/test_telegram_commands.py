@@ -1,13 +1,13 @@
-"""Phase-2 owner command surface (§3.2.11) + the §10.3 catalog renderers + the outbound bus alerts.
+"""RECOMMEND-mode owner command surface + the catalog renderers + the outbound bus alerts.
 
 Three properties are load-bearing and each has a test here:
 
-* **Owner-ID lock (R10)** still guards the NEW commands — a foreign chat gets no reply and causes no
+* **Owner-ID lock** still guards the NEW commands — a foreign chat gets no reply and causes no
   side effect (not "an error message", *nothing*).
-* **Unwired ≠ pretending.** Every Phase-2 dependency is optional; with it absent the command says so
-  instead of half-acting (the RECOMMEND-mode honesty rule, B7).
+* **Unwired ≠ pretending.** Every RECOMMEND-mode dependency is optional; with it absent the command says so
+  instead of half-acting (the RECOMMEND-mode honesty rule).
 * **No raw model leakage.** Catalog messages render as owner prose; the structured payload stays in
-  ``data`` for the audit log (R8) — mirrors ``test_notify_owner``'s render regression.
+  ``data`` for the audit log — mirrors ``test_notify_owner``'s render regression.
 """
 
 from __future__ import annotations
@@ -56,9 +56,9 @@ FOREIGN_CHAT = 999
 REAL_LIMITS_PATH = config_dir() / "limits.yaml"
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="two-step")
 
-# --- WO-29 ticker resolution: real rec_id shapes. 26 chars of Crockford base32 (no I/L/O/U), which is
+# --- ticker resolution: real rec_id shapes. 26 chars of Crockford base32 (no I/L/O/U), which is
 # what ``str(ULID())`` produces and what the resolver's id path keys off. The first is the actual id
-# of the platform's first-ever proposal (IMPLEMENTATION_PLAN WO-24), kept verbatim as a shape sample.
+# of the platform's first-ever proposal, kept verbatim as a shape sample.
 REC_A = "01M0H8ZXM3PYNAVXF54A5TDGV0"
 REC_B = "01M0H8ZXM3PYNAVXF54A5TDGV1"
 REC_C = "01M0H8ZXM3PYNAVXF54A5TDGV2"
@@ -100,7 +100,7 @@ class _Ctx:
 
 
 class _FakeBook:
-    """Stand-in for ``RecommendationBook`` (§3.6) — records calls, returns an owner summary."""
+    """Stand-in for ``RecommendationBook`` — records calls, returns an owner summary."""
 
     def __init__(self, *, raises: Exception | None = None) -> None:
         self.calls: list[tuple] = []
@@ -177,7 +177,7 @@ class _SendApp:
 # --------------------------------------------------------------------------- fixtures
 @pytest.fixture
 def bot(clock) -> TelegramBot:
-    """A bot with NO Phase-2 dependency wired — the "not wired" baseline."""
+    """A bot with NO RECOMMEND-mode dependency wired — the "not wired" baseline."""
     return TelegramBot("dummy-token", owner_chat_id=OWNER_CHAT, clock=clock)
 
 
@@ -253,7 +253,7 @@ def _insert_position(conn, position_id: str, **kw) -> None:
     ],
 )
 async def test_unwired_dependency_says_so(bot, msg, command, args):
-    """A command whose Phase-2 dependency is absent must SAY it is unwired — never half-act, and never
+    """A command whose RECOMMEND-mode dependency is absent must SAY it is unwired — never half-act, and never
     silently succeed (the dependency check precedes argument parsing on purpose)."""
     await bot._live_handlers()[command](_Update(msg), _Ctx(*args))
     assert len(msg.sent) == 1
@@ -261,7 +261,7 @@ async def test_unwired_dependency_says_so(bot, msg, command, args):
     assert f"/{command}" in msg.sent[0]
 
 
-# --------------------------------------------------------------------------- owner-ID lock (R10)
+# --------------------------------------------------------------------------- owner-ID lock
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "command", ["taken", "veto", "pause_entries", "resume_entries", "approve", "why"]
@@ -308,7 +308,7 @@ async def test_why_handler(bot, msg, args, fn_raises, expected):
     assert calls == (["TCS"] if expected != "/why <symbol>" else [])
 
 
-# --------------------------------------------------------------------------- /paper (plan Q4.0)
+# --------------------------------------------------------------------------- /paper
 @pytest.fixture
 def paper_bot(conn):
     """A bot wired to a real PaperControl on a clock the test can advance; autopilot built by default."""
@@ -409,13 +409,13 @@ async def test_paper_usage(paper_bot, args):
     assert await _paper(paper_bot[0], *args) == "/paper <on|off|status|reset>"
 
 
-# --------------------------------------------------------------------------- outcome capture (§3.6)
+# --------------------------------------------------------------------------- outcome capture
 @pytest.mark.asyncio
 async def test_taken_delegates_to_the_book(clock, msg):
     book = _FakeBook()
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)
     await bot._cmd_taken(_Update(msg), _Ctx("rec-1", "5", "2,450.25"))
-    # qty is an int and price an exact Decimal (money is never a float, §8.1); commas tolerated.
+    # qty is an int and price an exact Decimal (money is never a float); commas tolerated.
     assert book.calls == [("take", "rec-1", 5, Decimal("2450.25"))]
     assert msg.sent == ["recorded: took rec-1 5 @ 2450.25"]
 
@@ -462,7 +462,7 @@ async def test_closed_and_veto_delegate(clock, msg):
 
 @pytest.mark.asyncio
 async def test_close_is_honest_guidance_and_marks_nothing(clock, conn, msg):
-    """RECOMMEND places ZERO API orders (B7): /close must say the exit is owner-side, and must not
+    """RECOMMEND places ZERO API orders: /close must say the exit is owner-side, and must not
     touch the position row it names."""
     _insert_position(conn, "pos-1")
     book = _FakeBook()
@@ -477,7 +477,7 @@ async def test_close_is_honest_guidance_and_marks_nothing(clock, conn, msg):
     assert conn.execute("SELECT state FROM positions WHERE position_id='pos-1'").fetchone()["state"] == "OPEN"
 
 
-# ------------------------------------------- WO-29: the capture commands speak TICKER, not rec_id
+# ------------------------------------------- the capture commands speak TICKER, not rec_id
 def _insert_rec(
     conn,
     rec_id: str,
@@ -527,7 +527,7 @@ async def _run_open_set_command(bot, msg, command) -> None:
 
 @pytest.mark.asyncio
 async def test_taken_resolves_a_symbol_to_the_real_rec_id(clock, conn, msg):
-    """The whole point of WO-29: the owner types the ticker they were shown, and the book receives the
+    """The whole point: the owner types the ticker they were shown, and the book receives the
     26-char id they were never shown. Lower-case on purpose — the match is case-insensitive."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", qty=12)
     book = _FakeBook()
@@ -604,7 +604,7 @@ async def test_typed_veto_refuses_a_second_reason(clock, conn, msg):
     assert msg.sent == ["reason already recorded: market"]
 
 
-# ------------------------------------------------------------------- one-tap skip buttons (T13)
+# ------------------------------------------------------------------- one-tap skip buttons
 class _Query:
     def __init__(self, data: str | None, markup=None, *, edit_fails: bool = False,
                  answer_fails: bool = False) -> None:
@@ -784,7 +784,7 @@ async def test_an_ambiguous_symbol_lists_the_candidates_and_acts_on_none(clock, 
 @pytest.mark.asyncio
 async def test_an_unknown_symbol_replies_with_what_is_actually_open(clock, conn, msg):
     """A bare "unknown" would leave the owner guessing at a handle they have never been shown — the
-    exact defect WO-29 closes. The refusal ships the actionable set with it."""
+    exact defect ticker resolution closes. The refusal ships the actionable set with it."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", side="BUY", qty=12)
     book = _FakeBook()
 
@@ -799,7 +799,7 @@ async def test_an_unknown_symbol_replies_with_what_is_actually_open(clock, conn,
 
 @pytest.mark.asyncio
 async def test_a_listed_row_that_outlives_its_day_carries_both_dates(clock, conn, msg):
-    """A row whose delivery and valid_until fall on different IST days (WO-V's next-session TTL,
+    """A row whose delivery and valid_until fall on different IST days (the next-session TTL,
     withdrawn 2026-09-23, made this routine; the renderer stays date-aware for any such row) carries
     both stamps; a same-day row (the test above) renders exactly as before."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC", side="BUY", qty=12,
@@ -943,7 +943,7 @@ async def test_closed_on_a_symbol_with_nothing_taken_says_so(clock, conn, msg):
 
 @pytest.mark.asyncio
 async def test_resolution_never_precedes_qty_or_price_validation(clock, conn, msg):
-    """A malformed price is rejected before the ledger is touched — same reply as before WO-29."""
+    """A malformed price is rejected before the ledger is touched — same reply as before ticker resolution."""
     _insert_rec(conn, REC_A, instrument="HDFCAMC")
     book = _FakeBook()
     await _capture_bot(clock, conn, book)._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "abc"))
@@ -954,7 +954,7 @@ async def test_resolution_never_precedes_qty_or_price_validation(clock, conn, ms
 @pytest.mark.asyncio
 async def test_without_a_state_store_the_argument_passes_through(clock, msg):
     """No ledger to resolve against ⇒ no resolution, and no invented refusal: the argument reaches the
-    book exactly as it did before WO-29, and the book answers for its own id namespace."""
+    book exactly as it did before ticker resolution, and the book answers for its own id namespace."""
     book = _FakeBook()
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, reco_book=book)   # conn=None
     await bot._cmd_taken(_Update(msg), _Ctx("HDFCAMC", "12", "4210"))
@@ -1060,7 +1060,7 @@ async def test_protected_delegates_to_the_book_and_checks_arity(clock, msg):
 
 @pytest.mark.asyncio
 async def test_positions_puts_paper_rows_in_their_own_section(clock, conn, msg):
-    """Plan Q3.2: paper rows never join the real list; their section is absent while there are none."""
+    """Paper rows never join the real list; their section is absent while there are none."""
     _insert_position(conn, "pos-real")
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)
     await bot._cmd_positions(_Update(msg), _Ctx())
@@ -1126,7 +1126,7 @@ async def test_pnl_reports_realised_today_and_flags_a_missing_mark_source(clock,
 
     await bot._cmd_pnl(_Update(msg), _Ctx())
     text = msg.sent[0]
-    assert "realised today: ₹460.00 (+2.30%)" in text       # 500 gross - 40 costs, net (§7.1); 460 / 20,000 base
+    assert "realised today: ₹460.00 (+2.30%)" in text       # 500 gross - 40 costs, net; 460 / 20,000 base
     assert "realised all-time: ₹460.00 (+2.30%)" in text
     assert "day MTM: ₹460.00 (+2.30%)" in text
     assert "open MTM: n/a offline (no mark source)" in text  # never a zero placeholder posing as a mark
@@ -1146,7 +1146,7 @@ async def test_limits_renders_usage_against_the_protected_caps(clock, conn, expo
     assert f"open: 1/{table.limits.max_open_positions.total}" in text
     assert f"consecutive losses: 0/{table.limits.consecutive_losses.max_per_session}" in text
     assert f"trades today: 1/{table.limits.max_new_trades_day.count}" in text
-    # O16 2026-09-07: base 40000 / caps 6-2-4 — read the cap off the loaded table.
+    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — read the cap off the loaded table.
     assert f"deployed capital: ₹12,250.00 / ₹{table.limits.capital_cap.max_deployed_capital_inr:,.2f}" in text
     assert "equity: ₹" in text and "day MTM: ₹" in text
     assert f"day MTM: ₹0.00 (0.00%) (soft {table.limits.daily_loss_soft.day_mtm_pct}%" in text   # flat: no sign
@@ -1155,7 +1155,7 @@ async def test_limits_renders_usage_against_the_protected_caps(clock, conn, expo
 
 @pytest.mark.asyncio
 async def test_limits_survives_an_unreadable_store(clock, exposure, limits_engine, msg):
-    """An integrity failure is the gate's call (§2.4), never the bot's — /limits reports and lives."""
+    """An integrity failure is the gate's call, never the bot's — /limits reports and lives."""
 
     class _Broken:
         def table(self):
@@ -1177,7 +1177,7 @@ async def test_budget_reports_spend_pace_tier_and_per_agent_split(clock, governo
     await bot._cmd_budget(_Update(msg), _Ctx())
     text = msg.sent[0]
     assert "window spend: $2.5000" in text
-    # The owner must be able to see WHICH quota week the figure covers (§5.6, 2026-09-12).
+    # The owner must be able to see WHICH quota week the figure covers (2026-09-12).
     assert "window: 2026-06-11 14:00 → 2026-06-18 14:00 IST" in text
     assert "pro-rata to date:" in text and "tier: DG" in text and "forward cap:" in text
     assert "per agent (spend / allocation):" in text
@@ -1235,7 +1235,7 @@ async def test_pause_entries_latches_the_owner_cause(clock, conn, latch, msg):
 
 @pytest.mark.asyncio
 async def test_resume_entries_clears_owner_pause_and_rejection_storm(clock, conn, latch, msg):
-    """§3.5.3: a rejection-storm freeze has no auto-recovery — /resume_entries IS its recovery path,
+    """A rejection-storm freeze has no auto-recovery — /resume_entries IS its recovery path,
     so the command must clear BOTH causes, not just the owner's own pause."""
     await latch.set_cause(CAUSE_REJECTION_STORM, RiskState.FROZEN, "3 rejects/60s", Actor.RISK_GATE)
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, latch=latch)
@@ -1291,7 +1291,7 @@ async def test_a_raising_command_answers_the_owner(clock, latch, exposure, msg):
     assert [c for c, _s, _d in latch.active_causes()] == ["floor_equity_floor_rung"]
 
 
-# --------------------------------------------------------------------------- owner approvals (§3.4)
+# --------------------------------------------------------------------------- owner approvals
 def _insert_approval(conn, approval_id: str, payload: str = '{"position_id": "pos-1", "new_stop": "2380.00"}',
                      status: str = "pending") -> None:
     conn.execute(
@@ -1366,7 +1366,7 @@ async def test_reject_never_applies_an_approval(clock, conn, msg):
     assert smart.calls == []
 
 
-# --------------------------------------------------------------------------- /token (§10.2 fallback)
+# --------------------------------------------------------------------------- /token (fallback)
 @pytest.mark.asyncio
 async def test_token_completes_the_login(clock, msg):
     session = _FakeSession()
@@ -1387,7 +1387,7 @@ async def test_token_reports_a_failed_login(clock, msg):
     assert msg.sent[-1] == "usage: /token <request_token>"
 
 
-# --------------------------------------------------------------------------- catalog renderers (§10.3)
+# --------------------------------------------------------------------------- catalog renderers
 def _recommendation(clock) -> Recommendation:
     now = clock.now()
     cost = CostBreakdown(
@@ -1442,21 +1442,21 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "buttons="):
         assert leak not in text, leak
     # A genuine ZONE (low != high) is not a level, and an unsupplied quote is stated as unknown
-    # rather than invented — the pre-WO-4 prose is byte-identical in that case.
+    # rather than invented — the earlier prose is byte-identical in that case.
     assert message.data["level"] is None and message.data["ltp"] is None
     assert "current price" not in text
 
 
-# ------------------------------------------------- §6.1 `ins`: a TARGETLESS payload (2026-08-17)
+# ------------------------------------------------- `ins`: a TARGETLESS payload (2026-08-17)
 def test_recommendation_renders_a_targetless_ins_payload(clock):
-    """`ins` ships ``target = None`` by design (its exit is the §7.1 20-td time cap), so the owner
+    """`ins` ships ``target = None`` by design (its exit is the 20-td time cap), so the owner
     payload must render a recommendation with an EMPTY targets list — honestly, as "(none)", never
     by inventing a level. The rest of the payload is unchanged: the stop, the size, the gate ledger
-    and the B7 protective-order checklist all still ship.
+    and the protective-order checklist all still ship.
 
     KNOWN GAP, asserted here so it is documented rather than assumed away: :class:`Recommendation`
     has no informational-notes field and ``recommendation_message`` has no seam for one, so the
-    validated T+20 median (+1.21%) that the §6.1 addendum wants stated as INFORMATION cannot be
+    validated T+20 median (+1.21%) that the strategy rules want stated as INFORMATION cannot be
     rendered without a contract change. Flagged for the owner; deliberately not forced in here."""
     base = _recommendation(clock)
     rec = base.model_copy(update={
@@ -1481,7 +1481,7 @@ def test_recommendation_renders_a_targetless_ins_payload(clock):
     assert not hasattr(rec, "notes")
 
 
-# ------------------------------------------------------- WO-4: level + current price (§3.6/F5)
+# ------------------------------------------------------- level + current price
 def _limit_recommendation(clock, level: str = "2450.00") -> Recommendation:
     """A LIMIT proposal: the entry zone is the single instructed price (``low == high``), which is
     the shape ``brk20`` now produces — the broken 20-day-high LEVEL."""
@@ -1490,7 +1490,7 @@ def _limit_recommendation(clock, level: str = "2450.00") -> Recommendation:
 
 
 def test_recommendation_states_both_the_level_and_the_current_price(clock):
-    """WO-4/F5: the payload rendered a stale price verbatim and said nothing about where the market
+    """The payload rendered a stale price verbatim and said nothing about where the market
     actually was. It must now state BOTH, in prose and in the structured data."""
     text = catalog.recommendation_message(
         _limit_recommendation(clock), ltp=Decimal("2500.00")
@@ -1526,7 +1526,7 @@ def test_recommendation_gap_direction(clock, ltp, expected):
 
 def test_recommendation_without_a_quote_never_invents_one(clock):
     """No live quote ⇒ no current-price prose at all. Fabricating one (or silently reusing the
-    level) is exactly the F5 failure in a new costume."""
+    level) is exactly the stale-price failure in a new costume."""
     message = catalog.recommendation_message(_limit_recommendation(clock))
     text = message.render()
     assert "level 2450.00 (limit-at-level)" in text
@@ -1534,9 +1534,9 @@ def test_recommendation_without_a_quote_never_invents_one(clock):
     assert message.data["ltp"] is None and message.data["level"] == "2450.00"
 
 
-# ------------------------------------------- WO-29: the copy-ready capture footer (§3.6 delivery)
+# ------------------------------------------- the copy-ready capture footer
 def test_recommendation_ends_with_a_copy_ready_capture_footer(clock):
-    """The message must teach its own reply. Before WO-29 the only handle it carried for /taken was a
+    """The message must teach its own reply. Before ticker resolution the only handle it carried for /taken was a
     rec_id it never printed — which is how the platform's first executed recommendation ended up
     unrecordable. Symbol and qty are prefilled; ONLY the fill price stays a placeholder, because that
     number is the owner's and a guessed one would be a fabrication in their own audit trail."""
@@ -1544,7 +1544,7 @@ def test_recommendation_ends_with_a_copy_ready_capture_footer(clock):
     footer = "record: /taken RELIANCE 5 <price> · decline: /veto RELIANCE <market|price|size|trust|away|other>"
 
     assert footer in text
-    assert text.splitlines()[-1] == footer          # LAST line: the reply, after the B7 checklist
+    assert text.splitlines()[-1] == footer          # LAST line: the reply, after the protective-order checklist
     assert "rec-1" not in text                      # the internal id is still not the owner's handle
 
 
@@ -1738,7 +1738,7 @@ def test_render_does_no_io(clock, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_the_delivered_footer_round_trips_into_a_real_taken(clock, conn, msg):
-    """End-to-end WO-29: what the owner reads in the delivery message, typed back verbatim, reaches
+    """End-to-end: what the owner reads in the delivery message, typed back verbatim, reaches
     the book as the 26-char id they were never shown. Neither half is useful without the other."""
     rec = _recommendation(clock).model_copy(update={"rec_id": REC_A})
     conn.execute(
@@ -1794,7 +1794,7 @@ def test_catalog_helpers_render_clean_owner_text(message, kind, severity, fragme
         assert fragment in text, fragment
     for leak in ("kind=", "data={", "buttons=", "MessageKind.", "Decimal("):
         assert leak not in text, leak
-    assert message.data                                        # structured payload preserved (R8)
+    assert message.data                                        # structured payload preserved
 
 
 def test_budget_tier_reuses_the_existing_budget_kind():
@@ -1802,7 +1802,7 @@ def test_budget_tier_reuses_the_existing_budget_kind():
     assert catalog.budget_tier("DG1", "DG2", Decimal("60"), "2026-06-11").kind == MessageKind.BUDGET_WARNING
 
 
-# --------------------------------------------------------------------------- outbound bus alerts (R8)
+# --------------------------------------------------------------------------- outbound bus alerts
 @pytest.fixture
 def wired_bot(clock) -> tuple[TelegramBot, _SendBot]:
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)

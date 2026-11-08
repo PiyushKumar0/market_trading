@@ -3,7 +3,7 @@
 The script is deliberately stdlib-only (its module docstring: no engine import, so the G2 evidence
 generator can never perturb the live engine it reports on), which means it REIMPLEMENTS the governor's
 window arithmetic instead of importing it. An unpinned reimplementation is drift waiting to happen —
-and the failure mode is not cosmetic: the C5 row is a Phase-2 gate verdict, and keying it a period off
+and the failure mode is not cosmetic: the C5 row is a gate verdict, and keying it a period off
 is exactly what printed the false "~85% of allocation" signal that the weekly re-scope exists to
 retire. So this pins the two implementations against each other across a whole year of instants, and
 pins the C5 block itself to the window containing ``--to``.

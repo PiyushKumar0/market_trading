@@ -1,26 +1,26 @@
-"""Daily Kite login lifecycle — ``SessionManager`` (§3.2.2, R6/A5).
+"""Daily Kite login lifecycle — ``SessionManager``.
 
-The Kite access token rotates daily: it dies at ~06:00 IST (A5) and a fresh one must be minted
+The Kite access token rotates daily: it dies at ~06:00 IST and a fresh one must be minted
 through the Kite Connect login flow before the engine may place any entry. This module owns that
 lifecycle and is the *only* place an access token is created and stored.
 
-R6 device-flow (the sanctioned path)
+Device-flow (the sanctioned path)
 ------------------------------------
 1. ~08:30 IST the scheduler asks for :meth:`login_url` and the owner is sent the URL over Telegram.
 2. The owner taps the link on their phone, logs into Kite, and Kite redirects to the LAN callback
-   ``GET /kite/callback?request_token=...`` (UNAUTHENTICATED endpoint, §3.2.11) which calls
+   ``GET /kite/callback?request_token=...`` (UNAUTHENTICATED endpoint) which calls
    :meth:`complete_login`.
 3. :meth:`complete_login` performs the checksum exchange (SHA-256 of
    ``api_key + request_token + api_secret`` — done for us by ``kc.generate_session``), extracts the
-   ``access_token``, persists it via :class:`Secrets` (DPAPI, R10), and confirms on Telegram.
-4. Fallbacks (§13 runbook): off-LAN, the owner copies the ``request_token`` from the browser address
+   ``access_token``, persists it via :class:`Secrets` (DPAPI), and confirms on Telegram.
+4. Fallbacks: off-LAN, the owner copies the ``request_token`` from the browser address
    bar and sends ``/token <value>`` on Telegram — both routes land in :meth:`complete_login`. PC-side login in any browser works identically.
 
-Token validity is tracked behaviourally, NOT off a hard clock (A5 note): we keep a ``_last_success``
+Token validity is tracked behaviourally, NOT off a hard clock: we keep a ``_last_success``
 stamp (set on a successful login) and a ``_rejected`` flag (set by :meth:`on_token_rejected` when a
 live call comes back 403/TokenException). :meth:`token_valid` returns "token present and not rejected"
 so a token the broker still honours past a nominal expiry stays usable, and one the broker rejects
-*before* the nominal expiry is treated as dead immediately (R6 — fail toward freezing entries).
+*before* the nominal expiry is treated as dead immediately (fail toward freezing entries).
 
 Validity is now behavioural AND probed live ONCE at startup (:meth:`verify_token`, added after the
 2026-07-21 cold-start lockout): a boot on yesterday's expired token had ``_rejected=False`` and a
@@ -51,20 +51,20 @@ _log = get_logger("engine.broker.session")
 
 # Async hook invoked when the session is invalidated mid-day (:meth:`on_token_rejected`). The caller
 # (wiring layer) sets it to a coroutine that publishes a risk/feed event so the gate freezes entries
-# and the owner is alerted (R6). Kept as an injectable hook — not a hard EventBus dependency — so the
-# constructor signature stays the one the plan mandates and ``broker`` need not import ``risk``.
+# and the owner is alerted. Kept as an injectable hook — not a hard EventBus dependency — so the
+# constructor signature stays the mandated one and ``broker`` need not import ``risk``.
 InvalidationHook = Callable[[], Awaitable[None]]
 
 # Async hook invoked when the session transitions to a VALID token via :meth:`complete_login` — the
 # convergence point of BOTH login paths (the LAN ``/kite/callback`` route and the Telegram ``/token``
-# fallback both land there, §3.2.11). The wiring layer registers the §2.6 post-login recovery here so
+# fallback both land there). The wiring layer registers the post-login recovery here so
 # a boot BEFORE the daily login (token-less ⇒ ticker never started, warm-up frozen forever) is
 # RE-TRIGGERED the instant a token arrives. Fired fire-and-forget (see :meth:`_fire_login_hooks`).
 LoginHook = Callable[[], Awaitable[None]]
 
 
 class SessionManager:
-    """Owns the daily Kite token: minting it (login flow) and tracking its validity (R6/A5)."""
+    """Owns the daily Kite token: minting it (login flow) and tracking its validity."""
 
     def __init__(
         self,
@@ -92,10 +92,10 @@ class SessionManager:
         self._breaker_fired: bool = False
         self._last_success: datetime | None = None
 
-        # Optional async hook fired on mid-day invalidation; wired by the caller (R6).
+        # Optional async hook fired on mid-day invalidation; wired by the caller.
         self._on_invalidated: InvalidationHook | None = None
 
-        # Post-login re-trigger hooks (§2.6) fired fire-and-forget when a token becomes valid, plus the
+        # Post-login re-trigger hooks fired fire-and-forget when a token becomes valid, plus the
         # set of in-flight hook tasks held so the loop cannot GC a running recovery mid-flight.
         self._login_hooks: list[LoginHook] = []
         self._login_tasks: set[asyncio.Task[None]] = set()
@@ -103,19 +103,19 @@ class SessionManager:
     # -- wiring ---------------------------------------------------------------------------------
 
     def set_invalidation_hook(self, hook: InvalidationHook | None) -> None:
-        """Register the coroutine fired by :meth:`on_token_rejected` (publishes risk/feed event, R6)."""
+        """Register the coroutine fired by :meth:`on_token_rejected` (publishes risk/feed event)."""
         self._on_invalidated = hook
 
     def add_login_hook(self, hook: LoginHook) -> None:
         """Register a coroutine fired (fire-and-forget) whenever :meth:`complete_login` mints a valid
-        token — BOTH login paths land there (§2.6 re-trigger). The wiring layer registers the
+        token — BOTH login paths land there. The wiring layer registers the
         post-login recovery so a boot before the daily login re-arms the moment the owner logs in."""
         self._login_hooks.append(hook)
 
     # -- login flow -----------------------------------------------------------------------------
 
     def login_url(self) -> str:
-        """Return the Kite login URL the owner taps to start the daily flow (R6).
+        """Return the Kite login URL the owner taps to start the daily flow.
 
         Kite appends ``?request_token=...&action=login&status=success`` to the app's configured
         redirect on success; the redirect itself is configured in the Kite developer console, not
@@ -125,11 +125,11 @@ class SessionManager:
         return self._connect().login_url()
 
     async def complete_login(self, request_token: str) -> None:
-        """Exchange ``request_token`` for an access token and persist it (R6/A5).
+        """Exchange ``request_token`` for an access token and persist it.
 
         Runs ``kc.generate_session(request_token, api_secret=...)`` in a thread executor (the
         underlying call is blocking ``requests`` I/O). On success: extracts ``access_token``, stores
-        it via ``secrets.set(KITE_ACCESS_TOKEN, token)`` (DPAPI, R10), arms it on the KiteConnect
+        it via ``secrets.set(KITE_ACCESS_TOKEN, token)`` (DPAPI), arms it on the KiteConnect
         instance, clears ``_rejected`` AND the circuit breaker's ``_breaker_fired`` dedup (so a token
         that dies again later in the day re-alerts the owner), and stamps ``_last_success``.
         """
@@ -151,12 +151,12 @@ class SessionManager:
         self._breaker_fired = False   # a fresh token re-arms the mid-day breaker's one-shot alert
         self._last_success = self._clock.now()
         _log.info("session_live", at=self._last_success.isoformat())
-        # §2.6 RE-TRIGGER: a token just became valid — fire the post-login recovery hooks. Both login
+        # RE-TRIGGER: a token just became valid — fire the post-login recovery hooks. Both login
         # paths reach here, so this is the single place that catches "the token is now good".
         self._fire_login_hooks()
 
     def _fire_login_hooks(self) -> None:
-        """Fire every registered post-login hook fire-and-forget (§2.6 re-trigger).
+        """Fire every registered post-login hook fire-and-forget.
 
         Deliberately unlike :meth:`on_token_rejected` (which awaits its hook inline): the recovery a
         login hook runs — instruments / backfill / warm-up / ticker — can take seconds to minutes, and
@@ -187,7 +187,7 @@ class SessionManager:
     # -- startup liveness probe -----------------------------------------------------------------
 
     async def verify_token(self) -> str:
-        """Live-probe the persisted access token against the broker once at startup (R6/A5).
+        """Live-probe the persisted access token against the broker once at startup.
 
         Behavioural :meth:`token_valid` cannot tell a still-honoured token from an expired one that
         no live call has yet hit — the 2026-07-21 lockout (a boot on yesterday's token passed the
@@ -204,7 +204,7 @@ class SessionManager:
           (2026-08-20 incident — a boot-probe rejection silently swallowed the 11:26:40 live
           rejection's critical "entries FROZEN" alert, leaving the owner with zero notification).
         * ``"inconclusive"`` — any other error (network/DNS/5xx): cannot verify is NOT the same as
-          invalid, so ALL state is left untouched and the Fix-3 circuit breaker catches a truly dead
+          invalid, so ALL state is left untouched and the circuit breaker catches a truly dead
           token on the first real call.
         * ``"valid"`` — profile succeeded: :meth:`mark_success` stamps freshness.
         * ``"superseded"`` — a :meth:`complete_login` replaced the token while the probe was in
@@ -245,7 +245,7 @@ class SessionManager:
     # -- validity tracking ----------------------------------------------------------------------
 
     def token_valid(self) -> bool:
-        """True iff a token is present and has not been rejected (R6/A5).
+        """True iff a token is present and has not been rejected.
 
         Deliberately NOT a hard clock: the gate must keep trading on a token the broker still honours
         and must stop the instant the broker rejects one — both signalled behaviourally
@@ -259,7 +259,7 @@ class SessionManager:
         self._last_success = self._clock.now()
 
     async def on_token_rejected(self, token: str | None) -> None:
-        """Mid-day invalidation: a live call returned 403/TokenException (R6).
+        """Mid-day invalidation: a live call returned 403/TokenException.
 
         ``token`` is the access token the failing request was sent with. A rejection of a token that
         is no longer the session's current one (a re-login landed while the call was in flight) is
@@ -270,7 +270,7 @@ class SessionManager:
         the caller freezes entries and alerts the owner. Idempotent — repeated 403s in a burst only
         fire the hook the first time so we don't spam the owner.
 
-        The dedup is ``_breaker_fired`` — this method's OWN flag — not ``_rejected`` (WO-23). Until
+        The dedup is ``_breaker_fired`` — this method's OWN flag — not ``_rejected``. Until
         2026-08-20 it gated on ``_rejected``, which :meth:`verify_token`'s boot probe also sets
         (deliberately silently): a boot on a dead token therefore made the day's FIRST genuine live
         rejection look like a burst duplicate. That is exactly what happened at 11:26:40 on
@@ -298,7 +298,7 @@ class SessionManager:
     def kite_connect(self) -> KiteConnect | None:
         """The api_key-bound :class:`KiteConnect` (access token armed if present), or ``None`` when no
         api_key is configured yet — so the composition root can build a :class:`KiteClient` ONLY once
-        credentials exist (a fresh install stays runnable with entries FROZEN until login, §2.6/R6).
+        credentials exist (a fresh install stays runnable with entries FROZEN until login).
 
         The same instance backs the login flow, so a later :meth:`complete_login` arms the token on the
         very object the KiteClient already holds — no rewiring needed on daily re-login.
@@ -326,13 +326,13 @@ class SessionManager:
 
     # -- scripted-TOTP auto-login (owner-accepted policy violation, default OFF) -----------------
     #
-    # A5/§7.3: a scripted-TOTP headless auto-login would remove the daily manual tap, but it violates
+    # A scripted-TOTP headless auto-login would remove the daily manual tap, but it violates
     # Kite's terms (automating the credential entry) and stores TOTP seed material. The owner has
     # accepted this trade-off ONLY behind an explicit config flag that defaults OFF. This is left as a
-    # clearly-marked stub on purpose — it is NOT implemented in Phase 0.
+    # clearly-marked stub on purpose — it is NOT implemented.
     #
     #   async def _scripted_totp_login(self) -> None:
     #       raise NotImplementedError(
     #           "scripted-TOTP auto-login is an owner-accepted policy violation; gated behind a "
-    #           "config flag (default OFF, A5/§7.3) and intentionally not implemented"
+    #           "config flag (default OFF) and intentionally not implemented"
     #       )

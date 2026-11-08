@@ -1,19 +1,19 @@
-"""§3.2.5 ``SignalPreScreen`` (D5) — the deterministic trigger that makes Tier-1 event-driven.
+"""``SignalPreScreen`` — the deterministic trigger that makes Tier-1 event-driven.
 
-``on_bar(bar) -> list[SignalCandidate]`` (plan-PINNED signature) runs every enabled scanner over the
+``on_bar(bar) -> list[SignalCandidate]`` (pinned signature) runs every enabled scanner over the
 bar, dedupes on (symbol, strategy, day), applies per-day candidate caps, and publishes each accepted
 candidate on the canonical ``"signal.candidate"`` topic. Scanners are pure (no I/O — see
 ``scanners.base``); everything they need for the bar is assembled once by the injected
 ``context_provider`` (the seam to ``MarketStore``/``FeatureEngine``/calendar — DuckDB reads happen
 there, never inside a scanner).
 
-Admission ORDER (WO-1, 2026-08-13): within one admission BATCH — one ``_scan(bar)`` call, one
+Admission ORDER (2026-08-13): within one admission BATCH — one ``_scan(bar)`` call, one
 :meth:`admit` call — candidates are admitted **score-descending**, not in scanner/arrival order, so a
 binding cap keeps the batch's best rather than its first. ``SignalCandidate.score`` was previously
-computed, logged and read by no decision at all (audit finding F1). Ties keep emission order
-(``sorted`` is stable), so §9.6 replay determinism is unchanged, and the returned list is in the same
-ranked order — the caller publishes best-first, which is what the §5.2(a) forward cap then sees.
-``admission_mode="arrival"`` is the rollback flag to the pre-WO-1 behaviour. Cross-BATCH FORWARD
+computed, logged and read by no decision at all. Ties keep emission order
+(``sorted`` is stable), so replay determinism is unchanged, and the returned list is in the same
+ranked order — the caller publishes best-first, which is what the forward cap then sees.
+``admission_mode="arrival"`` is the rollback flag to the behaviour before ranked admission. Cross-BATCH FORWARD
 ordering is still not this class's job — the forward queue in ``engine.ops.pipeline`` owns which
 admitted candidate the analyst sees next, and in what order. Cross-batch ADMISSION is, since
 2026-08-27; see the displacement section below for why the two had to be split.
@@ -61,14 +61,14 @@ WHAT MAKES THIS SAFE, in the four places it could have gone wrong:
    admissions at ≤ 2× cap per strategy (``orb``: ≤ 14 — 0 while orb is parked, 2026-09-12; the bound
    is 2× whatever the cap says) AND ≤ 2× the day cap overall, with no new owner knob to get out of
    sync with the caps they are derived from.
-3. *The §2.7 ref set only grows.* A candidate carrying a ``catalyst_ref`` is never evicted, so
+3. *The catalyst ref set only grows.* A candidate carrying a ``catalyst_ref`` is never evicted, so
    ``_catalyst_refs`` never shrinks and the anti-manipulation cap cannot be churned. An arrival that
    carries one still faces that cap on its own after winning the displacement.
 4. *No cross-strategy comparison.* The victim is always the same strategy as the arrival, so only
-   scores that WO-1 already blesses as comparable ("comparable inside a strategy, not across them")
+   scores that ranked admission already blesses as comparable ("comparable inside a strategy, not across them")
    are ever compared — even when it is the aggregate day cap that is binding.
 
-Determinism (§9.6) is analysed in :meth:`_displacement_scan_locked`; the short version is that a
+Determinism is analysed in :meth:`_displacement_scan_locked`; the short version is that a
 pure bar-stream replay is byte-identical, and the live coupling is the pre-existing
 ``hydrate``/``rearm`` carve-out, not a new one.
 
@@ -90,7 +90,7 @@ guaranteed a contested seat instead of racing a burst that is over by the window
 effective cap is ``min(max_per_strategy_day, released tranche)`` — a schedule can only ever HOLD
 BACK capacity, never add any, so every spam bound and displacement budget derived from the flat cap
 is untouched. The release time is the candidate's BAR time (``_scan`` threads ``bar.ts_minute``
-through; the batch :meth:`admit` path carries no bar and keeps flat caps), never a Clock — §9.6
+through; the batch :meth:`admit` path carries no bar and keeps flat caps), never a Clock —
 replay determinism holds by construction. Unscheduled strategies and an absent config are byte-for-
 byte the prior behaviour; tranche values must be non-decreasing (a shrinking tranche would demand
 the cap decrement path the spam bound forbids). The tranche instant is the candidate's ENTRY time
@@ -107,7 +107,7 @@ arguably deserve their seat. And on a special session whose window opens after t
 time (muhurat ~13:45), the schedule is inert and the full flat cap applies from the first bar — a
 45-minute session cannot be meaningfully staggered.
 
-Determinism (§9.6): the pre-screen takes NO Clock — "today" is ``bar.ts_minute.date()``, so a replay
+Determinism: the pre-screen takes NO Clock — "today" is ``bar.ts_minute.date()``, so a replay
 of the same bar stream reproduces the same dedupe/cap decisions byte-for-byte (modulo the minted
 ``signal_id`` ULIDs). Per-day state (seen set, counters) resets when the bar date changes. The
 trade-window gate below preserves this: it reads ``ScanContext.trade_window`` and compares it against
@@ -144,21 +144,21 @@ before the park existed. One ``prescreen_strategy_disabled`` INFO per strategy p
 fact; the counter carries the volume. :meth:`sweep` also drops a parked strategy's
 :meth:`Scanner.pending` arm levels — they can never arm, and that message is owner-facing.
 ``default: 0`` stays a ValueError (see :meth:`_parse_caps`): parking every strategy at once is a
-kill-switch decision, not a cap edit. ``orb`` is parked; the re-enable is a plan §8.6 decision.
+kill-switch decision, not a cap edit. ``orb`` is parked; the re-enable is an owner promotion decision.
 
-Async surface (§3.2 convention 4): ``handle_bar`` is the ``"bar.1m"`` bus handler — it offloads the
-pandas-heavy scan to a worker thread (the loop is never blocked, §2.2) and awaits publication.
+Async surface: ``handle_bar`` is the ``"bar.1m"`` bus handler — it offloads the
+pandas-heavy scan to a worker thread (the loop is never blocked) and awaits publication.
 Sync/replay callers use ``on_bar`` directly. The integrator wires exactly ONE of the two paths
 (``bus.subscribe("bar.1m", prescreen.handle_bar)`` in ``engine.ops``).
 
-``cat`` catalyst seam (§3.2.5/§2.7, wired 2026-08-18 with the WO-18 v2 shadow): candidates carrying
+``cat`` catalyst seam (wired 2026-08-18 with the cat v2 shadow): candidates carrying
 a ``catalyst_ref`` must ADDITIONALLY respect ``catalyst_guard.max_catalyst_entries_day`` — enforced
-HERE, before publication, never inside ``RiskGate`` (GateContext stays news-free, §2.4 item 4). The
+HERE, before publication, never inside ``RiskGate`` (GateContext stays news-free). The
 value arrives through ``catalyst_cap_fn``, which the composition root binds to the HASH-VERIFIED
 ``limits.yaml`` block (``ProtectedStore.load_verified`` via ``LimitsEngine.catalyst_guard``) — the
 anti-manipulation surface is read at the ENFORCEMENT site, exactly as ``CatalystDigestJob`` reads it,
 and never accepted as a plain constructor number. Unwired or unverifiable ⇒ catalyst candidates are
-REFUSED, never admitted uncapped (D7: the news carve-out fails to LESS activity). ``cat`` is a batch
+REFUSED, never admitted uncapped (the news carve-out fails to LESS activity). ``cat`` is a batch
 rule and is deliberately absent from ``SCANNER_REGISTRY``; it reaches this class through
 :meth:`admit`, so the guard sits on the shared accept spine and binds both paths.
 """
@@ -181,14 +181,14 @@ from engine.strategy.types import PendingSetup, ScanContext, SignalCandidate
 
 _log = get_logger("engine.strategy.prescreen")
 
-#: Canonical EventBus topic (§3.2.1).
+#: Canonical EventBus topic.
 SIGNAL_CANDIDATE_TOPIC = "signal.candidate"
 
 #: Assembles a :class:`ScanContext` for one bar (MarketStore/calendar/FeatureEngine reads live here).
 ContextProvider = Callable[[Bar], ScanContext]
 
-#: Publication-admission orders (WO-1). ``ranked`` = score-descending within an admission batch;
-#: ``arrival`` = the pre-WO-1 scanner/emission order, kept ONLY as the config rollback.
+#: Publication-admission orders. ``ranked`` = score-descending within an admission batch;
+#: ``arrival`` = the pre-ranking scanner/emission order, kept ONLY as the config rollback.
 ADMISSION_MODES = ("ranked", "arrival")
 
 #: Key in a ``max_per_strategy_day`` MAPPING that binds every strategy without its own entry. Not a
@@ -200,7 +200,7 @@ DEFAULT_CAP_KEY = "default"
 #: FALLBACK for ``displacement_margin`` — how much better a later arrival must score to take a full
 #: cap's slot from an unevaluated incumbent of the same strategy (2026-08-27, module docstring).
 #: The SHIPPED value is ``strategy.prescreen.displacement_margin`` in ``config/settings.yaml``, an
-#: owner knob (§6.3) alongside ``max_per_strategy_day``, and the reasoning for 0.10 — plus the
+#: owner knob alongside ``max_per_strategy_day``, and the reasoning for 0.10 — plus the
 #: orb-saturation caveat that bounds what any margin can do — lives there with it. This constant
 #: exists so a directly-constructed pre-screen (tests, replay, backtest) behaves like the shipped
 #: engine without having to load settings; it is deliberately the same number.
@@ -210,7 +210,7 @@ DEFAULT_DISPLACEMENT_MARGIN = 0.10
 #: not defensive noise: ``0.90 - 0.80`` is ``0.09999999999999998`` in IEEE-754, so a float margin
 #: test silently refuses a displacement that is exactly at the boundary — and refuses it for some
 #: pairs of scores and not others, which is precisely the kind of "deterministic but arbitrary"
-#: behaviour §9.1/§9.6 exist to keep out of policy decisions. Scanner scores are clamped to [0, 1]
+#: behaviour the unit tests and replay determinism exist to keep out of policy decisions. Scanner scores are clamped to [0, 1]
 #: and none carries four significant decimals, so 1e-4 resolution loses nothing real.
 SCORE_BASIS = 10_000
 
@@ -224,7 +224,7 @@ def hydrated_catalyst_ref(symbol: str) -> str:
     """The stand-in ``catalyst_ref`` :meth:`SignalPreScreen.hydrate` charges for ``symbol``.
 
     The day-slot journal records (symbol, strategy) pairs and carries no ref column, so a restart
-    cannot read back the refs the §2.7 guard actually spent. It CAN read which of those pairs
+    cannot read back the refs the catalyst guard actually spent. It CAN read which of those pairs
     belonged to a catalyst strategy, and the twins one story projects share their symbol as well as
     their ref (one watchlist row per symbol per day) — so distinct symbols reconstruct the distinct-
     ref count. See :meth:`SignalPreScreen.hydrate` for the direction this is wrong in.
@@ -246,15 +246,15 @@ class _DisplacementScan(NamedTuple):
 
 
 def bar_in_trade_window(bar: Bar, window: tuple[datetime, datetime] | None) -> bool:
-    """Is ``bar``'s CLOSE instant inside the owner trade window? (§7.1, 2026-08-18)
+    """Is ``bar``'s CLOSE instant inside the owner trade window? (2026-08-18)
 
-    Bar-derived and Clock-free, so §9.6 replay determinism is preserved. The instant tested is
+    Bar-derived and Clock-free, so replay determinism is preserved. The instant tested is
     ``ts_minute + 1m`` — the moment an entry off this bar could actually be placed — which is exactly
     the ``entry_dt`` convention :meth:`~engine.strategy.scanners.orb.OrbScanner.scan` already uses, so
     the pre-screen and orb agree on what "in the window" means down to the minute.
 
     ``None`` (not a trading day, or an unreadable window) is FALSE: no window ⇒ nothing may originate,
-    the same fail-to-zero direction every other §2.7/§7.1 guard takes.
+    the same fail-to-zero direction every other guard takes.
     """
     if window is None:
         return False
@@ -263,13 +263,13 @@ def bar_in_trade_window(bar: Bar, window: tuple[datetime, datetime] | None) -> b
 
 
 class SignalPreScreen:
-    """Run enabled scanners per bar; dedupe; cap; publish (§3.2.5).
+    """Run enabled scanners per bar; dedupe; cap; publish.
 
     Parameters
     ----------
     scanners:
         The enabled scanner instances (``scanners.build_enabled_scanners``). Order is preserved as
-        the TIE-BREAK only: since WO-1 a binding cap keeps the batch's highest-scored candidates,
+        the TIE-BREAK only: a binding cap keeps the batch's highest-scored candidates,
         and equal scores fall back to this scanner/emission order (deterministically).
     context_provider:
         Builds the per-bar :class:`ScanContext`.
@@ -278,30 +278,29 @@ class SignalPreScreen:
     max_candidates_per_day:
         Total accepted candidates per day, all strategies/symbols combined [settings tunable —
         integrator: ``strategy.prescreen.max_candidates_per_day``]. Keeps a wild day from spamming
-        Tier-1 (D5 exists to make LLM calls event-driven AND bounded).
+        Tier-1 (the pre-screen exists to make LLM calls event-driven AND bounded).
     max_per_strategy_day:
         Per-strategy daily sub-cap [settings tunable — ``strategy.prescreen.max_per_strategy_day``].
         ``None`` = no per-strategy cap; an ``int`` = the same cap for every strategy; a MAPPING
         ``{strategy_id: cap}`` = per-strategy values, with the reserved key ``"default"`` binding
-        every strategy that has no line of its own (WO-1 (iii): owner knob, NOT learner-movable —
-        §6.3). The mapping form is what structurally prevents one strategy taking the whole day.
+        every strategy that has no line of its own (owner knob, NOT learner-movable). The mapping form is what structurally prevents one strategy taking the whole day.
         A per-strategy ``0`` PARKS that strategy: its candidates are refused before any slot is
         charged, counted under ``suppressed_disabled`` and logged once a day as
         ``prescreen_strategy_disabled`` (2026-09-12, ``orb``). ``default: 0`` is a ValueError.
     admission_mode:
         ``"ranked"`` (default) = score-descending admission within a batch; ``"arrival"`` = the
-        pre-WO-1 order. The rollback knob named in WO-1's risk note, nothing else.
+        pre-ranking order. The rollback knob, nothing else.
     catalyst_cap_fn:
         Reads ``catalyst_guard.max_catalyst_entries_day`` from the hash-verified ``limits.yaml`` at
-        the enforcement site (§2.4 item 1). Binds ONLY candidates with a ``catalyst_ref`` — the §2.7
+        the enforcement site. Binds ONLY candidates with a ``catalyst_ref`` — the
         news→origination carve-out. ``None``, or a call that raises (an unverifiable protected
         store), refuses every catalyst candidate: an anti-manipulation surface that cannot be read
-        must not degrade into "no cap". Price baselines are untouched either way (E5).
+        must not degrade into "no cap". Price baselines are untouched either way.
     raw_counts_loader:
-        ``day -> {strategy_id: raw fires}`` reader for the persisted WO-9 raw counters
+        ``day -> {strategy_id: raw fires}`` reader for the persisted raw funnel counters
         (``funnel_raw_counts``, 2026-08-21), called on every day ROLL — which includes the first
         roll of a fresh process. The composition root binds it to the state DB; replay/backtest
-        paths leave it ``None`` and stay pure, so §9.6 bar-stream determinism is untouched. It is
+        paths leave it ``None`` and stay pure, so bar-stream determinism is untouched. It is
         the READ half of a pair: whatever hydrates here is what
         :meth:`~engine.ops.pipeline.RecommendationPipeline._flush_funnel_raw` later writes back as
         the day's absolute total, so wiring the flush WITHOUT this loader would have each restart
@@ -309,11 +308,11 @@ class SignalPreScreen:
     displacement_margin:
         How much better a later candidate must score to take a full cap's admission slot from an
         unevaluated incumbent of the same strategy [settings tunable —
-        ``strategy.prescreen.displacement_margin``; owner knob, NOT learner-movable (§6.3), for the
+        ``strategy.prescreen.displacement_margin``; owner knob, NOT learner-movable, for the
         same reason ``max_per_strategy_day`` is not: it decides which candidates get evaluated at
         all]. ``None`` DISABLES displacement, restoring the pre-2026-08-27 behaviour where the first
         candidates to fire keep the strategy's slots for the whole session — the rollback flag, the
-        way ``admission_mode`` is WO-1's. The shipped 0.10 and the reasoning behind it live in
+        way ``admission_mode`` is for ranked admission. The shipped 0.10 and the reasoning behind it live in
         ``config/settings.yaml``; :data:`DEFAULT_DISPLACEMENT_MARGIN` mirrors it for direct
         construction. See the cap-displacement section of the module docstring for the mechanism.
     """
@@ -346,10 +345,10 @@ class SignalPreScreen:
         self._max_strategy_day = default_cap                  # binds strategies without a line
         self._strategy_caps = per_strategy                    # explicit per-strategy overrides
         self._admission_mode = admission_mode
-        self._catalyst_cap_fn = catalyst_cap_fn               # §7.1 catalyst_guard, read at use
-        self._raw_counts_loader = raw_counts_loader           # WO-9 raw counters, restored on roll
+        self._catalyst_cap_fn = catalyst_cap_fn               # catalyst_guard, read at use
+        self._raw_counts_loader = raw_counts_loader           # funnel raw counters, restored on roll
         #: ``None`` disables displacement entirely — the pre-2026-08-27 "first 90 seconds win the
-        #: day" behaviour, kept as the rollback knob the way ``admission_mode`` is for WO-1.
+        #: day" behaviour, kept as the rollback knob the way ``admission_mode`` is for ranked admission.
         self._displacement_margin = (
             None if displacement_margin is None else float(displacement_margin)
         )
@@ -368,7 +367,7 @@ class SignalPreScreen:
         self._count_day = 0
         self._count_by_strategy: dict[str, int] = {}
         #: DISTINCT ``catalyst_ref`` values charged today — the
-        #: ``catalyst_guard.max_catalyst_entries_day`` budget (§2.7), which the cap compares by
+        #: ``catalyst_guard.max_catalyst_entries_day`` budget, which the cap compares by
         #: ``len``. Deliberately keyed on the FIELD, not on ``strategy_id == "cat"``: the guard
         #: bounds news-originated ENTRIES, and no strategy id may be the thing that decides whether
         #: the news guard applies. A SET rather than a counter because one watchlist row projects
@@ -379,7 +378,7 @@ class SignalPreScreen:
         # ---------------------------------------------------------- cap displacement (2026-08-27)
         #: Every CHARGED pair -> (score at admission, admission sequence, carried a catalyst_ref).
         #: The displaceable population and the total order over it both come from here, and every
-        #: field is a fact about the candidate stream alone — which is what keeps §9.6 replay exact.
+        #: field is a fact about the candidate stream alone — which is what keeps replay exact.
         self._admitted: dict[tuple[str, str], tuple[float, int, bool]] = {}
         #: Monotonic admission counter — the final tie-break when two pairs share a score.
         self._admit_seq = 0
@@ -405,10 +404,10 @@ class SignalPreScreen:
         #: pipeline drains this on the EVENT LOOP, which is the only place ``_pending_forwards`` may
         #: be touched — admission itself runs in a scan worker thread and must never reach into it.
         self._displaced_pending: list[tuple[str, str]] = []
-        #: WO-9 funnel counters, per strategy, for the CURRENT day. ``_raw_by_strategy`` alone is
+        #: Funnel counters, per strategy, for the CURRENT day. ``_raw_by_strategy`` alone is
         #: RESTART-PROOF (2026-08-21): it is seeded from ``funnel_raw_counts`` on every day roll and
         #: flushed back by the drain tick, because a raw count that resets is indistinguishable from
-        #: "nothing fired" — the exact ambiguity WO-9 exists to remove, and it cost the nightly line
+        #: "nothing fired" — the exact ambiguity these counters exist to remove, and it cost the nightly line
         #: 4 of the last 6 trade days. The rest stay process-scoped: they describe what THIS
         #: process's admission spine did, and the day-slot journal is their restart-proof record.
         self._raw_by_strategy: dict[str, int] = {}
@@ -418,7 +417,7 @@ class SignalPreScreen:
         #: Candidates refused because the owner trade window was shut (2026-08-18). Distinct from
         #: ``_suppressed_cap``: these cost NOTHING — the whole point is that no slot was charged — so
         #: a large number here is healthy budget protection, where a large ``_suppressed_cap`` is
-        #: starvation. Keeping them apart is what makes the WO-9 funnel line readable.
+        #: starvation. Keeping them apart is what makes the funnel line readable.
         self._suppressed_window: dict[str, int] = {}
         #: Strategies already logged as window-refused today (one INFO per strategy per day).
         self._window_logged: set[str] = set()
@@ -512,7 +511,7 @@ class SignalPreScreen:
         first release competes for the first tranche. ``at=None`` (the batch :meth:`admit` path,
         which carries no bar) and unscheduled strategies keep the flat cap exactly as before; the
         schedule can only ever HOLD BACK capacity, never add any. ``at`` is bar time, never a
-        Clock — §9.6 replay determinism is preserved by construction."""
+        Clock — replay determinism is preserved by construction."""
         flat = self._strategy_caps.get(strategy_id, self._max_strategy_day)
         schedule = self._cap_schedule.get(strategy_id)
         if schedule is None or at is None:
@@ -529,12 +528,12 @@ class SignalPreScreen:
         return released if flat is None else min(flat, released)
 
     def _catalyst_cap(self) -> int | None:
-        """``catalyst_guard.max_catalyst_entries_day``, or ``None`` meaning REFUSE (§2.7/§2.4).
+        """``catalyst_guard.max_catalyst_entries_day``, or ``None`` meaning REFUSE.
 
         Read per admission from the hash-verified protected store, so an owner change lands on the
         next :meth:`~engine.risk.limits.LimitsEngine.reload` without a restart. ``None`` is returned
         for an unwired reader, an unverifiable store (``IntegrityError``) and a nonsense value alike:
-        all three mean the anti-manipulation surface could not be established, and the D7 direction
+        all three mean the anti-manipulation surface could not be established, and the fail-to-less-activity direction
         for that is no news-originated entries at all — never an uncapped one.
         """
         if self._catalyst_cap_fn is None:
@@ -548,14 +547,14 @@ class SignalPreScreen:
 
     # ------------------------------------------------------------------ pinned sync surface
     def on_bar(self, bar: Bar) -> list[SignalCandidate]:
-        """Scan one bar; return accepted candidates and publish them (plan-pinned surface, §3.2.5)."""
+        """Scan one bar; return accepted candidates and publish them (pinned surface)."""
         accepted = self._scan(bar)
         if self._bus is not None:
             for cand in accepted:
                 self._bus.publish(SIGNAL_CANDIDATE_TOPIC, cand)
         return accepted
 
-    # ------------------------------------------------------------------ sweep addendum (2026-07-29)
+    # ------------------------------------------------------------------ sweep (2026-07-29)
     def seen_today(self) -> int:
         """Number of (symbol, strategy) day slots spent so far today — the sweep verdict's
         "already evaluated" count."""
@@ -671,7 +670,7 @@ class SignalPreScreen:
         refused: governor/forward-cap/unsizeable); a charged-but-unseen pair was lost in flight and
         may re-publish within its already-paid quota — exactly the :meth:`rearm` semantics. Boot-only
         (composition root, from ``prescreen_day_slots``): replay/backtest paths never call this, so
-        §9.6 bar-stream determinism is untouched.
+        bar-stream determinism is untouched.
 
         Restored pairs are marked EVALUATED, i.e. undisplaceable (2026-08-27). The journal cannot
         prove a negative: ``evaluated``/``forwarded`` record what a PREVIOUS process did, and a
@@ -680,7 +679,7 @@ class SignalPreScreen:
         assume it was. The cost is that displacement is inert for pre-restart pairs; the alternative
         risks handing a second candidate the slot of one that had already been judged.
 
-        ``catalyst_strategies`` (2026-08-28) restores the §2.7 ``_catalyst_refs`` budget, which this
+        ``catalyst_strategies`` (2026-08-28) restores the ``_catalyst_refs`` budget, which this
         used to leave empty — justified while ``max_per_strategy_day['cat']`` equalled the guard and
         so bounded the day on its own, and broken the moment ``cat_reversal: 2`` was added alongside
         it (post-restart bound 4 against a guard of 2). The journal has no ref column, but the pairs
@@ -711,7 +710,7 @@ class SignalPreScreen:
             }
 
     def sweep(self, bars: Sequence[Bar]) -> tuple[list[SignalCandidate], list[PendingSetup]]:
-        """Re-scan the LATEST bar of each symbol on demand (§3.2.5 sweep addendum, 2026-07-29).
+        """Re-scan the LATEST bar of each symbol on demand (2026-07-29).
 
         Each bar runs through the normal :meth:`_scan` path — dedupe and caps apply exactly as if
         the bar had just arrived, so a sweep can never double-publish or bypass a bound.
@@ -747,7 +746,7 @@ class SignalPreScreen:
 
     # ------------------------------------------------------------------ bus adapter
     async def handle_bar(self, event: BaseModel) -> None:
-        """``"bar.1m"`` handler: scan off-loop (§2.2 heartbeat invariant), then await publication."""
+        """``"bar.1m"`` handler: scan off-loop (heartbeat invariant), then await publication."""
         if not isinstance(event, Bar):
             return
         accepted = await asyncio.to_thread(self._scan, event)
@@ -762,7 +761,7 @@ class SignalPreScreen:
 
         The brk20 daily sweep (2026-08-04, owner-directed after the BPCL miss) scans completed
         ``bars_1d`` for the full eligible universe — no 1m bar exists to drive :meth:`on_bar`, but
-        its candidates must face the identical §3.2.5 bounds (same-day (symbol, strategy) dedupe,
+        its candidates must face the identical prescreen bounds (same-day (symbol, strategy) dedupe,
         the daily and per-strategy caps) or the sweep would be a cap bypass. ``day`` is the
         session date (the caller's clock); publication stays the caller's job, as in :meth:`sweep`.
 
@@ -776,11 +775,11 @@ class SignalPreScreen:
             self._roll_day_locked(day)
             return self._admit_batch_locked(cands, in_window=in_window)
 
-    # ------------------------------------------------------------------ funnel telemetry (WO-9)
+    # ------------------------------------------------------------------ funnel telemetry
     def funnel_counters(self) -> dict[str, Any]:
-        """Today's raw→published funnel, per strategy (WO-9 — the top of the EOD funnel line).
+        """Today's raw→published funnel, per strategy (the top of the EOD funnel line).
 
-        ``raw`` is what the scanners PRODUCED; everything else is what the §3.2.5 bounds did with
+        ``raw`` is what the scanners PRODUCED; everything else is what the prescreen bounds did with
         it. Without ``raw``, "the analyst never saw it" and "nothing fired" are indistinguishable
         after the fact — that ambiguity is exactly what made the 2026-08-11 funnel unreadable.
         """
@@ -843,7 +842,7 @@ class SignalPreScreen:
 
         A genuine roll onto a NEW day loads ``{}`` (no rows written for it yet) and the counters
         legitimately start at zero. Unwired ⇒ no-op, the pre-2026-08-21 behaviour. Never raises: a
-        telemetry read must not be able to kill a scan (D7)."""
+        telemetry read must not be able to kill a scan."""
         if self._raw_counts_loader is None:
             return
         try:
@@ -858,11 +857,11 @@ class SignalPreScreen:
                   fires=sum(loaded.values()))
 
     def _rank(self, cands: Sequence[SignalCandidate]) -> list[SignalCandidate]:
-        """Order one admission batch (WO-1 (i)).
+        """Order one admission batch.
 
         THE ADMISSION RULE: within a batch, admit in DESCENDING ``score``; ties keep emission
-        (scanner) order. ``sorted`` is stable, so the pre-WO-1 order survives as the tie-break and a
-        §9.6 replay of the same bar stream still reproduces the same decisions byte-for-byte. Scores
+        (scanner) order. ``sorted`` is stable, so the pre-ranking order survives as the tie-break and a
+        replay of the same bar stream still reproduces the same decisions byte-for-byte. Scores
         are only comparable WITHIN a strategy, which is fine here and only here: a batch competes
         for the shared daily cap, and the per-strategy sub-caps — not this sort — are what bound one
         strategy's share of the day. Cross-strategy comparison at the ANALYST slot uses a per-
@@ -896,18 +895,18 @@ class SignalPreScreen:
         off". That case returns ``None`` and logs as null.
 
         PURE SELECTION — it mutates nothing, so a candidate that passes the cap check on a
-        displacement and is then refused by a LATER check (the §2.7 catalyst cap) has not silently
+        displacement and is then refused by a LATER check (the catalyst cap) has not silently
         destroyed an incumbent. :meth:`_commit_displacement_locked` is the mutation, and it runs at
         the accept point once every other bound has already said yes.
 
         Eligibility, all four required:
 
-        * same ``strategy_id`` — the only comparison WO-1 permits with raw scores, and the reason
+        * same ``strategy_id`` — the only comparison ranked admission permits with raw scores, and the reason
           this stays legitimate even when it is the aggregate DAY cap that binds;
         * admitted in an EARLIER batch (``seq <= batch_floor``) — displacement decides cross-batch
           competition, ranking decides intra-batch competition, and the two must not overlap;
         * not in ``_evaluated`` — invariant #1, the whole point;
-        * no ``catalyst_ref`` — keeps ``_catalyst_refs`` from ever shrinking (§2.7 anti-manipulation);
+        * no ``catalyst_ref`` — keeps ``_catalyst_refs`` from ever shrinking (anti-manipulation);
         * ``cand.score - incumbent >= _displacement_margin`` — "materially better", not "better by a
           rounding error" (``strategy.prescreen.displacement_margin`` in ``config/settings.yaml``,
           which carries the reasoning for the shipped 0.10).
@@ -918,14 +917,14 @@ class SignalPreScreen:
         subtraction makes ``0.90 - 0.80`` land *under* a 0.10 margin, which would have made the
         policy boundary depend on IEEE-754 representation rather than on the rule.
 
-        DETERMINISM (§9.6), worked through rather than asserted. The decision reads exactly five
+        DETERMINISM, worked through rather than asserted. The decision reads exactly five
         pieces of state: ``_admitted`` (score/seq/catalyst per charged pair), ``_evaluated``,
         ``_displacements``, ``_charged`` and the caps. Four of the five are written only by
         :meth:`_admit_one_locked` and :meth:`_commit_displacement_locked`, both of which are driven
         solely by the candidate stream in arrival order — no Clock is read anywhere on this path,
         the tie-break is total, and float comparison of identical inputs is exact. So a REPLAY of the
         same bar/candidate stream through this class reproduces every admission and displacement
-        byte-for-byte, which is the §9.6 guarantee.
+        byte-for-byte, which is the replay-determinism guarantee.
 
         The fifth, ``_evaluated``, is the honest exception and it is not a new one. It is also
         written by :meth:`claim_slot`, which the LIVE pipeline calls on its own 3-minute drain
@@ -1034,7 +1033,7 @@ class SignalPreScreen:
         """Count the batch as raw, rank it, and run each candidate through the accept spine.
 
         ``raw`` counts the batch BEFORE the window gate: what the scanners produced is a fact about
-        the scanners, and WO-9's starvation reading depends on it staying that (otherwise a shut
+        the scanners, and the funnel's starvation reading depends on it staying that (otherwise a shut
         window renders as "nothing fired").
         """
         for cand in cands:
@@ -1045,7 +1044,7 @@ class SignalPreScreen:
         # Everything admitted from here on carries a sequence above this floor and is off limits as a
         # victim, for two reasons. Correctness: the accepted list returned below is what the caller
         # PUBLISHES, so a candidate admitted and then evicted by a later member of its own batch
-        # would be published holding no slot. Design: WO-1 already decides intra-batch competition by
+        # would be published holding no slot. Design: ranked admission already decides intra-batch competition by
         # ranking, and under ``ranked`` a later candidate can never outscore an earlier one anyway —
         # only the ``arrival`` rollback could trip this, and a rollback flag that quietly changed
         # behaviour would not be one.
@@ -1059,7 +1058,7 @@ class SignalPreScreen:
         self, cand: SignalCandidate, *, in_window: bool = True, batch_floor: int | None = None,
         at: datetime | None = None,
     ) -> bool:
-        """The §3.2.5 accept spine for ONE candidate (lock held, day rolled): park, window, dedupe,
+        """The accept spine for ONE candidate (lock held, day rolled): park, window, dedupe,
         caps, telemetry. Shared verbatim between the bar-driven path and :meth:`admit`."""
         key = (cand.symbol, cand.strategy_id)
         # PARKED gate, ahead of everything including the window (2026-09-12): a per-strategy cap of 0
@@ -1111,7 +1110,7 @@ class SignalPreScreen:
             return False
         if key in self._seen:
             # Same (symbol, strategy) already fired today — a breakout re-closing beyond
-            # the range every minute must not re-trigger Tier-1 (D5 dedupe).
+            # the range every minute must not re-trigger Tier-1.
             self._suppressed_dedupe[cand.strategy_id] = (
                 self._suppressed_dedupe.get(cand.strategy_id, 0) + 1
             )
@@ -1124,7 +1123,7 @@ class SignalPreScreen:
         # A binding cap is no longer the end of the conversation (2026-08-27, module docstring). If
         # this strategy is holding a slot on a candidate NOBODY HAS LOOKED AT that scores materially
         # worse, the slot moves. Selection only — nothing is evicted until every remaining bound
-        # (including the §2.7 catalyst cap below) has also said yes.
+        # (including the catalyst cap below) has also said yes.
         day_full = self._count_day >= self._max_day
         strategy_full = strategy_cap is not None and per_strategy >= strategy_cap
         cap_binding = not charged and (day_full or strategy_full)
@@ -1147,7 +1146,7 @@ class SignalPreScreen:
         if not charged and victim is None and strategy_full:
             # Still a flat refusal — but the log now says WHY displacement did not save it, so
             # "the cap is full and every incumbent is better or already evaluated" is readable
-            # apart from "the cap is full and the displacement budget is spent" (WO-9 funnel).
+            # apart from "the cap is full and the displacement budget is spent".
             _log.info(
                 "prescreen_cap_suppressed", cap="strategy_day", symbol=cand.symbol,
                 strategy_id=cand.strategy_id, score=cand.score,
@@ -1160,9 +1159,9 @@ class SignalPreScreen:
             )
             self._suppressed_cap[cand.strategy_id] = self._suppressed_cap.get(cand.strategy_id, 0) + 1
             return False
-        # §2.7 news carve-out: a candidate carrying a `catalyst_ref` is ADDITIONALLY bound by
-        # catalyst_guard.max_catalyst_entries_day (§3.2.5/§7.1) — read here, at the enforcement site,
-        # from the hash-verified limits.yaml; never evaluated in RiskGate (§2.4 item 4). The budget
+        # News carve-out: a candidate carrying a `catalyst_ref` is ADDITIONALLY bound by
+        # catalyst_guard.max_catalyst_entries_day — read here, at the enforcement site,
+        # from the hash-verified limits.yaml; never evaluated in RiskGate. The budget
         # counts DISTINCT REFS, not admissions: one story is one news event however many strategies
         # enter on it (`cat` and `cat_reversal` share the watchlist row's entry_id), and charging it
         # twice spent the whole day's news budget on one headline. A ref already charged — including
@@ -1213,9 +1212,9 @@ class SignalPreScreen:
             # levels and a fresh score; `_admitted` held the one it was first charged at, so a later
             # arrival was measured against a number that no longer described anything. The sequence
             # advances too: this is a new publication, and its position in the total order should say
-            # so. Both are facts about the candidate stream in arrival order, so §9.6 replay is
+            # so. Both are facts about the candidate stream in arrival order, so replay is
             # unchanged. The catalyst flag is NOT re-read — it is what keeps the pair out of the
-            # victim pool, and §2.7 monotonicity is not a per-publication judgement.
+            # victim pool, and catalyst monotonicity is not a per-publication judgement.
             self._admit_seq += 1
             self._admitted[key] = (float(cand.score), self._admit_seq, self._admitted[key][2])
         self._published_scores.setdefault(cand.strategy_id, []).append(float(cand.score))
@@ -1233,12 +1232,12 @@ class SignalPreScreen:
             self._roll_day_locked(bar.ts_minute.date())
             ctx = self._context_provider(bar)
             # Collect the whole bar's batch BEFORE admitting any of it: ranking cannot pick the
-            # best of a batch it is only shown one candidate at a time (WO-1 (i)).
+            # best of a batch it is only shown one candidate at a time.
             produced: list[SignalCandidate] = []
             for scanner in self._scanners:
                 produced.extend(scanner.scan(bar, ctx))
             return self._admit_batch_locked(
                 produced, in_window=bar_in_trade_window(bar, ctx.trade_window),
-                # Bar time, never a Clock (§9.6) — drives the cap-release schedule (2026-09-02).
+                # Bar time, never a Clock — drives the cap-release schedule (2026-09-02).
                 at=bar.ts_minute,
             )

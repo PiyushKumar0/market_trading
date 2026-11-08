@@ -1,19 +1,19 @@
 #!/usr/bin/env python
-"""Pre-registered filings x price-baseline experiments E1-E3 (runbooks/WORKLOG.md 2026-07-17).
+"""Pre-registered filings x price-baseline experiments E1-E3 (2026-07-17).
 
 Single-pass, honest, offline analysis tools. Each experiment was PRE-REGISTERED (hypothesis +
-discriminator pinned in the worklog before it ran) so there is no in-sample tuning here: the ORB
-config is the section-6.3 ENVELOPE DEFAULTS (deliberately NOT the sweep-best, to avoid the
+discriminator pinned before it ran) so there is no in-sample tuning here: the ORB
+config is the ENVELOPE DEFAULTS (deliberately NOT the sweep-best, to avoid the
 in-sample trap), the RSI2 config is the already-promoted champion, and the insider leg is
 event_study.py's verbatim. The only outputs are gross AND net stats per cohort/slice, reported as
-found (C9) with honest n=0 sections when a cohort/slice is empty.
+found with honest n=0 sections when a cohort/slice is empty.
 
     uv run python scripts/filings_experiments.py <e1|e2|e3> --from YYYY-MM-DD --to YYYY-MM-DD \
         --symbols RELIANCE,TCS[,...]  [--reports-dir data/reports]
 
 E1  catalyst-conditioned ORB. H: ORB breakouts that carry a fresh exchange-verified event trend
     (insider-buy cluster <=5 sessions old, OR results T+1/T+2) hold, while the unconditioned ones
-    fade at the pinned -0.02% GROSS/trade base. ORB-v2 signals at the section-6.3 envelope defaults,
+    fade at the pinned -0.02% GROSS/trade base. ORB-v2 signals at the envelope defaults,
     ONE vbt Portfolio.from_signals (mechanics identical to sweep._backtest, fees=0 so the per-trade
     return is pure GROSS); each trade flagged into cohort A (insider-buy cluster), B (results T+1/2),
     or C (unconditioned). net = gross - one MIS round trip (CostModel at Rs 20,000).
@@ -79,12 +79,12 @@ _spec.loader.exec_module(es)
 _log = get_logger("scripts.filings_experiments")
 
 # --------------------------------------------------------------------------- pinned experiment config
-#: E1 ORB signals: the section-6.3 ENVELOPE DEFAULTS ONLY (NOT the sweep-best -- pre-registration
+#: E1 ORB signals: the ENVELOPE DEFAULTS ONLY (NOT the sweep-best -- pre-registration
 #: avoids the in-sample trap). Mirrors config/envelope.yaml orb.* defaults.
 E1_ORB_PARAMS: dict[str, float] = {
     "orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5,
 }
-#: E2 RSI2 signals: the already-PROMOTED champion config (worklog 2026-07-16: 102 trades / 70% win /
+#: E2 RSI2 signals: the already-PROMOTED champion config (2026-07-16: 102 trades / 70% win /
 #: +0.58% net per trade) -- a pre-registered fixed config, not re-swept here.
 E2_RSI2_PARAMS: dict[str, float] = {
     "rsi_entry": 2.0, "rsi_exit": 65.0, "stop_pct": 6.0, "max_hold_days": 15.0,
@@ -292,18 +292,17 @@ def _year_sort_key(label: str) -> tuple[int, int]:
 def _run_portfolio(frames, sig, *, init_cash: float = 100_000.0):
     """ONE vbt Portfolio.from_signals producing the pure GROSS per-trade return in
     ``pf.trades.records_readable['Return']`` (net is then gross - one CostModel round trip, applied
-    uniformly; see the module report). The per-side fee still feeds the ORB C3 cost floor via the
+    uniformly; see the module report). The per-side fee still feeds the ORB cost-gate floor via the
     signal builder -- only the vbt fee drag is zeroed here.
 
     NOT the same mechanics as ``sweep.SweepRunner._portfolio`` -- it is a GROSS harness and differs
     deliberately, so do not re-derive one from the other. What it does NOT do: no ``price=`` open
-    frame and no signal shift (fills land on the signal bar's own CLOSE, not the next bar's open --
-    WO-2); no ``slippage``; no ``stop_entry_price='fillprice'`` (stops anchor at vectorbt's default
+    frame and no signal shift (fills land on the signal bar's own CLOSE, not the next bar's open); no ``slippage``; no ``stop_entry_price='fillprice'`` (stops anchor at vectorbt's default
     close, not at the fill); no ``stop_exit_price='stopmarket'`` (a stop exit is priced at the level
     with slippage zeroed -- immaterial at slippage 0.0); and ``high``/``low`` still go in for
     INTRADAY frames only while ``open`` is never passed at all, so vectorbt substitutes the close
     for whichever OHLC legs are missing and a daily stop here is both decided and filled on the
-    close (WO-M item (i) fixed that in the sweep, deliberately not here -- this harness measures a
+    close (the sweep-mechanics fix (2026-09-13) corrected that in the sweep, deliberately not here -- this harness measures a
     GROSS event-study return, and its numbers are never quoted as sweep-comparable). Costs are
     applied OUTSIDE this function by construction."""
     import vectorbt as vbt  # function-level: engine._preload native import-order guard

@@ -1,4 +1,4 @@
-"""Paper OrderManager (plan Q4.3): submission, the paper guard, the one postback consumer, leg adoption."""
+"""Paper OrderManager: submission, the paper guard, the one postback consumer, leg adoption."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``candles`` PRE-REGISTERED price-action battery (runbooks/briefs/candles_backtest_brief_2026-09-04.md).
+"""``candles`` PRE-REGISTERED price-action battery.
 
 Owner question: "can't we track the candles and trade based on their movements?" This script answers
 it with evidence: FIVE long-only 5-minute candle rules x TWO exit styles = TEN cells, every cell
@@ -91,7 +91,7 @@ discarded tail is visible.
 COSTS
 ===============================================================================================
 ``CostModel.breakeven_pct(notional, "MIS")`` - ONE full round trip, statutory fees PLUS the measured
-bid-ask spread (WO-2), at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
+bid-ask spread, at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
 on EACH side, charged as ``2 * tick / entry_px * 100`` percent, so the slippage term is larger for a
 cheap stock exactly as it is in life. MIS, never CNC. This is byte-for-byte the ``tdc`` treatment.
 
@@ -105,7 +105,7 @@ grid. Every cell is ALSO reported for the ``real_nifty50_index_only`` split, whi
 trades measured against the true index.
 
 ===============================================================================================
-ATR% TERCILE SPLIT (R3, pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
+ATR% TERCILE SPLIT (pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
 ===============================================================================================
 The 2026-09-11 rebuttal argued that intraday alpha lives in high-beta / high-ATR names and that
 every refuted intraday family was measured on the POOLED NIFTY 200/500 universe. That claim is
@@ -212,7 +212,7 @@ PARAMS: dict[str, Any] = {
     "session_min_symbols": 150,           # a session is a bars_1m date with MORE than this many symbols
     "breadth_time": "11:00",
     "breadth_trend_day_min": 0.5,
-    "atr_lookback_sessions": 14,          # R3 split: DAILY sessions strictly before the signal day
+    "atr_lookback_sessions": 14,          # ATR split: DAILY sessions strictly before the signal day
     "or_start": "09:15",
     "or_end_exclusive": "09:30",
     # --- costs
@@ -402,7 +402,7 @@ class Trade:
     breadth: float
     catalyst_at_signal: bool
     catalyst_split_covered: bool
-    #: R3 split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
+    #: ATR split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
     #: the sessions before the signal day, and the tercile cell it falls in (None = unclassified).
     atr_pct: float | None = None
     atr_cell: str | None = None
@@ -1233,7 +1233,7 @@ def daily_net_series(trades: Sequence[Trade]) -> tuple[list[date], np.ndarray]:
 def cpcv_positive_share(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
     """CPCV over the per-session net series; the reported share is (splits with test mean > 0) / all.
 
-    Purge and embargo are the ``engine.learning.validate`` §6.4 defaults (5 observations each), which
+    Purge and embargo are the ``engine.learning.validate`` defaults (5 observations each), which
     is what tdc used: a candle trade opens and closes inside ONE session, so consecutive observations
     do not overlap at all and the default is already stricter than the leakage it guards against.
     """
@@ -1310,7 +1310,7 @@ def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
 def split_cells(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, list[Trade]]:
     """Every mandatory split, as named cells. The pooled number is never the only number.
 
-    The four ATR% cells (R3, 2026-09-12) are a PARTITION of the same trades: the three terciles plus
+    The four ATR% cells (2026-09-12) are a PARTITION of the same trades: the three terciles plus
     the symbol-days whose ATR% is not computable, so their counts sum to ``SPLIT_ALL`` exactly.
     """
     b = float(params["breadth_trend_day_min"])
@@ -1498,7 +1498,7 @@ def run_study(
                 breadth=breadth, catalyst_at_signal=cat_flag, catalyst_split_covered=covered,
             ))
 
-    # ---------------------------------------------------------------- the ATR% tercile split (R3)
+    # ---------------------------------------------------------------- the ATR% tercile split
     # Runs AFTER every rule x exit cell's trades exist and changes none of them: it only labels each
     # trade with the daily volatility of the sessions BEFORE its signal day. bars_1d is read here and
     # nowhere else in this study.

@@ -1,4 +1,4 @@
-"""R1 contracts placement (§9.1): the Tier-1<->Tier-2 data contracts live in ``engine.core.contracts``,
+"""Contracts placement: the Tier-1<->Tier-2 data contracts live in ``engine.core.contracts``,
 not ``engine.intelligence.schemas``, so ``engine.risk``/``engine.oms`` can construct a ``GateVerdict``
 without importing the LLM tier.
 

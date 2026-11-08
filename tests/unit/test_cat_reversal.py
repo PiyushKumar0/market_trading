@@ -1,4 +1,4 @@
-"""``cat_reversal`` SHADOW (§2.7, 2026-08-27) — the scanner, and the one property that must not fail.
+"""``cat_reversal`` SHADOW (2026-08-27) — the scanner, and the one property that must not fail.
 
 Reversal DETECTION lives in the digest and is tested next to the rule it extends
 (``test_catalyst_digest.py``, the "story-level REVERSAL detection" block). This file covers what the
@@ -8,8 +8,8 @@ keying — and, first and at length, the safety property.
 THE SAFETY PROPERTY, AND WHY IT IS TESTED DIRECTLY RATHER THAN BY ANALOGY
 -------------------------------------------------------------------------
 A shadow strategy accumulates a validation population and must reach RECOMMEND exactly never until
-its §8.6 owner gate. Building this file is what showed that the INDIRECT argument (ship no
-``expected_edge_pct``, let C3's targetless branch reject everything) has a hole an analyst-supplied
+its owner promotion gate. Building this file is what showed that the INDIRECT argument (ship no
+``expected_edge_pct``, let the cost gate's targetless branch reject everything) has a hole an analyst-supplied
 ``target_price`` walks straight through — the argument is set out in full at ``risk/gate.py``
 :data:`~engine.risk.gate._SHADOW_NO_EDGE`, the enforcement point.
 
@@ -73,7 +73,7 @@ def limit_table() -> LimitTable:
 
 @pytest.fixture(scope="module")
 def cost_model() -> CostModel:
-    return CostModel.from_config()          # the REAL config/costs.yaml (C1/C3)
+    return CostModel.from_config()          # the REAL config/costs.yaml
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ def test_a_maximally_strong_cat_reversal_signal_is_still_rejected(shadow_gate: R
 
     Everything is stacked in the proposal's favour: a 20x-breakeven target (an edge no real strategy
     produces), a 0.95-confidence thesis, a 1-unit ask that no cap can shrink, and a gate context in
-    which every other §7.1 enter rule passes. It is still rejected, and the reason names the shadow —
+    which every other risk-gate enter rule passes. It is still rejected, and the reason names the shadow —
     not the missing target, not a cap.
 
     If this test ever fails, ``cat_reversal`` has become able to spend real money on an unvalidated
@@ -180,7 +180,7 @@ def test_no_target_price_whatsoever_can_buy_a_cat_reversal_an_approval(
     """The hole this registry closes, swept shut. Across four orders of magnitude of analyst-supplied
     target — including the ``None`` the scanner actually emits — the verdict is reject every time.
 
-    Without the registry the ``None`` case would reject (C3's targetless branch) and EVERY other case
+    Without the registry the ``None`` case would reject (the cost gate's targetless branch) and EVERY other case
     would reach the real edge arithmetic, where a large enough target passes. That asymmetry is the
     bug: it makes a safety property contingent on what a language model chose to emit."""
     verdict = shadow_gate.evaluate(enter(target_price=target, quantity=1), passing_ctx())
@@ -209,8 +209,8 @@ def test_cat_reversal_registers_no_expected_edge_anywhere() -> None:
     """Belt AND braces: the registry is the enforcement, but the absence of an edge must hold too.
 
     An ``expected_edge_pct`` on the config model would let a future edit wire it into
-    ``strategy_expected_edge_pct`` and quietly satisfy C3 through the targetless branch. There is no
-    such field, and adding one is the §8.6 owner gate."""
+    ``strategy_expected_edge_pct`` and quietly satisfy the cost gate through the targetless branch. There is no
+    such field, and adding one is the owner promotion gate."""
     settings = Settings()
     assert not hasattr(settings.cat_reversal, "expected_edge_pct")
     # ...and the two shadows keep separate knobs, so tuning one cannot move the other.
@@ -297,7 +297,7 @@ def test_the_event_is_cat_v2s_plus_the_reversal_requirement() -> None:
 def test_an_ordinary_originating_row_is_not_a_cat_reversal_candidate() -> None:
     """The discriminator. A row that satisfies every one of ``cat`` v2's conditions but reversed
     nothing is exactly what ``cat`` originates on and must NOT enter this shadow's population — or the
-    two studies measure the same thing and the comparison at the §8.6 gate is meaningless."""
+    two studies measure the same thing and the comparison at the owner promotion gate is meaningless."""
     assert cat_reversal.is_eligible(row(reversal_of=None)) is False
     assert cat_reversal.sweep_watchlist([row(reversal_of=None)]) == []
     # ...while `cat` itself still originates on it, untouched by this change.
@@ -332,7 +332,7 @@ def test_levels_are_the_ins_mechanics_with_cat_reversals_own_stop() -> None:
     assert cand.raw_levels.entry == Decimal("100.00")
     assert cand.raw_levels.stop == Decimal("95.00")
     assert cand.raw_levels.target is None            # no target, ever — the exit is TIME
-    assert cand.catalyst_ref == "01ENTRY"            # the §6.5 audit link back to the graded row
+    assert cand.catalyst_ref == "01ENTRY"            # the audit link back to the graded row
 
 
 def test_the_stop_comes_from_cat_reversals_own_parameter_not_cats() -> None:
@@ -356,13 +356,13 @@ def test_score_is_the_reversal_clusters_weighted_materiality_clamped() -> None:
     "ref", [None, Decimal("0"), Decimal("-10"), Decimal("NaN"), "not-a-number"]
 )
 def test_a_bad_reference_price_fails_to_no_candidate(ref: Any) -> None:
-    """§3.2.5 fail-to-zero: a malformed price costs this candidate and nothing else — never raises."""
+    """Fail-to-zero: a malformed price costs this candidate and nothing else — never raises."""
     assert cat_reversal.scan_entry(row(reference_close=ref)) is None
 
 
 def test_tick_rounding_degeneracy_fails_to_no_candidate() -> None:
     """A stop that does not survive tick rounding as strictly below the entry emits nothing, rather
-    than shipping ``stop >= entry`` into the §7.1 ``levels_coherent`` check (the brk20/ins/cat rule)."""
+    than shipping ``stop >= entry`` into the ``levels_coherent`` check (the brk20/ins/cat rule)."""
     assert cat_reversal.scan_entry(row(reference_close=Decimal("0.05")),
                                    params={"stop_pct": 0.01}) is None
     assert cat_reversal.scan_entry(row(), params={"stop_pct": 0}) is None
@@ -370,7 +370,7 @@ def test_tick_rounding_degeneracy_fails_to_no_candidate() -> None:
 
 
 def test_sweep_is_deterministically_ordered() -> None:
-    """§9.6: score desc, symbol asc — the same convention as cat/ins/brk20."""
+    """Score desc, symbol asc — the same convention as cat/ins/brk20."""
     cands = cat_reversal.sweep_watchlist([
         row(symbol="BBB", materiality=0.5, entry_id="e2"),
         row(symbol="AAA", materiality=0.9, entry_id="e1"),
@@ -418,7 +418,7 @@ def test_one_story_charges_the_shared_budget_once_across_both_legs() -> None:
     that SHARE its ``entry_id`` as their ``catalyst_ref`` — one news event, deliberately entered
     twice as two experiments. Counting admissions charged that single story 2 of the day's 2 entries
     and starved the next genuine one; the test above never caught it because it gives every candidate
-    a ref of its own. Keying the cap on the ref is also what ``settings.yaml`` and §2.7 have always
+    a ref of its own. Keying the cap on the ref is also what ``settings.yaml`` and the catalyst layer have always
     claimed it does."""
     prescreen = SignalPreScreen(
         [], lambda bar: ScanContext(), None,
@@ -498,7 +498,7 @@ def test_the_two_shadows_pre_register_different_horizons() -> None:
     """Pinned so a later edit cannot quietly re-point one study at the other's horizons (which would
     re-open multiplicity for whichever window is open). ``cat_reversal`` measures T+5/T+10: T+5 is the
     resolved-uncertainty mechanism's own horizon, T+10 is the one horizon shared with ``cat`` v2 so
-    the two populations remain comparable at the §8.6 review."""
+    the two populations remain comparable at the owner promotion review."""
     doc = cat_reversal.__doc__ or ""
     assert "T+5 and T+10" in doc
     assert "T+20 is deliberately NOT pre-registered" in doc

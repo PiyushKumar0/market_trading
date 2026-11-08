@@ -1,4 +1,4 @@
--- 0002_filings_backfill.sql — §2.8 corporate-filings backfill checkpoints (state.db, §4.2).
+-- 0002_filings_backfill.sql — corporate-filings backfill checkpoints (state.db).
 -- Mirrors backfill_checkpoints' shape (0001): a resumable per-unit watermark so scripts/backfill_filings.py
 -- can seed the 3y history in ≤31-day NSE windows / per-symbol BSE SHP quarter loops and resume exactly
 -- where it stopped. The checkpoint key is (feed, unit): unit = the window end "YYYY-MM-DD..YYYY-MM-DD"

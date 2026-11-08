@@ -1,7 +1,7 @@
 """Protected-config status: the recorded signature, the signed snapshot and the on-disk file, side by side.
 
 ``config/limits.yaml`` and ``config/envelope.yaml`` load only when their on-disk SHA-256 equals the
-signature in ``state.db`` ``protected_config``. A dashboard capital change (O19) re-signs
+signature in ``state.db`` ``protected_config``. A dashboard capital change re-signs
 ``limits.yaml`` and leaves it modified in the git working tree. A ``git stash`` / ``checkout`` /
 ``reset --hard`` before it is committed puts the OLD bytes back under the NEW signature, and the next
 boot FREEZES, or KILLS if a real position is open (then /kill_reset + /confirm), on integrity. This

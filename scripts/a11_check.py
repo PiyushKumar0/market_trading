@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""A11 empirical check — are Kite *minute* candles corporate-action adjusted? (§4.4 job 11, §8.1).
+"""Empirical check — are Kite *minute* candles corporate-action adjusted?
 
-One-off Phase-0/1 task (plan §1.4 item, §4.4 job 11, §8.1 "A11 check", §14 Q10). The plan provisionally
-assumes minute candles are **not** corp-action adjusted while DAILY candles **are** (A11; see `bars_1d`
-"adjusted per A11 finding", §4.3); this script answers it empirically against a real recent split/bonus
+One-off task. The check provisionally
+assumes minute candles are **not** corp-action adjusted while DAILY candles **are** (see `bars_1d`); this script answers it empirically against a real recent split/bonus
 ex-date so the bar-stitching job can be configured correctly.
 
 Method
@@ -17,19 +16,18 @@ history across that ex-date:
   * **unadjusted** — pre-ex prices are left raw, so there is a large mechanical *jump* (~factor R) between
                      the last pre-ex bar and the first ex-date bar.
 
-DAILY candles are corp-action adjusted (the A11 baseline). We measure the *daily* close-to-close gap
+DAILY candles are corp-action adjusted (the daily baseline). We measure the *daily* close-to-close gap
 across the ex-date (this is the adjusted/continuous reference) and the *minute* gap (last pre-ex session
 close → first ex-date session open). If the minute gap matches the raw mechanical jump (≈ factor R), the
 minute series is **unadjusted**; if it matches the daily/adjusted continuity, it is **adjusted**.
 
 Session / network
 -----------------
-Talks to Kite REST directly via ``pykiteconnect`` (the ``engine.broker`` REST wrappers are not built yet
-in Phase 0), using the daily access token stored in Windows Credential Manager / DPAPI via
-``engine.core.secrets`` (R10). All network calls are guarded; with no valid session the script prints how
+Talks to Kite REST directly via ``pykiteconnect`` (the ``engine.broker`` REST wrappers are not built yet),
+using the daily access token stored in Windows Credential Manager / DPAPI via
+``engine.core.secrets``. All network calls are guarded; with no valid session the script prints how
 to log in first and exits non-zero. Prices are ``Decimal`` throughout. This script NEVER writes config —
-it prints the instruction to record the answer in ``config/settings.yaml`` (``data.minute_candles_adjusted``)
-and in plan §14 Q10.
+it prints the instruction to record the answer in ``config/settings.yaml`` (``data.minute_candles_adjusted``).
 """
 
 from __future__ import annotations
@@ -183,7 +181,7 @@ def _fetch_candles(
 
 
 def _resolve_token(kite: Any, symbol: str, exchange: str) -> int:
-    """Resolve an NSE tradingsymbol to its instrument token via the instruments dump (A10)."""
+    """Resolve an NSE tradingsymbol to its instrument token via the instruments dump."""
     try:
         instruments = kite.instruments(exchange)
     except Exception as exc:  # noqa: BLE001
@@ -283,7 +281,7 @@ def _decide(
     minute_jumped = abs(minute_gap) >= _RAW_JUMP_THRESHOLD
 
     if not daily_continuous:
-        # The daily-adjusted baseline (A11) itself shows a jump: either this is not a clean split/bonus
+        # The daily-adjusted baseline itself shows a jump: either this is not a clean split/bonus
         # ex-date, or daily candles are NOT adjusted as assumed. Don't claim a minute verdict.
         notes.append(
             "WARNING: the DAILY (assumed-adjusted) series ALSO shows a large gap across the ex-date — "
@@ -419,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
 
     secrets = Secrets()
 
-    # --- credentials (R10): API key + daily access token ---
+    # --- credentials: API key + daily access token ---
     api_key = args.api_key
     if not api_key:
         try:

@@ -1,34 +1,34 @@
-"""§6.1 ``mom`` — 4-week cross-sectional momentum (swing, CNC, long-only).
+"""``mom`` — 4-week cross-sectional momentum (swing, CNC, long-only).
 
-PINNED rule sketch (§6.1 row 4): 4-week momentum rank within the universe, top ``top_n``, hold
-``rebalance_days``, ex-date aware (A12). ``top_n`` defaults to 2 (C4: few, larger positions — never
+PINNED rule sketch: 4-week momentum rank within the universe, top ``top_n``, hold
+``rebalance_days``, ex-date aware. ``top_n`` defaults to 2 (few, larger positions — never
 ₹2,000 × 10 scrips).
 
 Inputs arrive pre-computed on the context (the provider computes ``indicators.momentum`` over the
 same ``bars_1d`` history for EVERY universe symbol — a per-symbol scanner cannot see the cross
 section): ``ctx.momentum_by_symbol`` (symbol → 4-week fractional return; NaN = insufficient
 history ⇒ unrankable), ``ctx.mom_sessions_since_rebalance`` (trading sessions since the last
-rebalance; ``None`` ⇒ never ⇒ due now — WO-13, 2026-08-13: the LIVE provider now supplies the real,
+rebalance; ``None`` ⇒ never ⇒ due now — 2026-08-13: the LIVE provider now supplies the real,
 restart-persisted count instead of a permanent ``None``; see ``engine.ops.scan_context``'s
 ``mom_rebalance_state`` — ``None`` remains the correct value for the genuine bootstrap case), and
-``ctx.upcoming_ex_dates`` (this symbol's known upcoming corp-action ex-dates, A12).
+``ctx.upcoming_ex_dates`` (this symbol's known upcoming corp-action ex-dates).
 
 Documented choices where the sketch is silent:
 
-* **Rebalance cadence** is denominated in TRADING SESSIONS (§6.3: ``rebalance_days`` upper bound 20
-  = the §7.1 swing holding cap in td). Due when ``sessions_since >= rebalance_days`` or never
-  rebalanced. WO-13: the LIVE provider owns advancing the persisted last-rebalance marker, purely
+* **Rebalance cadence** is denominated in TRADING SESSIONS (``rebalance_days`` upper bound 20
+  = the swing holding cap in td). Due when ``sessions_since >= rebalance_days`` or never
+  rebalanced. The LIVE provider owns advancing the persisted last-rebalance marker, purely
   on cadence (matching the sweep's fixed ``valid_positions[::rebalance_days]`` indexing) — a
   rebalance day is a calendar/session event, not conditioned on whether a candidate this scanner
   emits actually clears the gate or gets acted on.
-* **Ex-date skip horizon (A12)**: skip the symbol when any upcoming ex-date falls within
+* **Ex-date skip horizon**: skip the symbol when any upcoming ex-date falls within
   ``ceil(rebalance_days × 7/5)`` CALENDAR days of the bar's day (inclusive) — the trading-session
   hold horizon mapped conservatively (rounded up) onto the calendar, since the scanner is
   deliberately calendar-free. Past ex-dates are ignored.
 * **Ranking**: ``indicators.cross_sectional_rank`` — descending momentum, deterministic alphabetical
-  tie-break (§9.6); rank 1 = strongest; candidate iff rank ≤ ``top_n``.
-* **Levels**: entry = bar close; stop/target ``None`` — the book is rebalance-driven (§6.1); the
-  gate's R2 sizing applies its own gap-adjusted risk model.
+  tie-break; rank 1 = strongest; candidate iff rank ≤ ``top_n``.
+* **Levels**: entry = bar close; stop/target ``None`` — the book is rebalance-driven; the
+  gate's per-trade risk sizing applies its own gap-adjusted risk model.
 * **Score** = ``(top_n − rank + 1) / top_n`` — rank 1 scores 1.0, the last admitted rank scores
   ``1/top_n``.
 """
@@ -49,7 +49,7 @@ class MomentumScanner(Scanner):
     strategy_id = "mom"
     style = "swing"
 
-    DEFAULT_PARAMS = {           # §6.3 envelope defaults
+    DEFAULT_PARAMS = {           # parameter-envelope defaults
         "top_n": 2,
         "rebalance_days": 15,
     }
@@ -81,7 +81,7 @@ class MomentumScanner(Scanner):
                 ctx=ctx,
                 side="BUY",
                 entry=bar.close,
-                stop=None,       # rebalance-driven book — no fixed stop in the §6.1 sketch
+                stop=None,       # rebalance-driven book — no fixed stop in the rule sketch
                 target=None,
                 score=(top_n - rank + 1) / top_n,
             )

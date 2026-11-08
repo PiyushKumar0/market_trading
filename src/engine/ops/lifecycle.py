@@ -1,40 +1,40 @@
-"""Session lifecycle: the §2.6 every-startup recovery + catch-up sequence, and the shutdown guard.
+"""Session lifecycle: the every-startup recovery + catch-up sequence, and the shutdown guard.
 
-The engine is up only during active periods and may be deliberately stopped in between (§2.6). The
+The engine is up only during active periods and may be deliberately stopped in between. The
 defining invariant: **every startup is a full recovery** — scheduled or manual, after a clean stop or a
 crash, after a gap of minutes or days — and the platform never breaks because it was off. Capital
-protection is broker-resident throughout (R3), so being off is safe.
+protection is broker-resident throughout, so being off is safe.
 
-Phase-1 shape of the §2.6 sequence (steps that are OMS/broker-side land in Phase 4, real orders, as injected hooks):
+Shape of the startup sequence (steps that are OMS/broker-side are injected hooks; the live order path is not built):
 
-0. **Lifecycle boot (§2.2):** read the prior ``engine_lifecycle`` row. Prior ``state ∈ {RUNNING,
+0. **Lifecycle boot:** read the prior ``engine_lifecycle`` row. Prior ``state ∈ {RUNNING,
    STOPPING}`` with the prior pid ALIVE ⇒ **refuse to start** (:class:`SingleInstanceError` — another
-   instance owns the single-writer stores, O7/E4); prior pid dead ⇒ crash/interrupted-shutdown, the
+   instance owns the single-writer stores); prior pid dead ⇒ crash/interrupted-shutdown, the
    startup report leads with a crash-recovered notice. Then atomically commit ``state='RUNNING'`` +
    fresh ``last_alive_at``/``pid``/``started_at`` (the fresh ``last_alive_at`` IS the watchdog re-arm
    clear — its debounce predicate is ``last_down_alert_at < last_alive_at``), start the
    dedicated-thread :class:`~engine.ops.heartbeat.HeartbeatWriter`, and emit ``ENGINE_STARTED`` —
    all before step 1. Fast unclean boots inside ``lifecycle.crashloop_window_s`` coalesce into a
-   single ``ENGINE_CRASHLOOP`` alert (§2.2/§10.7) instead of a page per respawn.
-1. Read sticky kill / mode / trade-window state (R10) + run the startup self-test (D11).
-2. Reconcile vs broker = truth (R5) — injected hook, TODO(Phase 4, real orders).
-3. Overdue-MIS startup square-off (§2.6 step 3) — injected hook, TODO(Phase 4, real orders).
-4. Data-gap backfill (bars + NIFTY50/India-VIX history, §7.1 ``regime_data_ready``) — injected hook;
+   single ``ENGINE_CRASHLOOP`` alert instead of a page per respawn.
+1. Read sticky kill / mode / trade-window state + run the startup self-test.
+2. Reconcile vs broker = truth — injected hook, TODO(live AUTO).
+3. Overdue-MIS startup square-off — injected hook, TODO(live AUTO).
+4. Data-gap backfill (bars + NIFTY50/India-VIX history, the risk gate's ``regime_data_ready``) — injected hook;
    the integrator wires ``BackfillJob.warmup_gap``.
 5. Missed-job catch-up — :class:`engine.ops.jobs.CatchUpRunner` (per-job ``job_runs`` watermarks,
-   §2.6 step 5 classes); safety-critical failures ⇒ FROZEN-for-entries.
-6. Cold-start warm-up gate (§7.1 ``warmup_ready``/``regime_data_ready``) — the injected
+   step 5 classes); safety-critical failures ⇒ FROZEN-for-entries.
+6. Cold-start warm-up gate (``warmup_ready``/``regime_data_ready``) — the injected
    :class:`~engine.ops.warmup.WarmupGate` answers; this class applies the consequence PER COVERAGE
    CLASS (2026-09-13) and PER SYMBOL (2026-09-17): only a REGIME shortfall (NIFTY 50 / India VIX —
    every candidate depends on them) or an UNATTRIBUTABLE blocker is FROZEN via the risk-state setter
    + ``WARMUP_FROZEN`` alert; an INTRADAY or DAILY shortfall is logged and left to the per-candidate
    rules (risk gate + pre-screen), which refuse only the SYMBOLS that are short. Never trade on thin
    data — and never take the book down for one symbol's coverage hole.
-7. Re-arm schedules + resume the ticker (WARMING — feed-stale alarms suppressed, §3.2.12) and send
+7. Re-arm schedules + resume the ticker (WARMING — feed-stale alarms suppressed) and send
    the startup/recovery report.
 
-Clean stop (§2.2/§10.8): ``STOPPING`` FIRST (draws the planned-vs-crash line) → shutdown-guard hooks
-(cancel entries / flatten MIS / verify CNC PROTECTED / backup — Phase-4 seams) → ``STOPPED`` commit
+Clean stop: ``STOPPING`` FIRST (draws the planned-vs-crash line) → shutdown-guard hooks
+(cancel entries / flatten MIS / verify CNC PROTECTED / backup — live-AUTO seams) → ``STOPPED`` commit
 (**the point of no return** — nothing capital-critical runs after it) → heartbeat join → best-effort
 ``ENGINE_STOPPED``. A crash during STOPPING leaves ``state='STOPPING'`` ⇒ the watchdog fires
 ``ENGINE_DOWN`` and the next startup re-verifies — never silently mislabelled clean.
@@ -62,7 +62,7 @@ from engine.core.types import TradeWindow
 from engine.notify import catalog
 from engine.notify.catalog import CatalogMessage
 from engine.ops.heartbeat import HeartbeatWriter, pid_alive
-from engine.ops.jobs import (  # noqa: F401  (CatchUpRunner re-exported: §3.2.12 name)
+from engine.ops.jobs import (  # noqa: F401  (CatchUpRunner re-exported)
     CatchUpResult,
     CatchUpRunner,
 )
@@ -80,10 +80,10 @@ _log = get_logger("engine.ops.lifecycle")
 
 Hook = Callable[[], Awaitable[None]]
 AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
-LifecycleNotify = Callable[[CatalogMessage], Awaitable[None]]   # typed process-lifecycle send (§2.2)
+LifecycleNotify = Callable[[CatalogMessage], Awaitable[None]]   # typed process-lifecycle send
 
 #: Unclean boots within ``lifecycle.crashloop_window_s`` before ENGINE_STARTED coalesces into one
-#: ENGINE_CRASHLOOP (§2.2 — spec-silent threshold, resolved here: 3rd fast respawn trips the alarm).
+#: ENGINE_CRASHLOOP (threshold chosen here: 3rd fast respawn trips the alarm).
 CRASHLOOP_MIN_BOOTS = 3
 
 
@@ -94,17 +94,17 @@ CRASHLOOP_MIN_BOOTS = 3
 _UNATTRIBUTED_BLOCKER = "warmup not ready — no blocker rendered"
 
 
-#: The only two GLOBAL warm-up conditions (§2.6 step-6 addendum, owner-directed 2026-09-17). REGIME
+#: The only two GLOBAL warm-up conditions (owner-directed 2026-09-17). REGIME
 #: is NIFTY 50 / India VIX daily history — every candidate of every class depends on the market
 #: context built from it, so there is no per-symbol answer to give. UNKNOWN is a blocker nobody could
-#: attribute (R6): what cannot be verified is treated as missing, for the whole book.
+#: attribute: what cannot be verified is treated as missing, for the whole book.
 _FREEZING_CLASSES = (CLASS_REGIME, CLASS_UNKNOWN)
 
 
 def _freezes_entries(blockers: Sequence[str]) -> bool:
-    """Does this shortfall drive the GLOBAL FROZEN-for-entries (§2.6 step 6, narrowed 2026-09-13,
+    """Does this shortfall drive the GLOBAL FROZEN-for-entries (narrowed 2026-09-13,
     narrowed again 2026-09-17)? True ONLY for the REGIME class and for a blocker whose class cannot
-    be told from its rendering (unattributable coverage freezes, R6).
+    be told from its rendering (unattributable coverage freezes).
 
     Rationale for the 2026-09-17 narrowing: since 2026-09-13 an INTRADAY shortfall was already
     refused PER CANDIDATE rather than freezing, and DAILY now gets the identical treatment
@@ -131,13 +131,13 @@ def _rendered_blockers(status) -> list[str]:
 
 
 class SingleInstanceError(RuntimeError):
-    """§2.6 step 0: prior state RUNNING/STOPPING and the prior pid is ALIVE — another instance owns
-    the single-writer stores (O7/E4). The new process must refuse to start; nothing was written."""
+    """Step 0: prior state RUNNING/STOPPING and the prior pid is ALIVE — another instance owns
+    the single-writer stores. The new process must refuse to start; nothing was written."""
 
 
 class ShutdownBlockedError(RuntimeError):
-    """A shutdown-guard step failed and no owner override was given (§10.8) — the stop is blocked,
-    the engine stays RUNNING (never exit with an unprotected position / working entry order, R3)."""
+    """A shutdown-guard step failed and no owner override was given — the stop is blocked,
+    the engine stays RUNNING (never exit with an unprotected position / working entry order)."""
 
 
 class StartupReport(BaseModel):
@@ -147,9 +147,9 @@ class StartupReport(BaseModel):
     killed: bool
     needs_login: bool
     integrity_ok: bool
-    crash_recovered: bool = False        # prior run exited uncleanly (state RUNNING/STOPPING) — §2.6 step 0
+    crash_recovered: bool = False        # prior run exited uncleanly (state RUNNING/STOPPING) — step 0
     prior_state: str | None = None       # engine_lifecycle.state read before this run marked RUNNING
-    crashloop: bool = False              # this boot is part of a coalesced crash-loop episode (§2.2)
+    crashloop: bool = False              # this boot is part of a coalesced crash-loop episode
     off_duration_s: float | None = None  # since last_alive_at (crash) / last_clean_stop_at (clean)
     frozen_reasons: list[str] = Field(default_factory=list)
     jobs_caught_up: list[str] = Field(default_factory=list)
@@ -166,7 +166,7 @@ class StartupReport(BaseModel):
 
 
 class WarmupReapply(BaseModel):
-    """Outcome of a post-login :meth:`SessionLifecycle.reapply_warmup_gate` (§2.6 cold-start RE-TRIGGER).
+    """Outcome of a post-login :meth:`SessionLifecycle.reapply_warmup_gate` (cold-start RE-TRIGGER).
 
     ``outcome`` is one of ``deferred`` (no gate wired), ``frozen`` (a freezing class — REGIME or an
     unattributable blocker — still short, re-frozen), ``ready_<why>`` (every class covered), or
@@ -189,29 +189,29 @@ class WarmupReapply(BaseModel):
 
 
 class SessionLifecycle:
-    """Drives the §2.6 every-startup recovery & catch-up sequence and the shutdown guard.
+    """Drives the every-startup recovery & catch-up sequence and the shutdown guard.
 
-    Parameters (beyond the Phase-0 set)
+    Parameters (beyond the core set)
     -----------------------------------
     heartbeat:
-        The dedicated-thread liveness writer (§2.2). Started right after the RUNNING commit at
+        The dedicated-thread liveness writer. Started right after the RUNNING commit at
         step 0; joined after the STOPPED commit at shutdown (so a long STOPPING guard keeps beating).
     warmup_gate:
         Duck-typed warm-up gate (``async status() -> WarmupStatus`` with ``.ready``/``.blockers``) —
-        :class:`engine.ops.warmup.WarmupGate`. Consequence (FROZEN + alert) applied HERE (§2.6 step 6).
+        :class:`engine.ops.warmup.WarmupGate`. Consequence (FROZEN + alert) applied HERE (step 6).
     boot_history_path:
-        Private JSON file for crash-loop coalescing (§2.2). ``None`` disables tracking (tests /
-        Phase-0 wiring); the integrator passes ``<data_dir>/lifecycle_boots.json``.
+        Private JSON file for crash-loop coalescing. ``None`` disables tracking (tests /
+        minimal wiring); the integrator passes ``<data_dir>/lifecycle_boots.json``.
     reconcile_hook / overdue_squareoff_hook:
-        §2.6 steps 2–3 — OMS/broker-side. TODO(Phase 4, real orders): the integrator wires ReconcileJob /
+        Steps 2–3 — OMS/broker-side. TODO(live AUTO): the integrator wires ReconcileJob /
         SquareOffScheduler.run_window_squareoff; ``None`` logs the step as deferred.
     backfill_hook:
-        §2.6 step 4 — the integrator wires ``BackfillJob.warmup_gap`` + NIFTY50/VIX history fill.
+        Step 4 — the integrator wires ``BackfillJob.warmup_gap`` + NIFTY50/VIX history fill.
     rearm_schedules_hook / ticker_resume_hook:
-        §2.6 step 7 — re-arm the §10.1 schedule and resume the ticker into WARMING.
+        Step 7 — re-arm the job schedule and resume the ticker into WARMING.
     cancel_entries_hook / flatten_mis_hook / verify_cnc_protected_hook / backup_hook:
-        The §10.8 shutdown-guard seams, run in that order while STOPPING. TODO(Phase 4, real orders) for the
-        order-touching three; backup is the §10.5 watermark snapshot.
+        The shutdown-guard seams, run in that order while STOPPING. TODO(live AUTO) for the
+        order-touching three; backup is the watermark snapshot.
     """
 
     def __init__(
@@ -266,13 +266,13 @@ class SessionLifecycle:
         self._flatten_mis = flatten_mis_hook
         self._verify_cnc = verify_cnc_protected_hook
         self._backup = backup_hook
-        self._suppress_report_notify = False   # crash-loop coalescing (§2.2): silent boots stay silent
-        #: The boot self-test's skew verdict. Skew is measured at boot only (Phase 2), so a skew
-        #: freeze holds until a resync plus restart (§9.4 case 14) — the warm-up lift must not clear it.
+        self._suppress_report_notify = False   # crash-loop coalescing: silent boots stay silent
+        #: The boot self-test's skew verdict. Skew is measured at boot only (RECOMMEND mode), so a skew
+        #: freeze holds until a resync plus restart (chaos case 14) — the warm-up lift must not clear it.
         self._boot_clock_skewed = False
 
     async def _freeze(self, cause: str, detail: str) -> None:
-        """FROZEN-for-entries through the §3.5.3 cause ledger when wired (single-writer discipline —
+        """FROZEN-for-entries through the cause ledger when wired (single-writer discipline —
         2026-07-28 review: a direct write is invisible to ``clear_cause`` re-arms and to the lift
         path); the direct setter remains only for latch-less construction (older tests)."""
         if self._latch is not None:
@@ -280,9 +280,9 @@ class SessionLifecycle:
         else:
             await self._mode.set_risk_state(RiskState.FROZEN, detail, Actor.RISK_GATE)
 
-    # ------------------------------------------------------------------ startup (§2.6)
+    # ------------------------------------------------------------------ startup
     async def startup(self, *, check_skew: bool = True) -> StartupReport:
-        # 0) Process-lifecycle boot (§2.6 step 0 / §2.2): crash detection → atomic RUNNING commit →
+        # 0) Process-lifecycle boot: crash detection → atomic RUNNING commit →
         #    heartbeat thread → ENGINE_STARTED, all BEFORE the recovery body.
         #
         #    PRIMARY vs SECONDARY (2026-07-21 double-run): the real mutual exclusion is now the
@@ -330,12 +330,12 @@ class SessionLifecycle:
 
         await self._emit_boot_notification(report)
 
-        # 1) Sticky kill/mode/trade-window state is read above (R10) — log it.
+        # 1) Sticky kill/mode/trade-window state is read above — log it.
         _log.info("startup_sticky_state", mode=report.sticky_mode, risk_state=report.sticky_risk_state,
                   killed=report.killed, crash_recovered=crash_recovered,
                   off_duration_s=report.off_duration_s)
 
-        # 1b) Seed the trade window from settings on first run (§2.6); sticky thereafter.
+        # 1b) Seed the trade window from settings on first run; sticky thereafter.
         seed = TradeWindow(
             start=self._settings.trade_window.start_ist,
             end=self._settings.trade_window.end_ist,
@@ -344,14 +344,14 @@ class SessionLifecycle:
         if self._mode.seed_trade_window_if_absent(seed):
             report.notes.append("trade_window_seeded")
 
-        # 1c) Self-test (D11) — freshness/warm-up excluded here: catch-up (step 5) has not run yet,
+        # 1c) Self-test — freshness/warm-up excluded here: catch-up (step 5) has not run yet,
         #     so the lifecycle verifies data-freshness after step 5 and warm-up at step 6 instead.
         st: SelfTestReport = await self._selftest.run(check_skew=check_skew, include_freshness=False)
         report.needs_login = st.needs_login
         report.frozen_reasons = list(st.frozen_reasons)
         self._boot_clock_skewed = "clock_skew" in st.frozen_reasons
 
-        # Apply the §2.4 single integrity rule: a protected-store failure with a FLAT book ⇒ FROZEN;
+        # Apply the single integrity rule: a protected-store failure with a FLAT book ⇒ FROZEN;
         # with a LIVE book (or at runtime) ⇒ kill.
         integrity_failed = any(c.name.startswith("protected_store:") and c.status.value == "FAIL" for c in st.checks)
         report.integrity_ok = not integrity_failed
@@ -373,20 +373,20 @@ class SessionLifecycle:
         if report.frozen_reasons and not self._kill.is_killed():
             await self._freeze("startup_selftest", ",".join(report.frozen_reasons))
 
-        # 2) Reconcile vs broker = truth (R5) — TODO(Phase 4, real orders): OMS reconcile + REC_FILL_SUSPECTED.
+        # 2) Reconcile vs broker = truth — TODO(live AUTO): OMS reconcile + REC_FILL_SUSPECTED.
         await self._run_hook("reconcile", self._reconcile, report)
-        # 3) Overdue-MIS startup square-off (§2.6 step 3) — TODO(Phase 4, real orders): SquareOffScheduler.
+        # 3) Overdue-MIS startup square-off — TODO(live AUTO): SquareOffScheduler.
         await self._run_hook("overdue_mis_squareoff", self._overdue_squareoff, report)
-        # 4) Data-gap backfill incl. NIFTY50 + India VIX history (§2.6 step 4 / §7.1 regime_data_ready).
+        # 4) Data-gap backfill incl. NIFTY50 + India VIX history (risk-gate regime_data_ready).
         await self._run_hook("data_gap_backfill", self._backfill, report)
 
-        # 5) Missed-job catch-up (§2.6 step 5) — watermark-driven, by class in dependency order.
+        # 5) Missed-job catch-up — watermark-driven, by class in dependency order.
         result: CatchUpResult = await self._catch_up.catch_up(off_since=off_since)
         report.jobs_caught_up = list(result.jobs_caught_up)
         report.jobs_failed = list(result.jobs_failed)
         if result.frozen_reasons:
             # Belt-and-suspenders: the runner's own freeze seam may not be wired — the lifecycle
-            # guarantees a safety-critical catch-up failure never leaves entries open (§2.6).
+            # guarantees a safety-critical catch-up failure never leaves entries open.
             report.frozen_reasons.extend(r for r in result.frozen_reasons if r not in report.frozen_reasons)
             if not self._kill.is_killed():
                 await self._freeze("catchup_safety_jobs", ",".join(result.frozen_reasons))
@@ -399,35 +399,35 @@ class SessionLifecycle:
             # so any other standing freeze (owner_pause, floor rung, warm-up) keeps the state.
             await self._latch.clear_cause("catchup_safety_jobs", Actor.RISK_GATE)
 
-        # 6) Cold-start warm-up gate (§2.6 step 6 / §7.1 warmup_ready + regime_data_ready).
+        # 6) Cold-start warm-up gate (risk-gate warmup_ready + regime_data_ready).
         await self._apply_warmup_gate(report)
 
-        # 7) Re-arm schedules + resume the ticker into WARMING (feed-stale alarms suppressed, §3.2.12).
+        # 7) Re-arm schedules + resume the ticker into WARMING (feed-stale alarms suppressed).
         await self._run_hook("rearm_schedules", self._rearm_schedules, report)
         await self._run_hook("ticker_resume", self._ticker_resume, report)
 
-        # 7b) Alert the owner with the startup/recovery report (§2.6).
+        # 7b) Alert the owner with the startup/recovery report.
         await self._emit_report(report)
         return report
 
-    # ------------------------------------------------------------------ shutdown (§2.2/§10.8)
+    # ------------------------------------------------------------------ shutdown
     async def shutdown(self, *, owner_override: bool = False, reason: str = "owner") -> None:
-        """Clean/planned stop (§2.2/§2.6/§3.5.3): draw the planned-vs-crash line, run the shutdown
+        """Clean/planned stop: draw the planned-vs-crash line, run the shutdown
         guard, commit the clean-stop state, and emit ENGINE_STOPPED as the last act.
 
-        Ordering is load-bearing (§2.2): set ``state='STOPPING'`` FIRST (a crash while STOPPING stays
+        Ordering is load-bearing: set ``state='STOPPING'`` FIRST (a crash while STOPPING stays
         STOPPING ⇒ watchdog ``ENGINE_DOWN``, never mislabelled clean), run the guard, THEN commit
         ``state='STOPPED'`` + ``last_clean_stop_at`` (the point of no return), join the heartbeat,
         THEN best-effort send ENGINE_STOPPED — a failed send never blocks exit.
 
-        Guard semantics (§10.8): cancel + verify every working/unfilled entry order; flatten an open
+        Guard semantics: cancel + verify every working/unfilled entry order; flatten an open
         MIS before its window-end completes (or ``owner_override`` accepts the broker 15:25 backstop);
         verify every open CNC is PROTECTED (live resting GTT); snapshot a backup if due. The
-        order-touching hooks are TODO(Phase 4, real orders) — ``None`` logs the step as deferred. A guard step
+        order-touching hooks are TODO(live AUTO) — ``None`` logs the step as deferred. A guard step
         that RAISES without ``owner_override`` blocks the stop (:class:`ShutdownBlockedError`) and
-        the engine returns to RUNNING — never exit with an unprotected position (R3).
+        the engine returns to RUNNING — never exit with an unprotected position.
         """
-        self._mark_stopping()   # FIRST — draws the planned-vs-crash line (§2.2)
+        self._mark_stopping()   # FIRST — draws the planned-vs-crash line
         open_count = self._open_positions_count()
         if open_count and not owner_override:
             _log.warning("shutdown_guard_open_positions", count=open_count,
@@ -435,10 +435,10 @@ class SessionLifecycle:
                               "(§10.8); paper has no shutdown guard")
 
         guard_steps: tuple[tuple[str, Hook | None], ...] = (
-            ("cancel_entry_orders", self._cancel_entries),      # TODO(Phase 4) §10.8 (i)
-            ("flatten_open_mis", self._flatten_mis),            # TODO(Phase 4) §3.2.8 shutdown guard
-            ("verify_cnc_protected", self._verify_cnc),         # TODO(Phase 4) §10.8 (ii)
-            ("shutdown_backup", self._backup),                  # §10.5 watermark snapshot
+            ("cancel_entry_orders", self._cancel_entries),      # TODO(live AUTO)
+            ("flatten_open_mis", self._flatten_mis),            # TODO(live AUTO) shutdown guard
+            ("verify_cnc_protected", self._verify_cnc),         # TODO(live AUTO)
+            ("shutdown_backup", self._backup),                  # watermark snapshot
         )
         for name, hook in guard_steps:
             if hook is None:
@@ -451,25 +451,25 @@ class SessionLifecycle:
                 if self._alert is not None:
                     await self._alert("critical", f"shutdown guard step failed: {name}")
                 if not owner_override:
-                    self._mark_running_again()   # stop blocked — still the live instance (R3)
+                    self._mark_running_again()   # stop blocked — still the live instance
                     raise ShutdownBlockedError(
                         f"shutdown guard step {name!r} failed and no owner override was given (§10.8)"
                     ) from None
         _log.info("shutdown", owner_override=owner_override, open_positions=open_count, reason=reason)
 
-        self._mark_stopped()    # point of no return — clean stop committed (§2.2)
+        self._mark_stopped()    # point of no return — clean stop committed
         if self._heartbeat is not None:
             self._heartbeat.stop()
         await self._emit_lifecycle_stopped(reason=reason, open_positions=open_count)
 
-    # ----------------------------------------------------------------- lifecycle state (§2.2/§4.2)
+    # ----------------------------------------------------------------- lifecycle state
     def _read_prior(self) -> sqlite3.Row | None:
         return self._conn.execute(
             "SELECT state, pid, last_alive_at, started_at, last_clean_stop_at FROM engine_lifecycle WHERE id=1"
         ).fetchone()
 
     def _off_since(self, prior: sqlite3.Row | None, crash_recovered: bool) -> datetime | None:
-        """The last clean checkpoint the off-window started at (§2.6 step 4): the crash's last
+        """The last clean checkpoint the off-window started at (step 4): the crash's last
         heartbeat, or the clean stop's commit time."""
         if prior is None:
             return None
@@ -482,10 +482,10 @@ class SessionLifecycle:
             return None
 
     def _commit_running(self) -> None:
-        """§2.6 step 0: atomically mark this run RUNNING with fresh pid/started_at/last_alive_at.
+        """Step 0: atomically mark this run RUNNING with fresh pid/started_at/last_alive_at.
         The fresh ``last_alive_at`` also clears the watchdog re-arm (its debounce predicate is
         ``last_down_alert_at < last_alive_at`` — a just-booted engine can't be mistaken for the
-        outage it is recovering from, §2.2)."""
+        outage it is recovering from)."""
         now = self._clock.now().isoformat()
         pid = os.getpid()
         with transaction(self._conn):
@@ -505,7 +505,7 @@ class SessionLifecycle:
             self._conn.execute("UPDATE engine_lifecycle SET state='STOPPING' WHERE id=1")
 
     def _mark_running_again(self) -> None:
-        """A blocked stop returns to RUNNING (the process IS still the live instance, §10.8)."""
+        """A blocked stop returns to RUNNING (the process IS still the live instance)."""
         with transaction(self._conn):
             self._conn.execute("UPDATE engine_lifecycle SET state='RUNNING' WHERE id=1")
 
@@ -518,7 +518,7 @@ class SessionLifecycle:
 
     # ----------------------------------------------------------------- boot notification + crash-loop
     async def _emit_boot_notification(self, report: StartupReport) -> None:
-        """ENGINE_STARTED — or, on fast unclean respawns, the coalesced ENGINE_CRASHLOOP (§2.2)."""
+        """ENGINE_STARTED — or, on fast unclean respawns, the coalesced ENGINE_CRASHLOOP."""
         kind, restarts, window_s = self._crashloop_track(report.crash_recovered)
         report.crashloop = kind in ("crashloop", "crashloop_silent")
         if kind == "crashloop":
@@ -527,7 +527,7 @@ class SessionLifecycle:
                                     "engine_crashloop")
             return
         if kind == "crashloop_silent":
-            # Already alerted for this loop episode — one page per outage, not per respawn (§2.2).
+            # Already alerted for this loop episode — one page per outage, not per respawn.
             self._suppress_report_notify = True
             _log.warning("crashloop_boot_silenced", restarts=restarts, window_s=window_s)
             return
@@ -587,14 +587,14 @@ class SessionLifecycle:
             _log.exception("crashloop_history_write_failed")
         return (kind, n, window_s)
 
-    # ----------------------------------------------------------------- warm-up gate (§2.6 step 6)
+    # ----------------------------------------------------------------- warm-up gate (step 6)
     async def _apply_warmup_gate(self, report: StartupReport) -> None:
-        """§2.6 step 6 (startup): FREEZE-when-not-ready, per coverage class. Startup never LIFTS here
+        """Step 6 (startup): FREEZE-when-not-ready, per coverage class. Startup never LIFTS here
         — the other startup steps own their own freezes, so the composite FROZEN must stand while any
         reason holds; the reopen once coverage is met is the post-login re-trigger's job
         (:meth:`reapply_warmup_gate`).
 
-        2026-09-13 plan change, narrowed 2026-09-17 (§2.6 step-6 addenda): only the REGIME class and
+        2026-09-13 change, narrowed 2026-09-17: only the REGIME class and
         an UNATTRIBUTABLE blocker freeze entries. An INTRADAY shortfall — one symbol's minute hole
         (2026-09-16 13:36 PTCIL), a market-wide one-bar gap after a reconnect — and a DAILY one
         (2026-09-15 OLAELEC) are now logged and left to the per-candidate rules, which refuse only
@@ -620,8 +620,8 @@ class SessionLifecycle:
         # INTRADAY and/or DAILY only: no risk-state consequence and no WARMUP_FROZEN page (nothing
         # froze), but never silent — ``warmup_classes_short`` rides the OWNER's STARTUP_REPORT body
         # (see :meth:`_emit_report`), not only this log, because a session trading on incomplete
-        # coverage with `frozen: none` is exactly the silence the step-5 addendum was written
-        # against. The gate and the pre-screen refuse the SHORT SYMBOLS' candidates one by one.
+        # coverage with `frozen: none` is exactly the silence to avoid.
+        # The gate and the pre-screen refuse the SHORT SYMBOLS' candidates one by one.
         for cls in (CLASS_INTRADAY, CLASS_DAILY):
             if cls in report.warmup_classes_short:
                 report.notes.append(f"warmup_{cls}_not_ready")
@@ -632,7 +632,7 @@ class SessionLifecycle:
 
     async def _warmup_gate_status(self):
         """Query the injected warm-up gate; a raise means coverage cannot be VERIFIED ⇒ treated as
-        missing (R6-style: never trade on data you could not confirm). ``None`` ⇒ unverifiable."""
+        missing (never trade on data you could not confirm). ``None`` ⇒ unverifiable."""
         try:
             return await self._warmup_gate.status()
         except Exception:  # noqa: BLE001 - coverage that cannot be VERIFIED is treated as missing
@@ -640,8 +640,8 @@ class SessionLifecycle:
             return None
 
     async def _freeze_for_warmup(self, blockers: list[str]) -> bool:
-        """Never trade on thin data: FROZEN-for-entries via the risk-state setter + WARMUP_FROZEN alert
-        (§2.6 step 6). Shared by startup step 6 and the post-login reapply, and called ONLY when a
+        """Never trade on thin data: FROZEN-for-entries via the risk-state setter + WARMUP_FROZEN alert.
+        Shared by startup step 6 and the post-login reapply, and called ONLY when a
         freezing class (regime/unattributable) is short — the caller owns that decision. Entries
         reopen only once coverage is met (the gate is re-checked before entries open). Returns True if
         this call transitioned the state to FROZEN (it was not already)."""
@@ -660,7 +660,7 @@ class SessionLifecycle:
         return froze
 
     async def reapply_warmup_gate(self) -> WarmupReapply:
-        """Post-login re-evaluation of the §2.6 step-6 warm-up gate — the RE-TRIGGER half of the
+        """Post-login re-evaluation of the step-6 warm-up gate — the RE-TRIGGER half of the
         cold-start-family fix. Uses the SAME injected :class:`~engine.ops.warmup.WarmupGate` and the
         SAME risk-state seam as startup (never a direct bypass): FREEZE while a FREEZING class
         (regime / unattributable) is still short, and LIFT the warm-up FROZEN-for-entries once those
@@ -691,15 +691,15 @@ class SessionLifecycle:
         )
 
     async def _maybe_lift_warmup_freeze(self) -> tuple[bool, str]:
-        """Lift the warm-up FROZEN-for-entries once coverage is met — SAFELY (§2.6 step-6 reopen).
+        """Lift the warm-up FROZEN-for-entries once coverage is met — SAFELY (step-6 reopen).
 
         Conservative by construction: never overrides the kill switch, never clears a CLOSE_ONLY /
-        KILLED latch (those re-arm only on owner action, R3/R5), re-runs the CHEAP self-test
+        KILLED latch (those re-arm only on owner action), re-runs the CHEAP self-test
         preconditions (no NTP, no catch-up) so a still-standing secrets / trade-window / integrity /
         token freeze is respected, and holds while the boot measured clock skew (that check needs NTP,
         so only the boot verdict can speak for it) — the warm-up reopen must never clear a warranted
         freeze.
-        Multi-reason data-freshness arbitration is the Phase-2 gate's job (risk/mode.py: "most-
+        Multi-reason data-freshness arbitration is the risk gate's job (risk/mode.py: "most-
         restrictive-wins / latch logic is the gate's"). Returns ``(lifted, why)``."""
         if self._kill.is_killed():
             return False, "kill_held"
@@ -707,7 +707,7 @@ class SessionLifecycle:
         if state == RiskState.NORMAL:
             return False, "already_normal"
         if state != RiskState.FROZEN:
-            return False, "latched"   # CLOSE_ONLY / KILLED — owner re-arm only (R3/R5)
+            return False, "latched"   # CLOSE_ONLY / KILLED — owner re-arm only
         st = await self._selftest.run(check_skew=False, include_freshness=False)
         if st.needs_login or st.frozen_reasons or self._boot_clock_skewed:
             other = [*st.frozen_reasons, *(["clock_skew"] if self._boot_clock_skewed else [])]
@@ -741,7 +741,7 @@ class SessionLifecycle:
     async def _emit_lifecycle_stopped(self, *, reason: str, open_positions: int) -> None:
         if not self._settings.lifecycle.notify_planned_stop:
             return
-        # Best-effort: a failed send never blocks exit (§2.2 — the owner reconciles it against the
+        # Best-effort: a failed send never blocks exit (the owner reconciles it against the
         # next STARTUP_REPORT; the watchdog is deliberately silent for a clean stop).
         await self._notify_safe(
             catalog.engine_stopped(reason=reason, open_positions=open_positions), "engine_stopped"
@@ -760,7 +760,7 @@ class SessionLifecycle:
             deferred=report.deferred_steps,
         )
         if self._suppress_report_notify:
-            return   # coalesced crash-loop boot (§2.2): the single ENGINE_CRASHLOOP page stands
+            return   # coalesced crash-loop boot: the single ENGINE_CRASHLOOP page stands
         msg = catalog.startup_report(
             mode=report.sticky_mode, risk_state=report.sticky_risk_state, killed=report.killed,
             needs_login=report.needs_login, integrity_ok=report.integrity_ok,
@@ -774,7 +774,7 @@ class SessionLifecycle:
         )
         # Prefer the typed notification sink so the owner gets a clean STARTUP_REPORT; fall back to
         # the raw alert string only if no notify sink is wired (message carries its own severity).
-        # off-duration + per-job catch-up detail already reached the owner via CATCHUP_REPORT (§2.6).
+        # off-duration + per-job catch-up detail already reached the owner via CATCHUP_REPORT.
         if self._notify is not None:
             await self._notify_safe(msg, "startup_report")
         elif self._alert is not None:

@@ -1,7 +1,7 @@
-"""``scripts/validate_insider.py`` PURE daily-return-series builder (§6.4 / §2.8.4 stage 3). Synthetic
+"""``scripts/validate_insider.py`` PURE daily-return-series builder (filings-layer stage 3). Synthetic
 events + bars -> a hand-computed cost-adjusted daily portfolio series: PIT entry after the
 event-session close, T+1..T+H returns, per-side CNC legs on the entry + exit sessions,
-cross-sectional MEAN across open positions, 0 on flat days. WO-16 adds the fill convention —
+cross-sectional MEAN across open positions, 0 on flat days. It adds the fill convention —
 ``next_open`` (default, buy at open_(T+1)) vs the superseded ``close_t`` — pinned here against a
 series where the two differ. The loose script is loaded by path (the repo pattern used by
 ``test_event_study_filings.py``); no store, no network.
@@ -33,7 +33,7 @@ def _bars(closes: list[float], opens: list[float] | None = None) -> list[tuple]:
 
 def test_build_daily_return_series_cross_sectional_mean_with_legs():
     # AAA enters at d1 (close 110); BBB enters at d2 (close 220). hold=2, per-side fee 0.4%.
-    # entry_fill=close_t pins the pre-WO-16 arithmetic (every held session close-to-close).
+    # entry_fill=close_t pins the earlier arithmetic (every held session close-to-close).
     bars = {
         "AAA": _bars([100.0, 110.0, 121.0, 121.0, 121.0, 121.0]),
         "BBB": _bars([200.0, 200.0, 220.0, 231.0, 231.0, 231.0]),
@@ -68,7 +68,7 @@ def test_single_held_session_charges_both_legs():
     expected = (105.0 / 104.0 - 1.0) - 2 * 0.005                # entry+exit legs on the same session
     assert series[DAYS[5]] == pytest.approx(expected)
     assert series[DAYS[4]] == 0.0
-    # Same event under the WO-16 default: the single held session is bought at ITS OWN open (104),
+    # Same event under the next_open default: the single held session is bought at ITS OWN open (104),
     # so the d4->d5 overnight gap is not booked; both legs still land on that one session.
     series_next = vi.build_daily_return_series(
         events, bars, DAYS[0], DAYS[5], per_side_fee_pct=0.5, hold_sessions=2
@@ -86,7 +86,7 @@ def test_event_with_no_forward_bar_contributes_nothing():
     assert set(series.values()) == {0.0}
 
 
-# ====================================================== WO-16 entry fill: next_open vs close_t
+# ====================================================== entry fill: next_open vs close_t
 def test_next_open_is_the_default_and_excludes_the_entry_overnight_gap():
     """The whole move sits in the T->T+1 GAP: close_t books it, next_open (the default) cannot."""
     # Flat intraday sessions; a +10% gap between d1 (close 100) and d2 (open 110).

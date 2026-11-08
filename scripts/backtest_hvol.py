@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""hvol PRE-REGISTERED backtest harness (IMPLEMENTATION_PLAN.md ``hvol`` paragraph, 2026-10-09).
+"""hvol PRE-REGISTERED backtest harness (2026-10-09).
 
 Abnormal-volume swing drift (H-VOL, Gervais-Kaniel-Mingelgrin 2001): a stock whose daily volume is
 abnormally high against its own recent history, on a day it does NOT break out, is tested for drift
@@ -11,8 +11,8 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
 **ONE rule is registered and NO parameter sweep is run, here or before.** :data:`PRIMARY` is the
 registered rule (VR >= 3.0, not a breakout, fresh, structural-ex-date clean); every threshold below
-is a module constant copied from the paragraph, and no CLI flag changes any of them. The trial count
-cited to the §6.4 deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`).
+is a module constant copied from the pre-registration, and no CLI flag changes any of them. The trial count
+cited to the research-validation deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`).
 
 The robustness variants (:data:`VR_2`, :data:`VR_5`, :data:`BREAKOUT_INCLUSIVE`, and the primary
 cell's own T+5 / T+10 rows) are REPORTED, NEVER SELECTED: no code path picks, pools or max-picks
@@ -21,7 +21,7 @@ them, and the PROMOTION table reads the primary cell at T+20 only. The splits ar
 is not the registered study (``meta.registered_population = false``).
 
 ===============================================================================================
-CONVENTIONS (each one a choice; the plan paragraph is the spec of record)
+CONVENTIONS (each one a choice; the pre-registration is the spec of record)
 ===============================================================================================
 * **Sessions.** Every window ("sessions strictly before y", "y-50", "y+21", "T+k") is counted in
   the SYMBOL'S OWN ``bars_1d`` series, as ``backtest_hi52`` does. Two descriptive splits are
@@ -30,7 +30,7 @@ CONVENTIONS (each one a choice; the plan paragraph is the spec of record)
 * **Decision function.** :func:`signal_mask` is THE one function that decides whether (symbol, y)
   is a signal; it ANDs :func:`signal_conditions`, nothing else does. Every input to it is a bar at
   or before ``y`` EXCEPT the registered structural ex-date veto, which reads ex-dates out to
-  session ``y+21`` (the plan's own forward window - see "known optimism").
+  session ``y+21`` (the rule's own forward window - see "known optimism").
 * **Population (as-of y).** >= 60 prior sessions (``y`` index >= 60); median(close x volume) over
   the 20 sessions strictly before ``y`` >= Rs 5cr; close(y) >= Rs 10; >= 40 of the 50 baseline
   sessions with volume > 0. Traded value is rounded to paise before the median so the floor
@@ -52,7 +52,7 @@ CONVENTIONS (each one a choice; the plan paragraph is the spec of record)
   horizon (so T+5/T+10/T+20 share one event set).
 * **Costs.** One ``CostModel.breakeven_pct(notional, "CNC")`` round trip per trade (fees +
   measured spread) at ``--notional`` (default Rs 20,000 - the number every criterion reads), and
-  the same at Rs 6,000 (the §7.1 worst-book swing notional) reported beside it.
+  the same at Rs 6,000 (the risk-limits worst-book swing notional) reported beside it.
 * **Benchmark.** Per event and horizon: the equal-weight MEAN gross ``close(X)/open(E) - 1`` over
   every symbol that is as-of liquid on the signal date (the same 20-session floor, evaluated on
   that date from the symbol's own sessions strictly before it - a bar ON the signal date is not
@@ -75,7 +75,7 @@ CONVENTIONS (each one a choice; the plan paragraph is the spec of record)
   earnings = an ``earnings_calendar`` ``kind='results'`` event dated within grid sessions
   ``y-2 .. y+2`` ("unknown" when none is found and the window starts before the table's first
   results date or ends after its last); index class by CURRENT membership (NIFTY 500 and NIFTY
-  Total Market lists, sources per Amendment A1 - SURVIVORSHIP-TAINTED); as-of liquidity tercile = the event's
+  Total Market lists, sources named in the report - SURVIVORSHIP-TAINTED); as-of liquidity tercile = the event's
   liquidity against the cross-section of as-of-liquid names with a bar on ``y`` (``np.quantile``
   cuts, knowable at the close - not full-sample cuts); year; entry gap ``|open(y+1)/close(y) - 1|
   > 5%``; data-source switch = ``src(y)`` differs from the strict majority ``src`` over
@@ -94,12 +94,12 @@ KNOWN OPTIMISM (stated, not corrected)
 * Forward ex-veto: the structural veto reads ex-dates up to session y+21 (~a month AFTER the
   signal), a selection on information possibly not public at the close; a live rule could only veto
   actions already announced. It stays as registered (unadjusted stored prices make an in-window
-  split a fake -50%) and applies to the benchmark identically (Amendment A1).
+  split a fake -50%) and applies to the benchmark identically.
 
 ===============================================================================================
-AMENDMENT A1 (2026-10-09, before the full-population run)
+ETF EXCLUSION (2026-10-09, before the full-population run)
 ===============================================================================================
-* **ETFs excluded (Amendment A1, 2026-10-09).** The population is STOCKS: every symbol on NSE's ETF
+* **ETFs excluded (2026-10-09).** The population is STOCKS: every symbol on NSE's ETF
   list (``--etf-list``, default ``data/research/nse_etf_list_2026-10-09.csv``, its ``Symbol``
   column stripped and uppercased) plus any symbol matching ``(BEES|ETF|IETF)$`` is removed BEFORE
   anything is computed, so it is absent from the signal population AND from the benchmark, the
@@ -115,7 +115,7 @@ DATA ACCESS
 ===============================================================================================
 Read-only against a research snapshot through ``research_common.open_snapshot``, which REFUSES the
 live ``data/market.duckdb``; ``research_common.market_hours_refusal`` refuses 09:15-15:30 IST on
-NSE trading days. Index rows (``NIFTY 50``, ``INDIA VIX``) and ETFs (A1) are dropped from the population.
+NSE trading days. Index rows (``NIFTY 50``, ``INDIA VIX``) and ETFs are dropped from the population.
 Writes ``<out-dir>/backtest_hvol_<run date>.json`` and ``.md``. Exit codes: 0 ran; 2 refused.
 """
 
@@ -159,7 +159,7 @@ BASELINE_SESSIONS = 50              # VR baseline: median volume over y-50 .. y-
 MIN_POSITIVE_BASELINE = 40          # >= 40 of those 50 with volume > 0
 MIN_PRIOR_SESSIONS = 60
 LIQUIDITY_SESSIONS = 20             # median(close x volume) over the 20 sessions strictly before y
-LIQUIDITY_FLOOR_INR = 50_000_000.0  # Rs 5cr, the live §3.2.4 floor (frozen here, not read from settings)
+LIQUIDITY_FLOOR_INR = 50_000_000.0  # Rs 5cr, the live universe floor (frozen here, not read from settings)
 MIN_CLOSE_INR = 10.0
 BREAKOUT_SESSIONS = 20              # not a breakout: close(y) <= max(high over y-20 .. y-1)
 FRESH_SESSIONS = 20                 # no spike in y-20 .. y-1
@@ -629,7 +629,7 @@ def _parse_members(path: Path) -> set[str]:
 
 
 def load_membership(root: Path | None = None) -> tuple[set[str], set[str], dict[str, str]]:
-    """``(nifty500, total_market, sources)``. NIFTY 500 prefers the downloaded core list (A1)."""
+    """``(nifty500, total_market, sources)``. NIFTY 500 prefers the downloaded core list."""
     root = Path(root) if root is not None else repo_root()
     nifty500: set[str] | None = None
     n500_source = NIFTY500_CORE_CACHE_REL
@@ -671,7 +671,7 @@ def load_etf_list(path: Path) -> EtfList:
 
 
 def is_etf(symbol: str, etf_symbols: frozenset[str] | set[str]) -> bool:
-    """THE ETF test (Amendment A1): on NSE's ETF list, or the name ends BEES / ETF / IETF."""
+    """THE ETF test: on NSE's ETF list, or the name ends BEES / ETF / IETF."""
     sym = symbol.strip().upper()
     return sym in etf_symbols or ETF_PATTERN.search(sym) is not None
 

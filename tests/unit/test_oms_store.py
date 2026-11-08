@@ -1,4 +1,4 @@
-"""OrderStore unit tests (WO-P3-1, 2026-09-10; plan §3.5.1 persistence, §4.2 schema, R8).
+"""OrderStore unit tests (2026-09-10).
 
 The load-bearing property under test is **persist-before-side-effect**: :meth:`OrderStore.record`
 commits the new order row AND its ``order_events`` row in ONE transaction, so a caller that only acts
@@ -130,7 +130,7 @@ def test_events_are_returned_in_arrival_order(store: OrderStore) -> None:
     ]
 
 
-# ----------------------------------------------------------------- persist BEFORE side effect (R8)
+# ----------------------------------------------------------------- persist BEFORE side effect
 def test_record_is_committed_before_it_returns(store: OrderStore, conn, db_path: str) -> None:
     """A second connection sees the new state the instant ``record`` returns — the caller may act."""
     order = make_order(OrderState.SUBMITTED)
@@ -201,7 +201,7 @@ def test_terminal_order_rejects_further_records(store: OrderStore) -> None:
     filled, ev = transition(order, OrderState.FILLED, payload={"status": "COMPLETE"}, at=AT)
     store.record(order, filled, ev)
 
-    # Any later record against the persisted terminal row is refused (never re-opened, R8/§3.5.1).
+    # Any later record against the persisted terminal row is refused (never re-opened).
     ghost = filled.model_copy(update={"state": OrderState.CANCEL_PENDING})
     with pytest.raises(TerminalOrderWrite):
         store.record(filled, ghost, OrderEvent(
@@ -212,9 +212,9 @@ def test_terminal_order_rejects_further_records(store: OrderStore) -> None:
 
 
 def test_record_noop_audits_a_postback_against_a_terminal_row(store: OrderStore) -> None:
-    """§3.5.1 promises EVERY postback is recorded; ``record`` refuses terminal rows, so no-ops need
+    """EVERY postback must be recorded; ``record`` refuses terminal rows, so no-ops need
     their own door (2026-09-10 review finding: a replayed postback on a FILLED order was unrecordable
-    and the audit chain lost the frame — an unrecorded broker action is an unexplained one, R8)."""
+    and the audit chain lost the frame — an unrecorded broker action is an unexplained one)."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     store.insert(order)
     filled, ev = transition(order, OrderState.FILLED, payload={"status": "COMPLETE"}, at=AT)
@@ -248,7 +248,7 @@ def test_record_noop_works_on_a_live_row_too(store: OrderStore) -> None:
 
 def test_record_noop_refuses_an_unannotated_self_edge(store: OrderStore) -> None:
     """2026-09-10 round-3 review (major): a no-op is an event ANNOTATED with a NOOP flag, not merely
-    one whose states match — the PARTIALLY_FILLED accretion self-edge is a REAL transition (§3.2.8),
+    one whose states match — the PARTIALLY_FILLED accretion self-edge is a REAL transition,
     and routing it here would audit a clean event while the fill never reached the orders row."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     store.insert(order)
@@ -314,7 +314,7 @@ def test_by_broker_id(store: OrderStore) -> None:
 
 def test_by_broker_id_ignores_unset_broker_ids(store: OrderStore) -> None:
     store.insert(make_order(OrderState.SUBMITTED, order_id="01JA", broker_order_id=None))
-    assert store.by_broker_id(None) is None       # never correlate on a NULL broker id (A3)
+    assert store.by_broker_id(None) is None       # never correlate on a NULL broker id
 
 
 def test_open_orders_excludes_terminal_states(store: OrderStore) -> None:

@@ -1,33 +1,33 @@
 #!/usr/bin/env python
-"""§6.4 validation artifact for the PINNED ``insider_net_buy`` rule (§2.8.2 / §2.8.4 stage 3, N=1).
+"""Research-validation artifact for the PINNED ``insider_net_buy`` rule (N=1).
 
     python scripts/validate_insider.py --from 2023-08-01 --to 2026-07-01 [--symbols RELIANCE,TCS] \
         [--reports-dir data/reports]
 
 Unlike the price baselines (``scripts/backtest.py``), ``insider_net_buy`` was PRE-REGISTERED and passed
-a single-pass event study (stage-2 verdict, plan §2.8.4) — there is NO sweep, so the cited trial count
-**N = 1** and ``fold_pass_min(1) = 60%`` (§6.4 step 2). This script builds the rule's cost-adjusted
+a single-pass event study (stage-2 verdict) — there is NO sweep, so the cited trial count
+**N = 1** and ``fold_pass_min(1) = 60%``. This script builds the rule's cost-adjusted
 DAILY return series and runs it through the identical :class:`ValidationPipeline` the baselines use, so
 the promotion verdict lands in the same SQLite ``param_sets`` audit trail + md/json report.
 
-**Daily-return series (the §6.4 CPCV/walk-forward input):** equal-weight portfolio of OPEN insider
+**Daily-return series (the CPCV/walk-forward input):** equal-weight portfolio of OPEN insider
 positions. Each ``insider_net_buy`` event's ``event_session`` T is the first session at whose CLOSE
 the DISCLOSURE was public (``event_study.entry_session_index``, keyed on the exchange broadcast
 timestamp — never the transaction dates) and it holds one unit through T+20 sessions (or ``--to``,
 whichever is first). The portfolio's daily return on a session = the cross-sectional MEAN of the open
 positions' daily returns that day, **0 on no-position days** (the same convention as ``SweepRunner``
-returns, §6.4). A single CNC round trip is amortized as TWO legs — per-side fee =
+returns). A single CNC round trip is amortized as TWO legs — per-side fee =
 ``CostModel.breakeven_pct(₹20k, 'CNC') / 2`` — charged on the entry-day and exit-day returns (mirrors
 how the sweep splits its legs). ``breakeven_pct`` is the FULL friction: statutory fees **plus** the
-measured bid-ask spread (WO-2) — 0.3192% = 0.2992% + 0.0200% at ₹20k CNC, both legs, DP included.
+measured bid-ask spread — 0.3192% = 0.2992% + 0.0200% at ₹20k CNC, both legs, DP included.
 Documented approximation: the round trip is modelled at the ₹20k reference notional (not per-symbol
 size); it is subtracted at the two boundary sessions rather than spread, so the total cost drag per
 event is exactly one round trip regardless of hold length.
 
-**Entry fill (WO-16, 2026-08-14):** ``--entry-fill next_open`` (the DEFAULT) buys at ``open_(T+1)``
+**Entry fill (2026-08-14):** ``--entry-fill next_open`` (the DEFAULT) buys at ``open_(T+1)``
 — the first price reachable by an order placed after the signal was knowable at close_T — so the
 first held session earns ``close_(T+1)/open_(T+1) − 1`` and later sessions accrue close-to-close.
-``--entry-fill close_t`` reproduces the pre-WO-16 convention (buy at close_T, every held session
+``--entry-fill close_t`` reproduces the earlier convention (buy at close_T, every held session
 close-to-close), which books the T→T+1 overnight gap no post-close order can capture; it is kept
 only so the corrected run can be reported side by side with the recorded 2026-07-19 result.
 
@@ -62,10 +62,10 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 _log = get_logger("scripts.validate_insider")
 
 STRATEGY_ID = "insider"
-HOLD_SESSIONS = 20                      # §2.8.4 T+20 hold horizon (the leg's strongest net drift)
-REFERENCE_NOTIONAL = Decimal("20000")   # the §6.3/§2.8.4 CNC reference notional for the cost model
+HOLD_SESSIONS = 20                      # T+20 hold horizon (the leg's strongest net drift)
+REFERENCE_NOTIONAL = Decimal("20000")   # the CNC reference notional for the cost model
 
-#: WO-16 entry-fill conventions (see the module docstring); ``next_open`` is the corrected default.
+#: Entry-fill conventions (see the module docstring); ``next_open`` is the corrected default.
 ENTRY_FILL_NEXT_OPEN = "next_open"
 ENTRY_FILL_CLOSE_T = "close_t"
 ENTRY_FILLS = (ENTRY_FILL_NEXT_OPEN, ENTRY_FILL_CLOSE_T)
@@ -92,7 +92,7 @@ def build_daily_return_series(
 
     ``bars_by_symbol[sym]`` is that symbol's ascending ``(date, open, close)`` bars. ``event_session``
     T is the session at whose close the disclosure was public; the position is then filled per
-    ``entry_fill`` (WO-16):
+    ``entry_fill``:
 
     * ``next_open`` (default) — bought at ``open`` of the FIRST held session, so that session earns
       ``close/open − 1`` and every later held session accrues close-to-close;
@@ -127,7 +127,7 @@ def build_daily_return_series(
         ]
         if not ks:
             continue
-        # WO-16: under next_open the FIRST held session is entered at its own open, not carried in
+        # Under next_open the FIRST held session is entered at its own open, not carried in
         # from the prior close — the T→T+1 gap is unreachable by an order placed after close_T.
         if entry_fill == ENTRY_FILL_NEXT_OPEN and opens[idx + ks[0]] <= 0:
             continue                      # no usable fill price — un-actionable, skip the event
@@ -225,8 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         min_value_inr = settings.filings.insider_min_value_inr
         events, bars_by_symbol = _events_for(store, symbols, args.start, args.end, min_value_inr)
         cost_model = CostModel.from_config()
-        # FULL round-trip friction: statutory fees + the measured bid-ask spread (WO-2). The SAME
-        # number is handed to the WO-3 margin floor below, so the floor can never drift from the
+        # FULL round-trip friction: statutory fees + the measured bid-ask spread. The SAME
+        # number is handed to the margin floor below, so the floor can never drift from the
         # costs these returns were actually charged.
         round_trip_pct = float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
         fees_pct = float(cost_model.fee_breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
@@ -250,11 +250,11 @@ def main(argv: list[str] | None = None) -> int:
             params={
                 "insider_min_value_inr": float(min_value_inr),
                 "hold_sessions": float(HOLD_SESSIONS),
-                # WO-16: the fill convention is part of the candidate's identity, not a footnote —
+                # The fill convention is part of the candidate's identity, not a footnote —
                 # it lands in the report md and the param_sets audit row.
                 "entry_fill_next_open": float(args.entry_fill == ENTRY_FILL_NEXT_OPEN),
             },
-            trial_count_n=1,                          # PRE-REGISTERED rule, no sweep (§6.4: N=1)
+            trial_count_n=1,                          # PRE-REGISTERED rule, no sweep (N=1)
             sweep_stats={
                 "n_events": float(n_events),
                 "n_position_days": float(n_position_days),
@@ -262,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cost_fees_pct": fees_pct,
                 "cost_spread_pct": spread_pct,
             },
-            # WO-3 margin floor measured against the SAME friction the returns were charged.
+            # Margin floor measured against the SAME friction the returns were charged.
             cost_floor_pct=round_trip_pct,
         )
         report = pipeline.validate_sync(STRATEGY_ID, params)

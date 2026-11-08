@@ -1,4 +1,4 @@
-"""Fixtures for the replay tier (WO-P3-3, 2026-09-10).
+"""Fixtures for the replay tier (2026-09-10).
 
 The synthetic day is written ONCE per test session (``tmp_path_factory`` at session scope): it is
 ~6.8 k rows through a DuckDB ``COPY`` and every test in the module replays the SAME bytes — which is
@@ -54,10 +54,10 @@ def tie_day(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, date]:
 
 @pytest.fixture(scope="session", autouse=True)
 def _warm_duckdb(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Pay DuckDB's one-off per-process costs BEFORE any test times anything (§8.4 perf smoke).
+    """Pay DuckDB's one-off per-process costs BEFORE any test times anything.
 
     The first ``duckdb.connect`` in a process loads the extension/catalog machinery, and the first
-    ``MarketStore.open`` runs the whole §4.2 schema DDL — measured at seconds on this box, entirely
+    ``MarketStore.open`` runs the whole schema DDL — measured at seconds on this box, entirely
     once. Folding that into a perf assertion would make the bound a statement about interpreter
     start-up rather than about the replay loop, so it is burned here instead and the smoke test
     asserts the WARM number.

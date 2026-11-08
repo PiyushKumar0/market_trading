@@ -1,4 +1,4 @@
-"""Calendar horizon monitor (plan Q0.4), outbox dedupe and the new shipped settings."""
+"""Calendar horizon monitor, outbox dedupe and the new shipped settings."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""scripts/backtest_regime_filter.py (C2) + scripts/backtest_selection_filters.py (C3), plan-2026-10-06 Q5.4/Q5.5."""
+"""scripts/backtest_regime_filter.py (the regime-filter study) + scripts/backtest_selection_filters.py (the selection-filter study)."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _series(sym: str, dates: list[date], close) -> rc.bb.Series:
     return rc.bb.Series(sym, dates, c, c, c, c, np.full(len(c), 1000.0), [])
 
 
-# ----------------------------------------------------------------------------- C2 regime predicate
+# ----------------------------------------------------------------------------- regime predicate
 SAWTOOTH = [100.0 + (i % 20) for i in range(80)]   # SMA50 identical 20 sessions apart, close above it
 
 
@@ -72,7 +72,7 @@ def test_index_closes_are_point_in_time():
     assert c2.closes_through(idx, date(2026, 9, 6)) is None             # Sunday: no bar on y
 
 
-# ----------------------------------------------------------------------------- C3 filters at their boundaries
+# ----------------------------------------------------------------------------- selection filters at their boundaries
 def _bars(close, *, high=None, low=None, volume=None, atr=None, index=None) -> c3.Bars:
     c = np.asarray(close, dtype="float64")
     return c3.Bars(c, c if high is None else high, c if low is None else low,

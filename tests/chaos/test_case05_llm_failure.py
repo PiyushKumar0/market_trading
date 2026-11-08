@@ -1,11 +1,11 @@
-"""§9.4 chaos case 5 — LLM timeout / garbage output / credit (quota) exhaustion.
+"""Chaos case 5 — LLM timeout / garbage output / credit (quota) exhaustion.
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 5), "Must hold", verbatim:
+"Must hold" for case 5:
 
-    no-proposal + alert (D7); DG4 ⇒ same path; exits/square-offs unaffected (R1)
+    no-proposal + alert; DG4 ⇒ same path; exits/square-offs unaffected
 
-Composition (as ``engine.ops.main`` wires the Phase-2 decision plane, main.py:446-553 / 718-806): the
-REAL ``AgentHarness`` → REAL ``BudgetGovernor`` (pinned worked-example budget, the §5.6 ladder) → REAL
+Composition (as ``engine.ops.main`` wires the RECOMMEND-mode decision plane, main.py:446-553 / 718-806): the
+REAL ``AgentHarness`` → REAL ``BudgetGovernor`` (pinned worked-example budget, the degrade ladder) → REAL
 ``RecommendationPipeline`` + ``RecommendationBook`` + ``RiskGate`` (hash-verified ``LimitsEngine`` over
 a tmp copy of the shipped ``config/limits.yaml``) + real ``ContextAssembler`` over a tmp ``MarketStore``,
 real ``ModeManager``/``KillSwitch``/``ExposureTracker``, and a REAL ``TelegramBot`` journalling every
@@ -21,22 +21,22 @@ owner message into ``notifications`` (attached to the bus like main.py:3894; mai
 
 Clauses asserted:
 
-* **timeout ⇒ no-proposal + alert (D7)** — ``test_llm_timeout_fails_to_no_proposal_and_alerts``
-* **garbage output ⇒ no-proposal + alert; ≤ 2 schema retries, prose never salvaged (D7)** —
+* **timeout ⇒ no-proposal + alert** — ``test_llm_timeout_fails_to_no_proposal_and_alerts``
+* **garbage output ⇒ no-proposal + alert; ≤ 2 schema retries, prose never salvaged** —
   ``test_garbage_output_fails_to_no_proposal_and_alerts`` (prose / out-of-schema JSON)
 * **credit/quota exhaustion ⇒ no-proposal + alert; a billing error latches DG4, Telegram-alerted as a
   tier change ⇒ zero further SDK calls** — ``test_quota_exhaustion_fails_to_no_proposal_and_alerts``
   (SDK billing error / the subscription "session limit" result of 2026-09-03)
 * **DG4 ⇒ same path** (spend ≥ the weekly credit): tier change Telegram-alerted, every Tier-1 path
   refused with ZERO SDK calls, no proposal — ``test_dg4_takes_the_same_no_proposal_path``
-* **deterministic tiers unaffected (R1)**: mode/risk-state/kill untouched by every failure above, and
-  the §7.1 ``max_holding`` time-stop EXIT recommendation is still issued with the SDK dead AND DG4 —
+* **deterministic tiers unaffected**: mode/risk-state/kill untouched by every failure above, and
+  the ``max_holding`` time-stop EXIT recommendation is still issued with the SDK dead AND DG4 —
   ``test_deterministic_exit_unaffected_with_the_llm_dead`` (+ the tier asserts in every test)
 * control (non-vacuity): the same world with a healthy SDK DOES produce a recommendation —
   ``test_healthy_llm_control_produces_a_recommendation``
 
 Skipped: **square-offs unaffected** — ``SquareOffScheduler`` / window-end MIS square-off; MIS is out of
-paper scope (plan §1.3), so no platform position exists to square off.
+paper scope, so no platform position exists to square off.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ USAGE = {"input_tokens": 1500, "output_tokens": 300}
 # =========================================================================== the SDK boundary
 @dataclass
 class _Options:
-    """Stand-in for ``ClaudeAgentOptions``: every knob the harness probes for (§5.1/D10)."""
+    """Stand-in for ``ClaudeAgentOptions``: every knob the harness probes for."""
 
     model: str | None = None
     system_prompt: str | None = None
@@ -171,7 +171,7 @@ class _App:
 
 # =========================================================================== world
 def _passing_ctx(**overrides: Any) -> GateContext:
-    """Every §7.1 enter rule passes (the gate suite's baseline, test_reco_pipeline.passing_ctx)."""
+    """Every risk-gate enter rule passes (the gate suite's baseline, test_reco_pipeline.passing_ctx)."""
     base: dict[str, Any] = {
         "now": NOW, "mode": Mode.RECOMMEND, "risk_state": RiskState.NORMAL,
         "trade_window": TradeWindow(start=time(9, 30), end=time(15, 0), squareoff_buffer_min=5),
@@ -212,7 +212,7 @@ ENTER_JSON: dict[str, Any] = {
 
 
 class _World:
-    """One engine's Phase-2 decision plane over temp stores, wired the way main.py wires it."""
+    """One engine's RECOMMEND-mode decision plane over temp stores, wired the way main.py wires it."""
 
     def __init__(self, conn, tmp_path, sdk: _SDK, *, timeout_s: float = 45.0) -> None:
         self.conn = conn
@@ -342,7 +342,7 @@ async def test_healthy_llm_control_produces_a_recommendation(world_factory) -> N
     assert any(k == MessageKind.RECOMMENDATION.value for k, _, _ in w.owner_messages())
 
 
-# =========================================================================== D7 failure modes
+# =========================================================================== LLM failure modes
 async def test_llm_timeout_fails_to_no_proposal_and_alerts(world_factory) -> None:
     """A hung SDK call is abandoned at the agent timeout — one call, no retry, no proposal, alert."""
     w = await world_factory(_SDK([5.0, _StructuredMessage(ENTER_JSON)]), timeout_s=0.1)
@@ -390,8 +390,8 @@ async def test_garbage_output_fails_to_no_proposal_and_alerts(world_factory, gar
 async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
     world_factory, sdk_failure, reason, latches_dg4
 ) -> None:
-    """Credit/quota exhaustion is a no-retry D7 failure. A BILLING error additionally latches DG4 for
-    the quota window (§5.6: the ledger can read healthy at the moment the credit ran out), so the next
+    """Credit/quota exhaustion is a no-retry LLM failure. A BILLING error additionally latches DG4 for
+    the quota window (the ledger can read healthy at the moment the credit ran out), so the next
     candidate is refused by the governor with no SDK call at all; the transient session limit does not."""
     w = await world_factory(_SDK(sdk_failure))
 
@@ -414,9 +414,9 @@ async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
 
 
 async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
-    """DG4 by spend (window spend ≥ the weekly credit): the tier change is Telegram-alerted (R8/§5.6)
+    """DG4 by spend (window spend ≥ the weekly credit): the tier change is Telegram-alerted
     and every Tier-1 path — a queued candidate at the drain, a new arrival, a position event — resolves
-    to no proposal WITHOUT an SDK call. The governor-blocked refusal is audited (R8)."""
+    to no proposal WITHOUT an SDK call. The governor-blocked refusal is audited."""
     w = await world_factory(_SDK([_StructuredMessage(ENTER_JSON), _ResultMessage(usage=USAGE)]))
     await w.pipeline.on_signal_candidate(_candidate())    # queued BEFORE the budget runs out
 
@@ -435,7 +435,7 @@ async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
     w.assert_no_proposal()
     w.assert_deterministic_tiers_untouched()
 
-    # A position-event call under DG4 is refused before the SDK and still leaves an audit row (R8).
+    # A position-event call under DG4 is refused before the SDK and still leaves an audit row.
     ctx = ContextAssembler(w.store, w.conn, w.clock, w.calendar).for_position_event(
         {"position_id": "p1"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399")
     result = await w.harness.run_single_shot(w.harness.defs["intraday_analyst"], ctx, json.loads)
@@ -445,7 +445,7 @@ async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
 
 # =========================================================================== R1: exits unaffected
 async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, conn) -> None:
-    """R1: the §7.1 ``max_holding`` time-stop is built in Python — with the SDK raising on every call
+    """Three-tier rule: the ``max_holding`` time-stop is built in Python — with the SDK raising on every call
     AND the ladder at DG4, an aged swing position still gets its gate-approved EXIT recommendation
     delivered to the owner, and the SDK is never called."""
     w = await world_factory(_SDK([RuntimeError("claude CLI process died (exit 1)")]))
@@ -467,7 +467,7 @@ async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, co
     issued = await w.pipeline.time_exit_check(w.clock.today())
 
     assert issued == 1
-    assert w.sdk.calls == calls_before                           # exits never touch Tier 1 (R1)
+    assert w.sdk.calls == calls_before                           # exits never touch Tier 1
     rec = json.loads(conn.execute("SELECT payload FROM recommendations").fetchone()[0])
     assert rec["kind"] == "exit" and rec["qty"] == 10 and rec["instrument"] == "RELIANCE"
     proposal = json.loads(conn.execute("SELECT payload FROM proposals").fetchone()[0])

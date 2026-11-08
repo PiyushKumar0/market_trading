@@ -228,7 +228,7 @@ def test_e3_empty_is_honest(tmp_path, clock):
         res = fe.run_e3(store, cm, clock, ["AAA"], base, dates[-1], insider_min_value_inr=10_000_000)
         assert res["n_events"] == 0
         md = fe.render_e3(res)
-        assert "NO insider_net_buy crossings" in md            # honest whole-study empty (C9)
+        assert "NO insider_net_buy crossings" in md            # honest whole-study empty
     finally:
         store.close()
 
@@ -260,7 +260,7 @@ def test_e1_runs_end_to_end_honest_empty(tmp_path, clock):
         # The name promises an EMPTY run: if the fixture ever yields trades this fails loudly instead
         # of silently skipping the honest-n=0 check.
         assert res["n_trades_total"] == 0
-        assert "honest n=0" in md                              # empty cohorts reported honestly (C9)
+        assert "honest n=0" in md                              # empty cohorts reported honestly
     finally:
         store.close()
 

@@ -1,5 +1,5 @@
-"""EOD datafeeds jobs (§4.4 jobs 6–9, E5): bhavcopy UDiFF parse + bars_1d cross-check/fill,
-corp-actions purpose classification + persistence (A12), earnings-calendar kinds (R2/O13), and
+"""EOD datafeeds jobs: bhavcopy UDiFF parse + bars_1d cross-check/fill,
+corp-actions purpose classification + persistence, earnings-calendar kinds, and
 bulk/block deals → ``flagged_instrument_days`` with per-source degradation. All offline fixtures;
 every job degrades + alerts and never raises into the scheduler."""
 
@@ -43,7 +43,7 @@ BLOCK_DEALS_JSON = json.loads((FIXTURES / "block_deals.json").read_text(encoding
 
 @pytest.fixture(autouse=True)
 def _no_backoff_wait(instant_backoff):
-    """A3/A4: the feeds now fetch through nse_get, which retries transient failures with exponential
+    """The feeds now fetch through nse_get, which retries transient failures with exponential
     backoff. Collapse the sleep so the degrade-path tests (failing clients) don't actually wait — the
     retry/backoff schedule itself is asserted in test_nse_http.py."""
 
@@ -75,7 +75,7 @@ def failing_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-# =========================================================================== bhavcopy (§4.4 job 6)
+# =========================================================================== bhavcopy
 def test_parse_bhavcopy_udiff_defensive():
     bars = parse_bhavcopy_csv(BHAVCOPY_CSV, D)
     by_symbol = {b.symbol: b for b in bars}
@@ -90,7 +90,7 @@ def test_parse_bhavcopy_udiff_defensive():
 
 async def test_bhavcopy_run_unzips_fills_and_cross_checks(store, clock):
     # A pre-existing Kite-official row for RELIANCE that DISAGREES with the bhavcopy: it stays
-    # canonical (A11) — cross-checked + reported, never overwritten. TCS has no row: filled.
+    # canonical — cross-checked + reported, never overwritten. TCS has no row: filled.
     store.upsert_bars_1d(
         [
             DailyBar(
@@ -118,7 +118,7 @@ async def test_bhavcopy_run_unzips_fills_and_cross_checks(store, clock):
 async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
     msgs, sink = collect_alerts()
     job = BhavcopyJob(store, clock, failing_client(), notify=sink)
-    result = await job.run(D)                            # must not raise (E5)
+    result = await job.run(D)                            # must not raise
     assert result.ok is False and result.degraded is True
     assert msgs and msgs[0].data["job_id"] == "bhavcopy"
     assert store.get_bars_1d("RELIANCE", D, D) == []     # keeps whatever it had (here: nothing)
@@ -172,7 +172,7 @@ async def test_bhavcopy_alert_rearms_after_success(store, clock):
     assert msgs[1].data["d"] == D.isoformat()
 
 
-# =========================================================================== corp actions (job 7)
+# =========================================================================== corp actions
 def test_classify_purpose_deterministic():
     assert classify_purpose("Dividend - Rs 9 Per Share") == ("dividend", None, Decimal("9"))
     assert classify_purpose("Bonus 1:1") == ("bonus", "1:1", None)
@@ -227,7 +227,7 @@ async def test_a_feed_failure_alerts_critical(store, clock, job_cls, job_id: str
     msgs, sink = collect_alerts()
     result = await job_cls(store, clock, failing_client(), notify=sink).run(D)
     assert result.ok is False and result.degraded is True
-    # A12 (corp actions) / R2 (earnings) safety-critical set (§2.6 step 5)
+    # Corp-actions / earnings safety-critical set
     assert msgs and msgs[0].severity == "critical"
     assert msgs[0].data["job_id"] == job_id
     assert url.startswith("https://www.nseindia.com/")
@@ -261,7 +261,7 @@ async def test_corp_actions_run_requests_windowed_url(store, clock):
     assert "to_date=22-07-2026" in captured["url"]          # D + 35
 
 
-# =========================================================================== earnings (job 8)
+# =========================================================================== earnings
 def test_classify_event_results_vs_board_meeting():
     assert classify_event("Financial Results") == KIND_RESULTS
     assert classify_event("To consider and approve the financial results") == KIND_RESULTS
@@ -288,10 +288,10 @@ async def test_earnings_run_persists_and_reads_back(store, clock):
         ("TCS", KIND_RESULTS), ("RELIANCE", KIND_RESULTS), ("INFY", KIND_BOARD_MEETING),
     }
     tcs = store.get_earnings_calendar(date(2026, 7, 9), date(2026, 7, 9), symbol="TCS")
-    assert len(tcs) == 1                                 # the R2 per-instrument gate-time lookup
+    assert len(tcs) == 1                                 # the per-instrument gate-time lookup
 
 
-# =========================================================================== deals (job 9)
+# =========================================================================== deals
 def test_parse_deals_historical_or_live_shape():
     """The post-migration (2026-08-18) ``historicalOR/bulk-block-short-deals`` response, verbatim
     rows from the live probe that found the new route — pins that the alias tables really do cover

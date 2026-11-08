@@ -1,14 +1,14 @@
-"""ContextAssembler (§3.2.6 / §5.2–§5.4): cache discipline, determinism, and fail-to-zero rendering.
+"""ContextAssembler: cache discipline, determinism, and fail-to-zero rendering.
 
 The load-bearing properties, in order of how expensive they are to get wrong:
 
-1. **Byte-stability (D8).** The same inputs produce the same digest; changing only VOLATILE inputs
+1. **Byte-stability.** The same inputs produce the same digest; changing only VOLATILE inputs
    leaves the system prompt and the stable block byte-identical, so the cacheable prefix survives.
-2. **Digest sensitivity (R8).** Any block change moves the digest — it is what a decision is replayed
+2. **Digest sensitivity.** Any block change moves the digest — it is what a decision is replayed
    against.
-3. **Fail to zero (D7).** A missing feature snapshot, no bars, no day plan and an un-run sentiment
+3. **Fail to zero.** A missing feature snapshot, no bars, no day plan and an un-run sentiment
    digest all render as explicit "unavailable" text instead of raising.
-4. **Per-trigger output restrictions (§5.2).** Position-event contexts say in the prompt what the
+4. **Per-trigger output restrictions.** Position-event contexts say in the prompt what the
    caller enforces structurally.
 """
 
@@ -213,7 +213,7 @@ UP_LINE = (
 EW_LINE = "; core equal-weight return over the 20 sessions through 2026-06-16: -3.42%"
 
 
-# --------------------------------------------------------------------------- byte-stability (D8)
+# --------------------------------------------------------------------------- byte-stability
 def test_same_inputs_produce_the_same_digest(assembler, store, conn):
     seed_bars(store)
     seed_features(store)
@@ -231,8 +231,8 @@ def test_same_inputs_produce_the_same_digest(assembler, store, conn):
 
 
 def test_volatile_change_leaves_the_cacheable_prefix_identical(assembler, store, conn):
-    """D8: only the tail may move. A stable block that drifts with the candidate is a cache miss
-    on every call, which is the whole cost model of §11 for the intraday analyst."""
+    """Only the tail may move. A stable block that drifts with the candidate is a cache miss
+    on every call, which is the whole cost model for the intraday analyst."""
     seed_bars(store)
     seed_day_plan(conn)
 
@@ -285,7 +285,7 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
 
 
 def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
-    """WO-6 hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
+    """Hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
     STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
     seed_day_plan(conn, '{"regime": "trending up", "no_trade_today": false}')
     ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
@@ -299,7 +299,7 @@ def test_stable_block_gains_no_bytes_from_wo6(assembler, store, conn):
     assert "ago" not in ctx.stable_block               # the age lines live in volatile, never here
 
 
-# --------------------------------------------------------------------------- the regime line (T6)
+# --------------------------------------------------------------------------- the regime line
 @pytest.mark.parametrize(
     ("closes", "end", "rets", "expected", "warnings"),
     [
@@ -399,13 +399,13 @@ def test_signal_volatile_block_carries_every_pinned_input(assembler, store, conn
     v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
 
     assert '"signal_id":"sig-1"' in v
-    assert '"entry":"1400.00"' in v                       # Decimal levels as STRINGS (§8.1)
+    assert '"entry":"1400.00"' in v                       # Decimal levels as STRINGS
     assert '"features_snapshot_id":"fs-1"' in v
     assert "max_qty_by_risk: 14" in v
     assert "cost and breakeven: notional 19600" in v
     assert "sector exposure: Energy 12% of 25% cap" in v
     assert "equity: 500000.00" in v
-    # WO-6 (ii): an assembly-time as-of stamp (Clock) on a block that has none of its own.
+    # An assembly-time as-of stamp (Clock) on a block that has none of its own.
     assert "positions: 1 open: TCS 5 @ 3900 (MIS) (as of 10:05)" in v
 
 
@@ -429,15 +429,15 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     assert '"event_type":"order_win"' in v
     assert '"materiality":0.72' in v
     assert "confirm_trigger" not in v and "invalidation" not in v   # retired v1 levels stay out of prompts
-    # WO-6 (ii): the catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
+    # The catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
     # seed_catalyst) — the only genuinely-timestamped input this block has.
     assert "catalyst (sentiment as of 08:35):" in v
 
 
-# --------------------------------------------------------------------------- WO-6: session + staleness
+# --------------------------------------------------------------------------- session + staleness
 def test_session_aggregates_line(assembler, store):
-    """WO-6 (i): day H/L, %-from-open, %-from-VWAP (typical-price VWAP, matching features.py's
-    ``vwap_dist`` formula §4.3), session elapsed minutes. Hand-computable fixture: 3 round-number bars.
+    """Day H/L, %-from-open, %-from-VWAP (typical-price VWAP, matching features.py's
+    ``vwap_dist`` formula), session elapsed minutes. Hand-computable fixture: 3 round-number bars.
 
     day H = max(110,120,130) = 130; day L = min(90,95,100) = 90; open = bars[0].open = 100; last
     close = bars[-1].close = 120 -> from_open = 120/100-1 = +20.00%. VWAP (typical price (H+L+C)/3,
@@ -460,7 +460,7 @@ def test_session_aggregates_line(assembler, store):
 
 
 def test_day_plan_age_line_in_volatile(assembler, store, conn):
-    """WO-6 (iii): explicit day-plan age line, VOLATILE only (STABLE stays byte-identical — see
+    """Explicit day-plan age line, VOLATILE only (STABLE stays byte-identical — see
     ``test_stable_block_gains_no_bytes_from_wo6``). 90 minutes authored-to-now = a clean 1.5h with no
     banker's-rounding ambiguity (unlike the fixture default 08:50, which is 75min -> 1.25h)."""
     seed_bars(store)
@@ -506,8 +506,8 @@ def test_position_event_context_names_the_closed_exit_codes(assembler):
     """2026-09-03 to 09-10: 47 of 47 position-event exits failed validation on the first attempt
     because the five contract codes appeared in NO prompt — the only place the model ever saw them
     was the pydantic error the harness echoes on retry. They are named in the VOLATILE block: this
-    is per-call context for the one trigger that can exit, and the system prompt stays byte-stable
-    (D8). The list is derived from the contract, so it cannot drift from what the parser accepts."""
+    is per-call context for the one trigger that can exit, and the system prompt stays byte-stable.
+    The list is derived from the contract, so it cannot drift from what the parser accepts."""
     ctx = assembler.for_position_event(
         {"position_id": "pos-9"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
     )
@@ -526,7 +526,7 @@ def test_exit_codes_are_named_only_where_an_exit_is_legal(assembler, store):
     assert "exit_reason" not in assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
 
 
-# --------------------------------------------------------------------------- planner (§5.3)
+# --------------------------------------------------------------------------- planner
 def test_planner_context_uses_the_preopen_prompt_and_carries_its_inputs(assembler):
     ctx = assembler.for_planner(
         TODAY,
@@ -551,7 +551,7 @@ def test_planner_context_uses_the_preopen_prompt_and_carries_its_inputs(assemble
     assert "binding levels are the scanner's" in ctx.volatile_block
 
 
-# --------------------------------------------------------------------------- news batch (§5.4)
+# --------------------------------------------------------------------------- news batch
 def _clusters(n: int) -> list[dict]:
     return [
         {
@@ -572,7 +572,7 @@ def test_news_batch_renders_numbered_clusters_and_the_theme_vocabulary(assembler
     assert "1. cluster_id=c0 | first seen 2026-06-17 | 2 source domain(s)" in ctx.volatile_block
     assert "   headline: Headline number 2" in ctx.volatile_block
     assert "  - ev_mobility" in ctx.volatile_block
-    # No date in the stable prefix: this agent runs across the pre-open boundary (D8).
+    # No date in the stable prefix: this agent runs across the pre-open boundary.
     assert "2026" not in ctx.stable_block
 
 
@@ -681,15 +681,15 @@ def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(as
 #: the daily-tail change. The fixture seeds daily bars deliberately: an intraday candidate must not
 #: render them even when they are sitting right there in the store.
 #:
-#: WO-20a (2026-08-20) added exactly ONE block to this pin — the two-line ``orb`` strategy contract,
+#: The 2026-08-20 change added exactly ONE block to this pin — the two-line ``orb`` strategy contract,
 #: immediately after the candidate line. Nothing else about the intraday rendering moved: the
 #: rel_volume legend needs a ``rel_volume`` key this fixture does not carry, and the saturation label
 #: needs a railed sentiment value this fixture does not carry either.
 #:
-#: WO-21 (2026-08-21) left it byte-identical for the same reason — the legend now names
+#: The rel_volume_tod change (2026-08-21) left it byte-identical for the same reason — the legend now names
 #: ``rel_volume_tod`` too, but this fixture's features carry neither key, so it renders nothing.
 #:
-#: T6 (2026-10-29) removed the trailing regime-note-age line with the heartbeat.
+#: The 2026-10-29 change removed the trailing regime-note-age line with the heartbeat.
 INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
 strategy contract (orb):
@@ -772,9 +772,9 @@ def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
     assert est_tokens < 400            # worst case; a watched swing candidate pays only the tail
 
 
-# ============================================ WO-20 (2026-08-20): the contract frame + input honesty
+# ============================================ 2026-08-20: the contract frame + input honesty
 # The funnel autopsy: 63/63 analyst evaluations ended no_action, zero proposals ever created, the
-# §7.1 gate never invoked. Two inputs lied (rel_volume's denominator, sentiment_agg's rail) and one
+# risk gate never invoked. Two inputs lied (rel_volume's denominator, sentiment_agg's rail) and one
 # intraday rubric was applied to seven strategies. These tests pin the render-time half of the fix.
 
 INS_CANDIDATE = SignalCandidate(
@@ -878,11 +878,11 @@ def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler,
     assert records and records[0].strategy_id == "newleg"
 
 
-# ------------------------------------------------------------------ WO-20c (E2): the sentiment rail
+# ------------------------------------------------------------------ the sentiment rail
 def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
     """``sentiment_agg`` is a CLIPPED SUM: a handful of same-direction headlines reaches ±1.0. The
     analyst read the rail as "the floor of the scale" in 46 of 63 declines, so the semantics are
-    stated where the number is. A row with NO WO-21 measures keeps this prose verbatim."""
+    stated where the number is. A row with NO saturation measures keeps this prose verbatim."""
     line = assembler._sentiment_line("symbol RELIANCE", {"value": -1.0})
 
     assert "SATURATED" in line
@@ -896,7 +896,7 @@ def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
 
 def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
     """The label is for the RAIL only: a normal reading must not grow an explanation it does not
-    need (D8 — every extra byte here is on the volatile path of every call). Measures present or
+    need (every extra byte here is on the volatile path of every call). Measures present or
     absent makes no difference off the rail."""
     assert assembler._sentiment_line("market", {"value": 0.5}) == "  sentiment market: +0.500"
     assert assembler._sentiment_line("market", {"value": -0.998}) == "  sentiment market: -0.998"
@@ -907,7 +907,7 @@ def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
     assert assembler._sentiment_line("market", measured) == "  sentiment market: +0.500"
 
 
-# ------------------------------------------------------- WO-21 (2026-08-21): the measured rail
+# ------------------------------------------------------- 2026-08-21: the measured rail
 def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
     """With the digest's own ``raw_sum``/``n_clusters``, the rail stops being an annotation and
     becomes a reading: how far past the clip the flow ran, and over how many clusters."""
@@ -919,7 +919,7 @@ def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
         "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters, "
         "mean -0.257 per cluster — read as net negative headline flow, not extremity)"
     )
-    assert "SATURATED:" not in line          # the measurement REPLACES the WO-20 prose
+    assert "SATURATED:" not in line          # the measurement REPLACES the saturated-label prose
 
     positive = assembler._sentiment_line(
         "symbol RELIANCE", {"value": 1.0, "raw_sum": 1.0004, "n_clusters": 1}
@@ -957,7 +957,7 @@ def test_the_catalyst_block_renders_the_measured_rail_end_to_end(assembler, stor
     assert "  sentiment market: -1.000 (clipped SUM saturated: raw -2.31 across 9 clusters" in text
 
 
-# --------------------------------------------------------- WO-20c (E1): the rel_volume denominator
+# --------------------------------------------------------- the rel_volume denominator
 def test_rel_volume_carries_its_full_day_denominator(assembler, store):
     """cumulative session volume ÷ 20d median FULL-DAY volume, NOT time-adjusted — so 0.03 at 09:20
     is an ordinary tape, not a dead one. Phantom thinness was cited in 44 of the 63 declines."""
@@ -973,7 +973,7 @@ def test_rel_volume_carries_its_full_day_denominator(assembler, store):
     assert "  note: rel_volume = cumulative session volume / 20d median FULL-DAY volume" in v
 
 
-# ------------------------------------------------- WO-21: the corrected number ships beside it
+# ------------------------------------------------- the corrected number ships beside it
 def test_both_relative_volume_keys_are_explained(assembler, store):
     """``rel_volume_tod`` is the pace number (1.0 = typical for this time of day) and ``rel_volume``
     is the legacy full-day ratio. Two ratios named alike on one page ⇒ the legend names BOTH

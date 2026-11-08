@@ -1,4 +1,4 @@
-"""Plan Q4.12: one replayed day drives proposal -> paper gate -> OMS -> fill -> GTT -> exit through the
+"""One replayed day drives proposal -> paper gate -> OMS -> fill -> GTT -> exit through the
 composition root's own factory (``ops.main._compose_paper``), beside the real recommendation path.
 
 Prints reach the paper bridge through its synchronous entry points (``PaperRuntime.on_tick``/``on_bar``,
@@ -192,9 +192,9 @@ _R3_SQL = (
 
 
 class R3:
-    """Plan Q4.5's property, judged on every forwarded print from a paper entry's first broker fill until
+    """The property, judged on every forwarded print from a paper entry's first broker fill until
     its position closes: the position has an ACTIVE GTT for its qty, or is PENDING_EXIT with a working
-    exit, or is PROTECTION_FAILED with its PAPER_ALERT sent, or (D14) is a time-only position with its
+    exit, or is PROTECTION_FAILED with its PAPER_ALERT sent, or (paper no-stop test) is a time-only position with its
     exit session set. A lapse must heal within R3_TICKS prints."""
 
     def __init__(self, conn: Any, alerts: Notes) -> None:

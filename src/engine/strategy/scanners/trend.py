@@ -1,27 +1,26 @@
-"""§6.1 ``trend`` — 20/50 EMA cross with ADX filter (position, CNC, long-only).
+"""``trend`` — 20/50 EMA cross with ADX filter (position, CNC, long-only).
 
-PINNED rule sketch (§6.1 row 3): 20/50 EMA cross with ADX > ``adx_min``; trail =
-``trail_atr_mult × ATR(14, 1d)``; max hold 120 td (the §7.1 ``max_holding`` position cap —
+PINNED rule sketch: 20/50 EMA cross with ADX > ``adx_min``; trail =
+``trail_atr_mult × ATR(14, 1d)``; max hold 120 td (the ``max_holding`` position cap —
 gate-enforced, not a scanner output).
 
 Documented choices where the sketch is silent:
 
 * **Cross = golden cross only** (EMA20 crossing ABOVE EMA50): ``ema20[t−1] ≤ ema50[t−1]`` and
-  ``ema20[t] > ema50[t]``. The bearish cross would be a CNC short — not tradeable (C5/§1.4.9), so
+  ``ema20[t] > ema50[t]``. The bearish cross would be a CNC short — not tradeable, so
   it is not emitted. Long-only, like every CNC baseline at introduction.
 * **EMA series = completed daily closes + today's provisional close** (the scanned 1m bar's close),
   so the cross is actionable the day it forms; ``t−1`` is the same series without the provisional
   point. ADX(14) and ATR(14, 1d) are computed on COMPLETED daily bars only — today's daily
   high/low/close do not exist intraday (a 1m bar is not a day bar); the trigger's trend-strength and
   trail distance come from finished sessions.
-* **Warm-up**: ≥ 150 completed dailies required (WO-11, 2026-08-13 — raised from a 60-bar floor,
-  audit finding F10). EMA is seeded deterministically from the series start (see ``indicators``
+* **Warm-up**: ≥ 150 completed dailies required (2026-08-13 — raised from a 60-bar floor). EMA is seeded deterministically from the series start (see ``indicators``
   module contract), so the seed's own contribution after ``n`` bars decays as
   ``(1 − alpha)**n`` with ``alpha = 2 / (period + 1)``; for EMA(50) (``alpha = 2/51``) that residual
   seed weight is **9.07% at 60 bars** — still material — versus **0.25% at 150 bars**, the
   sub-1%-residual convergence point this floor targets (the derivation this docstring states is the
-  one WO-11's acceptance bar cites). ADX(14) itself only needs 28 rows — EMA50's seed is the binding
-  constraint, not ADX. ``warmup_ready``/§2.6 backfill supplies 1–2 y of dailies for established
+  one this floor's acceptance bar cites). ADX(14) itself only needs 28 rows — EMA50's seed is the binding
+  constraint, not ADX. ``warmup_ready``/startup backfill supplies 1–2 y of dailies for established
   listings, so the raise costs nothing there; it only holds back young listings, closing the gap
   where WarmupGate's young-listing exemption previously let a 60–150-session listing through with a
   live golden-cross carrying material EMA-seed noise (fewer trend signals on young names — intended).
@@ -39,11 +38,11 @@ from engine.strategy.indicators import ema, wilder_adx, wilder_atr
 from engine.strategy.scanners.base import Scanner, register
 from engine.strategy.types import ScanContext, SignalCandidate, round_to_tick
 
-_EMA_FAST = 20         # §6.1: 20/50 EMA cross
+_EMA_FAST = 20         # 20/50 EMA cross
 _EMA_SLOW = 50
-_ATR_PERIOD = 14       # §6.1: ATR(14, 1d)
+_ATR_PERIOD = 14       # ATR(14, 1d)
 _ADX_PERIOD = 14
-_MIN_DAILIES = 150     # warm-up floor (WO-11, F10): EMA(50) seed residual weight (1 - 2/51)^n is
+_MIN_DAILIES = 150     # warm-up floor: EMA(50) seed residual weight (1 - 2/51)^n is
                         # 9.07% at 60 bars vs 0.25% at 150 — see module docstring "Warm-up" bullet
 _ADX_SCORE_CEIL = 50.0
 
@@ -53,7 +52,7 @@ class TrendScanner(Scanner):
     strategy_id = "trend"
     style = "position"
 
-    DEFAULT_PARAMS = {           # §6.3 envelope defaults
+    DEFAULT_PARAMS = {           # parameter-envelope defaults
         "adx_min": 20,
         "trail_atr_mult": 2.5,
     }
@@ -91,7 +90,7 @@ class TrendScanner(Scanner):
                 side="BUY",
                 entry=entry,
                 stop=stop,
-                target=None,     # trail-managed; no fixed target in the §6.1 sketch
+                target=None,     # trail-managed; no fixed target in the rule sketch
                 score=(adx - p["adx_min"]) / denom,
             )
         ]

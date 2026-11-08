@@ -1,4 +1,4 @@
-"""Research trial ledger and the multiplicity-aware registration bar (review §9 #8).
+"""Research trial ledger and the multiplicity-aware registration bar.
 
 ``fold_pass_min`` deflates by one sweep's grid size; the ledger (``config/research_trials.yaml``) counts every
 hypothesis a family has tested. A new ``expected_edge_pct``, or a promotion out of shadow, cites a ledger entry,

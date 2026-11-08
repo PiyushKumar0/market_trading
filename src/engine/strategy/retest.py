@@ -1,7 +1,7 @@
-"""``brk20`` RETEST re-arm — the broken level RESTS for N trading sessions (WO-R, 2026-09-12).
+"""``brk20`` RETEST re-arm — the broken level RESTS for N trading sessions (2026-09-12).
 
 WHAT THIS IMPLEMENTS, AND WHAT SELECTED IT. The 2026-09-12 pre-registered ``brk20`` entry-mechanism
-backtest (plan §8.6, ``scripts/backtest_brk20.py``) compared three entry variants on one signal
+backtest (``scripts/backtest_brk20.py``) compared three entry variants on one signal
 population and its DECISION RULE — fixed before the run — returned ``V2_limit_at_H20_N5``: a limit
 resting at the candidate's own ``raw_levels.entry`` (``round_to_tick(H20)``) for up to FIVE sessions,
 filled on the first session whose low reaches the level. That variant was the only one
@@ -12,7 +12,7 @@ The rule as SHIPPED does not implement it. ``brk20`` publishes the level exactly
 session after the crossing, under the pre-screen's same-day ``(symbol, strategy)`` dedupe — the N=1
 variant, which was not among the registered variants, has no measured return, and whose fill rate reads 31.4%
 off the registered delay histogram against V2-5's 59.1%. The live cost of that gap is measured: of 15
-``brk20`` proposals on 2026-09-11, SIX died on the §7.1 ``entry_sanity_band`` with the level already
+``brk20`` proposals on 2026-09-11, SIX died on the ``entry_sanity_band`` with the level already
 >2% below LTP at sweep time, the band being the SOLE reject cause for three of them — and those three
 are the day's top three ``brk20`` scores, because the score is monotone in breakout margin and a wide
 margin is precisely what puts the rested level far below the live price.
@@ -21,7 +21,7 @@ So: every ADMITTED ``brk20`` candidate's level is journalled here on its publica
 ``signal_d`` (y+1, the session after the crossing y) and stays DUE for the next N−1 trading sessions,
 so the level is offered on y+1..y+N. On each re-offer session, while the market is open and inside
 the owner trade window, the level is re-offered for judgement on the FIRST minute the live price is
-back inside the §7.1 ``entry_sanity_band`` — the same band, read from the same hash-verified limits
+back inside the ``entry_sanity_band`` — the same band, read from the same hash-verified limits
 table, that rejects it when it is not.
 
 WHAT IT DOES NOT DO, stated because the temptation runs the other way:
@@ -33,20 +33,20 @@ WHAT IT DOES NOT DO, stated because the temptation runs the other way:
   is a NARROWING: a level outside the band is not offered at all. Nothing in this module can make a
   candidate the gate would reject acceptable.
 * **No new admission capacity.** Every re-publication goes through the SAME ``prescreen.admit`` —
-  the §3.2.5 day cap, the per-strategy cap and the same-day dedupe all bind identically. A retest
+  the prescreen day cap, the per-strategy cap and the same-day dedupe all bind identically. A retest
   competes for the same scarce analyst slot as a fresh candidate and wins nothing by being one.
-* **No expectancy claim.** ``brk20`` remains exploratory (§6.1). The backtest chose a MECHANISM
+* **No expectancy claim.** ``brk20`` remains exploratory. The backtest chose a MECHANISM
   between two mechanisms; it promoted no rule, and the population it chose on is the same
   survivorship-tainted eligible-universe proxy the ``hi52`` study carries.
 * **No wider population and no stale trigger.** A re-offer is refused for any symbol the caller's
-  ``skip_fn`` names (see :meth:`due`) and for any level whose live price is older than the §7.1
+  ``skip_fn`` names (see :meth:`due`) and for any level whose live price is older than the
   ``stale_data_guard.max_tick_age_s`` the gate will judge it by. Both are NARROWINGS on top of the
   band, and both fail to zero.
 
 THE TRIGGER IS A FRESH PRICE, NOT MERELY A PRICE. ``ltp_fn`` is the engine's tick cache, which has
 no upper bound on age — a symbol that last printed at 11:02 still reads 11:02's price at 14:00 and
-``mark_price`` will not say so. Everywhere else in the platform an unaged LTP only DEFERS (the D1 (e)
-band screen) or fails closed at the gate; here it would be the thing that SPENDS a §3.2.5 day slot,
+``mark_price`` will not say so. Everywhere else in the platform an unaged LTP only DEFERS (the
+band screen) or fails closed at the gate; here it would be the thing that SPENDS a prescreen day slot,
 so :meth:`due` takes the age seam (``main.tick_age_s``) beside the price and applies the gate's own
 ``max_tick_age_s``. The population this matters most for is the one :meth:`resting_symbols` exists to
 reach: sub-cap eligible names that can go minutes between prints.
@@ -58,7 +58,7 @@ would reject it as ``already held or pending`` — a HARD reason no shrink can c
 already spent a day slot and one of the day's analyst calls. The caller owns that verdict (it owns
 the positions and recommendations tables); this module owns only the refusal.
 
-INTERACTION WITH THE D1 (e) BAND SCREEN (``pipeline.BAND_SKIP_STRATEGIES``). That screen defers a
+INTERACTION WITH THE BAND SCREEN (``pipeline.BAND_SKIP_STRATEGIES``). That screen defers a
 queued ``brk20`` candidate WITHIN a day while its level sits outside the band, and the two mechanisms
 are complements, not duplicates: the screen can only defer a candidate that is still in today's
 forward queue, and the queue empties at its TTL, so a level that walks away in the morning and comes
@@ -72,11 +72,11 @@ inside the session (a warm-up freeze, a token refresh, a deploy), and a multi-se
 state does not survive a restart silently degenerates into the single-session one it was built to
 replace.
 
-FAIL TO ZERO (§3.2.5 / D7). Nothing here raises. A journal read that fails, a row that will not
+FAIL TO ZERO. Nothing here raises. A journal read that fails, a row that will not
 parse, an ``ltp_fn`` that throws, a ``skip_fn`` that cannot be evaluated, a calendar past its
 verified horizon — each costs at most its own row (the screen, the whole tick) and never the drain
 tick it is called from. The worst outcome of a failure in this module is that
-a level is not re-offered today, which is exactly the pre-WO-R behaviour.
+a level is not re-offered today, which is exactly the behaviour before this re-arm existed.
 """
 
 from __future__ import annotations
@@ -248,7 +248,7 @@ class RestingLevelBook:
 
         THE MECHANISM DEPENDS ON THIS. :meth:`due` bands the level against a LIVE price, and the
         engine's only price source is the tick cache: ``brk20`` originates over the whole ELIGIBLE
-        set (NIFTY Total Market since O18, 2026-10-08) while the feed carries the included watchlist (~300), and the sweep's
+        set (NIFTY Total Market since owner decision 2026-10-08) while the feed carries the included watchlist (~300), and the sweep's
         ``_batch_ticks`` subscription ROLLS AT MIDNIGHT (yesterday's admissions are not today's
         universe). So on retest day 2..5 a level on a sub-cap symbol would read ``ltp is None`` and
         never be offered again — silently dead for exactly the population ``brk20`` exists to catch,
@@ -267,7 +267,7 @@ class RestingLevelBook:
                 "WHERE status = ? AND signal_d < ? AND expires_d >= ? ORDER BY symbol ASC",
                 (STATUS_RESTING, today.isoformat(), today.isoformat()),
             ).fetchall()
-        except Exception as exc:  # noqa: BLE001 - a feed hint is never worth a sweep (D7)
+        except Exception as exc:  # noqa: BLE001 - a feed hint is never worth a sweep
             _log.warning("brk20_retest_symbols_failed", d=today.isoformat(), error=str(exc))
             return []
         return [str(r["symbol"]) for r in rows]
@@ -290,14 +290,14 @@ class RestingLevelBook:
         INCLUSIVE at the far end, so a 5-session window offers ``signal_d`` plus four re-offer
         sessions (y+2..y+5).
 
-        Band: ``abs(entry - ltp) / ltp * 100 <= band_pct``, the §7.1 ``entry_sanity_band`` formula
+        Band: ``abs(entry - ltp) / ltp * 100 <= band_pct``, the ``entry_sanity_band`` formula
         and its ``<=`` edge verbatim (equality passes, as in the gate). ``ltp_fn`` returning None —
         no tick for the symbol — or a non-positive price publishes NOTHING: an unpriceable symbol is
-        the one case where the band cannot be evaluated, and the D7 direction for a mechanism that
+        the one case where the band cannot be evaluated, and the fail-to-zero direction for a mechanism that
         SPENDS a scarce analyst slot is to stay silent, not to guess.
 
         Freshness: with ``tick_age_fn`` and ``max_tick_age_s`` supplied (the engine passes
-        ``main.tick_age_s`` and the §7.1 ``stale_data_guard.max_tick_age_s``), a level whose live
+        ``main.tick_age_s`` and the ``stale_data_guard.max_tick_age_s``), a level whose live
         price has no age or is OLDER than that bound is not offered. The tick cache is unbounded in
         age and ``ltp_fn`` cannot say so, so without this the trigger can be a price from hours ago
         — while the gate that judges the resulting proposal rejects anything past the same bound.
@@ -308,7 +308,7 @@ class RestingLevelBook:
         re-offered at all — the engine names symbols already HELD or carrying a PENDING entry
         recommendation (``gate._rule_per_stock_exposure`` rejects those as ``already held or
         pending``, a HARD reason, only after the slot and the analyst call are spent), symbols with
-        an ex-date inside brk20's own A12 horizon (the stored level is a pre-ex price the tape no
+        an ex-date inside brk20's own ex-date-skip horizon (the stored level is a pre-ex price the tape no
         longer quotes), and symbols that have left the eligible universe since the crossing. A
         ``skip_fn`` that RAISES offers nothing this tick: the screen is a narrowing, and a narrowing
         that cannot be evaluated fails to zero like the band.
@@ -329,7 +329,7 @@ class RestingLevelBook:
         session inside the window; the level has not stopped being a level. What bounds it is
         per-day: the pre-screen's same-day ``(symbol, strategy)`` dedupe bounds PUBLICATION to once a
         day, and this book bounds the OFFER to once a day so the minute cadence cannot inflate the
-        WO-9 raw counters — ``prescreen.admit`` counts every candidate handed to it as raw, and 375
+        raw counters — ``prescreen.admit`` counts every candidate handed to it as raw, and 375
         ticks a day against one resting row would make the ``brk20`` funnel unreadable. The bound is
         spent on an OFFER, never on a look: a level out of band at 09:20 and back inside it at 14:00
         is the case this mechanism exists for.
@@ -340,7 +340,7 @@ class RestingLevelBook:
         same batch or an hour later — can only ever be suppressed, at the cost of a raw count and a
         suppression line. So one symbol yields at most ONE candidate per DAY, the strongest breakout
         margin (the ``score`` desc, ``symbol`` asc order the ``brk20`` sweep itself publishes in,
-        §9.6 deterministic); the other row is left un-offered, still there tomorrow.
+        deterministic); the other row is left un-offered, still there tomorrow.
 
         That bound is process memory rather than a column, deliberately. It is a TELEMETRY bound, not
         a correctness one: losing it in a restart costs one extra offer that day (deduped by the
@@ -362,7 +362,7 @@ class RestingLevelBook:
                 "ORDER BY score DESC, symbol ASC",
                 (STATUS_RESTING, today.isoformat(), today.isoformat()),
             ).fetchall()
-        except Exception as exc:  # noqa: BLE001 - an unreadable journal re-offers nothing (D7)
+        except Exception as exc:  # noqa: BLE001 - an unreadable journal re-offers nothing
             _log.warning("brk20_retest_due_failed", d=today.isoformat(), error=str(exc))
             return []
         if not rows:
@@ -375,7 +375,7 @@ class RestingLevelBook:
         if skip_fn is not None:
             try:
                 skip = skip_fn(sorted({str(r["symbol"]) for r in rows}))
-            except Exception as exc:  # noqa: BLE001 - an unevaluable narrowing offers nothing (D7)
+            except Exception as exc:  # noqa: BLE001 - an unevaluable narrowing offers nothing
                 _log.warning("brk20_retest_skip_unreadable", d=today.isoformat(), error=str(exc))
                 return []
 
@@ -430,7 +430,7 @@ class RestingLevelBook:
         if dev > band:
             return None
         # FRESHNESS, after the band so the log only fires on a level that would otherwise have been
-        # offered. `ltp_fn` is the tick cache and carries no age; the §7.1 gate that will judge the
+        # offered. `ltp_fn` is the tick cache and carries no age; the gate that will judge the
         # resulting proposal rejects anything past `max_tick_age_s`, so originating on an older
         # price spends a day slot, the symbol's one offer and an analyst call on a certain reject.
         # No age at all is the same refusal as a stale one — fail to zero, never to a guess.
@@ -460,7 +460,7 @@ class RestingLevelBook:
         # `_offered`, NOT `_republished`: nothing is published until `prescreen.admit` has seen it,
         # and the day cap / the brk20 sub-cap / the same-day dedupe can each refuse it. The caller
         # emits `brk20_retest_republished` off `offers` for the ones that survive admission, so a
-        # grep of either name counts exactly one stage of the funnel (WO-9).
+        # grep of either name counts exactly one stage of the funnel.
         detail = {
             "symbol": symbol, "entry": str(entry), "ltp": str(ltp),
             "dev": str(dev.quantize(_PAISA, rounding=ROUND_HALF_UP)),

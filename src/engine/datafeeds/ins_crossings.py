@@ -1,4 +1,4 @@
-"""``ins_crossings`` — the EOD job that finds the day's NEW insider net-BUY crossings (§6.1 `ins`).
+"""``ins_crossings`` — the EOD job that finds the day's NEW insider net-BUY crossings (the `ins` strategy).
 
 Owner-directed 2026-08-17, the first evidence-first origination leg. Runs date-keyed at 19:15 IST,
 AFTER ``filings_pit_fresh`` (19:00) so the day's BSE fresh disclosures are already in
@@ -7,18 +7,18 @@ session's window-open sweep to admit through ``SignalPreScreen.admit``.
 
 Why the work is split EOD-compute / morning-admit rather than done in one place: filings arrive after
 the close, so the event is knowable tonight; but a candidate may only enter the pipeline during a
-session, through the §3.2.5 dedupe/caps spine. Journalling the crossing in between is what makes the
-handoff survive an engine restart, a sleeping machine or a §2.6 catch-up replay — the same reason
+session, through the prescreen's dedupe/caps spine. Journalling the crossing in between is what makes the
+handoff survive an engine restart, a sleeping machine or a catch-up replay — the same reason
 ``mom_rebalance_state`` (0006) and the prescreen day-slot journal (0004/0005) exist.
 
 **The crossing rule is NOT implemented here.** It comes from
 :func:`engine.datafeeds.filings_events.insider_net_buy`, which wraps
 :func:`engine.datafeeds.insider_crossings.insider_cluster_events` verbatim — the SAME function the
-WO-16 study runs (T+10 +0.7297% / T+20 +1.5797% net). One definition; a copy would drift, and a
+insider-crossing study runs (T+10 +0.7297% / T+20 +1.5797% net). One definition; a copy would drift, and a
 drifted live rule would be trading a population the evidence never measured. This module's whole job
 is to feed that function the right inputs and journal what comes back.
 
-STARVATION VISIBILITY (plan §6.1, binding)
+STARVATION VISIBILITY (binding)
 ------------------------------------------
 Live crossings come from two same-day feeds carrying the same filings: the **BSE fresh feed** (live
 since 2026-07-19, ~13-18 in-universe rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old
@@ -42,7 +42,7 @@ not today's feed (a backfill can widen it with the live feeds unchanged), so bot
 This alarm does NOT own the feed's own resolution stage. Widening the corpus lifts ``coverage_pct``
 above the floor and silences this line permanently, so a later collapse of
 ``filings_pit_fresh``'s scrip→symbol map would be invisible here: that job raises its own
-``filings_pit_fresh_scrip_map_degraded`` warning and a latched owner alert (plan §2.8.5). Keep the
+``filings_pit_fresh_scrip_map_degraded`` warning and a latched owner alert. Keep the
 two alarms distinct — this one answers "how much of the universe has filings at all", that one
 answers "can we still resolve the rows we fetched".
 
@@ -92,11 +92,11 @@ COVERAGE_WARN_PCT = 10.0
 
 
 class InsCrossingsResult(BaseModel):
-    """One run's outcome (never an exception — this job is not entry-blocking, §2.8 rule iii).
+    """One run's outcome (never an exception — this job is not entry-blocking).
 
     ``ok`` is the watermark verdict (``engine.ops.jobs._job_result_ok`` reads it): False only when the
     day could not be EVALUATED at all — no universe row for ``d``, or no daily bar for ``d`` on any
-    candidate symbol — so a §2.6 catch-up pass retries it. Zero crossings on a day that WAS evaluated
+    candidate symbol — so a catch-up pass retries it. Zero crossings on a day that WAS evaluated
     is a real answer, not a failure: ``ok=True``, ``crossings_found=0``.
     """
 
@@ -108,7 +108,7 @@ class InsCrossingsResult(BaseModel):
     universe_symbols: int = 0
     symbols_with_filings: int = 0
     fresh_rows_today: int = 0        # insider rows broadcast on d (both live feeds, constituents)
-    fresh_rows_in_universe: int = 0  # ...of those, rows on an ELIGIBLE symbol (the plan's ~13-18/day)
+    fresh_rows_in_universe: int = 0  # ...of those, rows on an ELIGIBLE symbol (~13-18/day expected)
     crossings_found: int = 0
     rows_written: int = 0
     symbols_missing_bar: int = 0
@@ -116,7 +116,7 @@ class InsCrossingsResult(BaseModel):
 
 
 class InsCrossingsJob:
-    """§6.1 ``ins_crossings`` — date-keyed EOD crossing detection + ``ins_pending`` journalling.
+    """``ins_crossings`` — date-keyed EOD crossing detection + ``ins_pending`` journalling.
 
     Idempotent per day: ``ins_pending``'s ``(for_session, symbol)`` primary key means a re-run
     (catch-up replay, the periodic missed-job sweep, a manual ``--once``) upserts the same row rather
@@ -140,7 +140,7 @@ class InsCrossingsJob:
         self._threshold = Decimal(str(threshold_inr))
 
     async def run(self, d: date) -> InsCrossingsResult:
-        """Compute ``d``'s NEW crossings and journal them for the next session. Never raises (E5)."""
+        """Compute ``d``'s NEW crossings and journal them for the next session. Never raises."""
         try:
             return await asyncio.to_thread(self._run_sync, d)
         except Exception as exc:  # noqa: BLE001 - E5: a filings job never takes down the scheduler
@@ -151,15 +151,15 @@ class InsCrossingsJob:
     def _run_sync(self, d: date) -> InsCrossingsResult:
         window_start = d - timedelta(days=LOOKBACK_DAYS)
 
-        # --- CORE-eligible universe (O18): the eligible set brk20 scans, restricted to core (NIFTY 500)
-        #     members via get_core_eligible_symbols (§6.1: `ins` is a batch rule). A watchlist-cap exclusion is the ONE
+        # --- CORE-eligible universe (owner decision): the eligible set brk20 scans, restricted to core (NIFTY 500)
+        #     members via get_core_eligible_symbols (`ins` is a batch rule). A watchlist-cap exclusion is the ONE
         #     exclusion that still leaves a symbol tradeable — it means "not in today's top-N focus
         #     list", not "ineligible" — and cap symbols have no 1m bars, which is precisely why a
         #     batch rule exists at all. (2026-09-01: predicate centralized in the store method —
         #     this was an inline duplicate; `ins` deliberately stays on the ELIGIBLE set, NOT the
         #     batch-universe extended set, because its registered edge was measured on index members
         #     and its candidates must be gate-approvable.)
-        #     O18 (2026-10-08): the CORE (NIFTY 500) subset of the eligible set — the index widened
+        #     Owner decision 2026-10-08: the CORE (NIFTY 500) subset of the eligible set — the index widened
         #     to NIFTY Total Market, and the registered edge was never measured on microcaps.
         eligible = set(self._store.get_core_eligible_symbols(d))
         if not eligible:
@@ -238,7 +238,7 @@ class InsCrossingsJob:
             rows_written=written,
             symbols_missing_bar=missing_bar,
         )
-        # THE starvation-visibility line (plan §6.1): fresh-feed row counts next to crossings found.
+        # THE starvation-visibility line: fresh-feed row counts next to crossings found.
         # Zero crossings with zero fresh rows = the feed is starved. Zero crossings with healthy fresh
         # rows = a genuinely quiet day. One log line has to be able to tell those apart.
         coverage_pct = coverage_percent(len(by_symbol), len(eligible))

@@ -1,4 +1,4 @@
-"""config/research_trials.yaml, the research trial ledger (review §9 #8). Pins the production file."""
+"""config/research_trials.yaml, the research trial ledger. Pins the production file."""
 
 from __future__ import annotations
 

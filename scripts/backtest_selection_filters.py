@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""C3 selection-filter study (IMPLEMENTATION_PLAN §6.1 "C3 SELECTION-FILTER STUDY — PRE-REGISTERED 2026-10-07").
+"""Selection-filter study (pre-registered 2026-10-07).
 
 Expect null. Per strategy (brk20 V2-N5 fills, hi52 v2), the arm (ii) construct over the admitted
 events; each of five pinned filters, evaluated at the signal session y from bars through y, splits
@@ -101,7 +101,7 @@ FILTERS: dict[str, Callable[[Bars], bool | None]] = {
 }
 
 
-# ----------------------------------------------------------------------------- C3
+# ----------------------------------------------------------------------------- selection-filter study
 def decide(r: dict[str, Any], name: str) -> str:
     c = r["cohorts"][name]
     if c["n"] < rf.MIN_N:

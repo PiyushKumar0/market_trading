@@ -1,10 +1,10 @@
-"""Prompt integrity (A2): absent is not empty.
+"""Prompt integrity: absent is not empty.
 
 Every prompt section renders one of three states and never confuses them: the source is absent
 (``unavailable (<reason>)``), present but empty (an explicit ``none``), or present (the value). Rule 14
 tells the analyst absent news is neutral, which only works if absence is labelled. Sections with no
 empty state (1m bars, the day plan, movers) carry only the other two; the regime line's renderings
-are tests/unit/test_context_assembler.py's T6 table.
+are tests/unit/test_context_assembler.py's regime-line table.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
-"""C2 applied to the brk20 sweep (plan D-A): crossings originate only in an up NIFTY 50 regime, and the
-blocked ones are journalled in brk20_regime_blocked for the rule_blocked arm (D-B)."""
+"""The regime gate applied to the brk20 sweep: crossings originate only in an up NIFTY 50 regime, and the
+blocked ones are journalled in brk20_regime_blocked for the rule_blocked arm."""
 
 from __future__ import annotations
 

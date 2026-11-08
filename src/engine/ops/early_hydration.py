@@ -1,10 +1,10 @@
-"""Early hydration — an early Kite login runs the pre-open chain ahead of its clock (§2.6 addendum).
+"""Early hydration — an early Kite login runs the pre-open chain ahead of its clock.
 
 Owner-directed 2026-09-09: *"on most days I am travelling at 08:15 and only able to start the system
 around 09:30–10:00 … early hydration whenever I login early, like 06:30"*. The pre-open chain is
 scheduled at surveillance 08:20, news chain 08:25, universe 08:30, catalyst digest 08:35, pre-open
 planner 08:50; on a 09:30+ boot every one of them fires AFTER the trade window opens, which is why
-the G2 digest-before-open criterion reads 61%. Nothing in the catch-up machinery could help: its
+the digest-before-open criterion reads 61%. Nothing in the catch-up machinery could help: its
 due-gates treat today's job as not-missed until its fire-time has passed, so a 06:30 pass replays
 nothing (see :meth:`engine.ops.jobs.CatchUpRunner.hydrate_ahead`, which is the deliberate exception
 this module drives).
@@ -15,13 +15,13 @@ registered beside :class:`~engine.ops.post_login.PostLoginRecovery`. Registratio
 (2026-09-09 review). The recovery's ``completed`` event is what actually sequences them. Its decision
 table:
 
-- not a trading day (R6) ⇒ nothing to hydrate;
+- not a trading day ⇒ nothing to hydrate;
 - login at/after session open ⇒ nothing to do HERE: from the open on, every one of those jobs is
   simply DUE, and the boot pass / 30-min sweep own due jobs. Two paths for one job would only race.
   The open is resolved PER LOGIN from the calendar (a zero-arg callable), never frozen at boot — the
   hook outlives the day it was built on, and a special/muhurat session moves the boundary;
 - otherwise wait for ``scheduler.start()`` (the ``armed`` event) before running anything. This is the
-  WO-15 firing-point rule verbatim: the news chain and digest must never run ahead of arming — the
+  deferred-catch-up firing-point rule verbatim: the news chain and digest must never run ahead of arming — the
   2026-08-10 wedge starved every scheduled job for 8 h, *including the sweep that self-heals*. The
   wait is bounded (:data:`EARLY_HYDRATION_ARM_TIMEOUT_S`) so a boot that never arms leaves no
   parked task;
@@ -60,21 +60,21 @@ _log = get_logger("engine.ops.early_hydration")
 
 Notify = Callable[[CatalogMessage], Awaitable[None]]
 
-#: How long the hook waits for ``scheduler.start()`` before giving up (§2.6/WO-15: the chain never
+#: How long the hook waits for ``scheduler.start()`` before giving up (the chain never
 #: runs ahead of arming, so a boot that never arms must end as a logged skip, not a parked task).
-#: 15 min is far longer than any observed boot (the worst recorded is minutes, WO-25c) and still
+#: 15 min is far longer than any observed boot (the worst recorded is minutes) and still
 #: leaves the whole 06:30 → 08:20 head-start intact on the mornings this exists for.
 EARLY_HYDRATION_ARM_TIMEOUT_S = 900
 
 
 class EarlyHydration:
-    """The §2.6 early-login pre-open hydration hook (see the module docstring).
+    """The early-login pre-open hydration hook (see the module docstring).
 
     Parameters
     ----------
     armed:
         Set by the composition root inside ``start_scheduler_and_fire_post_arm`` — after
-        ``scheduler.start()`` (the WO-15 firing point) AND after the post-arm one-shot is dispatched,
+        ``scheduler.start()`` (the post-arm firing point) AND after the post-arm one-shot is dispatched,
         so a login landing mid-boot cannot win the single-flight pass lock and turn that one-shot
         into a ``skipped_in_flight`` no-op.
     job_ids:

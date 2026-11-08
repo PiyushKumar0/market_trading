@@ -1,19 +1,19 @@
-"""§6.1 sweep signal-builder correctness (pure pandas/numpy — no vectorbt).
+"""Sweep signal-builder correctness (pure pandas/numpy — no vectorbt).
 
 ``engine.learning.sweep`` keeps its module top pure (indicator math + stdlib), so the per-strategy
 signal builders are testable without the heavy backtest stack. This file pins:
 
 * the ``orb`` intraday baseline's **forced session-end square-off** — a breakout still open at the
-  14:30 entry-window end must ride to the day's LAST bar (the MIS end-of-session square-off, §6.1
-  "squared off by window end"), NOT be truncated at 14:30 (truncation biased the §6.1 CPCV reports);
-* the §6.1 v2 (2026-07-12) **range-anchored stop/target** — risk = ``stop_range_frac × (entry −
-  range_low)`` stamped as per-signal ``sl_stop``/``tp_stop`` fractions — and the **C3 cost floor**
+  14:30 entry-window end must ride to the day's LAST bar (the MIS end-of-session square-off,
+  "squared off by window end"), NOT be truncated at 14:30 (truncation biased the CPCV reports);
+* the strategy-rules v2 (2026-07-12) **range-anchored stop/target** — risk = ``stop_range_frac × (entry −
+  range_low)`` stamped as per-signal ``sl_stop``/``tp_stop`` fractions — and the **cost floor**
   that skips breakouts whose risk cannot pay a round trip twice (risk/price < 4 × per-side fee);
 * the ``rsi2`` **max_hold_days scheduled time-exit** (modelled 2026-07-12) OR-ed onto the RSI-exit;
-* the WO-2 (2026-08-13) **next-bar-open shift** — the pure transform ``_shift_to_next_bar`` /
+* the 2026-08-13 **next-bar-open shift** — the pure transform ``_shift_to_next_bar`` /
   ``_shift_stop_frame`` that turns "signal on bar t" into "order on bar t+1, filled at its open",
   including the session-aware drop that stops an intraday signal leaking into the next session;
-* WO-2 (iv): the ``mom`` ranking window **excludes the traded session** once fills are next-open.
+* the ``mom`` ranking window **excludes the traded session** once fills are next-open.
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def test_orb_squares_off_at_session_end_not_entry_window_end():
     assert bool(exits.loc[ts_window_end]) is False
     assert ts_last > ts_window_end                             # the session really does extend past 14:30
 
-    # §6.1 v2: per-signal stop/target anchored at the OPPOSITE opening-range edge (range low 99.5),
+    # Strategy-rules v2: per-signal stop/target anchored at the OPPOSITE opening-range edge (range low 99.5),
     # stamped at the entry bar. On the 102.0 breakout: risk = stop_range_frac(1.0) × (102.0 − 99.5)
     # = 2.5, so sl_stop = risk/price = 2.5/102.0 and tp_stop = rr_target(1.5) × risk/price.
     assert sig.sl_stop is not None and sig.tp_stop is not None
@@ -95,7 +95,7 @@ def test_orb_squares_off_at_session_end_not_entry_window_end():
 
 
 def test_orb_cost_floor_skips_sub_breakeven_breakout():
-    # C3 cost floor (§6.1 v2): a breakout is skipped when risk/price < 4 × per-side fee (= 2×
+    # Cost floor (strategy-rules v2): a breakout is skipped when risk/price < 4 × per-side fee (= 2×
     # round-trip breakeven). Here risk/price = 2.5/102.0 ≈ 0.0245; with fee=0.01 the floor is
     # 4 × 0.01 = 0.04 > 0.0245, so the single breakout is suppressed — no entry AND no square-off.
     frames = _breakout_session()
@@ -164,10 +164,10 @@ def test_rsi2_max_hold_days_schedules_time_exit():
     assert int(sig0.entries[_SYM].sum()) == entry_positions.size   # entries unchanged (cache reused)
 
 
-# --------------------------------------------------------------------------- WO-2 next-bar-open shift
+# --------------------------------------------------------------------------- next-bar-open shift
 def test_shift_to_next_bar_moves_signals_forward_and_drops_the_last_one():
     """A signal computed on bar t must act on bar t+1; a signal on the LAST bar has no bar to fill
-    into and is dropped (never silently filled at its own bar, the pre-WO-2 defect)."""
+    into and is dropped (never silently filled at its own bar, the defect before the next-open fill correction)."""
     idx = pd.bdate_range("2024-01-01", periods=5)
     sig = pd.DataFrame({_SYM: [False, True, False, False, True]}, index=idx)
 
@@ -231,7 +231,7 @@ def _mom_frames() -> _Frames:
 
 
 def test_mom_ranking_window_excludes_the_traded_session():
-    """WO-2 (iv): the rank that FILLS on session t+1 is computed from closes through session t.
+    """The rank that FILLS on session t+1 is computed from closes through session t.
 
     The builder stamps the rebalance on row t and ``SweepRunner._portfolio`` shifts it to t+1, so in
     fill-row space the ranking input is ``momentum.shift(1)`` — the live 'through d−1' window

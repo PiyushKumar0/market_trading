@@ -1,4 +1,4 @@
-"""LimitsEngine (§3.2.7): typed, hash-verified access to config/limits.yaml (§7.1)."""
+"""LimitsEngine: typed, hash-verified access to config/limits.yaml."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
 
     assert isinstance(table, LimitTable)
     assert table.schema_version == 1
-    # O16 2026-09-07: base 40000 / caps 6-2-4
+    # Owner decision 2026-09-07: base 40000 / caps 6-2-4
     assert table.capital_base_inr == Decimal("40000")
 
     # A representative sample across the block types (money, pct, int, bool, time, on_breach str).
@@ -53,7 +53,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.capital_cap.on_breach == "reject_entry"
     assert table.limits.per_trade_risk.intraday_pct == 1.0
     assert table.limits.per_trade_risk.swing_position_pct == 2.0
-    assert table.limits.per_trade_risk.overnight_gap_mult == 2.0   # O17
+    assert table.limits.per_trade_risk.overnight_gap_mult == 2.0   # owner decision 2026-09-24
     assert table.limits.daily_loss_soft.day_mtm_pct == -5.0
     assert table.limits.daily_loss_hard.day_mtm_pct == -7.0
     assert table.limits.weekly_drawdown.rolling_sessions == 5
@@ -62,12 +62,12 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.cumulative_floor.equity_pct_of_base == -15.0
     assert table.limits.consecutive_losses.max_per_session == 3
     assert table.limits.max_new_trades_day.count == 5
-    # O16 2026-09-07: base 40000 / caps 6-2-4; owner 2026-11-05: caps 30-2-28
+    # Owner decision 2026-09-07: base 40000 / caps 6-2-4; owner 2026-11-05: caps 30-2-28
     assert table.limits.max_open_positions.total == 30
     assert table.limits.max_open_positions.max_mis == 2
     assert table.limits.max_open_positions.max_cnc == 28
     assert table.limits.per_stock_exposure.max_positions_per_symbol == 1
-    assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("12000")   # O17
+    assert table.limits.per_stock_exposure.cnc_notional_inr == Decimal("12000")   # owner decision
     assert table.limits.per_sector_exposure.max_positions_per_sector == 2
     assert table.limits.per_sector_exposure.unclassified_cap == 1
     assert table.limits.co_movement_cap.corr_max == 0.7
@@ -165,7 +165,7 @@ def test_table_accessor_matches_load(registered_store):
     assert engine.table() is engine.load()
 
 
-# --------------------------------------------------------------------------- analyst_confidence_min (§6.3)
+# --------------------------------------------------------------------------- analyst_confidence_min
 def _register_with_floor(store, tmp_path, floor: str | None) -> None:
     text = re.sub(r"(?m)^analyst_confidence_min:.*\r?\n", "", REAL_LIMITS_PATH.read_text(encoding="utf-8"))
     if floor is not None:
@@ -178,7 +178,7 @@ def test_analyst_confidence_min_is_top_level_and_owner_only(store, tmp_path):
     _register_with_floor(store, tmp_path, "0.55")
     table = LimitsEngine(store).load()
     assert table.analyst_confidence_min == 0.55
-    # Outside the `limits:` map (§6.3) — LimitsBlock has no such field.
+    # Outside the `limits:` map — LimitsBlock has no such field.
     assert not hasattr(table.limits, "analyst_confidence_min")
 
 
@@ -210,7 +210,7 @@ def test_catalyst_guard_accessor_matches_yaml(registered_store):
     assert guard.on_breach == "reject_catalyst_entry_or_disable_cat"
 
 
-# --------------------------------------------------------------------------- tamper / integrity (R4)
+# --------------------------------------------------------------------------- tamper / integrity
 def test_tampered_file_raises_integrity_error_on_load(registered_store, tmp_path):
     engine = LimitsEngine(registered_store)
     # Modify one byte after registration — the on-disk hash no longer matches the recorded signature.
@@ -237,7 +237,7 @@ def test_reload_reverifies_hash(registered_store, tmp_path):
 
 
 def test_unregistered_store_raises_integrity_error(store):
-    # `store` fixture never calls register_initial — load_verified must reject it (R4).
+    # `store` fixture never calls register_initial — load_verified must reject it.
     engine = LimitsEngine(store)
     with pytest.raises(IntegrityError):
         engine.load()

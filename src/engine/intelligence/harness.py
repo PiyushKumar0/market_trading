@@ -1,29 +1,29 @@
-"""AgentHarness (§3.2.6, §5.1) — the ONLY module in the platform that calls the Claude Agent SDK.
+"""AgentHarness — the ONLY module in the platform that calls the Claude Agent SDK.
 
-Everything the plan pins about *how* a Tier-1 call is made lives here, in one place, so the guarantees
+Everything about *how* a Tier-1 call is made lives here, in one place, so the guarantees
 are auditable in code rather than prose:
 
-- **Shape (D5).** Intraday agents are single-shot: one fresh ``query()`` per invocation, context fully
+- **Shape.** Intraday agents are single-shot: one fresh ``query()`` per invocation, context fully
   pre-assembled by ``ContextAssembler`` (the model never fetches its own data), one response. Agentic
   multi-turn is permitted only for the nightly/weekly agents, under a hard ``max_turns`` AND a
-  cumulative billed-token run budget enforced here mid-run (§5.5).
-- **Tool allowlisting is explicit and mandatory (D5/D10).** Every call passes an explicit allowed-tools
-  list — empty for single-shot agents, the §5.5 read-only set for the agentic ones — and explicitly
+  cumulative billed-token run budget enforced here mid-run.
+- **Tool allowlisting is explicit and mandatory.** Every call passes an explicit allowed-tools
+  list — empty for single-shot agents, the read-only set for the agentic ones — and explicitly
   disables the CLI's built-ins (``tools=[]`` plus a by-name deny list). ``tools_enabled: true`` NEVER
   means "SDK defaults": a definition with
   tools enabled and no explicit allowlist is refused at load time (:func:`load_agent_defs`), and an
-  options surface that exposes no tool knob at all is refused at call time. §9.1 tests both.
-- **Isolation from the owner's Claude Code (D10).** The service runs from the repo root (NSSM
+  options surface that exposes no tool knob at all is refused at call time. Tests cover both.
+- **Isolation from the owner's Claude Code.** The service runs from the repo root (NSSM
   AppDirectory) as the owner's own account, so the cwd alone isolates nothing. Isolation is
   ``setting_sources=[]`` (no CLAUDE.md/settings) + :data:`ISOLATION_ENV` (cwd-keyed auto-memory off,
   claude.ai connectors off, updater off) + strict MCP (only servers the harness passes itself). An
   options surface that cannot express these is refused rather than called unconstrained.
   KNOWN RESIDUAL, not a guarantee: the owner's email still reaches every call as the CLI's
   ``session_context`` — the stored claude.ai OAuth login carries it and CLI 2.1.288 has no opt-out.
-- **Model is always explicit (D4).** ``config/agents.yaml`` names the model; :data:`MODEL_API_IDS` maps
+- **Model is always explicit.** ``config/agents.yaml`` names the model; :data:`MODEL_API_IDS` maps
   that name to the API id. An unknown name is a loud load-time error — never a silent SDK default
   (which is Opus on Max plans, 5× Haiku rates).
-- **Failure semantics (D7).** Schema-invalid retries at most twice, each a FRESH query with the
+- **Failure semantics.** Schema-invalid retries at most twice, each a FRESH query with the
   validation error appended; timeout / 429 / credit / SDK death do not retry. Everything resolves to
   ``AgentResult.Failed`` + an owner alert. Model prose is NEVER salvaged by regex or fence-stripping —
   a non-JSON response is a schema violation, full stop.
@@ -32,12 +32,12 @@ are auditable in code rather than prose:
   second turn, so the turn cap gets +3 exactly when the schema knob went out (the round-trip plus
   room for ~two CLI-side schema retries, see ``_build_options``). The tool input is the
   authoritative answer (it can never be fenced or wrapped in prose), and client-side validation
-  remains authoritative on top of it (§8.1). Thinking depth is the per-agent ``effort`` knob in
+  remains authoritative on top of it. Thinking depth is the per-agent ``effort`` knob in
   agents.yaml; thinking is never disabled (the deprecated ``max_thinking_tokens=0`` did not stop it).
-- **No LLM-originated time (§5.1).** The harness stamps nothing from model output. Temporal stamping
+- **No LLM-originated time.** The harness stamps nothing from model output. Temporal stamping
   belongs to the ``validate`` callback the caller supplies (e.g. ``schemas.parse_and_stamp``), which
   overwrites ``valid_until``/ids from ``Clock``.
-- **Auditability (R8).** Every SDK call — including each retry, whose prompt differs — persists its own
+- **Auditability.** Every SDK call — including each retry, whose prompt differs — persists its own
   ``agent_calls`` row: inputs digest, gzipped system+prompt snapshot, raw output, usage, priced cost,
   duration. A governor-blocked invocation persists a row too (with no SDK call made), so "we did not
   call" is as visible in the audit trail as "we called and it failed".
@@ -75,7 +75,7 @@ from engine.notify.episodes import AlertEpisodes
 
 _log = get_logger("engine.intelligence.harness")
 
-# agents.yaml model NAME -> API model id (D4). The yaml name is also the governor's pricing key, so the
+# agents.yaml model NAME -> API model id. The yaml name is also the governor's pricing key, so the
 # two never drift apart; an unmapped name fails loud rather than reaching the SDK as a default.
 MODEL_API_IDS: dict[str, str] = {
     "haiku-4.5": "claude-haiku-4-5",
@@ -94,7 +94,7 @@ MODEL_API_IDS: dict[str, str] = {
     "haiku-5.5": "claude-haiku-5-5",
 }
 
-# The CLI's built-in tools, denied by name on every call (§5.1) — the second layer behind `tools=[]`
+# The CLI's built-in tools, denied by name on every call — the second layer behind `tools=[]`
 # (_build_options): "no filesystem, no network, no order surface" is enforced in the options, not
 # assumed from an empty allowlist. Names observed in pinned-CLI 2.1.288 transcripts added 2026-10-11.
 BUILTIN_TOOLS: tuple[str, ...] = (
@@ -133,7 +133,7 @@ BUILTIN_TOOLS: tuple[str, ...] = (
     "Write",
 )
 
-# Sent as ``options.env`` on every call (D10). The SDK layers it OVER the inherited process env, so a
+# Sent as ``options.env`` on every call. The SDK layers it OVER the inherited process env, so a
 # stray value in the service env cannot re-enable either leak. Names verified live on pinned CLI
 # 2.1.288 (2026-10-11): without them each call carried the repo's auto-memory MEMORY.md (~4.7K input
 # tokens) and fetched the account's claude.ai connector list, opening live connections to them.
@@ -144,7 +144,7 @@ ISOLATION_ENV: dict[str, str] = {
 }
 
 MAX_SCHEMA_RETRIES = 2      # D7: schema-invalid retries at most twice => at most 3 SDK calls per run
-DEFAULT_TIMEOUT_S = 45.0    # D7 single-shot default; every enabled agent overrides it (agents.yaml timeout_s)
+DEFAULT_TIMEOUT_S = 45.0    # single-shot default; every enabled agent overrides it (agents.yaml timeout_s)
 
 RETRY_TAIL = (
     "Previous output failed validation: {err}. Emit ONLY valid JSON matching the schema."
@@ -176,7 +176,7 @@ _ZERO_USAGE = TokenUsage(in_tokens=0, out_tokens=0)
 
 # --------------------------------------------------------------------------- agent definitions
 class RunCaps(BaseModel):
-    """Hard caps for one agentic RUN (D5/§5.5) — also the shape of ``run_budget_tokens`` in agents.yaml.
+    """Hard caps for one agentic RUN — also the shape of ``run_budget_tokens`` in agents.yaml.
 
     ``billed_*_max`` are cumulative over the whole run (all turns, all retries), which is the only
     reading that makes them a real stop: a per-turn cap would let 12 turns spend 12×.
@@ -193,7 +193,7 @@ class RunCaps(BaseModel):
 class AgentDef(BaseModel):
     """One agents.yaml agent, validated into the shape the harness will actually call with.
 
-    ``allowed_tools`` has NO default on purpose (D5/D10): the allowlist must be an explicit decision at
+    ``allowed_tools`` has NO default on purpose: the allowlist must be an explicit decision at
     every construction site, not something a forgotten yaml key silently supplies.
     """
 
@@ -203,7 +203,7 @@ class AgentDef(BaseModel):
     model: str                      # agents.yaml NAME (the governor's pricing key), not the API id
     shape: Literal["single_shot", "agentic"]
     tools_enabled: bool
-    allowed_tools: list[str]        # MANDATORY (D5/D10)
+    allowed_tools: list[str]        # MANDATORY
     max_output_tokens: int | None = Field(default=None, gt=0)
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     timeout_s: float = Field(default=DEFAULT_TIMEOUT_S, gt=0)
@@ -253,7 +253,7 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
     """Build :class:`AgentDef` objects from a loaded ``agents.yaml`` mapping.
 
     Refuses (raises ``ValueError``) any definition with ``tools_enabled: true`` and no explicit
-    ``allowed_tools`` list — the §9.1 allowlist guarantee (D5/D10). Refusing at LOAD time means an
+    ``allowed_tools`` list — the allowlist guarantee. Refusing at LOAD time means an
     unallowlisted agent cannot exist in the roster at all, rather than failing at 21:00 on the night it
     is first scheduled.
     """
@@ -262,7 +262,7 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
         if not isinstance(raw, dict):
             raise ValueError(f"agents.{agent_id}: expected a mapping, got {type(raw).__name__}")
         if not raw.get("enabled", True):
-            # A def the roster deliberately parks (weekly_researcher until Phase 5, §8.7). Skipping at
+            # A def the roster deliberately parks (weekly_researcher until online learning). Skipping at
             # load keeps the allowlist refusal strict for everything that CAN run.
             continue
         tools_enabled = bool(raw.get("tools_enabled", False))
@@ -312,8 +312,8 @@ def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
     success watermarks).
 
     Each definition validates independently: an invalid one is EXCLUDED and logged loud (the
-    §9.1/D5 guarantee is preserved — a def that fails validation is not runnable), while the valid
-    rest of the roster stays live (D7: failures degrade to less capability, never more). The strict
+    allowlist guarantee is preserved — a def that fails validation is not runnable), while the valid
+    rest of the roster stays live (failures degrade to less capability, never more). The strict
     :func:`load_agent_defs` remains for tests/tooling that want refusal semantics.
     """
     defs: dict[str, AgentDef] = {}
@@ -347,7 +347,7 @@ def resolve_cli_path(cfg: dict[str, Any], root: Path) -> str | None:
 class AgentResult(BaseModel):
     """``Ok(payload, usage, call_id)`` | ``Failed(reason, detail, call_id)`` as one frozen model.
 
-    ``call_id`` is the LAST attempt's ``agent_calls`` row (each retry has its own row, R8).
+    ``call_id`` is the LAST attempt's ``agent_calls`` row (each retry has its own row).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -362,7 +362,7 @@ class AgentResult(BaseModel):
     attempts: int = 0
 
     @classmethod
-    def Ok(  # noqa: N802 - mirrors the plan's ADT notation (§3.2.6)
+    def Ok(  # noqa: N802 - mirrors the ADT notation
         cls,
         *,
         call_id: str,
@@ -398,7 +398,7 @@ class AgentResult(BaseModel):
 class AssembledContextLike(Protocol):
     """What the harness needs from an assembled context (duck-typed).
 
-    ``ContextAssembler`` (§3.2.6, ``engine.intelligence.context``) is a separate module; the harness
+    ``ContextAssembler`` (``engine.intelligence.context``) is a separate module; the harness
     deliberately does NOT import it, so the two can be built and tested independently. ``call_class``
     is read defensively with a ``schedule`` default — it is the governor's admission class, not part
     of the prompt.
@@ -417,7 +417,7 @@ _OPTION_FIELDS: dict[type, set[str]] = {}
 def _option_fields(cls: type) -> set[str]:
     """Field names the options class exposes (annotations + dataclass/pydantic fields + a probe).
 
-    Same introspection the Phase-0 smoke test uses (§8.1): the options class has been renamed and
+    Same introspection the SDK smoke test uses: the options class has been renamed and
     re-shaped across SDK releases, so every knob is probed rather than assumed.
     """
     cached = _OPTION_FIELDS.get(cls)
@@ -484,7 +484,7 @@ def _unwrap_lone_fence(text: str) -> str:
     """The whole-string fence unwrap ``_validate`` documents: ```` ```json\\n{...}\\n``` ```` → ``{...}``.
 
     Anything around the fence — prose before, commentary after, a second block — fails the match
-    and the text passes through untouched (and then fails JSON parsing as it should, D7).
+    and the text passes through untouched (and then fails JSON parsing as it should).
     """
     match = _FENCE_RE.match(text)
     return match.group(1).strip() if match else text
@@ -599,7 +599,7 @@ class _UsageAccumulator:
 
 
 class _RunBudget:
-    """Cumulative billed-token cap for one agentic run (§5.5), carried across retries within the run.
+    """Cumulative billed-token cap for one agentic run, carried across retries within the run.
 
     Cache reads/writes are billed input, so they count against ``billed_in_max`` — a cap that ignored
     them would be a cap on the cheapest part of the bill.
@@ -667,7 +667,7 @@ def _prompt_version(
 
 
 def _classify(exc: BaseException) -> tuple[FailReason, str]:
-    """Map an SDK exception to a D7 failure reason (all of which resolve to no-action + alert)."""
+    """Map an SDK exception to a no-action failure reason (all of which resolve to no-action + alert)."""
     detail = f"{type(exc).__name__}: {exc}"
     lowered = detail.lower()
     # "session limit"/"usage limit": the subscription's rolling window (2026-09-03 12:42–14:32 —
@@ -714,9 +714,9 @@ class AgentHarness:
         self._query_fn = query_fn
         self._options_cls = options_cls
         self._alert = alert
-        #: Owner-alert cadence per ``(agent_id, reason)`` (WO-25b): the FIRST failure of a kind alerts,
+        #: Owner-alert cadence per ``(agent_id, reason)``: the FIRST failure of a kind alerts,
         #: repeats inside the window are logged only, and a successful call closes the episode so the
-        #: next failure is heard again. The D7 behaviour is untouched — every failure still resolves to
+        #: next failure is heard again. The no-action behaviour is untouched — every failure still resolves to
         #: no-action and is still logged; what changes is how many times the owner's phone buzzes for
         #: one broken thing (an SDK outage used to alert on every call for hours).
         self._alert_episodes = AlertEpisodes()
@@ -740,11 +740,11 @@ class AgentHarness:
         json_schema: dict[str, Any] | None = None,
         call_class: str | None = None,
     ) -> AgentResult:
-        """One fresh ``query()`` (D5/D10), validated client-side, metered and persisted.
+        """One fresh ``query()``, validated client-side, metered and persisted.
 
         ``validate`` is the caller's schema contract — e.g. ``schemas.parse_and_stamp`` for an
         ``ActionProposal``, or a DayPlan validator. It also owns every platform stamp: the harness
-        never derives a time or an id from model output (§5.1).
+        never derives a time or an id from model output.
         """
         if agent_def.shape != "single_shot":
             raise ValueError(f"{agent_def.agent_id}: run_single_shot called on a {agent_def.shape} def (D5)")
@@ -775,7 +775,7 @@ class AgentHarness:
         call_class: str = "schedule",
         json_schema: dict[str, Any] | None = None,
     ) -> AgentResult:
-        """Multi-turn run for the nightly/weekly agents only (D5), under ``max_turns`` + a cumulative
+        """Multi-turn run for the nightly/weekly agents only, under ``max_turns`` + a cumulative
         billed-token run budget that is checked mid-stream and carried across retries."""
         if agent_def.shape != "agentic":
             raise ValueError(f"{agent_def.agent_id}: run_agentic called on a {agent_def.shape} def (D5)")
@@ -829,7 +829,7 @@ class AgentHarness:
         prompt_version = _prompt_version(system_prompt, template, json_schema, agent_def.effort)
         decision = self._governor.can_invoke(agent_def.agent_id)
         if not decision.allowed:
-            # NO SDK call — but the audit trail still records that the agent was asked and refused (R8).
+            # NO SDK call — but the audit trail still records that the agent was asked and refused.
             call_id = self._persist(
                 agent_def,
                 trigger=trigger,
@@ -853,8 +853,8 @@ class AgentHarness:
                 agent_def, system_prompt=system_prompt, json_schema=json_schema, max_turns=max_turns
             )
         except RuntimeError as exc:
-            # SDK-surface refusal (missing tool/setting knob, D5/D10): an ordinary Failed so every
-            # trigger degrades to no-proposal + alert (D7) instead of leaning on bus isolation.
+            # SDK-surface refusal (missing tool/setting knob): an ordinary Failed so every
+            # trigger degrades to no-proposal + alert instead of leaning on bus isolation.
             call_id = self._persist(
                 agent_def,
                 trigger=trigger,
@@ -889,7 +889,7 @@ class AgentHarness:
                 failure = ("timeout", f"no complete response within {timeout_s}s")
             except (asyncio.CancelledError, KeyboardInterrupt):
                 raise
-            except Exception as exc:  # noqa: BLE001 - every SDK failure maps to a D7 reason
+            except Exception as exc:  # noqa: BLE001 - every SDK failure maps to a no-action failure reason
                 failure = _classify(exc)
 
             usage = accumulator.total()
@@ -932,7 +932,7 @@ class AgentHarness:
                     in_tokens=usage.in_tokens,
                     out_tokens=usage.out_tokens,
                 )
-                # A working agent closes every open alert episode it owns (WO-25b): the next failure,
+                # A working agent closes every open alert episode it owns: the next failure,
                 # whatever its reason, is a NEW incident and must reach the owner immediately.
                 self._alert_episodes.reset(agent_def.agent_id)
                 if self._account_episodes.open_episodes():
@@ -953,8 +953,8 @@ class AgentHarness:
             )
             if reason == "credit_exhausted":
                 # The ledger only ever sees calls that SUCCEEDED, so it can read healthy at the exact
-                # moment the credit ran out — the billing error is the only signal (§5.6 DG4). Raised,
-                # not just noted: the tier change must reach budget.state (R8 owner alert, dashboard).
+                # moment the credit ran out — the billing error is the only signal (DG4). Raised,
+                # not just noted: the tier change must reach budget.state (owner alert, dashboard).
                 await self._governor.raise_billing_error(detail[:200])
             if reason != "schema_invalid":
                 return await self._fail(
@@ -977,7 +977,7 @@ class AgentHarness:
     ) -> tuple[bool, Any, str]:
         """Parse the final assistant text as JSON and hand it to the caller's validator.
 
-        No prose salvage (D7): a response that MIXES prose with JSON is a schema violation and
+        No prose salvage: a response that MIXES prose with JSON is a schema violation and
         earns a retry, not a rescue. ONE deterministic unwrap is permitted (2026-07-29): a response
         that is EXACTLY a single ```-fenced block and nothing else is that JSON in the CLI's
         habitual framing, not prose — observed live when the structured-output knob silently
@@ -1054,7 +1054,7 @@ class AgentHarness:
                 "claude_agent_sdk exposes no ClaudeAgentOptions/ClaudeCodeOptions — cannot set model, "
                 "setting_sources or the tool allowlist (D5/D10); refusing to call"
             )
-        # The D10 isolation knobs are probed-and-skipped for injected test classes, but the REAL SDK
+        # The isolation knobs are probed-and-skipped for injected test classes, but the REAL SDK
         # must carry them: a release that dropped one would silently reopen the memory/connector leak.
         fields = _option_fields(cls)
         if "env" not in fields or not fields & {"strict_mcp_config", "extra_args"}:
@@ -1076,7 +1076,7 @@ class AgentHarness:
         """Build the call options; return ``(options, prompt_prefix)``.
 
         ``prompt_prefix`` is non-empty only when the options surface has no system-prompt knob, in which
-        case the byte-stable system block is prepended to the prompt — preserving the D8 stable-first
+        case the byte-stable system block is prepended to the prompt — preserving the stable-first
         ordering rather than dropping the system prompt.
         """
         cls = self._options_class()
@@ -1088,7 +1088,7 @@ class AgentHarness:
                 "CLAUDE.md/settings from the filesystem (D10); refusing to call"
             )
 
-        # D10 isolation on every call, pinned CLI or bundled (the real SDK surface is required to take
+        # Isolation on every call, pinned CLI or bundled (the real SDK surface is required to take
         # both knobs, _options_class). Strict MCP drops every server the harness did not pass itself
         # — the account's claude.ai connectors included; the CLI-flag fallback covers an SDK that
         # predates the typed field.
@@ -1126,7 +1126,7 @@ class AgentHarness:
         if agent_def.effort is not None and "effort" in fields:
             kwargs["effort"] = agent_def.effort
 
-        # Explicit allowlist on EVERY call (D5/D10) — empty for single-shot. An options surface with
+        # Explicit allowlist on EVERY call — empty for single-shot. An options surface with
         # NO tool knob is refused for EVERY shape (2026-07-28 review): an SDK release that renames
         # the knob would otherwise run single-shot agents with the SDK's DEFAULT built-in toolset
         # (Bash/file/network) on the box holding the broker credentials — fail closed, never open.
@@ -1140,7 +1140,7 @@ class AgentHarness:
             )
         # `allowed_tools` only auto-approves; `tools` is the CLI's built-in base set, and [] removes
         # every built-in (`--tools ""`). Without it the pinned CLI offered single-shot agents Skill,
-        # ToolSearch, Workflow, Cron*, SendMessage... (sdk transcripts, 2026-10-09). The §5.5 agentic
+        # ToolSearch, Workflow, Cron*, SendMessage... (sdk transcripts, 2026-10-09). The agentic
         # set is MCP, which `tools` does not govern; under strict MCP its server must come from the
         # harness's own options. StructuredOutput survives both (verified 2026-10-11).
         if tool_field != "tools" and "tools" in fields:
@@ -1157,7 +1157,7 @@ class AgentHarness:
                 kwargs["output_format"] = {"type": "json_schema", "schema": json_schema}
                 schema_sent = True
             # Absent either knob the schema simply is not sent — client-side validation is authoritative
-            # in every case anyway (§8.1 locked convention).
+            # in every case anyway (a locked convention).
 
         if max_turns is not None and "max_turns" in fields:
             # The CLI fulfils a sent schema via a StructuredOutput TOOL choreography that consumes
@@ -1183,14 +1183,14 @@ class AgentHarness:
     async def _meter(
         self, agent_def: AgentDef, usage: TokenUsage, sdk_cost_usd: Decimal | None
     ) -> None:
-        """Book billed usage into the governor ledger (D6). Zero-usage calls book nothing: a call that
+        """Book billed usage into the governor ledger. Zero-usage calls book nothing: a call that
         died before reporting usage would otherwise add a $0 row that says nothing."""
         if not any((usage.in_tokens, usage.out_tokens, usage.cache_read, usage.cache_write)):
             return
         await self._governor.record(agent_def.agent_id, agent_def.model, usage)
         if sdk_cost_usd is not None:
-            # Ledger cost stays OURS (D4 rates, Decimal) — the SDK's own figure is debug-logged for
-            # comparison only (there is no console figure to reconcile, D6 re-scope 2026-08-13),
+            # Ledger cost stays OURS (standard rates, Decimal) — the SDK's own figure is debug-logged for
+            # comparison only (there is no console figure to reconcile; re-scoped 2026-08-13),
             # never written to the ledger.
             _log.debug(
                 "agent_call_sdk_cost", agent=agent_def.agent_id, sdk_cost_usd=str(sdk_cost_usd)
@@ -1212,7 +1212,7 @@ class AgentHarness:
         cost: Decimal,
         duration_ms: int,
     ) -> str:
-        """Append one ``agent_calls`` row — one per SDK call, retries included (R8 replayability)."""
+        """Append one ``agent_calls`` row — one per SDK call, retries included (replayability)."""
         call_id = str(ULID())
         blob = gzip.compress(f"{system_prompt}\n\n{prompt}".encode())
         used = usage or _ZERO_USAGE
@@ -1239,7 +1239,7 @@ class AgentHarness:
                     used.out_tokens,
                     used.cache_read,
                     used.cache_write,
-                    str(cost),                  # TEXT column: decimal-as-string (§8.1), never a float
+                    str(cost),                  # TEXT column: decimal-as-string, never a float
                     duration_ms,
                     self._clock.now().isoformat(),
                     prompt_version,
@@ -1258,7 +1258,7 @@ class AgentHarness:
         raw_text: str | None = None,
         attempts: int = 0,
     ) -> AgentResult:
-        """Build the D7 ``Failed`` result and alert the owner ONCE PER EPISODE (WO-25b).
+        """Build the ``Failed`` result and alert the owner ONCE PER EPISODE.
 
         The failure itself is unchanged — ``agent_call_failed`` is logged by the caller for every
         single occurrence, and the returned result is identical. What is throttled is the OWNER ALERT:
@@ -1331,7 +1331,7 @@ class AgentHarness:
             _log.warning("agent_alert_failed", agent=agent_def.agent_id, error=str(exc))
 
 
-# --------------------------------------------------------------------------- D11 smoke (S3.2.12)
+# --------------------------------------------------------------------------- SDK smoke test
 class _SmokeContext:
     """Minimal AssembledContextLike for the self-test round-trip (no assembler dependency)."""
 
@@ -1353,7 +1353,7 @@ SMOKE_AGENT_DEF = AgentDef(
     timeout_s=30.0,
 )
 
-# Every production agent sends a json_schema, so the smoke call sends one too — D11 must exercise
+# Every production agent sends a json_schema, so the smoke call sends one too — the smoke test must exercise
 # the structured-output path the real calls take, not a text-only path nothing else uses
 # (2026-07-28: a schema-less smoke passed while every schema call failed on the untested path).
 SMOKE_SCHEMA: dict[str, Any] = {
@@ -1366,8 +1366,8 @@ SMOKE_SCHEMA: dict[str, Any] = {
 
 async def run_sdk_smoke(harness: AgentHarness) -> str:
     """One cheap Haiku round-trip through the FULL harness path (options, allowlist, structured
-    output, validation, metering, audit row) — the D11 self-test call. Raises on any failure; the
-    self-test maps that to WARN (LLM availability is never a safety input, D7)."""
+    output, validation, metering, audit row) — the self-test call. Raises on any failure; the
+    self-test maps that to WARN (LLM availability is never a safety input)."""
 
     def _validate(raw: str) -> Any:
         data = json.loads(raw)

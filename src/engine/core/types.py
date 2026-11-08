@@ -2,7 +2,7 @@
 
 Kept deliberately minimal — only types that genuinely cross module boundaries live here. All
 datetimes are tz-aware IST (produced via ``core.Clock`` / ``core.NSECalendar``, never a bare
-``datetime.now()`` — §3.2 convention). Money is ``Decimal``.
+``datetime.now()``). Money is ``Decimal``.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from engine.core.enums import Actor
 
 
 class OwnerConfirmation(BaseModel):
-    """Proof token for an owner-confirmed destructive/protected action (R10).
+    """Proof token for an owner-confirmed destructive/protected action.
 
     The actual two-step verification (one-time phrase from the owner's chat ID, or dashboard bearer
     token) happens in the ``notify``/``api`` layer; this model is the validated proof passed down to
     ``ProtectedStore.owner_update`` / ``ModeManager`` / ``KillSwitch``. ``confirmed`` is only ever set
-    True by that authenticated flow — never by Tier 1 or the learner (R4).
+    True by that authenticated flow — never by Tier 1 or the learner.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -34,7 +34,7 @@ class OwnerConfirmation(BaseModel):
 
 
 class Session(BaseModel):
-    """A single trading day's session times (R6). Returned by ``NSECalendar.session``.
+    """A single trading day's session times. Returned by ``NSECalendar.session``.
 
     Handles muhurat (Diwali evening) and shortened/special sessions. All times tz-aware IST.
     """
@@ -53,9 +53,9 @@ class Session(BaseModel):
 
 
 class CorpAction(BaseModel):
-    """A corporate action with an ex-date (A12). Drives GTT ex-date adjustment + ledger attribution.
+    """A corporate action with an ex-date. Drives GTT ex-date adjustment + ledger attribution.
 
-    Return type of ``NSECalendar.ex_dates`` (the planned §2.6/T12 GTT ex-date scan). The corp-actions
+    Return type of ``NSECalendar.ex_dates`` (the planned GTT ex-date scan). The corp-actions
     feed stores raw rows in the ``corp_actions`` table, not this type.
     """
 
@@ -68,21 +68,21 @@ class CorpAction(BaseModel):
     amount: Decimal | None = None    # dividend per share
 
 
-#: Provenance of a 1-minute bar row (§4.3 ``bars_1m.src``): ``self`` = built live from ticks (A13);
-#: ``kite_official`` = official historical candle (canonical where it exists, §4.4 job 2);
-#: ``gap_backfilled`` = an offline-span fill (§2.6) — excluded from the reconcile drift denominator.
+#: Provenance of a 1-minute bar row (``bars_1m.src``): ``self`` = built live from ticks;
+#: ``kite_official`` = official historical candle (canonical where it exists);
+#: ``gap_backfilled`` = an offline-span fill — excluded from the reconcile drift denominator.
 BarSrc = Literal["self", "kite_official", "gap_backfilled"]
 
 
 class Tick(BaseModel):
-    """One KiteTicker FULL-mode tick frame, as forwarded by the mt-ticker child (§3.2.2/§3.2.3).
+    """One KiteTicker FULL-mode tick frame, as forwarded by the mt-ticker child.
 
     Field names track the KiteTicker FULL-mode payload (``ticker/main.py`` wire contract) so the
     frame→model mapping is mechanical. ``volume_traded`` is the **cumulative day volume**, NOT a
-    per-tick delta — bar volume is computed as the delta of this field (A13, load-bearing).
-    ``exchange_ts`` is the exchange timestamp, tz-aware IST always (§3.2 convention). The optional
+    per-tick delta — bar volume is computed as the delta of this field (load-bearing).
+    ``exchange_ts`` is the exchange timestamp, tz-aware IST always. The optional
     fields carry the FULL-mode extras persisted to the tick Parquet dataset (depth top-of-book feeds
-    the §6.2 spread estimate; ``avg_price`` is the exchange day-VWAP).
+    the spread estimate; ``avg_price`` is the exchange day-VWAP).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -90,7 +90,7 @@ class Tick(BaseModel):
     instrument_token: int
     tradingsymbol: str
     ltp: Decimal                          # last traded price (KiteTicker last_price)
-    volume_traded: int = Field(ge=0)      # CUMULATIVE day volume (A13)
+    volume_traded: int = Field(ge=0)      # CUMULATIVE day volume
     exchange_ts: datetime                 # tz-aware IST (validated below)
     ohlc_open: Decimal | None = None      # FULL-mode day ohlc snapshot
     ohlc_high: Decimal | None = None
@@ -109,11 +109,11 @@ class Tick(BaseModel):
 
 
 class Bar(BaseModel):
-    """A finalized 1-minute OHLCV bar (§3.2.3/§4.3 ``bars_1m``), published on ``bar.1m``.
+    """A finalized 1-minute OHLCV bar (``bars_1m``), published on ``bar.1m``.
 
-    ``volume`` is the per-bar volume derived from cumulative-volume deltas (A13). ``src`` records
+    ``volume`` is the per-bar volume derived from cumulative-volume deltas. ``src`` records
     provenance (:data:`BarSrc`). ``auction_open`` is the pre-open-auction-derived open price, present
-    ONLY on the 09:15 row (A14 — pre-open ticks are excluded from bars; the auction open is captured
+    ONLY on the 09:15 row (pre-open ticks are excluded from bars; the auction open is captured
     separately). ``ts_minute`` is the bar's minute START, tz-aware IST, minute-aligned.
     """
 
@@ -125,9 +125,9 @@ class Bar(BaseModel):
     high: Decimal
     low: Decimal
     close: Decimal
-    volume: int = Field(ge=0)             # Δ(cumulative day volume) over the minute (A13)
+    volume: int = Field(ge=0)             # Δ(cumulative day volume) over the minute
     src: BarSrc = "self"
-    auction_open: Decimal | None = None   # only on the 09:15 row (A14)
+    auction_open: Decimal | None = None   # only on the 09:15 row
 
     @field_validator("ts_minute")
     @classmethod
@@ -138,11 +138,11 @@ class Bar(BaseModel):
 
 
 class TradeWindow(BaseModel):
-    """The owner-set daily trade window (§7.1 ``trade_window``).
+    """The owner-set daily trade window (``trade_window``).
 
     A STICKY control-plane value (SQLite ``trade_window_state``), seeded from settings.yaml and
-    owner-adjustable at runtime (§3.2.7). Gates entry decisions + entry recommendations only — NEVER
-    risk-reducing actions (R3).
+    owner-adjustable at runtime. Gates entry decisions + entry recommendations only — NEVER
+    risk-reducing actions.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -152,7 +152,7 @@ class TradeWindow(BaseModel):
     squareoff_buffer_min: int = Field(ge=0, default=5)
 
     def mis_entry_cutoff(self) -> time:
-        """MIS entries cut off at ``end − squareoff_buffer`` (§3.2.8)."""
+        """MIS entries cut off at ``end − squareoff_buffer``."""
         from datetime import date as _date
         from datetime import timedelta
 

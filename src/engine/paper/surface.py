@@ -1,8 +1,8 @@
-"""The broker order / GTT / account surface shared by live and paper routing (§3.2.9, R9).
+"""The broker order / GTT / account surface shared by live and paper routing.
 
-WO-P3-2, 2026-09-10 (§8.4 Phase-3 decomposition addendum).
+2026-09-10.
 
-**Why this exists.** §3.5.3 makes routing a sticky flag: in AUTO the OMS talks to
+**Why this exists.** Routing is a sticky flag: in AUTO the OMS talks to
 :class:`~engine.broker.kite_client.KiteClient` or to :class:`~engine.paper.broker.PaperBroker`
 depending on ``routing: paper | live``, and it must not know which. Duck typing alone makes that a
 convention; :class:`BrokerSurface` makes it structural, and ``tests/unit/test_broker_surface.py``
@@ -12,14 +12,14 @@ first paper-AUTO session.
 
 **What is pinned here, and why:**
 
-* Exactly the twelve order/GTT/account methods the OMS calls — the count §8.4's WO-P3-2 entry
+* Exactly the twelve order/GTT/account methods the OMS calls — the count the design
   pins. ``KiteClient.historical`` and ``KiteClient.instruments`` are deliberately OUT of the
   surface: they are reference/market-data endpoints owned by ``engine.marketdata`` /
   ``InstrumentStore``, never routed per mode, and a PaperBroker implementation of them would be
   meaningless.
 * ``intent`` defaults (``"entry"`` on place, ``"risk_reducing"`` on modify/cancel) are part of the
-  contract, not an implementation detail: they select the §7.1 ``order_rate`` pool on the live side
-  and are what the injected ``order_guard`` (§3.5.3 order-surface predicate) sees.
+  contract, not an implementation detail: they select the ``order_rate`` pool on the live side
+  and are what the injected ``order_guard`` (the order-surface predicate) sees.
 * Every method is ``async``. Paper fills are computed synchronously inside ``on_tick``, but the
   surface stays awaitable so the OMS has one call shape.
 
@@ -76,7 +76,7 @@ class BrokerSurface(Protocol):
         ...
 
     async def margins(self) -> Any:
-        """Account margins. Checked before every order (C6)."""
+        """Account margins. Checked before every order."""
         ...
 
     # -- GTT ---------------------------------------------------------------------------------

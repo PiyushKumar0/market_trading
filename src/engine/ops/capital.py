@@ -1,18 +1,18 @@
-"""Owner capital change from the dashboard (O19; design 2026-10-16 v2 §3.2, §4, §5).
+"""Owner capital change from the dashboard.
 
 One figure moves, ``limits.yaml capital_base_inr``, and the two rupee caps scale with it
 (``floor(cap × new / old)``). :class:`CapitalChanger` refuses a change in the session window, in AUTO,
 on a calendar that does not cover today, outside half..double, on an unverified file, or when it would
 NEWLY trip a brake in either book. Otherwise it rewrites exactly three lines of the verified bytes,
 re-signs them with a compare-and-swap ``owner_update`` and reloads the limits, so every reader of the
-base (both trackers, ``PaperRisk``, the gate) sees it on its next call (§2).
+base (both trackers, ``PaperRisk``, the gate) sees it on its next call.
 
 Both books are checked with every held position priced the way the next session's first evaluation
 sees it: the live mark, else the close of the last stored 1m bar (paper prep's own seed). After an
 out-of-session restart the live caches are empty, and pricing at entry would hide open MTM from the
 brakes. A held position with neither price refuses 409, as ``PaperRisk._evaluate`` does.
 
-Ordering constraint (ruling R7): :meth:`CapitalChanger.apply` runs synchronously from the verified
+Ordering constraint: :meth:`CapitalChanger.apply` runs synchronously from the verified
 read through ``owner_update`` to ``limits.reload()``. The only ``await`` before ``reload()`` is the
 price prefetch, before the table is read; after it, the bounded Telegram notify. A tick interleaving
 a reload between a floor check's table read and its tracker read could compare new-base equity with
@@ -155,7 +155,7 @@ def scaled_values(table: LimitTable, new_base: int) -> dict[Path, int]:
     return out
 
 
-# --------------------------------------------------------------------------- the rewrite (§4)
+# --------------------------------------------------------------------------- the rewrite
 def rewrite_limits_text(text: str, old: Mapping[Path, int], new: Mapping[Path, int], stamp: str) -> str:
     """Replace each path's value on its one line, keep its comment and append the provenance.
 
@@ -257,9 +257,9 @@ def check_structure(old_text: str, new_text: str, new: Mapping[Path, int]) -> Li
             422, f"limits.yaml structure: the new file does not validate ({exc.error_count()} errors)") from exc
 
 
-# --------------------------------------------------------------------------- brakes (§3.2)
+# --------------------------------------------------------------------------- brakes
 def _tripped(tracker: ExposureTracker, table: LimitTable) -> list[tuple[str, Decimal]]:
-    """Every brake ``tracker`` trips against ``table``'s OWN lines (ruling R8), with each ₹ line:
+    """Every brake ``tracker`` trips against ``table``'s OWN lines, with each ₹ line:
     the floor ladder in the engine's order, then the day-loss rungs (hard first)."""
     breaches = tracker.evaluate_floors(floor_limits_from(table))
     out: list[tuple[str, Decimal]] = [(b.rung, b.threshold) for b in breaches]
@@ -610,8 +610,7 @@ class CapitalChanger:
         return {"ok": True, "old": old_figures, "new": new_figures, "commit_hint": COMMIT_HINT}
 
     def _check_live_base(self, new_table: LimitTable) -> None:
-        """Wiring self-check after the reload: the real tracker's base must read the new table (O19
-        §2: one live source, no setter). Logs; never refuses, since the change is already live."""
+        """Wiring self-check after the reload: the real tracker's base must read the new table (one live source, no setter). Logs; never refuses, since the change is already live."""
         try:
             live: object = self._real.capital_base
         except Exception as exc:

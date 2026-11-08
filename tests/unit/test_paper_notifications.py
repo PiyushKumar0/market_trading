@@ -1,4 +1,4 @@
-"""Paper owner notifications (plan Q4.10): FILL and PAPER_ALERT messages, dedupe, the paper-only sink."""
+"""Paper owner notifications: FILL and PAPER_ALERT messages, dedupe, the paper-only sink."""
 
 from __future__ import annotations
 

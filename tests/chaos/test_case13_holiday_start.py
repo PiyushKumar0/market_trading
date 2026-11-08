@@ -1,11 +1,11 @@
-"""Plan §9.4 chaos case 13 — Platform starts on an exchange holiday (R6).
+"""Chaos case 13 — Platform starts on an exchange holiday.
 
-Must hold (§9.4 row 13, verbatim): "calendar guard: no session, no LLM calls (governor), jobs skip,
+Must hold: "calendar guard: no session, no LLM calls (governor), jobs skip,
 heartbeat-only health".
 
 Scenario: the engine boots at 09:40 IST on Fri 2026-06-26 — "Muharram", a full-day holiday in
 ``config/calendar/2026.yaml`` (the calendar is loaded STRICT, as ``engine.ops.main`` does in prod).
-The real §2.6 ``SessionLifecycle.startup`` runs with the real ``SelfTest`` (incl. the D11 SDK smoke
+The real ``SessionLifecycle.startup`` runs with the real ``SelfTest`` (incl. the SDK smoke
 seam), the real ``build_job_registry`` inventory behind a real ``CatchUpRunner``, the real
 ``HeartbeatWriter`` thread and the real ``HealthMonitor``. Only the external edges are faked: the SDK
 smoke call and every job body are recorders, and anything that would reach an LLM / the store is a
@@ -19,14 +19,14 @@ Clauses covered (one test each):
 Every guard assertion is paired with a trading-day CONTROL through the same object, so a guard that
 stopped guarding (or a test that stopped exercising it) fails loudly.
 
-Phase-3-gated: none — every clause is observable in Phase 2 (RECOMMEND).
+Gated on the live order path: none — every clause is observable in RECOMMEND mode.
 
-Resolved ambiguity: "(governor)" — the §5.6 ``BudgetGovernor.can_invoke`` is deliberately NOT
+Resolved ambiguity: "(governor)" — the ``BudgetGovernor.can_invoke`` is deliberately NOT
 calendar-aware (its module docstring: "No burn on holidays is emergent — no calls fire"); the holiday
 guard lives at every LLM dispatch site (calendar-guarded scheduler, catch-up fire-days, the
-pipeline's trade-window seam, the news scorer's market-hours leg, the D11 smoke skip). The test
+pipeline's trade-window seam, the news scorer's market-hours leg, the SDK smoke skip). The test
 therefore asserts each dispatch site refuses AND that the governor's spend ledger — which every SDK
-call is priced into — stays empty. The §5.4 19:00–22:00 news sweep deliberately scores on holidays
+call is priced into — stays empty. The 19:00–22:00 news sweep deliberately scores on holidays
 too (news_scoring.py "Spec ambiguities resolved"); it is outside a 09:40 boot and not asserted here.
 """
 
@@ -115,7 +115,7 @@ class _KeepAwake:
 
 @pytest.fixture
 def holiday_engine(conn, db_path, tmp_path, monkeypatch):
-    """The §2.6 boot graph as engine.ops.main composes it, on the holiday clock."""
+    """The boot graph as engine.ops.main composes it, on the holiday clock."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))   # keep every settings path in tmp
     (tmp_path / "data").mkdir()
@@ -190,7 +190,7 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
 
 
 async def _boot(rig):
-    await rig.mode.request_transition(Mode.RECOMMEND, Actor.OWNER)   # the Phase-2 sticky mode
+    await rig.mode.request_transition(Mode.RECOMMEND, Actor.OWNER)   # the RECOMMEND sticky mode
     return await rig.lifecycle.startup(check_skew=False)             # NTP is not this case's subject
 
 
@@ -202,7 +202,7 @@ async def test_holiday_boot_has_no_session_and_opens_no_entries(holiday_engine):
 
     report = await _boot(rig)
 
-    # The boot itself completes cleanly — a holiday start is NOT a fault (runbook §10.4 13/14: "no action").
+    # The boot itself completes cleanly — a holiday start is NOT a fault ("no action").
     assert report.frozen_reasons == [] and report.killed is False
     assert any(str(m.kind) == "startup_report" for m in rig.notified)
     # Calendar guard: no session, no trade window, so nothing can be in-window.
@@ -230,7 +230,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
         report = await rig.self_test.run(check_skew=False, include_freshness=False)
         return next(c for c in report.checks if c.name == "sdk_smoke")
 
-    # (1) D11 boot smoke — the one SDK call every startup may make — is skipped on a holiday.
+    # (1) SDK boot smoke — the one SDK call every startup may make — is skipped on a holiday.
     assert rig.sdk_smoke_calls == []
     smoke = await smoke_check()
     assert smoke.status.value == "SKIP" and "non-trading day" in smoke.detail
@@ -256,7 +256,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
     pipeline._calendar = rig.calendar
     assert pipeline._window(HOLIDAY) is None
 
-    # (4) News analyst: the §5.4 market-hours scoring leg requires a trading day (R6).
+    # (4) News analyst: the market-hours scoring leg requires a trading day.
     scorer = NewsScoringJob(
         _Tripwire("store", hits), _Tripwire("resolver", hits), _Tripwire("assembler", hits),
         _Tripwire("harness", hits), load_agent_defs(load_yaml(config_dir() / "agents.yaml")),
@@ -284,7 +284,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
 # ------------------------------------------------------------------------------------ jobs skip
 async def _lane_pass(rig) -> None:
     task = rig.compaction_lane.spawn("sweep")
-    assert task is not None                 # a holiday, and 23:30, are outside the WO-21 window
+    assert task is not None                 # a holiday, and 23:30, are outside the tick_compact no-run window
     await task
 
 
@@ -316,7 +316,7 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     assert rig.mode.risk_state() == RiskState.NORMAL          # nothing latched a freeze
 
     # Next trading day, after the EOD block: the sweep runs each date-keyed job for Mon ONLY — the
-    # holiday is never replayed as a "missed" day (§2.6 step 5: fire-days are NSE trading days).
+    # holiday is never replayed as a "missed" day (fire-days are NSE trading days).
     rig.now.at = datetime(2026, 6, 29, 23, 30, tzinfo=IST)
     await rig.catch_up.catch_up(scope=CatchUpScope.ALL)
     await _lane_pass(rig)
@@ -331,7 +331,7 @@ async def test_holiday_health_is_heartbeat_only(holiday_engine):
     rig = holiday_engine
     await _boot(rig)
 
-    # The §2.2 liveness heartbeat (dedicated thread, own sqlite connection) IS running on the holiday.
+    # The liveness heartbeat (dedicated thread, own sqlite connection) IS running on the holiday.
     for _ in range(200):
         if rig.heartbeat.writes >= 1:
             break

@@ -1,4 +1,4 @@
-"""Paper Reconciler (plan Q4.7; R5): the OMS and ``gtts`` rows against the PaperBroker's book.
+"""Paper Reconciler: the OMS and ``gtts`` rows against the PaperBroker's book.
 
 * A non-terminal paper order the broker reports differently is re-delivered through the OrderManager's
   postback consumer, so ``apply_update`` and the fill callbacks run as for a live postback.

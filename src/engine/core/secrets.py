@@ -1,7 +1,6 @@
-"""Secrets via Windows Credential Manager / DPAPI (R10).
+"""Secrets via Windows Credential Manager / DPAPI.
 
-Backed by ``keyring`` (DPAPI on Windows). Secrets NEVER live in the repo, YAML, or plaintext on disk
-(§2.4). Seed them once with ``scripts/dpapi_set.py``. The Claude OAuth token is stored here but no
+Backed by ``keyring`` (DPAPI on Windows). Secrets NEVER live in the repo, YAML, or plaintext on disk. Seed them once with ``scripts/dpapi_set.py``. The Claude OAuth token is stored here but no
 engine code reads it or puts it in any environment today: the harness passes the pinned CLI only
 ``env={"DISABLE_AUTOUPDATER": "1"}``, and that CLI authenticates with its own stored login.
 """
@@ -12,15 +11,15 @@ import keyring
 
 SERVICE = "market_trading"
 
-# Canonical secret keys (§3.2.1). Documented (names only) in .env.example.
+# Canonical secret keys. Documented (names only) in .env.example.
 KITE_API_KEY = "kite_api_key"
 KITE_API_SECRET = "kite_api_secret"
-KITE_ACCESS_TOKEN = "kite_access_token"          # rotates daily (~06:00 IST, A5)
+KITE_ACCESS_TOKEN = "kite_access_token"          # rotates daily (~06:00 IST)
 TELEGRAM_BOT_TOKEN = "telegram_bot_token"
 DASHBOARD_TOKEN = "dashboard_token"
-CLAUDE_CODE_OAUTH_TOKEN = "claude_code_oauth_token"  # D2; stored only, read by no engine code
+CLAUDE_CODE_OAUTH_TOKEN = "claude_code_oauth_token"  # stored only, read by no engine code
 
-# Secrets that must be present for the engine to operate (checked by the startup self-test, D11).
+# Secrets that must be present for the engine to operate (checked by the startup self-test).
 REQUIRED_AT_STARTUP = (
     KITE_API_KEY,
     KITE_API_SECRET,
@@ -34,7 +33,7 @@ class MissingSecretError(KeyError):
 
 
 class Secrets:
-    """Read/write secrets in the Windows Credential Manager (R10)."""
+    """Read/write secrets in the Windows Credential Manager."""
 
     def __init__(self, service: str = SERVICE) -> None:
         self._service = service
@@ -61,5 +60,5 @@ class Secrets:
             pass
 
     def missing_required(self) -> list[str]:
-        """Return the required-at-startup secrets that are absent (for the self-test, D11)."""
+        """Return the required-at-startup secrets that are absent (for the self-test)."""
         return [k for k in REQUIRED_AT_STARTUP if not self.has(k)]

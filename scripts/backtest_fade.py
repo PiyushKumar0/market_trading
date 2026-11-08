@@ -1,8 +1,7 @@
 #!/usr/bin/env python
-"""``fade`` PRE-REGISTERED backtest harness (IMPLEMENTATION_PLAN.md `fade` pre-registration, R4,
-2026-09-12) - the SHORT side of intraday, which no backtest in this repo has ever run.
+"""``fade`` PRE-REGISTERED backtest harness (`fade` pre-registered 2026-09-12) - the SHORT side of intraday, which no backtest in this repo has ever run.
 
-Every intraday sweep here has been LONG-ONLY under the §1.4.9 short gate: ORB twice, `tdc`, the
+Every intraday sweep here has been LONG-ONLY under the short gate: ORB twice, `tdc`, the
 candle battery, the aborted VWAP-deviation study. The one piece of evidence pointing the other way
 is the `orb` v2 finding of a **negative-gross fade of breakouts in 2025-H2** - i.e. the thing that
 killed the long side is the prior FOR this study. This harness measures two fade rules and nothing
@@ -13,9 +12,9 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
 :data:`PARAMS` dict and one :data:`RULES` dict, both fixed at import time and both transcribed from
-the plan paragraph. **TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``F1``, ``F2``). Every
+the pre-registration paragraph. **TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``F1``, ``F2``). Every
 other entry in :data:`RULES` is a REPORTING-ONLY cell, marked ``registered=False``, and is never a
-competitor F1/F2 is picked from: two of them are the plan's stated reporting variants (F1 at 12:00,
+competitor F1/F2 is picked from: two of them are the pre-registration's stated reporting variants (F1 at 12:00,
 F2 with a 15:15-only exit) and two are EXECUTION-CONSERVATISM cells (the stop evaluated on the 1m
 HIGH instead of the 1m close) that can only make a fade look WORSE. The CLI exposes no flag that
 changes a signal parameter.
@@ -24,11 +23,11 @@ changes a signal parameter.
 ``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a REFUTATION, it is
 reported in exactly those terms, and it changes nothing.
 
-**Shorts are gated for AUTO by §1.4.9 whatever this study finds.** A promotable cell is evidence for
+**Shorts are gated for AUTO whatever this study finds.** A promotable cell is evidence for
 a pre-registered origination proposal, never a wiring: this script wires nothing.
 
 ===============================================================================================
-THE TWO RULES (transcribed from the plan; every clause is evaluated at a bar CLOSE)
+THE TWO RULES (transcribed from the pre-registration; every clause is evaluated at a bar CLOSE)
 ===============================================================================================
 **F1 - failed-breakout fade.** At the decision bar ``T`` (11:00 IST):
 
@@ -40,7 +39,7 @@ THE TWO RULES (transcribed from the plan; every clause is evaluated at a bar CLO
 * ``rel_volume_tod >= 1.5`` - cumulative volume 09:15..T over the MEDIAN, across the 20 sessions
   immediately preceding this one, of that symbol's cumulative volume to the SAME minute. Fewer than
   ``rvol_min_valid_sessions`` (10) usable priors ⇒ the symbol-day is SKIPPED and counted, never
-  admitted on a thin denominator. PINNED INTERPRETATION: the plan phrase "broke ... on
+  admitted on a thin denominator. PINNED INTERPRETATION: the pre-registered phrase "broke ... on
   rel_volume_tod >= 1.5" does not say at WHICH minute participation is measured; it is measured at
   the DECISION bar T, which is the `tdc` definition verbatim, so the same words mean the same thing
   in both studies. The alternative (at the break minute) was NOT computed, so no selection between
@@ -73,7 +72,7 @@ A short's equal-notional percent return is ``(1 - exit/entry) * 100`` - profit p
 ENTRY notional. (``entry/exit - 1`` is a different number and is not used anywhere.)
 
 ``CostModel.breakeven_pct(notional, "MIS")`` - ONE full round trip, statutory fees PLUS the measured
-bid-ask spread (WO-2) - plus ONE TICK of slippage on EACH side, charged as ``2 * tick / entry_px *
+bid-ask spread - plus ONE TICK of slippage on EACH side, charged as ``2 * tick / entry_px *
 100`` percent. The round trip is SIDE-AGNOSTIC: a short is the same two legs in the reverse order,
 and the components that are per-side (intraday STT on the sell, stamp duty on the buy) are each
 charged exactly once either way. MIS, never CNC - a short leg cannot be a delivery position.
@@ -99,7 +98,7 @@ LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here 
   close could actually reach - never at the close that triggered it.
 * The F2 prior close is the symbol's last ``bars_1d`` close STRICTLY BEFORE ``d``.
 * The index-regime split is computed from the same T-bar snapshot as the signal, not from the
-  session's outcome. The ATR tercile (R3's statistic, imported definition) is computed over the 14
+  session's outcome. The ATR tercile (the candle study's statistic, imported definition) is computed over the 14
   daily sessions STRICTLY BEFORE the signal day, so the signal day's own range never enters the
   label it is sorted by.
 
@@ -108,7 +107,7 @@ POPULATION (survivorship, stated not buried)
 ===============================================================================================
 The ELIGIBLE universe - the CURRENT (latest ``universe_daily`` day) ``included`` rows plus rows
 excluded for ``['watchlist_cap']`` exactly, i.e. the set ``get_universe_eligible_symbols`` hands the
-live sweep, which is NIFTY 500-based since O15 (2026-09-04) - applied BACKWARDS over the whole
+live sweep, which is NIFTY 500-based since owner decision 2026-09-04 - applied BACKWARDS over the whole
 window and intersected with the symbols ``bars_1m`` actually holds that session. This is a
 **survivorship-tainted proxy** in the same sense the `brk20` and `hi52` reports carry: index
 membership as of each historical session is stored nowhere in this platform. For a LONG continuation
@@ -123,7 +122,7 @@ the LIQUID head of the eligible set, not its tail.
 EX-DATE VETO (universal, one window, both rules)
 ===============================================================================================
 A symbol-day is VETOED when ``corp_actions`` carries ANY ex-date in the 35 CALENDAR days ending at
-``d`` (the `brk20`/`hi52` window). Kite minute candles are adjusted AT FETCH TIME (§14 Q10), so a
+``d`` (the `brk20`/`hi52` window). Kite minute candles are adjusted AT FETCH TIME, so a
 series stitched across an ex-date can hold two unit systems, and the 20-session ``rel_volume_tod``
 denominator is distorted by a split's volume multiplier either way. F2 additionally compares two
 SERIES (a ``bars_1d`` prior close against a ``bars_1m`` open); that cross-source comparison gets its
@@ -221,13 +220,12 @@ def _ascii(text: str) -> str:
     reaches the cp1252 console as '?', which reads as a corrupted report rather than a citation."""
     return tdc._ascii(text.replace("§", "sec."))
 
-#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every §3.2.4
+#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every eligibility
 #: criterion and lost only the 200-name tick-watchlist cap). Same constant `brk20` reads.
 EXCL_WATCHLIST_CAP = "watchlist_cap"
 
 # ================================================================================================
-# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from IMPLEMENTATION_PLAN.md, the `fade` (R4)
-# pre-registration paragraph. Not a knob, not a grid, not reachable from the CLI.
+# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from the `fade` pre-registration paragraph. Not a knob, not a grid, not reachable from the CLI.
 # ================================================================================================
 PARAMS: dict[str, Any] = {
     # --- the opening range (completed bars only: 09:15..09:29)
@@ -253,7 +251,7 @@ PARAMS: dict[str, Any] = {
     # --- vetoes / splits
     "exdate_veto_window_days": 35,
     "atr_period": 14,
-    # --- the plan's promotion rule (a boolean, not a recommendation)
+    # --- the pre-registered promotion rule (a boolean, not a recommendation)
     "promote_min_n": 200,
     "promote_min_t": 2.0,
     "promote_min_cpcv_positive_share": 0.60,
@@ -276,7 +274,7 @@ class RuleSpec:
     """One measured cell. ``registered`` marks the two that carry the trial count.
 
     ``family`` is the REGISTERED rule a cell belongs to. The ATR tercile cuts are taken once per
-    family (R3's posture), so a symbol-day sits in the same cell under every variant of its rule and
+    family (the candle study's posture), so a symbol-day sits in the same cell under every variant of its rule and
     the cells compare populations rather than cuts. F1 and F2 measure different populations at
     different decision bars, so their cuts are never pooled with each other.
     """
@@ -294,7 +292,7 @@ class RuleSpec:
 
 # ================================================================================================
 # EVERY RULE IS REPORTED. NONE IS SELECTED. Two are REGISTERED (the trial count is 2); the other four
-# are reporting-only cells - two named by the plan paragraph, two execution-conservatism checks that
+# are reporting-only cells - two named by the pre-registration paragraph, two execution-conservatism checks that
 # can only make the short look worse.
 # ================================================================================================
 RULES: dict[str, RuleSpec] = {
@@ -341,7 +339,7 @@ ATR_MID = "atr_tercile_2_middle"
 ATR_HIGH = "atr_tercile_3_wildest"
 ATR_UNCLASSIFIED = "atr_pct_unclassified"
 #: The four ATR cells sum to the pooled cell exactly - a symbol-day without 14 prior daily sessions
-#: is LABELLED, never dropped (R3's construction, so the two studies' ATR rows are comparable).
+#: is LABELLED, never dropped (the candle study's construction, so the two studies' ATR rows are comparable).
 ATR_CELLS = (ATR_LOW, ATR_MID, ATR_HIGH, ATR_UNCLASSIFIED)
 
 EXIT_FADE_FAILED = "fade_failed_next_open"
@@ -628,13 +626,13 @@ def atr_pct_at(
     period: int,
     cache: dict[tuple[str, date], float | None] | None = None,
 ) -> float | None:
-    """R3's statistic VERBATIM: Wilder ATR(``period``) over the ``period`` completed daily sessions
+    """The candle study's ATR statistic VERBATIM: Wilder ATR(``period``) over the ``period`` completed daily sessions
     STRICTLY BEFORE ``d``, over the close of the last of them, in percent. ``None`` when the symbol
     has fewer than ``period`` prior daily sessions.
 
     Two consequences of "strictly before", both deliberate: the signal day's own range never enters
     the label it is sorted by, and the window's FIRST bar has no prior close inside the window, so
-    ``wilder_atr`` gives it the plain ``high - low`` true range (R3's pinned reading; the gap-aware
+    ``wilder_atr`` gives it the plain ``high - low`` true range (the candle study's pinned reading; the gap-aware
     alternative was not computed, so no selection between the two took place). With exactly
     ``period`` bars the Wilder recursion never runs and the value is the SMA seed - the mean of the
     window's true ranges - which is what makes the window definition and the house function agree.
@@ -1026,7 +1024,7 @@ def run_study(
             })
 
     # ---------------------------------------------------------------- ATR cells, cut ONCE per family
-    # R3's posture: the cuts are taken over the DISTINCT measured (symbol, signal day) pairs of the
+    # The candle study's posture: the cuts are taken over the DISTINCT measured (symbol, signal day) pairs of the
     # rule family, so a symbol-day sits in the same cell under every variant of its rule and the
     # cells compare populations rather than cuts. F1 and F2 measure different populations at
     # different decision bars, so their cuts are never pooled with one another.
@@ -1302,7 +1300,7 @@ def select_rule(
 
 
 def verdict(doc: dict[str, Any]) -> dict[str, Any]:
-    """The registered outcome, computed from the report itself: which cells clear the plan's boolean.
+    """The registered outcome, computed from the report itself: which cells clear the pre-registered boolean.
 
     A REFUTATION is the default and is stated as one. Reporting-only cells are listed separately and
     are never part of the outcome - they cannot promote what the registered rules did not.

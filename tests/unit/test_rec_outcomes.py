@@ -1,4 +1,4 @@
-"""Plan Q2.3: the hindsight ``rec_outcomes`` job."""
+"""The hindsight ``rec_outcomes`` job."""
 
 from __future__ import annotations
 

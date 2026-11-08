@@ -1,10 +1,10 @@
-"""CatalystDigestJob (§2.7 step 5 / §3.2.4 / §4.4 job 14) — the deterministic heart of the news layer.
+"""CatalystDigestJob — the deterministic heart of the news layer.
 
 Covers the two pinned outputs and every rule that can license origination: the decay-weighted SUM
-(§2.7 step 5(i)) at its half-life boundaries, the AND-list per condition (§2.7 step 5(ii)), the
+at its half-life boundaries, the AND-list per condition, the
 fan-out weight applied to materiality AND |sentiment| BEFORE the thresholds, trading-SESSION event
-age (Friday event ⇒ age 1 on Monday, O13), the T+1 PEAD sign agreement, the inclusion floor, the
-§6.1 deterministic levels against a hand-computed ATR, and the fail-safe ladder (unscored ⇒
+age (Friday event ⇒ age 1 on Monday), the T+1 PEAD sign agreement, the inclusion floor, the
+deterministic levels against a hand-computed ATR, and the fail-safe ladder (unscored ⇒
 empty-but-FRESH; only stale/missing disables `cat`).
 """
 
@@ -38,7 +38,7 @@ MON = date(2026, 6, 15)
 TUE = date(2026, 6, 16)
 WED = date(2026, 6, 17)
 
-#: The shipped §7.1 `catalyst_guard` block (config/limits.yaml), verbatim.
+#: The shipped `catalyst_guard` block (config/limits.yaml), verbatim.
 GUARD = {
     "min_source_domains": 2,
     "sentiment_min_long": 0.30,
@@ -85,7 +85,7 @@ def make_job(store, conn, tmp_path, digest_clock):
             encoding="utf-8",
         )
         protected = ProtectedStore(cfg, conn, digest_clock)
-        protected.register_initial("limits.yaml", OWNER_OK)   # hash-verified load path (§2.4)
+        protected.register_initial("limits.yaml", OWNER_OK)   # hash-verified load path
         calendar = NSECalendar(CAL_DIR, digest_clock, strict=False)
         return CatalystDigestJob(store, digest_clock, calendar, protected, envelope=envelope)
 
@@ -161,7 +161,7 @@ def sentiment_map(store: MarketStore, ran_at: datetime) -> dict[tuple[str, str],
 
 
 def seed_qualifying(store: MarketStore, **cluster_kwargs) -> None:
-    """A single cluster that satisfies EVERY §2.7 step-5(ii) condition for ACME at the WED digest."""
+    """A single cluster that satisfies EVERY AND-list condition for ACME at the WED digest."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED)
     kwargs = {"first_seen": at(TUE, 18, 0), "symbols": ("ACME",)}
@@ -169,7 +169,7 @@ def seed_qualifying(store: MarketStore, **cluster_kwargs) -> None:
     seed_cluster(store, "c-1", **kwargs)
 
 
-# --------------------------------------------------------------------------- step 5(i): decay SUM
+# --------------------------------------------------------------------------- decay SUM
 async def test_decay_at_halflife_boundaries(store, make_job):
     """0.5^(age/half-life) exactly at 0/1/2/6 half-lives; > 6× half-life drops out entirely."""
     ran = at(WED)
@@ -194,7 +194,7 @@ async def test_decay_at_halflife_boundaries(store, make_job):
 
 
 async def test_decayed_sum_is_clipped_to_unit_interval(store, make_job):
-    """A decayed SUM can exceed ±1 — the §2.7 formula clips, so |value| ≤ 1 always."""
+    """A decayed SUM can exceed ±1 — the formula clips, so |value| ≤ 1 always."""
     ran = at(WED)
     for i in range(5):
         seed_cluster(store, f"c-up-{i}", first_seen=ran, sentiment=0.9, materiality=1.0, symbols=("UP",))
@@ -224,7 +224,7 @@ async def test_sum_not_mean_and_old_news_decays_to_zero(store, make_job, now_box
     assert aged_value < 0.05
 
 
-# --------------------------------------------------------------------------- step 5(ii): AND-list
+# --------------------------------------------------------------------------- AND-list
 BASE_CONDITIONS = {
     "weighted_materiality": 0.80,
     "weighted_sentiment": 0.60,
@@ -275,7 +275,7 @@ def test_truncated_guard_block_originates_nothing():
     assert conditions["sentiment_long"] is True          # falls back to the pinned +0.30 floor
 
 
-# --------------------------------------------------------------------------- corroboration (§7.1)
+# --------------------------------------------------------------------------- corroboration
 @pytest.mark.parametrize(("n_domains", "grade"), [(1, "context"), (2, "originating"), (3, "originating")])
 async def test_single_source_cluster_can_never_originate(store, make_job, n_domains: int, grade: str):
     domains = ("economictimes.com", "moneycontrol.com", "livemint.com")[:n_domains]
@@ -289,8 +289,8 @@ async def test_single_source_cluster_can_never_originate(store, make_job, n_doma
 
 
 async def test_story_level_union_corroborates_across_single_domain_clusters(store, make_job):
-    """§2.7 step 5(ii) 2026-08-05 amendment: cross-outlet paraphrase never merges under the pinned
-    §3.2.4 similarity (0/1,400 live pairs ≥ 0.75), so corroboration counts the domain UNION across
+    """2026-08-05: cross-outlet paraphrase never merges under the pinned
+    similarity (0/1,400 live pairs ≥ 0.75), so corroboration counts the domain UNION across
     age-eligible clusters for the same (symbol, event_type). Two single-domain clusters, different
     outlets ⇒ originating; the ITC/MARUTI/BEL results shape from the 2026-08-05 research."""
     seed_qualifying(store, domains=("economictimes.indiatimes.com",))
@@ -304,7 +304,7 @@ async def test_story_level_union_corroborates_across_single_domain_clusters(stor
 
     assert [r["grade"] for r in rows] == ["originating"]
     assert rows[0]["source_domain_count"] == 2
-    # §6.5 audit: best cluster (higher weighted materiality) FIRST, then the corroborator.
+    # Audit: best cluster (higher weighted materiality) FIRST, then the corroborator.
     assert list(rows[0]["cluster_refs"]) == ["c-1", "c-2"]
 
 
@@ -397,7 +397,7 @@ async def test_fanout_weight_multiplies_materiality_and_sentiment_pre_threshold(
 
 
 async def test_fanout_weight_scales_the_symbol_row_but_not_the_sector_row(store, make_job):
-    """§2.7 step 5(i): wᵢ = cat.fanout_weight only for a sector cluster's SYMBOL contribution."""
+    """wᵢ = cat.fanout_weight only for a sector cluster's SYMBOL contribution."""
     seed_universe(store, WED, ("ACME",))
     store.upsert_sector_map(WED, [{"symbol": "ACME", "sector": "METALS"}])
     seed_cluster(
@@ -415,7 +415,7 @@ async def test_fanout_weight_scales_the_symbol_row_but_not_the_sector_row(store,
 # ------------------------------------------------------- best-cluster selection (recency-decayed)
 # The 2026-08-27 HINDZINC fix. "Best" used to mean highest RAW weighted materiality, so a stale
 # cluster held the symbol's slot for its whole `cat.max_event_age_days` life no matter what
-# followed it. Ranking now applies step 5(i)'s own decay — 0.5^(age_h / cat.decay_halflife_h),
+# followed it. Ranking now applies the digest's own decay — 0.5^(age_h / cat.decay_halflife_h),
 # half-life 24h by default — to the COMPARISON key only.
 #
 # Every rank below is hand-computed against ran_at = WED 08:35 IST (the `now_box` default):
@@ -455,7 +455,7 @@ async def test_fresher_cluster_overtakes_a_stale_higher_materiality_one(store, m
 
     assert [r["symbol"] for r in rows] == ["ACME"]
     assert rows[0]["direction"] == "long"                     # the denial, not the speculation
-    assert list(rows[0]["cluster_refs"]) == ["c-fresh", "c-stale"]   # best FIRST (§6.5 audit)
+    assert list(rows[0]["cluster_refs"]) == ["c-fresh", "c-stale"]   # best FIRST (audit)
     # The STORED materiality is the winner's UNDECAYED weighted value — decay ranks, never labels.
     assert rows[0]["materiality"] == pytest.approx(0.50)
     assert rows[0]["event_age_h"] == pytest.approx(21.58333, abs=1e-4)
@@ -463,13 +463,13 @@ async def test_fresher_cluster_overtakes_a_stale_higher_materiality_one(store, m
 
 
 # ------------------------------------------------------------------ story-level REVERSAL detection
-# §2.7 `cat_reversal` (2026-08-27). The other half of the HINDZINC lesson: once decay lets the denial
+# `cat_reversal` (2026-08-27). The other half of the HINDZINC lesson: once decay lets the denial
 # take the slot, the fact that it REVERSED this platform's own earlier bearish reading is itself
 # information, and it was being thrown away. `reversal_of` records it deterministically — the same
 # (symbol, event_type) story contains an EARLIER cluster that cleared the inclusion floor on its own
 # UNDECAYED materiality and carried the opposite (short) direction. Purely additive: no grade, level,
 # condition or existing column reads it, so `cat` v2's event definition is untouched (its clock is
-# not — the decay ranking restarted it, §2.7 2026-08-28).
+# not — the decay ranking restarted it, 2026-08-28).
 async def test_hindzinc_shape_is_flagged_as_a_reversal(store, make_job):
     """The motivating case, now labelled. Same corpus as the decay test above: the Aug-24/25 bearish
     stake-sale speculation (short, materiality 0.60 — floor-clearing, so a real established claim)
@@ -554,7 +554,7 @@ async def test_a_LATER_opposite_cluster_is_not_a_reversal(store, make_job):
     Here the bearish cluster is the FRESHER one and merely loses the slot on rank
     (0.25 x 0.98329 = 0.2458 < 0.50 x 0.53614 = 0.2681). That is a story turning negative, which is
     the mirror case this rule deliberately does NOT trade — it is an exit-side signal on an existing
-    position (§5.2(b)), not an entry."""
+    position, not an entry."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED)
     seed_cluster(
@@ -575,7 +575,7 @@ async def test_a_LATER_opposite_cluster_is_not_a_reversal(store, make_job):
 
 async def test_a_winning_SHORT_row_is_never_flagged_as_a_reversal(store, make_job):
     """LONG-ONLY, enforced at detection. A positive story getting denied is a real event, but it is
-    an exit-side signal on an existing position — already owned by the §5.2(b) risk-reducing exit
+    an exit-side signal on an existing position — already owned by the risk-reducing exit
     path — and NSE cash equities cannot be shorted overnight anyway. Building the mirror case would
     add a short-side origination surface behind a flag nobody gated."""
     seed_universe(store, WED, ("ACME",))
@@ -631,7 +631,7 @@ async def test_a_FANNED_OUT_sector_predecessor_does_not_establish_a_reversal(sto
     sector-wide bearish cluster (materiality 0.60, sentiment −0.70) clears the floor AND the direction
     bar for EVERY constituent at once, so any later symbol-specific positive headline of the same
     event_type would be labelled a reversal of a story that never named the symbol — one sector
-    headline manufacturing a reversal per constituent. Fan-out corroborates (step 5(ii)) and it can
+    headline manufacturing a reversal per constituent. Fan-out corroborates and it can
     still WIN a row; what it cannot do is be the thing that was reversed."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED)
@@ -701,7 +701,7 @@ async def test_a_sector_cluster_that_NAMES_the_symbol_still_establishes_a_revers
 
 
 async def test_reversal_detection_is_deterministic_across_runs(store, make_job):
-    """§9.1: the verdict is a pure function of (corpus, ran_at) — no clock read of its own, no
+    """The verdict is a pure function of (corpus, ran_at) — no clock read of its own, no
     cross-day DB lookup, no LLM call. Re-running the same digest must reproduce it exactly."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED)
@@ -781,7 +781,7 @@ async def test_fresher_winner_can_narrow_origination_to_context(store, make_job)
     can only tighten: the old rule picked the raw-materiality argmax, so any cluster the decay
     promotes has materiality <= the one it displaced. Here a fresh 0.60 cluster takes the slot
     from a stale 0.90 one and the row drops below `cat.materiality_min` (0.70) to `context` —
-    the §2.7 fail-safe direction (LESS activity), on the correct, current story."""
+    the fail-safe direction (LESS activity), on the correct, current story."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED)
     seed_cluster(store, "c-stale", first_seen=at(MON, 4, 0), symbols=("ACME",), materiality=0.90)
@@ -795,11 +795,11 @@ async def test_fresher_winner_can_narrow_origination_to_context(store, make_job)
     assert rows[0]["materiality"] == pytest.approx(0.60)
     assert rows[0]["grade"] == "context"
     assert (result.n_originating, result.n_context) == (0, 1)
-    assert rows[0]["confirm_trigger"] is None                # context rows carry no §6.1 levels
+    assert rows[0]["confirm_trigger"] is None                # context rows carry no levels
 
 
 async def test_decayed_ranking_stays_deterministic_across_runs(store, make_job):
-    """§9.1: the same corpus at the same clock must yield the same watchlist. Decay is a pure
+    """The same corpus at the same clock must yield the same watchlist. Decay is a pure
     function of ``first_seen`` against the run's single fixed ``ran_at``, and equal ranks still
     break on ``cluster_id`` — so a re-run reproduces every field but the minted ``entry_id``."""
     seed_universe(store, WED, ("ACME", "BETA"))
@@ -822,7 +822,7 @@ async def test_decayed_ranking_stays_deterministic_across_runs(store, make_job):
     assert refs["BETA"] == ["c-b1", "c-b2"]                  # identical rank => cluster_id breaks it
 
 
-# --------------------------------------------------------------------------- session age (R6/O13)
+# --------------------------------------------------------------------------- session age
 def test_friday_evening_event_is_age_one_on_monday(make_job):
     job = make_job()
     friday_evening = at(FRI, 18, 30)
@@ -855,7 +855,7 @@ async def test_friday_event_stays_eligible_until_it_ages_out(store, make_job, no
     assert ("symbol", "ACME") in sentiment_map(store, wednesday.ran_at)   # still feeds sentiment
 
 
-# --------------------------------------------------------------------------- O13 PEAD agreement
+# --------------------------------------------------------------------------- PEAD agreement
 @pytest.mark.parametrize(
     ("open_t", "close_t", "sentiment", "grade"),
     [
@@ -881,7 +881,7 @@ async def test_earnings_t_plus_one_requires_reaction_sign_agreement(
 
 
 async def test_results_day_t_is_never_originating(store, make_job):
-    """Day T stays banned (`no_entry_on_results_day`); only T+1 onward can originate (O13)."""
+    """Day T stays banned (`no_entry_on_results_day`); only T+1 onward can originate."""
     seed_qualifying(store, event_type="earnings_result")
     store.upsert_earnings_calendar([{"symbol": "ACME", "event_date": WED, "kind": "results"}])
 
@@ -946,7 +946,7 @@ async def test_digest_status_missing_stale_fresh(store, make_job, now_box):
     assert job.digest_status(WED) == "stale"
 
 
-# --------------------------------------------------------------------------- §6.1 levels
+# --------------------------------------------------------------------------- levels
 async def test_deterministic_levels_worked_example(store, make_job):
     """20 identical bars (close 250.13, ±2.50) ⇒ TR == 5.00 every bar ⇒ ATR(14) == 5.00 exactly.
 
@@ -978,7 +978,7 @@ async def test_context_rows_carry_no_levels(store, make_job):
 
 
 async def test_thin_daily_history_nulls_levels_without_blocking_the_grade(store, make_job):
-    """Fewer than 15 bars ⇒ levels NULL + logged; the grade itself is never blocked (E5)."""
+    """Fewer than 15 bars ⇒ levels NULL + logged; the grade itself is never blocked."""
     seed_universe(store, WED, ("ACME",))
     seed_bars(store, "ACME", WED, n=10)
     seed_cluster(store, "c-1", first_seen=at(TUE, 18, 0), symbols=("ACME",))
@@ -1032,7 +1032,7 @@ async def test_watchlist_cap_only_symbol_passes_in_universe(store, make_job):
 
 
 async def test_rerun_replaces_the_day_and_carries_cluster_refs(store, make_job):
-    """Run-latest catch-up (§2.6): a second run for the same day never duplicates rows."""
+    """Run-latest catch-up: a second run for the same day never duplicates rows."""
     seed_qualifying(store)
     job = make_job()
 
@@ -1048,7 +1048,7 @@ async def test_rerun_replaces_the_day_and_carries_cluster_refs(store, make_job):
 
 
 async def test_unresolvable_prior_session_degrades_to_no_flags(store, make_job):
-    """The E5 degrade on the prior-session flags read (2026-08-18): a calendar that cannot resolve
+    """The degrade on the prior-session flags read (2026-08-18): a calendar that cannot resolve
     a prior trading day yields NO flags — origination proceeds unflagged rather than the digest
     dying on a calendar hole."""
     seed_universe(store, WED, ("ACME",))

@@ -1,4 +1,4 @@
-"""OS-level single-instance lock (§2.6 step-0 PRIMARY guard) — in-process semantics + subprocess proof.
+"""OS-level single-instance lock (PRIMARY guard) — in-process semantics + subprocess proof.
 
 Closes the 2026-07-21 double-run follow-up. The ``engine_lifecycle`` DB guard in ``lifecycle.startup``
 is a TOCTOU check-then-act an instance can slip past by wedging before the RUNNING commit;

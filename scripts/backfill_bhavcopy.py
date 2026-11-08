@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Full-market ``bars_1d`` history backfill from the NSE bhavcopy archive, plus corporate-action
-history for the same window (owner one-off tool, worklog 2026-09-01 follow-up).
+history for the same window (owner one-off tool, 2026-09-01 follow-up).
 
-The daily bhavcopy job (``BhavcopyJob``, §4.4 job 6) only started covering the FULL market on
+The daily bhavcopy job (``BhavcopyJob``) only started covering the FULL market on
 2026-07-13; before that, ``bars_1d`` outside the trading universe is sparse. This script fills the
 gap so ``scripts/backtest_hi52.py`` can be re-run on a genuinely full-market population: it walks
 every calendar date in ``[--from, --to]`` (default 2022-07-01..2026-07-12 — exactly the pre-coverage
@@ -25,7 +25,7 @@ a calendar shape NSE produces (the longest closures run 4-5 days): it is an arch
 URL era, so the leg stops there, the streak's 'holiday' checkpoints are cleared and counted failed,
 and the next run retries them. Any OTHER error fails the date (counted, no checkpoint) so the next
 run retries it. Bars are persisted via ``BhavcopyJob._persist`` exactly as the live job does, so a
-Kite-official row for (symbol, day) is NEVER overwritten (A11) — the archive row only fills a gap or
+Kite-official row for (symbol, day) is NEVER overwritten — the archive row only fills a gap or
 cross-checks (an adjusted Kite row vs a raw archive row shows up as a mismatch count, nothing more).
 
 The corp-actions leg starts ``_CORP_ACTIONS_LOOKBACK_DAYS`` (400, the live hi52 frame window) BEFORE
@@ -33,7 +33,7 @@ The corp-actions leg starts ``_CORP_ACTIONS_LOOKBACK_DAYS`` (400, the live hi52 
 ex-dates from a year earlier. A window that parses to zero rows fails (no checkpoint) — NSE lists
 hundreds of actions a month, so an empty window is a capped/failed response, not history.
 
-The engine must be OFF while this runs: ``market.duckdb`` (DuckDB) has a single writer (§4.1), and
+The engine must be OFF while this runs: ``market.duckdb`` (DuckDB) has a single writer, and
 this script opens it directly (no engine IPC). ``--status`` is the one read-only exception — it opens
 ``state.db`` (SQLite) read-only and never touches DuckDB, so it is safe to run while the engine is live.
 
@@ -198,7 +198,7 @@ async def _ingest_bhavcopy_date(
                 raise
         bars = parse_bhavcopy_csv(text, d)
         if not bars:
-            raise ValueError("bhavcopy parsed to zero EQ rows")  # a served file is never empty (E5)
+            raise ValueError("bhavcopy parsed to zero EQ rows")  # a served file is never empty
         written, checked, mismatches = await store.arun(job._persist, d, bars)
     except Exception as exc:  # noqa: BLE001 - every failure is counted and left for the next run
         if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None \

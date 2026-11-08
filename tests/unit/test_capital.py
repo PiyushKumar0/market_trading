@@ -1,4 +1,4 @@
-"""O19 capital change (design §3.2, §4, §5): the verified three-line rewrite, the refusals, the brake
+"""The owner's dashboard capital change: the verified three-line rewrite, the refusals, the brake
 check in both scopes, and the real path through ProtectedStore + LimitsEngine on a temp copy of the
 pinned limits.yaml. The real config files are never touched.
 
@@ -180,12 +180,12 @@ def _sub1(pattern: str, repl: str, text: str) -> str:
 
 
 def test_the_module_reads_the_pinned_config_and_its_calendar():
-    """E3 (R12's class): the live repo config moves with every dashboard change; the pin does not."""
+    """The live repo config moves with every dashboard change; the pin does not."""
     assert SHIPPED == config_dir() and (CALENDAR / "2026.yaml").is_file()
     assert _table(_shipped_text()).capital_base_inr == 40000                  # PINNED_CAPITAL
 
 
-# --------------------------------------------------------------------------- the rewrite (§4)
+# --------------------------------------------------------------------------- the rewrite
 def _rewrite(text: str, new_base: int) -> str:
     table = _table(text)
     new = cap.scaled_values(table, new_base)
@@ -294,7 +294,7 @@ def test_check_structure_returns_the_validated_new_table():
     assert table.limits.per_stock_exposure.cnc_notional_inr == 18000
 
 
-# --------------------------------------------------------------------------- bounds (§5)
+# --------------------------------------------------------------------------- bounds
 @pytest.mark.parametrize("new", [80000, 20000, 60000, 20001])
 async def test_bounds_accept_half_to_double(tmp_path, conn, new):
     rig = _rig(tmp_path, conn)
@@ -320,7 +320,7 @@ async def test_a_non_int_capital_is_refused_422(tmp_path, conn):
         assert exc.value.status == 422
 
 
-# --------------------------------------------------------------------------- window + calendar (§5)
+# --------------------------------------------------------------------------- window + calendar
 @pytest.mark.parametrize("at", [OPEN, CLOSE, datetime(2026, 6, 17, 12, 0, tzinfo=IST), PAST_HORIZON])
 async def test_the_session_window_and_an_uncovered_day_are_refused_409(tmp_path, conn, at):
     rig = _rig(tmp_path, conn, at=at)
@@ -423,7 +423,7 @@ async def test_a_cut_that_trips_the_paper_equity_floor_is_refused_422(tmp_path, 
 
 
 async def test_without_a_paper_mark_the_paper_book_is_still_checked(tmp_path, conn):
-    """E2 (A3): paper not composed at this boot, so no runtime mark; its epoch's rows still meet the
+    """Paper not composed at this boot, so no runtime mark; its epoch's rows still meet the
     new base at the next boot that composes it, so they are checked all the same."""
     rig = _rig(tmp_path, conn, paper_mark=None)
     _closed_position(conn, "PP1", "-3000", paper=True)
@@ -452,7 +452,7 @@ async def test_a_book_with_no_rows_trips_nothing_and_shows_its_base(tmp_path, co
     assert preview["proposed"]["paper_equity_inr"] == "20000.00"
 
 
-# --------------------------------------------------------------------------- held positions after a restart (E1)
+# --------------------------------------------------------------------------- held positions after a restart
 # The state after any out-of-session restart: both live caches are empty until the next session, so a
 # held position is priced at the last stored 1m close, the price the next session's first evaluation
 # starts from. 50 @ 300 last marked 230 is open MTM −3,500: equity 36,500 at 40k, 30,500 at 34k
@@ -524,7 +524,7 @@ async def test_a_gate_or_bounds_refusal_comes_before_the_missing_price(tmp_path,
 
 
 async def test_a_cold_restart_does_not_falsely_refuse_for_day_loss(tmp_path, conn):
-    """A1 (2): a position in profit at the last snapshot. Priced at entry, today's P&L would read
+    """A position in profit at the last snapshot. Priced at entry, today's P&L would read
     −1,500 (−5% of 30,000: the soft line); priced at its stored close, today's P&L is 0."""
     rig = _rig(tmp_path, conn, real_mark=_no_mark, last_mark=_stored({"AAA": "330"}))
     _open_position(conn, "P1", "AAA")
@@ -641,7 +641,7 @@ async def test_an_already_tripped_rung_does_not_block_a_raise(tmp_path, conn):
 
 
 async def test_an_already_tripped_rung_does_not_block_a_cut_either(tmp_path, conn):
-    """R8's current-table side: the current book is judged against the CURRENT table's lines.
+    """The current-table side: the current book is judged against the CURRENT table's lines.
     Against the new table's (31,500 at 35k), 35,500 would read untripped now, and the rung the
     what-if trips (30,500 ≤ 31,500) would wrongly count as new."""
     rig = _rig(tmp_path, conn)
@@ -652,7 +652,7 @@ async def test_an_already_tripped_rung_does_not_block_a_cut_either(tmp_path, con
     assert out["ok"] is True and rig.limits.load().capital_base_inr == 35000
 
 
-# --------------------------------------------------------------------------- the real path (§8)
+# --------------------------------------------------------------------------- the real path
 async def test_the_real_path_signs_reloads_and_reaches_every_reader(tmp_path, conn):
     rig = _rig(tmp_path, conn)
     audits = len(rig.audit_rows())
@@ -696,7 +696,7 @@ async def test_a_failing_notify_is_logged_and_never_raised(tmp_path, conn, caplo
 
 
 async def test_a_slow_notify_does_not_hold_the_answer_and_still_delivers(tmp_path, conn, monkeypatch, caplog):
-    """E4 (D2): the change is live before the send; the dashboard abandons the request at 15 s while
+    """The change is live before the send; the dashboard abandons the request at 15 s while
     a Telegram send can retry for over a minute."""
     monkeypatch.setattr(cap, "NOTIFY_WAIT_S", 0.05)
     rig = _rig(tmp_path, conn)
@@ -728,7 +728,7 @@ async def test_a_notify_within_the_bound_is_awaited(tmp_path, conn):
     assert rig.changer._sends == set()
 
 
-# --------------------------------------------------------------------------- after the write (T4)
+# --------------------------------------------------------------------------- after the write
 async def test_a_reload_failure_is_503_and_a_retry_is_409_until_a_restart(tmp_path, conn, monkeypatch):
     """Signed on disk, not live: the cached table stays the old one, so every in-process reader
     agrees on the old base; a retry is built on a file that differs from it, so it is refused."""
@@ -815,7 +815,7 @@ async def test_a_signed_file_that_differs_from_the_loaded_limits_is_refused_409(
     assert rig.limits_path.read_text(encoding="utf-8") == other
 
 
-# --------------------------------------------------------------------------- preview figures (§6)
+# --------------------------------------------------------------------------- preview figures
 async def test_the_preview_figures_at_the_pinned_limits(tmp_path, conn):
     rig = _rig(tmp_path, conn)
     preview = await rig.changer.preview(None)

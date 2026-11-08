@@ -1,6 +1,6 @@
-"""Pure deterministic indicator functions (§6.1/§6.2) — shared by live scanners AND backtests.
+"""Pure deterministic indicator functions — shared by live scanners AND backtests.
 
-Design contract (load-bearing for §9.6 determinism and the Phase-1 vectorbt sweep):
+Design contract (load-bearing for replay determinism and the vectorbt sweep):
 
 * **Pure functions, column-wise.** Every function maps input series → output ``pandas.Series``
   aligned 1:1 with the input (same index, same length; warm-up positions are ``NaN``). No state, no
@@ -13,7 +13,7 @@ Design contract (load-bearing for §9.6 determinism and the Phase-1 vectorbt swe
 * **Floats, deliberately.** Indicators are statistics, not money — inputs are coerced to
   ``float64`` (Decimals via ``str``-free direct ``float()``: these feed comparisons and multipliers,
   never a ledger). Scanners convert final PRICE LEVELS back to exact ``Decimal`` with
-  ``strategy.types.round_to_tick`` — no float ever becomes a persisted price (§3.2).
+  ``strategy.types.round_to_tick`` — no float ever becomes a persisted price.
 
 Smoothing conventions (documented so hand-computed test vectors are unambiguous):
 
@@ -23,7 +23,7 @@ Smoothing conventions (documented so hand-computed test vectors are unambiguous)
   gains present ⇒ 100.0.
 * **EMA**: ``alpha = 2/(period+1)``, seeded at the first value (``ema[0] = x[0]``) — identical to
   ``Series.ewm(span=period, adjust=False)``. Callers wanting TA-textbook SMA-seeded values must
-  supply ≥ ~3×period warm-up bars (the §7.1 ``warmup_ready`` gate guarantees this live).
+  supply ≥ ~3×period warm-up bars (the ``warmup_ready`` gate guarantees this live).
 * **ADX**: ±DM/TR are Wilder-smoothed with seed = mean of elements 1..period (the first delta-based
   values) landing at index ``period``; DX exists from index ``period``; ADX seed = mean of
   DX[period .. 2*period-1] landing at index ``2*period-1``. First ADX therefore needs
@@ -211,7 +211,7 @@ def wilder_adx(
     close: Sequence[Any] | pd.Series,
     period: int = 14,
 ) -> pd.Series:
-    """The ADX line of :func:`wilder_dmi` (trend-strength filter, §6.1 ``trend``)."""
+    """The ADX line of :func:`wilder_dmi` (trend-strength filter, ``trend``)."""
     return wilder_dmi(high, low, close, period)["adx"]
 
 
@@ -236,7 +236,7 @@ def momentum(
 ) -> pd.Series:
     """N-week price momentum: fractional return vs ``weeks × sessions_per_week`` sessions ago.
 
-    §6.1 ``mom`` uses 4 weeks = 20 trading sessions. NaN until the lookback exists.
+    ``mom`` uses 4 weeks = 20 trading sessions. NaN until the lookback exists.
     """
     s = as_float_series(closes)
     k = weeks * sessions_per_week
@@ -244,7 +244,7 @@ def momentum(
 
 
 def cross_sectional_rank(values: Mapping[str, float]) -> dict[str, int]:
-    """Rank symbols by value DESCENDING: rank 1 = strongest. Deterministic (§9.6).
+    """Rank symbols by value DESCENDING: rank 1 = strongest. Deterministic.
 
     NaN values are excluded (no rank ⇒ the symbol simply cannot make ``top_n``). Ties are broken
     alphabetically by symbol and ranks stay strictly sequential 1..n, so the same inputs always

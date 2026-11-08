@@ -1,8 +1,8 @@
-"""CatchUpRunner over a simulated multi-day off-gap (§2.6 step 5 / §4.2 job_runs watermarks).
+"""CatchUpRunner over a simulated multi-day off-gap (job_runs watermarks).
 
 Scenario: FIXED_NOW is Wed 2026-06-17 10:05 IST; the engine was last up Fri 2026-06-12 evening.
 Missed trading days in the gap: Mon 15, Tue 16 (13/14 = weekend), plus today's already-due morning
-jobs. Asserts the §2.6 step-5 classes: safety-critical run-or-verify the run that governs the next
+jobs. Asserts the catch-up classes: safety-critical run-or-verify the run that governs the next
 entries (in dependency order,
 before everything else), run-latest exactly ONCE for the whole gap, date-keyed once per missed
 trading day ascending, watermarks respected on re-run, and the freeze/notify seams on failure.
@@ -95,11 +95,11 @@ async def test_three_day_gap_catch_up_by_class(conn, clock, calendar):
     # Run-latest ran exactly ONCE despite three missed fire-days, recorded under the latest (Wed).
     assert [(j, d) for j, d in calls if j == "universe_build"] == [("universe_build", None)]
     assert runner.was_run("universe_build", WED) is True
-    assert runner.was_run("universe_build", MON) is False  # never per-day for run-latest (§2.6)
+    assert runner.was_run("universe_build", MON) is False  # never per-day for run-latest
     # Weekly job caught up once for the in-gap Sunday.
     assert [(j, d) for j, d in calls if j == "sector_map"] == [("sector_map", None)]
     assert runner.was_run("sector_map", date(2026, 6, 14)) is True
-    # Safety-critical ran first, in dependency order, then run-latest, then date-keyed (§2.6 classes).
+    # Safety-critical ran first, in dependency order, then run-latest, then date-keyed.
     job_order = [j for j, _ in calls]
     assert job_order[:2] == ["instruments", "surveillance"]
     assert job_order.index("universe_build") < job_order.index("bhavcopy")
@@ -240,7 +240,7 @@ class _NotOkResult:
 
 def _spec_recorder_notok(calls: list, job_id: str, at: time, *, notok_on: date, order: int = 100):
     """A DATE_KEYED JobSpec whose run() appends (job_id, d) then returns ``ok=False`` for
-    ``notok_on`` — the degrade-without-raise E5 shape (e.g. ``BhavcopyResult(ok=False)``)."""
+    ``notok_on`` — the degrade-without-raise shape (e.g. ``BhavcopyResult(ok=False)``)."""
 
     async def run(d: date) -> _NotOkResult:
         calls.append((job_id, d))
@@ -251,7 +251,7 @@ def _spec_recorder_notok(calls: list, job_id: str, at: time, *, notok_on: date, 
 
 @pytest.mark.asyncio
 async def test_date_keyed_notok_return_is_a_failure_and_resumes(conn, clock, calendar):
-    """2026-08-12 live bug: a job that returns ``ok=False`` WITHOUT raising (bhavcopy's E5 shape —
+    """2026-08-12 live bug: a job that returns ``ok=False`` WITHOUT raising (bhavcopy's degrade-without-raise shape —
     it degrades + alerts + returns, never raises) must be treated exactly like an exception:
     recorded failed, listed in jobs_failed, retried next pass. Before the fix this hit
     ``record_run`` with its default ``status='success'`` and the day was silently skipped."""
@@ -468,8 +468,8 @@ async def test_unchanged_failure_report_is_sent_once(conn, clock, calendar):
     assert runner2.was_run("deals", TUE) is True
 
 
-# ===================================================== WO-23: freeze-notify is once per (job, day)
-# IMPROVEMENT_SPEC.md:205 ("fires per attempt"): ``was_run`` keeps a failed safety-critical job
+# ===================================================== freeze-notify is once per (job, day)
+# The old behaviour ("fires per attempt"): ``was_run`` keeps a failed safety-critical job
 # retryable, so a persistently failing one re-ran — and re-alerted — on EVERY 30-min sweep. The
 # FREEZE stays unconditional (idempotent state that must always hold); only the notify is one-shot.
 
@@ -690,7 +690,7 @@ async def test_governing_run_per_boot_moment(conn, calendar, now, job, at, expec
 
 
 def test_stale_safety_jobs_predicate(conn, clock, calendar):
-    """The §3.2.12 data-freshness predicate: due-today-but-unrecorded ⇒ stale; recorded ⇒ fresh."""
+    """The data-freshness predicate: due-today-but-unrecorded ⇒ stale; recorded ⇒ fresh."""
     async def run() -> None:  # pragma: no cover - never invoked here
         pass
 
@@ -862,7 +862,7 @@ def test_no_registry_is_pure_watermark_store(conn, clock, calendar):
     assert runner.was_run("bhavcopy", MON) is True
 
 
-# =========================================================================== WO-15: boot ordering
+# =========================================================================== deferred boot catch-up: boot ordering
 # The 2026-08-10 wedge: the news chain ran INSIDE lifecycle.startup, ahead of scheduler.start(), and
 # an 8 h hang starved every scheduled job — including the 30-min sweep that exists to self-heal. The
 # machinery half of the fix is here (the firing point itself lives in engine.ops.main): a pass is
@@ -903,8 +903,8 @@ async def test_boot_pass_runs_load_bearing_only_and_the_post_arm_pass_runs_the_d
 @pytest.mark.asyncio
 async def test_failed_post_arm_run_is_swept_by_the_all_scope_sweep(conn, clock, calendar):
     """A post-arm one-shot that fails must still be swept — which is exactly why the periodic sweep
-    asks for ALL rather than the default scope (WO-15 (i): 'the catch-up machinery should still track
-    their watermarks so a failed post-arm run is swept')."""
+    asks for ALL rather than the default scope (the catch-up machinery should still track
+    their watermarks so a failed post-arm run is swept)."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25), fail_on="always"))
@@ -930,7 +930,7 @@ async def test_failed_post_arm_run_is_swept_by_the_all_scope_sweep(conn, clock, 
 
 @pytest.mark.asyncio
 async def test_sweep_during_an_in_flight_pass_is_a_logged_no_op(conn, clock, calendar, caplog):
-    """WO-15 (ii) single-flight: the reordering makes sweep-vs-post-arm concurrency reachable
+    """Single-flight: the reordering makes sweep-vs-post-arm concurrency reachable
     (APScheduler's max_instances=1 only serializes sweep-vs-sweep), and watermarks cannot save a
     CONCURRENT pass — both would see the same un-watermarked job and run it twice."""
     calls: list = []
@@ -982,10 +982,10 @@ async def test_no_deferred_set_is_the_pre_wo15_behavior(conn, clock, calendar):
     assert calls == [] and post_arm.jobs_caught_up == []
 
 
-# ==================== early hydration (§2.6 "Early-hydration addendum", owner-directed 2026-09-09)
+# ==================== early hydration (owner-directed 2026-09-09)
 # The owner travels at 08:15 and boots the PC 09:30–10:00, so the pre-open chain (surveillance 08:20,
 # news 08:25, universe 08:30, digest 08:35, planner 08:50) fired AFTER the trade window opened and the
-# G2 digest-before-open criterion fell to 61%. The due-gate in ``_missed_days``/``_run_safety_critical``
+# digest-before-open criterion fell to 61%. The due-gate in ``_missed_days``/``_run_safety_critical``
 # treats today's jobs as not-yet-due until their fire time, so no catch-up path can serve a 06:30
 # login: ``hydrate_ahead`` is that path — today's named jobs, ahead of their clock, same watermarks,
 # same single-flight pass lock, same ``_job_result_ok`` verdict. The due-gate itself stays untouched.
@@ -999,7 +999,7 @@ def _early_clock(at: datetime = EARLY) -> Clock:
 
 
 class _NotOk:
-    """A job that degrades WITHOUT raising (the bhavcopy/E5 shape): ``ok=False`` sinks the watermark."""
+    """A job that degrades WITHOUT raising (the bhavcopy degrade-without-raise shape): ``ok=False`` sinks the watermark."""
 
     ok = False
 
@@ -1088,7 +1088,7 @@ async def test_hydrate_ahead_records_failed_and_keeps_running_the_siblings(conn,
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_does_nothing_on_a_non_trading_day(conn, calendar, caplog):
-    """A Saturday 06:30 login has no session to hydrate for (R6)."""
+    """A Saturday 06:30 login has no session to hydrate for."""
     calls: list = []
     runner = CatchUpRunner(conn, _early_clock(SAT_EARLY), calendar, _preopen_registry(calls))
 
@@ -1115,7 +1115,7 @@ async def test_hydrate_ahead_rejects_a_date_keyed_job(conn, calendar):
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_waits_for_an_in_flight_catch_up_pass(conn, calendar):
-    """Single-flight (WO-15 (ii)): watermarks cannot make a CONCURRENT pass safe — both would see the
+    """Single-flight: watermarks cannot make a CONCURRENT pass safe — both would see the
     same un-watermarked job. Unlike a sweep (a logged no-op), an early hydration QUEUES on the pass
     lock, then finds the watermark the pass wrote and reports ``already_run``."""
     calls: list = []

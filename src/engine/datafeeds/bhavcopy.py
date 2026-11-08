@@ -1,20 +1,20 @@
-"""NSE bhavcopy (UDiFF) ingest — §4.4 job 6 (18:00), E5 best-effort.
+"""NSE bhavcopy (UDiFF) ingest — daily job (18:00), best-effort.
 
 Downloads the day's cash-market bhavcopy in the CURRENT UDiFF format/URL scheme (NSE cut over from
 the legacy ``EQ_...bhav.csv.zip`` in 2024 — the [VERIFY]-marked template below is the UDiFF archive
-path) and uses it two ways per the plan:
+path) and uses it two ways:
 
-1. **Cross-check input for ``bars_1d``** (§4.3): where a Kite-official row already exists for
-   (symbol, day) it is CANONICAL (adjusted per A11) — the bhavcopy row only cross-checks it
+1. **Cross-check input for ``bars_1d``**: where a Kite-official row already exists for
+   (symbol, day) it is CANONICAL (adjusted) — the bhavcopy row only cross-checks it
    (close/volume drift beyond tolerance is logged + reported, never overwritten). Where no row
    exists, the bhavcopy row is written with ``src='bhavcopy'`` (fills the daily-bar history the
    traded-value filter needs even when Kite backfill lags).
 2. **Traded-value universe-filter feed**: the written ``bars_1d`` rows are exactly what
    ``UniverseBuilder`` medians over (``close × volume``).
 
-Failure model (E5): injected ``httpx.AsyncClient``, defensive parsing (UDiFF column names with
+Failure model: injected ``httpx.AsyncClient``, defensive parsing (UDiFF column names with
 legacy aliases; malformed rows skipped-and-counted), and on ANY failure the job alerts + returns a
-degraded result — ``bars_1d`` keeps yesterday's data and the §2.6 date-keyed catch-up re-runs the
+degraded result — ``bars_1d`` keeps yesterday's data and the date-keyed catch-up re-runs the
 missed day. Never raises into the scheduler.
 """
 
@@ -38,17 +38,17 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.bhavcopy")
 
-#: UDiFF cash-market bhavcopy archive URL (current scheme). [VERIFY Phase-1] — NSE moves these.
+#: UDiFF cash-market bhavcopy archive URL (current scheme). [VERIFY] — NSE moves these.
 BHAVCOPY_URL_TEMPLATE = (
     "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
 )
 
 #: Only the rolling-settlement equity series feeds bars_1d / the traded-value filter; T2T (BE/BZ)
-#: names are universe-excluded anyway (§3.2.4) and SME/other series are out of scope.
+#: names are universe-excluded anyway and SME/other series are out of scope.
 _SERIES_KEPT = frozenset({"EQ"})
 
-#: Cross-check tolerances (module-pinned; the §3.2.3 reconcile thresholds govern 1m bars, not this):
-#: close within one minimum tick (A10 floor ₹0.05), volume within 2%.
+#: Cross-check tolerances (module-pinned; the 1m-bar reconcile thresholds govern 1m bars, not this):
+#: close within one minimum tick (floor ₹0.05), volume within 2%.
 CLOSE_TOLERANCE = Decimal("0.05")
 VOLUME_TOLERANCE_PCT = 2.0
 
@@ -59,7 +59,7 @@ NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class BhavcopyResult(BaseModel):
-    """One run's outcome (returned to the scheduler/catch-up; never an exception, E5)."""
+    """One run's outcome (returned to the scheduler/catch-up; never an exception)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -86,7 +86,7 @@ def _parse_date(raw: str) -> date | None:
 def parse_bhavcopy_csv(text: str, d: date) -> list[DailyBar]:
     """UDiFF (or legacy) bhavcopy CSV → ``DailyBar`` rows for day ``d`` (``src='bhavcopy'``).
 
-    Defensive (E5): column names are located case-insensitively with UDiFF-first aliases
+    Defensive: column names are located case-insensitively with UDiFF-first aliases
     (``TckrSymb``/``SYMBOL``, ``OpnPric``/``OPEN``, …); non-EQ series are dropped; a row whose
     ``TradDt`` parses to a DIFFERENT day is dropped (wrong file); malformed rows are
     skipped-and-counted, never fatal.
@@ -150,7 +150,7 @@ def _unwrap_zip(content: bytes) -> str:
 
 
 class BhavcopyJob:
-    """§4.4 job 6 — daily UDiFF bhavcopy → ``bars_1d`` cross-check/fill + traded-value feed (E5)."""
+    """Daily UDiFF bhavcopy → ``bars_1d`` cross-check/fill + traded-value feed."""
 
     def __init__(
         self,
@@ -168,14 +168,14 @@ class BhavcopyJob:
         self._timeout = float(request_timeout_s)
         #: Per-date alert dedup (2026-08-13): with the watermark fix, the 30-min sweeps genuinely
         #: re-run a still-failing day, so alerting on EVERY attempt would storm during a long NSE
-        #: outage. Process-lifetime only — a fresh process re-alerts once, which is fine (E5).
+        #: outage. Process-lifetime only — a fresh process re-alerts once, which is fine.
         self._alerted: set[date] = set()
 
     async def run(self, d: date) -> BhavcopyResult:
-        """Fetch + parse + persist day ``d``'s bhavcopy. Never raises into the scheduler (E5)."""
+        """Fetch + parse + persist day ``d``'s bhavcopy. Never raises into the scheduler."""
         url = BHAVCOPY_URL_TEMPLATE.format(d=d)
         try:
-            # Archives host (nsearchives): browser UA + bounded retry, no cookie priming (A4).
+            # Archives host (nsearchives): browser UA + bounded retry, no cookie priming.
             resp = await nse_get(self._http, url, timeout=self._timeout)
             bars = parse_bhavcopy_csv(_unwrap_zip(resp.content), d)
             if not bars:
@@ -207,7 +207,7 @@ class BhavcopyJob:
 
     # ------------------------------------------------------------------ persistence (sync, via arun)
     def _persist(self, d: date, bars: list[DailyBar]) -> tuple[int, int, list[str]]:
-        """Kite-official rows are canonical (A11-adjusted): cross-check them, never overwrite;
+        """Kite-official rows are canonical (adjusted): cross-check them, never overwrite;
         write bhavcopy rows only where no row exists yet.
 
         One day-scan read + one batched write — NOT per-symbol round trips: ~2000 single-row

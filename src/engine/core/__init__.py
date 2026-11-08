@@ -1,8 +1,8 @@
-"""Foundational, dependency-graph-root package (§3.2.1).
+"""Foundational, dependency-graph-root package.
 
-Event bus, IST clock + NTP skew, NSE trading calendar, config loading, protected store (R4), DPAPI
-secrets (R10), structured logging, SQLite helpers, and the foundational enums/value types shared
-across tiers. Depends on NO other engine package — this is the root of the import graph (the R1 tier
+Event bus, IST clock + NTP skew, NSE trading calendar, config loading, protected store, DPAPI
+secrets, structured logging, SQLite helpers, and the foundational enums/value types shared
+across tiers. Depends on NO other engine package — this is the root of the import graph (the three-tier
 separation is built on top of it).
 """
 

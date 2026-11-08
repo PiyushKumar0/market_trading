@@ -1,4 +1,4 @@
-"""Rebuild today's ``sector_map`` snapshot outside the engine (plan section 4.4 job 13).
+"""Rebuild today's ``sector_map`` snapshot outside the engine.
 
 The job is Sunday-only in the scheduler, so a classification change (a new override, the
 2026-09-21 industry fallback) otherwise waits up to a week. This runs the SAME ``SectorMapJob`` the

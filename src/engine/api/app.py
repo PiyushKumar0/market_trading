@@ -1,24 +1,24 @@
-"""FastAPI LAN dashboard API + Kite login callback (§3.2.11; R6/R8/R10).
+"""FastAPI LAN dashboard API + Kite login callback.
 
 The owner I/O surface over read-only views of risk / OMS / learning / intelligence state. This module
 is the composition point for the HTTP/WS surface; it NEVER originates orders — owner commands route
-through ``ModeManager`` / ``KillSwitch`` / ``OrderManager`` interfaces (§3.2.11).
+through ``ModeManager`` / ``KillSwitch`` / ``OrderManager`` interfaces.
 
-Security model (R10):
+Security model:
 - EVERY route is behind a ``Authorization: Bearer <token>`` check against ``Secrets[DASHBOARD_TOKEN]``,
-  EXCEPT the unauthenticated ``GET /kite/callback`` (R6 — Kite redirects the browser there with a
+  EXCEPT the unauthenticated ``GET /kite/callback`` (Kite redirects the browser there with a
   ``request_token`` to complete the daily login; it cannot carry our bearer header).
 - The bind address (LAN ``settings.api.host:port``, default ``0.0.0.0:8400``) is the caller's concern
   (uvicorn); this module only constructs the ``FastAPI`` app.
 
-Phase 0 scope shipped REAL wiring + REAL auth with shape-correct read-route placeholders. Phase 2
-(§3.2.11 C3) wires the read routes to real SQLite state + the risk/intelligence collaborators
+The initial scope shipped REAL wiring + REAL auth with shape-correct read-route placeholders. The current scope
+wires the read routes to real SQLite state + the risk/intelligence collaborators
 (``conn``/``store``/``exposure``/``governor``/``limits_engine``, all OPTIONAL keyword args on
 :func:`create_app`) and lands ``POST /mode``/``POST /kill`` as real SINGLE-step owner actions (the
-bearer token itself is the owner authentication, §2.4). Every collaborator degrades to its Phase-0/1
+bearer token itself is the owner authentication). Every collaborator degrades to its
 stub response shape when left ``None`` — composition (``engine.ops``) wires them for real. ``POST /mode
 AUTO`` and ``POST /kill/reset`` still require the owner TWO-STEP pattern, which has no dashboard path
-yet (Telegram-only, §3.5.3/§7.2) — they answer 409, not a stub. ``POST /paper`` turns the paper
+yet (Telegram-only) — they answer 409, not a stub. ``POST /paper`` turns the paper
 autopilot ON/OFF single-step (bearer); ``/paper reset`` stays a Telegram two-step.
 """
 
@@ -59,36 +59,36 @@ _log = get_logger("engine.api.app")
 # ``web/dist`` is the hand-written notifications page (/notifications-ui), not a build target.
 _DASHBOARD_DIST_DIRNAME = "dist"
 
-#: The protected-store name for the learnable-parameter envelope (§6.3), matching ``limits.py``'s
+#: The protected-store name for the learnable-parameter envelope, matching ``limits.py``'s
 #: module-level ``LIMITS_FILE`` convention.
 ENVELOPE_FILE = "envelope.yaml"
 
-#: §7.1 ``catalyst_guard.digest_stale_max_h`` fallback for the READ-ONLY freshness label on
+#: ``catalyst_guard.digest_stale_max_h`` fallback for the READ-ONLY freshness label on
 #: ``GET /news/watchlist``, used only when ``limits_engine`` is unwired. Mirrors the pinned fallback in
 #: ``engine.datafeeds.news_pipeline`` (duplicated rather than imported: this API module must not drag
 #: the whole news pipeline into its import graph for one number, and nothing here can license a trade).
 _DIGEST_STALE_MAX_H_FALLBACK = 20
 
-#: Bus topics relayed onto every connected ``/ws/live`` socket (R8). Tick fan-out is Phase 3.
+#: Bus topics relayed onto every connected ``/ws/live`` socket. Tick fan-out is not built yet.
 _WS_RELAY_TOPICS = (TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_KILL_STATE, TOPIC_TRADE_WINDOW, TOPIC_BUDGET_STATE)
 
 #: Keepalive ping cadence for a live ``/ws/live`` socket (LAN dashboard / proxies see it as alive).
 _WS_PING_INTERVAL_S = 15
 
 #: ``POST /db/query`` row cap: the default an owner gets, and the ceiling a request may ask for
-#: (§3.2.11). Enforced with ``fetchmany(max_rows + 1)`` on the result STREAM — the extra row IS the
+#: Enforced with ``fetchmany(max_rows + 1)`` on the result STREAM — the extra row IS the
 #: ``truncated`` flag — so an unbounded scan is answered without materializing it in this process.
 _DB_QUERY_MAX_ROWS_DEFAULT = 10_000
 _DB_QUERY_MAX_ROWS_LIMIT = 100_000
 
 #: ``POST /db/query`` interrupt deadline in seconds: the default, and the longest an owner may ask
-#: for (§3.2.11). Past it the query is interrupted at its own connection and answered 504 — this is a
+#: for. Past it the query is interrupted at its own connection and answered 504 — this is a
 #: trading process first, and an ad-hoc read never holds a worker thread indefinitely.
 _DB_QUERY_TIMEOUT_S_DEFAULT = 5.0
 _DB_QUERY_TIMEOUT_S_LIMIT = 60.0
 
 #: DuckDB statement types ``POST /db/query`` accepts. Read-only is decided by the PARSER's statement
-#: TYPE, never by inspecting the SQL text (§3.2.11). DuckDB 1.5 types ``SHOW``/``DESCRIBE``/
+#: TYPE, never by inspecting the SQL text. DuckDB 1.5 types ``SHOW``/``DESCRIBE``/
 #: ``SUMMARIZE``/``VALUES``/``FROM x``/read-only ``PRAGMA``s as SELECT, and everything that can mutate
 #: data, instance settings or the filesystem as its own type (INSERT/UPDATE/DELETE/CREATE/COPY/SET/
 #: ATTACH/CALL/PRAGMA/…), so SELECT + EXPLAIN is the whole read-only surface — EXPLAIN is enumerated
@@ -96,7 +96,7 @@ _DB_QUERY_TIMEOUT_S_LIMIT = 60.0
 _DB_QUERY_ALLOWED_STATEMENTS = frozenset({duckdb.StatementType.SELECT, duckdb.StatementType.EXPLAIN})
 
 #: SQLite authorizer actions ``POST /db/query`` permits — sqlite's equivalent of DuckDB statement
-#: typing (§3.2.11): sqlite asks per action while preparing, and everything outside this set is DENIED
+#: typing: sqlite asks per action while preparing, and everything outside this set is DENIED
 #: before a byte is read, so INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the file.
 #: SQLITE_RECURSIVE (2026-08-19 review): WITH RECURSIVE is a read shape (walking order_events
 #: chains); the action authorizes recursion only, no write capability — allowed.
@@ -104,7 +104,7 @@ _DB_QUERY_SQLITE_ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
 
-#: ``POST /db/query`` log-line outcome per HTTP status (§6.5 — every query is logged, including the
+#: ``POST /db/query`` log-line outcome per HTTP status (every query is logged, including the
 #: ones that never ran).
 _DB_QUERY_OUTCOMES = {400: "rejected", 503: "unavailable", 504: "timeout"}
 
@@ -115,7 +115,7 @@ _DB_QUERY_LOG_SQL_CHARS = 200
 
 # --------------------------------------------------------------------------- request bodies
 class TradeWindowBody(BaseModel):
-    """Owner-set trade-window payload for ``POST /config/trade_window`` (§3.2.7/§7.1)."""
+    """Owner-set trade-window payload for ``POST /config/trade_window``."""
 
     start: str = Field(description="IST start time, 'HH:MM'")
     end: str = Field(description="IST end time, 'HH:MM'")
@@ -123,14 +123,14 @@ class TradeWindowBody(BaseModel):
 
 
 class ParamBody(BaseModel):
-    """Owner-applied tunable for ``POST /config/params`` — the platform SUGGESTS, the owner SETS (§6.3)."""
+    """Owner-applied tunable for ``POST /config/params`` — the platform SUGGESTS, the owner SETS."""
 
     name: str
     value: Any
 
 
 class ModeBody(BaseModel):
-    """Owner mode-change payload for ``POST /mode`` (two-step; §3.5.3/R10)."""
+    """Owner mode-change payload for ``POST /mode`` (two-step)."""
 
     mode: str
     confirmation_phrase: str | None = None
@@ -138,13 +138,13 @@ class ModeBody(BaseModel):
 
 
 class PaperBody(BaseModel):
-    """Owner paper-autopilot payload for ``POST /paper`` (single-step; D13)."""
+    """Owner paper-autopilot payload for ``POST /paper`` (single-step)."""
 
     enabled: StrictBool
 
 
 class CapitalBody(BaseModel):
-    """Owner capital change for ``POST /config/capital`` (O19). Strict whole rupees: ``60000.0`` and
+    """Owner capital change for ``POST /config/capital``. Strict whole rupees: ``60000.0`` and
     ``"60000"`` are refused here, so the changer only ever sees an ``int``."""
 
     capital_inr: StrictInt = Field(ge=1)
@@ -152,13 +152,13 @@ class CapitalBody(BaseModel):
 
 
 class KillBody(BaseModel):
-    """Owner kill payload for ``POST /kill`` (single-step, fast; §7.2)."""
+    """Owner kill payload for ``POST /kill`` (single-step, fast)."""
 
     reason: str | None = None
 
 
 class DbQueryBody(BaseModel):
-    """Owner ad-hoc read payload for ``POST /db/query`` (§3.2.11; owner-directed 2026-08-19).
+    """Owner ad-hoc read payload for ``POST /db/query`` (owner-directed 2026-08-19).
 
     ``max_rows``/``timeout_s`` are BOUNDED here rather than clamped silently: an owner who asks for
     more than the ceiling gets a 422 naming it, not a truncated answer they did not ask for."""
@@ -169,14 +169,14 @@ class DbQueryBody(BaseModel):
     timeout_s: float = Field(default=_DB_QUERY_TIMEOUT_S_DEFAULT, gt=0, le=_DB_QUERY_TIMEOUT_S_LIMIT)
 
 
-# --------------------------------------------------------------------------- WS fan-out hub (R8)
+# --------------------------------------------------------------------------- WS fan-out hub
 class WSHub:
     """Tracks connected ``/ws/live`` sockets and fans a JSON frame out to all of them.
 
-    Tick fan-out (held + watch instruments) is Phase 3 — this hub only relays the risk/mode/kill/
-    trade-window/budget state-change events the bus already publishes (§3.2.11). A socket that fails a
+    Tick fan-out (held + watch instruments) is not built yet — this hub only relays the risk/mode/kill/
+    trade-window/budget state-change events the bus already publishes. A socket that fails a
     send (client gone) is dropped rather than raising into the publisher (mirrors ``EventBus``'s
-    isolate-a-bad-handler stance, R8).
+    isolate-a-bad-handler stance).
     """
 
     def __init__(self, clock: Any = None) -> None:
@@ -224,14 +224,14 @@ def create_app(
     latch: Any = None,
     capital: Any = None,
 ) -> FastAPI:
-    """Construct the dashboard ``FastAPI`` app (§3.2.11).
+    """Construct the dashboard ``FastAPI`` app.
 
     All dependencies are injected by the composition root (``engine.ops``) so the app is testable and
-    holds no module-level singletons. ``secrets`` supplies the bearer token (R10); ``mode_manager``
-    backs the trade-window read/write path (§3.2.7). ``conn``/``store``/``exposure``/``governor``/
-    ``limits_engine`` back the Phase-2 read/write routes (proposals/verdicts/positions/orders/config
+    holds no module-level singletons. ``secrets`` supplies the bearer token; ``mode_manager``
+    backs the trade-window read/write path. ``conn``/``store``/``exposure``/``governor``/
+    ``limits_engine`` back the read/write routes (proposals/verdicts/positions/orders/config
     audit/envelope params/risk headroom/budget) — every one is OPTIONAL and each route degrades to its
-    Phase-0/1 stub response shape when its own collaborator is ``None`` (duck-typed calls; no isinstance
+    stub response shape when its own collaborator is ``None`` (duck-typed calls; no isinstance
     checks), so this factory stays usable before composition wires the real objects. The caller binds it
     to ``settings.api.host:port`` via uvicorn — this factory does not start a server.
     """
@@ -255,7 +255,7 @@ def create_app(
     app.state.paper_control = paper_control
     app.state.paper_view = paper_view
     app.state.latch = latch
-    app.state.capital = capital   # CapitalChanger (O19); None = the capital routes answer 501
+    app.state.capital = capital   # CapitalChanger; None = the capital routes answer 501
     app.state.settings = settings
     app.state.ws_hub = WSHub(clock)
 
@@ -263,31 +263,31 @@ def create_app(
     async def _protected_config_unverified(_request: Request, exc: IntegrityError) -> JSONResponse:
         """An unverified protected store (edited without a reseed; the boot is FROZEN on it) is an
         answer, not a 500, on every route that reads it (/risk/headroom, /risk/rearm, /config/params).
-        Nothing falls back to a stale table: R4 keeps raising, this only words the refusal."""
+        Nothing falls back to a stale table: the integrity check keeps raising, this only words the refusal."""
         _log.warning("api_protected_config_unverified", error=str(exc))
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"ok": False, "note": f"protected config unverified: {exc}"},
         )
 
-    # ----------------------------------------------------------------- unauthenticated: Kite login (R6)
+    # ----------------------------------------------------------------- unauthenticated: Kite login
     # MUST be mounted WITHOUT the bearer dependency: Kite redirects the owner's browser here with a
     # ``request_token`` to complete the daily login, and that redirect cannot carry our bearer header.
     app.include_router(build_kite_callback_router(session_manager, clock))
 
-    # ----------------------------------------------------------------- WS relay subscriptions (R8)
+    # ----------------------------------------------------------------- WS relay subscriptions
     # Subscribe the hub to every canonical state-change topic so a connected dashboard sees mode/risk/
-    # kill/trade-window/budget changes live. Tick fan-out is Phase 3 (deliberately not faked here).
+    # kill/trade-window/budget changes live. Tick fan-out is not built yet (deliberately not faked here).
     if bus is not None:
         for topic in _WS_RELAY_TOPICS:
             bus.subscribe(topic, _make_ws_relay_handler(app.state.ws_hub, topic))
 
     # ----------------------------------------------------------------- read routes (bearer-auth)
     # Each reads live SQLite/collaborator state and degrades to an empty, shape-correct payload when
-    # its collaborator is absent (None). Every one is gated by ``Owner`` (R10).
+    # its collaborator is absent (None). Every one is gated by ``Owner``.
     @app.get("/positions")
     async def positions(_: Owner) -> dict[str, Any]:
-        """All-origin positions (platform/external/recommended), OPEN first, + ``as_of`` (R8/O5)."""
+        """All-origin positions (platform/external/recommended), OPEN first, + ``as_of``."""
         conn = app.state.conn
         if conn is None:
             return {"positions": [], "as_of": None}
@@ -300,7 +300,7 @@ def create_app(
 
     @app.get("/orders")
     async def orders(_: Owner) -> dict[str, Any]:
-        """Latest 100 orders, most recent first (Phase 3 will add live working-order state)."""
+        """Latest 100 orders, most recent first (live working-order state is not built yet)."""
         conn = app.state.conn
         if conn is None:
             return {"orders": []}
@@ -311,8 +311,8 @@ def create_app(
 
     @app.get("/decisions")
     async def decisions(_: Owner) -> dict[str, Any]:
-        """Latest 100 Tier-1 action proposals LEFT JOIN their verdict (R8 provenance-chain audit view).
-        One row per proposal: the real verdict, and the paper verdict beside it (plan Q3.2)."""
+        """Latest 100 Tier-1 action proposals LEFT JOIN their verdict (provenance-chain audit view).
+        One row per proposal: the real verdict, and the paper verdict beside it."""
         conn = app.state.conn
         if conn is None:
             return {"decisions": []}
@@ -361,7 +361,7 @@ def create_app(
 
     @app.get("/recommendations")
     async def recommendations(_: Owner) -> dict[str, Any]:
-        """Latest 100 RECOMMEND-mode recommendations, most recently delivered first (§3.6/R8).
+        """Latest 100 RECOMMEND-mode recommendations, most recently delivered first.
 
         ``/decisions`` is the proposal→verdict PROVENANCE view and carries no ``Recommendation``
         payload; the dashboard's recommendation panel needs the delivered artifact itself (thesis,
@@ -389,7 +389,7 @@ def create_app(
 
     @app.get("/scorecard")
     async def scorecard_route(_: Owner) -> dict[str, Any]:
-        """Per-strategy hindsight outcomes of delivered entry recs (plan Q2.4) and of published signals."""
+        """Per-strategy hindsight outcomes of delivered entry recs and of published signals."""
         conn, clock = app.state.conn, app.state.clock
         if conn is None or clock is None:
             return {"label": LABEL, "bench": {}, "strategies": {}}
@@ -401,7 +401,7 @@ def create_app(
         control, conn = app.state.paper_control, app.state.conn
         if control is None or conn is None:
             return {"enabled": False}
-        # The live base (O19 §7): history shown at today's starting capital. Unwired or unverified
+        # The live base: history shown at today's starting capital. Unwired or unverified
         # limits keep each snapshot's own stored base.
         capital_base = None
         if app.state.limits_engine is not None:
@@ -416,8 +416,8 @@ def create_app(
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:
-        """Latest 100 gate-verdict payloads, most recently evaluated first (R8). One row per
-        proposal: the real verdict, and the paper verdict beside it (plan Q3.2)."""
+        """Latest 100 gate-verdict payloads, most recently evaluated first. One row per
+        proposal: the real verdict, and the paper verdict beside it."""
         conn = app.state.conn
         if conn is None:
             return {"verdicts": []}
@@ -451,7 +451,7 @@ def create_app(
 
     @app.get("/risk/headroom")
     async def risk_headroom(_: Owner) -> dict[str, Any]:
-        """Platform equity/day-MTM/open-count/consecutive-loss headroom (§7.1) + limit caps when wired."""
+        """Platform equity/day-MTM/open-count/consecutive-loss headroom + limit caps when wired."""
         exposure = app.state.exposure
         if exposure is None:
             return {"headroom": {}}
@@ -482,7 +482,7 @@ def create_app(
 
     @app.post("/risk/rearm")
     async def risk_rearm(_: Owner) -> dict[str, Any]:
-        """Owner re-arm of floor stops (§7.1), single-step like ``POST /mode``: it clears only the rungs
+        """Owner re-arm of floor stops, single-step like ``POST /mode``: it clears only the rungs
         equity is back above, so it can never relax a floor that is still breached."""
         exposure, limits_engine, latch = app.state.exposure, app.state.limits_engine, app.state.latch
         if exposure is None or limits_engine is None or latch is None:
@@ -495,7 +495,7 @@ def create_app(
 
     @app.get("/budget")
     async def budget(_: Owner) -> dict[str, Any]:
-        """SDK-call budget governor state for the live quota WEEK (§5.6): the window's bounds, its
+        """SDK-call budget governor state for the live quota WEEK: the window's bounds, its
         spend per agent against the weekly allocations, the degrade tier, and the forward cap the tier
         is currently imposing (the one number the owner otherwise has to infer from the tier).
 
@@ -527,13 +527,13 @@ def create_app(
 
     @app.get("/news/watchlist")
     async def news_watchlist(_: Owner) -> dict[str, Any]:
-        """Today's §2.7 catalyst watchlist — ``originating`` vs ``context`` rows with their event type,
+        """Today's catalyst watchlist — ``originating`` vs ``context`` rows with their event type,
         materiality and the retired v1 levels (served as stored, not displayed) — plus the digest freshness the `cat` fail-safe ladder
-        keys off (§2.7). READ-ONLY: this route mirrors the freshness label, it never gates anything.
+        keys off. READ-ONLY: this route mirrors the freshness label, it never gates anything.
 
         Duck-typed like every other read route: rows come off ``store`` when it exposes the news-layer
         readers, and ``digest_stale_max_h`` off ``limits_engine``'s hash-verified ``catalyst_guard``
-        block (§7.1). An unwired store / clock degrades to the empty shape with ``status: null`` — an
+        block. An unwired store / clock degrades to the empty shape with ``status: null`` — an
         UNKNOWN freshness is never reported as one of the three real ``digest_status`` values."""
         store = app.state.market_store if app.state.market_store is not None else app.state.store
         clock = app.state.clock
@@ -555,7 +555,7 @@ def create_app(
 
     @app.get("/learning/status")
     async def learning_status(_: Owner) -> dict[str, Any]:
-        """Live envelope_state values + param_sets counts by status (§5.5/§6.5; champ/chall UI is Phase 4+)."""
+        """Live envelope_state values + param_sets counts by status (champ/chall UI is not built yet)."""
         conn = app.state.conn
         if conn is None:
             return {"learning": {}}
@@ -574,7 +574,7 @@ def create_app(
 
     @app.get("/config/audit")
     async def config_audit(_: Owner) -> dict[str, Any]:
-        """Latest 100 ``config_audit`` rows, most recent first (NEW route; R8 owner-change trail)."""
+        """Latest 100 ``config_audit`` rows, most recent first (NEW route; owner-change trail)."""
         conn = app.state.conn
         if conn is None:
             return {"config_audit": []}
@@ -594,7 +594,7 @@ def create_app(
 
     @app.get("/notifications")
     async def notifications(_: Owner, d: str | None = None) -> dict[str, Any]:
-        """One IST day of owner notifications, CHRONOLOGICAL (WO-24d; owner-directed 2026-08-21).
+        """One IST day of owner notifications, CHRONOLOGICAL (owner-directed 2026-08-21).
 
         Reads the ``notifications`` journal every ``TelegramBot.send`` writes to (migration 0011) —
         the same rows the retry outbox drains, so the page can never show a "delivered" the wire never
@@ -630,7 +630,7 @@ def create_app(
             cursor.close()
         return {"d": day, "rows": [dict(r) for r in rows]}
 
-    # ----------------------------------------------------------------- ad-hoc DB read (POST, §3.2.11)
+    # ----------------------------------------------------------------- ad-hoc DB read (POST)
     @app.post("/db/query")
     async def db_query(body: DbQueryBody, _: Owner) -> dict[str, Any]:
         """Owner ad-hoc SELECT over the live databases (owner-directed 2026-08-19). Motivated by the
@@ -643,11 +643,11 @@ def create_app(
         authorizer (:data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS`) on a ``mode=ro`` connection —
         INSERT/COPY/SET/ATTACH/DDL and multi-statement bodies are 400, so instance-global settings and
         the filesystem write path are unreachable from here. Both dbs execute on a worker thread
-        against a PER-REQUEST cursor/connection (never the loop — §2.2 heartbeat invariant; never a
+        against a PER-REQUEST cursor/connection (never the loop — the heartbeat invariant; never a
         shared cursor), under the row cap and an interrupt deadline (504).
 
         Accepted residual (owner-directed): a genuine SELECT can still read local files through
-        DuckDB's ``read_*`` table functions — the single-owner bearer token IS the boundary (R10)."""
+        DuckDB's ``read_*`` table functions — the single-owner bearer token IS the boundary."""
         started = time.perf_counter()
         try:
             if not body.sql.strip():
@@ -683,10 +683,10 @@ def create_app(
             "risk_state": mm.risk_state().value,
         }
 
-    # ----------------------------------------------------------------- trade window (GET + POST, §3.2.7)
+    # ----------------------------------------------------------------- trade window (GET + POST)
     @app.get("/config/trade_window")
     async def get_trade_window(_: Owner) -> dict[str, Any]:
-        """Current owner-set trade window (read via ``mode_manager.get_trade_window``; §7.1)."""
+        """Current owner-set trade window (read via ``mode_manager.get_trade_window``)."""
         mm = app.state.mode_manager
         window = mm.get_trade_window() if mm is not None else None
         if window is None:
@@ -701,8 +701,8 @@ def create_app(
 
     @app.post("/config/trade_window")
     async def set_trade_window(body: TradeWindowBody, _: Owner) -> dict[str, Any]:
-        """Owner SINGLE-step trade-window setter (§3.2.7): validate → persist sticky → audit → publish →
-        apply. Bearer auth IS the owner authentication (R10), so the call is made as ``Actor.OWNER``;
+        """Owner SINGLE-step trade-window setter: validate → persist sticky → audit → publish →
+        apply. Bearer auth IS the owner authentication, so the call is made as ``Actor.OWNER``;
         ``ModeManager.set_trade_window`` does the validation + ``config_audit`` write + alert publish."""
         mm = app.state.mode_manager
         if mm is None:
@@ -717,7 +717,7 @@ def create_app(
         _log.warning("trade_window_set_via_api", start=body.start, end=body.end)
         return {"ok": True}
 
-    # ----------------------------------------------------------------- capital (O19, design 2026-10-16 §5)
+    # ----------------------------------------------------------------- capital (owner's dashboard capital change, design 2026-10-16)
     def _capital_unwired() -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED,
                             content={"ok": False, "note": "capital change not wired"})
@@ -736,7 +736,7 @@ def create_app(
 
     @app.post("/config/capital")
     async def set_capital(body: CapitalBody, _: Owner) -> Any:
-        """Owner capital change. ``async def`` on purpose (ruling R7): ``apply`` runs the verified read
+        """Owner capital change. ``async def`` on purpose: ``apply`` runs the verified read
         through the limits reload with no await, which only holds on the event loop; a sync route would
         run it in a worker thread, interleaved with the ticks."""
         capital = app.state.capital
@@ -750,12 +750,12 @@ def create_app(
             _log.exception("capital_change_failed")
             raise
 
-    # ----------------------------------------------------------------- params (GET + POST, §6.3)
+    # ----------------------------------------------------------------- params (GET + POST)
     @app.get("/config/params")
     async def get_params(_: Owner) -> dict[str, Any]:
         """Live ``envelope_state`` values + ``envelope.yaml`` bounds (when ``store`` wired) +
         ``analyst_confidence_min`` (when ``limits_engine`` wired and set) + the latest nightly-reviewer
-        SUGGESTED values — the platform SUGGESTS, the owner SETS (§6.3/§5.5)."""
+        SUGGESTED values — the platform SUGGESTS, the owner SETS."""
         conn = app.state.conn
         if conn is None:
             return {"params": {}, "suggestions": []}
@@ -800,10 +800,10 @@ def create_app(
 
     @app.post("/config/params")
     async def set_params(body: ParamBody, _: Owner) -> dict[str, Any]:
-        """Owner applies ONE envelope tunable — every change audited to ``config_audit`` (§6.3). The
+        """Owner applies ONE envelope tunable — every change audited to ``config_audit``. The
         platform never self-applies a suggestion; only this owner-authenticated path SETS.
         ``analyst_confidence_min`` is owner-only via the PROTECTED ``limits.yaml`` flow, not this route
-        (§6.3) — rejected 409 regardless of wiring. Unknown name / out-of-[min,max] value => 422."""
+        rejected 409 regardless of wiring. Unknown name / out-of-[min,max] value => 422."""
         if body.name == "analyst_confidence_min":
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
@@ -854,13 +854,13 @@ def create_app(
         _log.warning("param_set_via_api", name=body.name, value=str(value))
         return {"ok": True, "applied": True, "value": value}
 
-    # ----------------------------------------------------------------- mode (POST, two-step; R10)
+    # ----------------------------------------------------------------- mode (POST, two-step)
     @app.post("/mode")
     async def set_mode(body: ModeBody, _: Owner) -> dict[str, Any]:
         """Owner mode change. OFF/RECOMMEND are SINGLE-step (the bearer token itself IS the owner
-        authentication, §2.4) — ``ModeManager.request_transition`` applies them directly as
-        ``Actor.OWNER``. →AUTO requires a TWO-STEP owner confirmation (R10/§3.5.3) that has no dashboard
-        path in Phase 2 (Telegram ``/mode AUTO`` + ``/confirm`` only) — rejected 409, not a stub."""
+        authentication) — ``ModeManager.request_transition`` applies them directly as
+        ``Actor.OWNER``. →AUTO requires a TWO-STEP owner confirmation that has no dashboard
+        path (Telegram ``/mode AUTO`` + ``/confirm`` only) — rejected 409, not a stub."""
         try:
             target = Mode(body.mode)
         except ValueError:
@@ -880,12 +880,12 @@ def create_app(
         ok = await mm.request_transition(target, Actor.OWNER)
         return {"ok": ok, "mode": target.value}
 
-    # ----------------------------------------------------------------- kill (POST, two-step; R10/§7.2)
+    # ----------------------------------------------------------------- kill (POST, two-step)
     @app.post("/kill")
     async def kill(_: Owner, body: KillBody = KillBody()) -> dict[str, Any]:
-        """Engage the kill switch — SINGLE-step trigger (fast), owner-authenticated via bearer (§7.2).
-        ``KillSwitch.trigger`` persists KILLED before acting (R10); the OMS flatten sequence is
-        Phase 3 and runs via its own injected callback when wired."""
+        """Engage the kill switch — SINGLE-step trigger (fast), owner-authenticated via bearer.
+        ``KillSwitch.trigger`` persists KILLED before acting; the OMS flatten sequence is
+        part of the order machinery (not built yet) and runs via its own injected callback when wired."""
         ks = app.state.kill_switch
         if ks is None:
             return JSONResponse(
@@ -898,8 +898,8 @@ def create_app(
 
     @app.post("/kill/reset")
     async def kill_reset(_: Owner) -> dict[str, Any]:
-        """Reset the kill switch — owner TWO-STEP authenticated flow (R10/§7.2). No dashboard two-step
-        exists in Phase 2 (Telegram ``/kill_reset`` + ``/confirm`` only) — always 409, not a stub."""
+        """Reset the kill switch — owner TWO-STEP authenticated flow. No dashboard two-step
+        exists (Telegram ``/kill_reset`` + ``/confirm`` only) — always 409, not a stub."""
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
@@ -908,7 +908,7 @@ def create_app(
             },
         )
 
-    # ----------------------------------------------------------------- paper (POST, single-step; D13)
+    # ----------------------------------------------------------------- paper (POST, single-step)
     @app.post("/paper")
     async def set_paper(body: PaperBody, _: Owner) -> dict[str, Any]:
         """Paper autopilot ON/OFF, single-step (D8: paper cannot place a real order). ON is refused unless
@@ -929,12 +929,12 @@ def create_app(
         _log.warning("paper_set_via_api", enabled=body.enabled, changed=changed)
         return {"ok": True, "enabled": body.enabled, "changed": changed}
 
-    # ----------------------------------------------------------------- WS live stream (R8; Phase 2)
+    # ----------------------------------------------------------------- WS live stream
     @app.websocket("/ws/live")
     async def ws_live(websocket: WebSocket) -> None:
-        """Live risk/mode/kill/trade-window/budget state stream (R8): the socket is registered on
+        """Live risk/mode/kill/trade-window/budget state stream: the socket is registered on
         ``app.state.ws_hub`` and receives ``{kind, payload, at}`` frames relayed off the bus, plus a
-        keepalive ping every 15s. Tick fan-out (held + watch instruments) is Phase 3 — not faked here.
+        keepalive ping every 15s. Tick fan-out (held + watch instruments) is not built yet — not faked here.
 
         NOTE: the bearer check is enforced manually here (WS handshakes can't use the HTTP ``Depends``
         bearer dependency the same way) — the token may arrive as the ``Authorization`` header or a
@@ -956,7 +956,7 @@ def create_app(
             keepalive.cancel()
             hub.unregister(websocket)
 
-    # ----------------------------------------------------------------- static dashboard (R8)
+    # ----------------------------------------------------------------- static dashboard
     # ORDER MATTERS: the dashboard mount is a catch-all at "/", so every narrower route has to be
     # registered before it or the SPA swallows the path (Starlette takes the FIRST matching route).
     _add_notifications_ui_route(app)
@@ -1005,9 +1005,9 @@ def _decision_subjects(conn: Any, proposals: list[dict[str, Any]]) -> list[str |
     return out
 
 
-# --------------------------------------------------------------------------- auth (R10)
+# --------------------------------------------------------------------------- auth
 async def _require_owner(request: Request) -> None:
-    """Enforce ``Authorization: Bearer <DASHBOARD_TOKEN>`` on every protected route (R10).
+    """Enforce ``Authorization: Bearer <DASHBOARD_TOKEN>`` on every protected route.
 
     MODULE-LEVEL by design: with ``from __future__ import annotations`` the ``_: Owner`` route
     annotations are strings, and FastAPI resolves them against the route function's MODULE globals — a
@@ -1025,7 +1025,7 @@ async def _require_owner(request: Request) -> None:
         )
 
 
-#: Route dependency marker: ``_: Owner`` on a handler gates it behind :func:`_require_owner` (R10).
+#: Route dependency marker: ``_: Owner`` on a handler gates it behind :func:`_require_owner`.
 Owner = Annotated[None, Depends(_require_owner)]
 
 
@@ -1039,7 +1039,7 @@ def _extract_bearer(authorization: str | None) -> str | None:
 
 
 def _token_matches(secrets: Secrets, presented: str) -> bool:
-    """Fail-closed comparison of the presented token against the stored dashboard token (R10)."""
+    """Fail-closed comparison of the presented token against the stored dashboard token."""
     import hmac
 
     try:
@@ -1050,7 +1050,7 @@ def _token_matches(secrets: Secrets, presented: str) -> bool:
 
 
 def _ws_authorized(websocket: WebSocket, secrets: Secrets) -> bool:
-    """Bearer check for the WS handshake — accepts the token via header or ``?token=`` query (R10)."""
+    """Bearer check for the WS handshake — accepts the token via header or ``?token=`` query."""
     token = _extract_bearer(websocket.headers.get("authorization"))
     if token is None:
         token = websocket.query_params.get("token")
@@ -1059,12 +1059,12 @@ def _ws_authorized(websocket: WebSocket, secrets: Secrets) -> bool:
 
 def _make_ws_relay_handler(hub: WSHub, topic: str) -> Any:
     """Bind ``topic`` by value (default-arg trick) so every subscribed handler broadcasts under its
-    OWN topic name, not whichever topic the enclosing loop last iterated to (R8).
+    OWN topic name, not whichever topic the enclosing loop last iterated to.
 
     The broadcast is FIRE-AND-FORGET (2026-07-28 review): ``KillSwitch.trigger`` and the mode/risk
     setters ``apublish`` their events — i.e. they AWAIT every subscribed handler — so an awaited
     broadcast would let one stalled dashboard socket wedge the KILL sequence. A dropped frame costs
-    a dashboard refresh; a wedged kill path costs capital (R10)."""
+    a dashboard refresh; a wedged kill path costs capital."""
 
     async def _handler(event: Any) -> None:
         payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
@@ -1081,7 +1081,7 @@ def _log_ws_relay_result(task: "asyncio.Task[Any]") -> None:
 
 
 async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
-    """Ping frame every 15s (§3.2.11) so LAN clients/proxies see the socket as alive. A failed send
+    """Ping frame every 15s so LAN clients/proxies see the socket as alive. A failed send
     (client already gone) just ends the task — the connection's own receive loop handles cleanup."""
     while True:
         await asyncio.sleep(_WS_PING_INTERVAL_S)
@@ -1094,8 +1094,7 @@ async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
 # --------------------------------------------------------------------------- helpers
 def _jsonable(value: Any) -> Any:
     """Render one store row value for the wire. Store rows are DuckDB-native, so prices arrive as
-    ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (§8.1
-    decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level).
+    ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level).
 
     ``bytes``/``dict`` are handled for ``POST /db/query``, which returns whatever column the owner
     asked for: FastAPI's encoder UTF-8-decodes bytes (a 500 on any real BLOB — ``agent_calls.context_gz``
@@ -1116,14 +1115,14 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-# --------------------------------------------------------------------------- /db/query (§3.2.11)
+# --------------------------------------------------------------------------- /db/query
 async def _db_query_market(app_state: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Validate + run one owner SELECT on a PER-REQUEST cursor of the LIVE ``MarketStore`` connection.
 
     ``con.cursor()`` is a fresh DuckDB connection onto the SAME instance: it sees every committed row
     the engine has written, contends for none of the store's write lock, and its ``interrupt()`` cancels
     only its own query (verified 2026-08-19 — the parent connection's in-flight work completes
-    untouched). Riding the store INSTANCE is forced rather than preferred: §4.1 gives exactly one
+    untouched). Riding the store INSTANCE is forced rather than preferred: the store layout gives exactly one
     process ``market.duckdb`` and DuckDB's file lock refuses a second ``connect()``. The store is
     duck-typed off ``market_store`` then ``store``, exactly like ``/news/watchlist``; its connection
     accessor is private because there is no public one and widening the store API is not this
@@ -1146,7 +1145,7 @@ async def _db_query_market(app_state: Any, body: DbQueryBody) -> tuple[list[str]
 
 def _reject_non_read_duckdb(cursor: Any, sql: str) -> None:
     """400 anything that is not EXACTLY ONE read-only DuckDB statement, by asking the PARSER for the
-    statement TYPE (§3.2.11). Text inspection is not a mechanism here — it cannot see through comments,
+    statement TYPE. Text inspection is not a mechanism here — it cannot see through comments,
     quoting or CTEs, and DuckDB already exposes the parser's own verdict."""
     try:
         statements = cursor.extract_statements(sql)
@@ -1221,7 +1220,7 @@ def _state_db_uri_path(conn: Any) -> str:
 def _run_sqlite(db_uri_path: str, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Execute the owner statement on a fresh ``mode=ro`` connection under an interrupt deadline.
 
-    Three independent read-only guarantees, none of them text inspection (§3.2.11): the connection is
+    Three independent read-only guarantees, none of them text inspection: the connection is
     opened READ-ONLY (a WAL reader — the engine keeps writing throughout), the authorizer DENIES every
     action outside :data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS` while sqlite prepares the statement, and
     sqlite3 itself refuses more than one statement per ``execute``. All three answer 400.
@@ -1257,8 +1256,8 @@ def _run_sqlite(db_uri_path: str, body: DbQueryBody) -> tuple[list[str], list[li
 
 
 def _db_query_sqlite_authorizer(action: int, *_args: Any) -> int:
-    """SQLite's per-action gate for ``POST /db/query`` — sqlite's equivalent of DuckDB statement typing
-    (§3.2.11). Everything outside the read set is DENIED as the statement is prepared, so
+    """SQLite's per-action gate for ``POST /db/query`` — sqlite's equivalent of DuckDB statement typing.
+    Everything outside the read set is DENIED as the statement is prepared, so
     INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the (already read-only) file."""
     return sqlite3.SQLITE_OK if action in _DB_QUERY_SQLITE_ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
@@ -1281,7 +1280,7 @@ def _log_db_query(
     truncated: bool | None = None,
     detail: str | None = None,
 ) -> None:
-    """One INFO line per owner query, run or rejected (§3.2.11/§6.5) — the audit trail for a surface
+    """One INFO line per owner query, run or rejected — the audit trail for a surface
     that can read any row in either database."""
     _log.info(
         "db_query",
@@ -1335,7 +1334,7 @@ def _parse_hhmm(value: str):
     return _time(int(hh), int(mm))
 
 
-#: URL path of the WO-24d notifications page, served as an explicit ROUTE rather than as a candidate
+#: URL path of the notifications page, served as an explicit ROUTE rather than as a candidate
 #: of the "/" dashboard mount below. Two reasons, both load-bearing:
 #:
 #: * ``<repo>/dashboard/dist`` already exists on the LAN box and is the FIRST candidate of that
@@ -1359,7 +1358,7 @@ def _add_notifications_ui_route(app: FastAPI) -> None:
     ``Authorization`` header, and this app has no auth MIDDLEWARE — auth is per-route via
     ``Depends(_require_owner)``, which this route deliberately does not carry. What ships here is
     therefore an empty SHELL: it holds no state, prompts for the dashboard token itself, and every
-    byte it displays comes from bearer-authed ``GET /notifications`` (R10). Same posture as the
+    byte it displays comes from bearer-authed ``GET /notifications``. Same posture as the
     existing "/" dashboard mount — the LAN bind plus the token is the boundary."""
     from pathlib import Path
 
@@ -1380,10 +1379,10 @@ def _add_notifications_ui_route(app: FastAPI) -> None:
 
 
 def _mount_dashboard_if_present(app: FastAPI, settings: Settings) -> None:
-    """Serve the built React dashboard at ``/`` if a build exists (R8). No-op otherwise so the API runs
+    """Serve the built React dashboard at ``/`` if a build exists. No-op otherwise so the API runs
     headless in dev / before the front-end is built.
 
-    ``<repo>/dashboard/dist`` is the FIRST candidate and the real one (D3): the front-end source lives
+    ``<repo>/dashboard/dist`` is the FIRST candidate and the real one: the front-end source lives
     in ``dashboard/`` and ``npm run build`` writes there. It is resolved from ``repo_root()`` — NOT from
     ``Path.cwd()`` — because the engine is normally launched as a service whose working directory is
     not the repo. The legacy ``web/dist`` locations stay as fallbacks."""

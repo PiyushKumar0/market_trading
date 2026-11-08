@@ -1,4 +1,4 @@
-"""Mode + risk-state stickiness, transition guards, and the trade-window setter (R5/R10, §3.5.3)."""
+"""Mode + risk-state stickiness, transition guards, and the trade-window setter."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ async def test_auto_requires_two_step_confirmation(conn, clock):
         Mode.AUTO, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True)
     )
     assert ok and mm.mode() == Mode.AUTO
-    assert mm.routing() == Routing.PAPER  # default safe routing (live gated elsewhere, §8.5)
+    assert mm.routing() == Routing.PAPER  # default safe routing (live gated elsewhere)
 
 
 @pytest.mark.asyncio
@@ -98,7 +98,7 @@ async def test_force_downgrade_only_lowers(conn, clock):
     await mm.request_transition(Mode.AUTO, Actor.OWNER, OwnerConfirmation(actor=Actor.OWNER, confirmed=True))
     await mm.force_downgrade(Mode.RECOMMEND, "daily_loss_hard")
     assert mm.mode() == Mode.RECOMMEND
-    # A "downgrade" to a higher mode is a no-op (re-arm is owner-only, R3).
+    # A "downgrade" to a higher mode is a no-op (re-arm is owner-only).
     await mm.force_downgrade(Mode.AUTO, "should_not_upgrade")
     assert mm.mode() == Mode.RECOMMEND
 

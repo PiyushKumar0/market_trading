@@ -1,7 +1,7 @@
-"""§9.4 chaos case 23 — Shutdown races an in-flight tick flush (§2.6 teardown order / §3.2 hot-path
-invariant 5).
+"""Chaos case 23 — Shutdown races an in-flight tick flush (teardown order / hot-path
+invariant).
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 23), "Must hold":
+Drill-catalog row (case 23), "Must hold":
 
     "with a due tick batch mid-flush on a background thread, a concurrent clean stop neither deadlocks
     (lock order: flush-serialization → store; close() flushes before taking the store lock) nor
@@ -28,11 +28,10 @@ Tests:
   run after ``store.close()`` (the undrained-handler hazard): the orphaned flush restages the batch and
   logs ``tick_flush_skipped_store_closed``; nothing raises. (passes)
 * ``…_bus_handlers_drained_before_store_close`` — the teardown drains the bus
-  (``_SHUTDOWN_BUS_DRAIN_S``) before ``store.close()``, so no delivery is pending at close (CD-6,
-  fixed 2026-09-24).
+  (``_SHUTDOWN_BUS_DRAIN_S``) before ``store.close()``, so no delivery is pending at close (fixed 2026-09-24).
 * ``…_flush_wedged_past_close_bound_degrades_gracefully`` — a flush still mid-flight when both
   bounds (the drain and ``close()``'s ``_CLOSE_FLUSH_WAIT_S``) expire restages its unwritten batch with
-  ``tick_flush_skipped_store_closed`` instead of crashing (CD-7, fixed 2026-09-24).
+  ``tick_flush_skipped_store_closed`` instead of crashing (fixed 2026-09-24).
 """
 
 from __future__ import annotations
@@ -231,7 +230,7 @@ def test_case23_late_flush_after_close_restages_with_explicit_log(tmp_path, monk
 
 # --------------------------------------------------------------------------- bus drained before close
 def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
-    """CD-6 (fixed 2026-09-24): teardown now awaits ``bus.drain`` before ``store.close()``."""
+    """Fixed 2026-09-24: teardown now awaits ``bus.drain`` before ``store.close()``."""
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> list[str]:
@@ -257,7 +256,7 @@ def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- wedged past the bound
 def test_case23_flush_wedged_past_close_bound_degrades_gracefully(tmp_path, monkeypatch, caplog):
-    """CD-7 (fixed 2026-09-24): the flush close() gave up on used to raise and lose its batch."""
+    """Fixed 2026-09-24: the flush close() gave up on used to raise and lose its batch."""
     import engine.marketdata.store as store_mod
     import tests.chaos._lifecycle_rig as rig_mod
 

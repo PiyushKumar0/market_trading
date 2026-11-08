@@ -1,28 +1,28 @@
-"""Historical candle backfill + startup warm-up gap fill (§3.2.3, §4.4 jobs 1 & 3, §2.6 step 4, A2).
+"""Historical candle backfill + startup warm-up gap fill.
 
 ``BackfillJob`` pulls official Kite candles through :meth:`KiteClient.historical` — every request is
-paced by the shared :class:`~engine.broker.rate_limiter.RateLimiter` ``historical`` bucket (≤3 req/s,
-A2) inside the client, so this job never sleeps or paces on its own. Requests are **chunked** per
+paced by the shared :class:`~engine.broker.rate_limiter.RateLimiter` ``historical`` bucket (≤3 req/s)
+inside the client, so this job never sleeps or paces on its own. Requests are **chunked** per
 Kite's per-request range caps (pinned constants below), **checkpointed** per ``(symbol, interval)``
 in the SQLite ``backfill_checkpoints`` table, and **resumable**: a re-run skips everything at or
-behind the checkpoint and continues from the day after it (A2 — the initial minute history is a
+behind the checkpoint and continues from the day after it (the initial minute history is a
 multi-evening job).
 
-**A11 RESOLVED — NO re-adjustment:** Kite minute (and daily) candles are ALREADY corp-action
+**RESOLVED — NO re-adjustment:** Kite minute (and daily) candles are ALREADY corp-action
 adjusted (``settings data.minute_candles_adjusted=true``; verified 2026-07-05 against the BSE 2:1
 bonus via ``scripts/a11_check.py``). Candles are therefore written EXACTLY as fetched — this job
 must never apply split/bonus factors across ex-dates.
 
-Provenance (§4.3 ``bars_1m.src``):
-    * :meth:`run` writes ``src='kite_official'`` (canonical historical rows; §4.4 jobs 2/3).
-    * :meth:`warmup_gap` writes ``src='gap_backfilled'`` — the §2.6 offline-span fill, which the
+Provenance (``bars_1m.src``):
+    * :meth:`run` writes ``src='kite_official'`` (canonical historical rows).
+    * :meth:`warmup_gap` writes ``src='gap_backfilled'`` — the offline-span fill, which the
       nightly reconcile EXCLUDES from its drift denominator (they are not self-built bars).
     * :meth:`warmup_gap` with ``confirm_until`` ALSO writes ``bars_1m_no_trade`` rows (2026-09-18) —
       upstream-confirmed tradeless minutes, which are evidence and not bars: no price is synthesized
       and ``bars_1m`` is never touched by that path. See the method's contract.
 
-Dependencies: ``core`` + ``broker`` (§3.2.3). The SQLite checkpoint table lives in ``state.db``
-(§4.2); the bars land in DuckDB via the single-writer :class:`MarketStore`.
+Dependencies: ``core`` + ``broker``. The SQLite checkpoint table lives in ``state.db``;
+the bars land in DuckDB via the single-writer :class:`MarketStore`.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from engine.marketdata.store import DailyBar, MarketStore
 
 _log = get_logger("engine.marketdata.backfill")
 
-# --- Kite historical per-request range caps (A2/§3.2.3, pinned) --------------------------------
+# --- Kite historical per-request range caps (pinned) --------------------------------
 # These are BROKER limits, not tunables: a request spanning more days than this is rejected by the
 # API. settings.backfill.{minute,day}_chunk_days may tighten them but can never exceed them.
 KITE_MINUTE_CHUNK_DAYS = 60     # max span per minute-interval historical request
@@ -70,11 +70,11 @@ class BackfillSpan(BaseModel):
 
 
 class BackfillReport(BaseModel):
-    """Outcome of one backfill run (§3.2.3): requested/fetched/failed spans + bars written.
+    """Outcome of one backfill run: requested/fetched/failed spans + bars written.
 
     ``requested`` is the caller-asked span per symbol; ``fetched`` the chunk spans actually pulled
     (a resumed symbol shows only the remainder); ``failed`` the spans abandoned with their error —
-    those symbols stay behind their checkpoint and the next run resumes them (A2 resumable).
+    those symbols stay behind their checkpoint and the next run resumes them (resumable).
     """
 
     interval: str
@@ -145,7 +145,7 @@ def _abort_remaining(
 
 
 class BackfillJob:
-    """Chunked, checkpointed, resumable official-candle backfill (§3.2.3, A2/A11).
+    """Chunked, checkpointed, resumable official-candle backfill.
 
     Parameters
     ----------
@@ -153,13 +153,13 @@ class BackfillJob:
         Single-writer :class:`MarketStore` (bars_1m upserts / bars_1d upserts).
     kite:
         :class:`KiteClient` — ALL pacing happens inside it (the shared RateLimiter ``historical``
-        bucket, 3 req/s, A2). This job issues requests back-to-back and lets the limiter pace.
+        bucket, 3 req/s). This job issues requests back-to-back and lets the limiter pace.
     clock:
-        The single source of "now"/tz-aware combination (§3.2).
+        The single source of "now"/tz-aware combination.
     settings:
         ``settings.backfill`` chunk knobs (clamped to the pinned Kite caps above).
     conn:
-        The SQLite ``state.db`` connection (WAL; §4.2) holding ``backfill_checkpoints``.
+        The SQLite ``state.db`` connection (WAL) holding ``backfill_checkpoints``.
     token_for_symbol:
         tradingsymbol → instrument_token resolver (the composition root wires ``InstrumentStore``).
         ``None`` for a symbol ⇒ that symbol is reported failed, never guessed.
@@ -181,7 +181,7 @@ class BackfillJob:
         self._conn = conn
         self._token_for_symbol = token_for_symbol
 
-    # ------------------------------------------------------------------ §4.4 job 3: history
+    # ------------------------------------------------------------------ history
 
     async def run(
         self, symbols: Sequence[str], interval: str, start: date, end: date
@@ -190,8 +190,8 @@ class BackfillJob:
 
         ``interval`` is the Kite interval string (``"minute"`` | ``"day"``). Chunked per the pinned
         range caps; each successfully written chunk advances the ``(symbol, interval)`` checkpoint
-        so an interrupted run resumes exactly where it stopped (A2). Rows are written
-        ``src='kite_official'`` — already corp-action adjusted, NO re-adjustment (A11, module
+        so an interrupted run resumes exactly where it stopped. Rows are written
+        ``src='kite_official'`` — already corp-action adjusted, NO re-adjustment (module
         docstring). A per-symbol failure abandons that symbol's remaining chunks (checkpoint left
         at the last success) and continues with the next symbol.
         """
@@ -234,7 +234,7 @@ class BackfillJob:
                     written = await self._write_candles(
                         symbol, interval, candles, src="kite_official"
                     )
-                except Exception as exc:  # noqa: BLE001 - record + resume next run (A2)
+                except Exception as exc:  # noqa: BLE001 - record + resume next run
                     report.failed.append(
                         BackfillSpan(
                             symbol=symbol, frm=cur.isoformat(), to=chunk_end.isoformat(),
@@ -287,7 +287,7 @@ class BackfillJob:
         )
         return report
 
-    # ------------------------------------------------------------------ §2.6 step 4: warm-up gap
+    # ------------------------------------------------------------------ warm-up gap
 
     async def warmup_gap(
         self,
@@ -297,19 +297,19 @@ class BackfillJob:
         *,
         confirm_until: datetime | None = None,
     ) -> BackfillReport:
-        """Fill the ``[frm, to)`` minute-bar gap from official candles (§2.6 step 4 / §4.4 job 1).
+        """Fill the ``[frm, to)`` minute-bar gap from official candles.
 
         The cold-start/restart same-session (or multi-day) gap fill: ``frm`` is last-bar-seen, so
         warm-up never requires live tick capture since 09:15 — the reference catch-up pattern.
-        Rows are written ``src='gap_backfilled'`` (§4.3): an offline-span fill that the nightly
-        reconcile EXCLUDES from its drift denominator (§2.6). Candles are already corp-action
-        adjusted (A11) — written as fetched. NOT checkpointed: every startup computes its own gap.
+        Rows are written ``src='gap_backfilled'``: an offline-span fill that the nightly
+        reconcile EXCLUDES from its drift denominator. Candles are already corp-action
+        adjusted — written as fetched. NOT checkpointed: every startup computes its own gap.
 
         ``confirm_until`` (2026-09-18) turns this job into the one place that can close an UNFILLABLE
         hole. A thin, high-priced symbol (PTCIL, MRF, SHYAMMETL, KIMS, DEEPAKNTR) has minutes in
         which nothing trades: no tick ⇒ the bar builder writes no bar, and Kite publishes no candle
         for a tradeless minute ⇒ this fill fetches the day and writes nothing. The minute is a
-        permanent hole and §2.6 refused the symbol for the whole session (09-16 PTCIL 13:36; 09-17
+        permanent hole and the warm-up gate refused the symbol for the whole session (09-16 PTCIL 13:36; 09-17
         DEEPAKNTR 374/375). It is not missing data — it is an observation the exchange made — so when
         ``confirm_until`` is set, a still-missing minute that Kite DID NOT return, for a symbol whose
         fetch completed, is recorded in ``bars_1m_no_trade`` (:meth:`MarketStore.mark_no_trade`) and
@@ -317,7 +317,7 @@ class BackfillJob:
 
         UPSTREAM-CONFIRMED ONLY — never a synthetic bar, never an invented price. ``bars_1m`` is
         untouched by this path (its ``src`` CHECK constraint is not widened; no new ``src`` value),
-        so every feature input is unchanged by construction: only the §2.6 gate's verdict moves.
+        so every feature input is unchanged by construction: only the warm-up gate's verdict moves.
 
         Confirmation runs in TWO PHASES because the last guard is a cross-symbol one. Phase 1, inside
         the per-symbol loop, only COLLECTS candidates (no write); phase 2, after the loop, applies the
@@ -481,7 +481,7 @@ class BackfillJob:
         )
         return report
 
-    # ------------------------------------------------------------------ §2.6 step 6 residue: daily gap
+    # ------------------------------------------------------------------ daily gap
 
     async def daily_gap(self, symbols: Sequence[str], sessions: Sequence[date]) -> BackfillReport:
         """Fill missing ``bars_1d`` rows for ``symbols`` on exactly ``sessions`` — the warm-up gate's
@@ -603,7 +603,7 @@ class BackfillJob:
         only_minutes: set | None = None,
         only_dates: set[date] | None = None,
     ) -> int:
-        """Write fetched candles (as-is, A11) to bars_1d / bars_1m; optional ``[frm, to)`` filter.
+        """Write fetched candles (as-is) to bars_1d / bars_1m; optional ``[frm, to)`` filter.
 
         ``only_minutes`` (minute interval only): write ONLY candles whose ts is in the set — the
         warmup-gap fill-gaps-never-overwrite contract (2026-07-23; see :meth:`warmup_gap`).
@@ -649,7 +649,7 @@ class BackfillJob:
             return 0
         return await self._store.ainsert_bars_1m(bars)
 
-    # ---- SQLite checkpoints (§4.2 ``backfill_checkpoints``; A2 resumable) ----
+    # ---- SQLite checkpoints (``backfill_checkpoints``; resumable) ----
 
     def _checkpoint(self, symbol: str, interval: str) -> date | None:
         row = self._conn.execute(

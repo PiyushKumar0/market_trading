@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""WO-10 pre-registered experiment CLI — intraday VWAP-deviation reversion at 15-60 min.
+"""Pre-registered experiment CLI — intraday VWAP-deviation reversion at 15-60 min.
 
     python scripts/experiment_vwap_reversion.py --from 2025-07-10 --to 2026-08-12 \
         --symbols RELIANCE,TCS [--reports-dir data/reports]
@@ -11,13 +11,13 @@ opens the market store READ-ONLY, runs the two-stage experiment and writes ONE r
 (``data/reports/vwap_reversion_<ts>.{json,md}``). It writes nothing to SQLite — no ``param_sets``
 candidate row is created, so nothing downstream can promote this.
 
-Two stages, per WO-10's abort criterion:
+Two stages, per the abort criterion:
 
 1. the UNCONDITIONED 15-60-min reversion base rate after costs over the full window (no stretch, no
    relative-volume condition). If it is ``<= 0`` the run writes an **ABORTED** report stating the
    number and stops — the stretch grid is never evaluated;
 2. only if stage 1 clears zero: the pre-registered ``{1.0, 1.5, 2.0}`` stretch grid (that axis ONLY;
-   N = 3), each point validated by the house CPCV + ``fold_pass_min`` + WO-3 margin-floor rule.
+   N = 3), each point validated by the house CPCV + ``fold_pass_min`` + margin-floor rule.
 
 Exit codes: **0** = ran (a stage-1 ABORT is a valid pre-registered outcome and still exits 0);
 **2** = no symbols/bars resolved (nothing was measured).

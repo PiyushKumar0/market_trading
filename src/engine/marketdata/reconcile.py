@@ -1,6 +1,6 @@
-"""Daily self-built-vs-official 1-minute bar reconciliation (§3.2.3, §4.4 job 2, A13, §2.6).
+"""Daily self-built-vs-official 1-minute bar reconciliation.
 
-Nightly (15:50) — and as the §2.6 startup catch-up for past trading days, driven by the
+Nightly (15:50) — and as the startup catch-up for past trading days, driven by the
 ``job_runs`` DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
 :meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail
 AND the per-(day, symbol) resume checkpoint: a run skips every symbol already logged for ``d`` with
@@ -17,29 +17,29 @@ symbol official but unlogged. A row's ``alerted`` is set only after the drift al
 handed to the notify sink; a run that dies first (or whose send fails) leaves flagged rows
 ``alerted=False``, and the next run of ``d`` carries them into its alert (``symbols_alert_carried``).
 
-The report is ok-bearing (E5): a run stopped by a rejected token reports ``ok=False``
-(``token_rejected``), so the DATE_KEYED watermark records the day ``failed`` and the §2.6 sweep
+The report is ok-bearing: a run stopped by a rejected token reports ``ok=False``
+(``token_rejected``), so the DATE_KEYED watermark records the day ``failed`` and the catch-up sweep
 retries it after re-login, resuming only the unlogged symbols.
 
 For each actively-ticked symbol of day ``d``:
 
 * Fetch the official Kite 1m candles for the session (paced ≤3 req/s by the shared RateLimiter
-  inside :class:`KiteClient`, A2).
+  inside :class:`KiteClient`).
 * **Official candles become the canonical ``bars_1m`` rows** (``src='kite_official'``) wherever
-  they exist (§4.4 job 2); self-built bars remain only where official has no candle ("self-built
-  fill gaps"). The ``auction_open`` stamped on the self 09:15 row (A14) is carried over onto the
+  they exist; self-built bars remain only where official has no candle ("self-built
+  fill gaps"). The ``auction_open`` stamped on the self 09:15 row is carried over onto the
   canonical row — the official candle does not know it.
 * **Drift** is measured ONLY over minutes where a ``src='self'`` bar exists to compare
   (the *compared* set): a bar drifts when ``|Δvolume| > reconcile.vol_drift_pct`` of the official
   volume OR ``|Δclose| > reconcile.close_drift_ticks × tick_size`` (both strict ``>``; thresholds
   are ``settings.reconcile`` [tunable]). The day flags a symbol when its bad-bar fraction exceeds
   ``reconcile.max_bad_bar_fraction`` (strict ``>`` — "on >1% of bars").
-* **OFFLINE spans are NOT drift (§2.6):** an official minute with no self-built bar (the engine was
+* **OFFLINE spans are NOT drift:** an official minute with no self-built bar (the engine was
   off, or the row is already ``gap_backfilled``/official) is backfilled from the official candle
   and counted in ``offline_bars`` — EXCLUDED from the drift denominator, never a failure.
 * Results land in ``reconcile_log`` (per (d, symbol) — the audit trail) and a
   ``reconcile_drift`` catalog alert goes to the injected async ``notify`` sink when any symbol
-  flags (A13 "alert on drift").
+  flags ("alert on drift").
 
 Dependencies: ``core`` + ``broker`` (+ the transport-free ``notify.catalog`` shapes, same as the
 datafeeds jobs). All DuckDB access goes through the single-writer :class:`MarketStore`.
@@ -69,7 +69,7 @@ _log = get_logger("engine.marketdata.reconcile")
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
-#: Fallback tick size when no per-instrument resolver is injected (NSE minimum tick, A10). The
+#: Fallback tick size when no per-instrument resolver is injected (NSE minimum tick). The
 #: composition root wires ``InstrumentStore``-backed resolution; the fallback only loosens the
 #: close-drift check for higher-band instruments (never tightens it).
 DEFAULT_TICK_SIZE = Decimal("0.05")
@@ -92,7 +92,7 @@ class SymbolReconcile(BaseModel):
 
 
 class ReconcileReport(BaseModel):
-    """Outcome of one :meth:`ReconcileJob.run` (§3.2.3). Totals cover THIS run's symbols only.
+    """Outcome of one :meth:`ReconcileJob.run`. Totals cover THIS run's symbols only.
 
     ``ok`` is the watermark verdict (``_job_result_ok``): False only when the run stopped before
     attempting every unlogged symbol — ``aborted_reason`` is ``'token_rejected'`` (a fetch raised
@@ -116,7 +116,7 @@ class ReconcileReport(BaseModel):
 
 
 class ReconcileJob:
-    """Self-vs-official 1m reconciliation + offline-span fill (§4.4 job 2; module docstring).
+    """Self-vs-official 1m reconciliation + offline-span fill (module docstring).
 
     Parameters
     ----------
@@ -127,7 +127,7 @@ class ReconcileJob:
         set (logged) — its row still lands in ``reconcile_log`` with ``bars_official=0``, which the
         next run of the day retries.
     tick_size_for:
-        Optional per-symbol tick size (A10 price-banded); defaults to ``DEFAULT_TICK_SIZE``.
+        Optional per-symbol tick size (price-banded); defaults to ``DEFAULT_TICK_SIZE``.
     notify:
         Injected async alert sink (``CatalogMessage`` consumer, e.g. ``TelegramBot.send``);
         ``None`` disables alerting. A notify failure is logged, never raised (the reconcile result
@@ -168,7 +168,7 @@ class ReconcileJob:
     # ------------------------------------------------------------------ per-day entry point
 
     async def run(self, d: date, symbols: Sequence[str] | None = None) -> ReconcileReport:
-        """Reconcile day ``d`` (§2.6 catch-up calls this per missing day). Idempotent per (day,
+        """Reconcile day ``d`` (the catch-up calls this per missing day). Idempotent per (day,
         symbol): symbols already in ``reconcile_log`` for ``d`` with official bars are skipped,
         never re-fetched.
 
@@ -210,7 +210,7 @@ class ReconcileJob:
             except TokenException:
                 # 2026-07-21: a rejected token fails every official fetch identically — stop
                 # instead of hammering the broker (the KiteClient circuit breaker has already
-                # frozen entries). ok=False sinks the DATE_KEYED watermark, so the §2.6 sweep
+                # frozen entries). ok=False sinks the DATE_KEYED watermark, so the catch-up sweep
                 # retries the day after re-login and resumes at the first unlogged symbol.
                 report.ok = False
                 report.aborted_reason = "token_rejected"
@@ -235,7 +235,7 @@ class ReconcileJob:
                 oc = official[minute]
                 mine = self_bars.get(minute)
                 if mine is None:
-                    # §2.6: no self-built bar ⇒ offline span (or already gap-backfilled/official)
+                    # No self-built bar ⇒ offline span (or already gap-backfilled/official)
                     # — fill from official, EXCLUDE from the drift denominator.
                     offline += 1
                 else:
@@ -247,7 +247,7 @@ class ReconcileJob:
                     vol_drift += int(v_bad)
                     close_drift += int(c_bad)
                     bad += int(v_bad or c_bad)
-                # Official becomes canonical everywhere it exists (§4.4 job 2). Preserve the A14
+                # Official becomes canonical everywhere it exists. Preserve the
                 # auction_open stamped on the (self-built) session-open row.
                 prev = by_minute.get(minute)
                 canonical.append(
@@ -320,7 +320,7 @@ class ReconcileJob:
         Package-internal read through the single-writer store's own connection (convention 12:
         only ``MarketStore`` opens ``market.duckdb``; this never opens a second handle).
         """
-        rows = self._store._fetchall(  # noqa: SLF001 - in-package consumer (§3.2.3 / store module doc)
+        rows = self._store._fetchall(  # noqa: SLF001 - in-package consumer (store module doc)
             "SELECT DISTINCT symbol FROM bars_1m WHERE CAST(ts_minute AS DATE) = ? ORDER BY symbol",
             [d],
         )

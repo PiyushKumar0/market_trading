@@ -1,4 +1,4 @@
-"""HealthMonitor feed-staleness alerting (§3.2.12, R2) — session-aware since 2026-07-31.
+"""HealthMonitor feed-staleness alerting — session-aware since 2026-07-31.
 
 The midnight-rollover incident: a STALE feed out of session is DEFINITIONAL (no ticks exist at
 night), but ``check()`` flagged it unconditionally and alerted every minute from 00:32 once the
@@ -72,7 +72,7 @@ async def test_healthy_and_warming_raise_nothing_in_session():
         assert alerts == [], state
 
 
-# ------------------------------------------------- problem-set alert episodes (WO-25b, 2026-08-24)
+# ------------------------------------------------- problem-set alert episodes (2026-08-24)
 # The pulse is 60 s and used to alert on EVERY pulse a problem existed: 57 identical
 # ``health problems: ['feed_stale']`` messages in one morning, the bulk of the 203-deep notification
 # backlog that then starved a fresh owner ack. An episode is the problem SET: a change alerts at once,
@@ -445,9 +445,9 @@ def _spent_cap_funnel():
     ids=["spent", "deliberately-zero"],
 )
 async def test_funnel_quiet_when_the_forward_cap_is_closed(make_funnel):
-    """A spent §5.6 daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
+    """A spent daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
     but the governor is deliberately done forwarding — paging here would train the owner to ignore
-    the alarm (WO-25b lesson).
+    the alarm.
 
     2026-09-02 review: a KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from
     minute one and must stay quiet - only cap=None (unreadable) falls back to the zero-forwarded

@@ -1,6 +1,6 @@
-"""Paper PositionBook (plan Q4.4): paper position rows and their learning-ledger rows.
+"""Paper PositionBook: paper position rows and their learning-ledger rows.
 
-* Paper only (D8): every insert carries ``is_paper=1`` (positions also ``origin='platform'``) and every
+* Paper only: every insert carries ``is_paper=1`` (positions also ``origin='platform'``) and every
   UPDATE is guarded by the paper scope, so a real row is never touched.
 * ``qty`` is the open quantity while held and the entry quantity once CLOSED. ``realized_pnl`` is gross
   and accrues per exit fill; ``costs`` are charged once, at close, on the entry notional.
@@ -41,7 +41,7 @@ _PAPER = scope_sql("paper")
 _PAPER_POSITION = scope_sql("paper", has_origin=True)
 _HELD = f"{_PAPER_POSITION} AND {HELD_STATES_SQL['paper']}"
 _WORKING = "state NOT IN ({})".format(", ".join(f"'{s.value}'" for s in sorted(TERMINAL_ORDER_STATES)))
-#: Leg index -> reason; leg 0 is the stop (``gtts.trigger_low``), leg 1 the target (Q4.2 restore order).
+#: Leg index -> reason; leg 0 is the stop (``gtts.trigger_low``), leg 1 the target (the restore order).
 LEG_REASON = {0: CloseReason.STOP, 1: CloseReason.TARGET}
 _LEG_TAG = re.compile(r"gtt:(\d+):(\d+)")
 _PRICE = Decimal("0.0001")
@@ -170,10 +170,10 @@ class PositionBook:
                   qty=qty, exit_session=exit_session, exit_policy=TIME_ONLY_POLICY if time_only else None)
 
     def _time_only(self, proposal: EnterAction, exit_session: date | None) -> bool:
-        """D14: a listed strategy opens with no stop and no target, but only once its exit session is known
+        """A listed strategy opens with no stop and no target, but only once its exit session is known
         (a hold, and a calendar that reaches the 20th session), so a stopless position always has its exit;
-        otherwise it keeps the shipped levels and is outside the C5 population. The proposal keeps the
-        shipped levels either way (the C5 counterfactual)."""
+        otherwise it keeps the shipped levels and is outside the no-stop test population. The proposal keeps the
+        shipped levels either way (the no-stop counterfactual)."""
         if proposal.strategy_id not in self._no_stop:
             return False
         if exit_session is None:

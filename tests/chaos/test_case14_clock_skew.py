@@ -1,10 +1,10 @@
-"""Plan §9.4 chaos case 14 — Clock skew beyond 2 s (R6).
+"""Chaos case 14 — Clock skew beyond 2 s.
 
-Must hold (§9.4 row 14, verbatim): "FROZEN entries until resync; alert".
+Must hold: "FROZEN entries until resync; alert".
 
 Scenario: the engine boots while the host clock is 3.5 s off NTP (or NTP is unreachable). Composed
 as ``engine.ops.main`` wires it: the real ``SessionLifecycle.startup(check_skew=True)`` → the real
-``SelfTest`` clock-skew check → the §3.5.3 cause ledger (``RiskStateLatch``); the boot-scoped skew
+``SelfTest`` clock-skew check → the cause ledger (``RiskStateLatch``); the boot-scoped skew
 verdict main.py derives from the startup report (main.py ``skew_holder["ok"] = "clock_skew" not in
 report.frozen_reasons``) feeding the real ``GateContextBuilder`` → real ``RiskGate``; and the real
 60 s warm-up refresh (``engine.ops.main.refresh_and_lift_warmup``, armed as
@@ -17,13 +17,13 @@ Clauses:
   ``test_boot_with_skew_beyond_limit_freezes_entries_and_alerts`` (2.0 s = the boundary control).
 * "until resync" — entries stay REFUSED while skewed even across the warm-up lift:
   ``test_entries_stay_refused_while_skewed_even_after_the_warmup_lift``; resync plus the restart the
-  Phase-2 design requires re-opens them: ``test_resync_then_restart_reopens_entries``.
+  RECOMMEND-mode design requires re-opens them: ``test_resync_then_restart_reopens_entries``.
 * ``test_skew_freeze_holds_until_resync`` — the risk-state FROZEN survives the 60 s warm-up refresh
-  while NTP still reports the skew (CD-2, fixed 2026-09-24).
-* Skipped (an accepted Phase-2 gap, NOT Phase-3): mid-session skew detection and in-session resync —
+  while NTP still reports the skew (fixed 2026-09-24).
+* Skipped (an accepted gap in the current RECOMMEND-mode design, not gated on the live order path): mid-session skew detection and in-session resync —
   ``test_mid_session_skew_detection_and_in_session_resync``.
 
-Phase-3-gated: none.
+Gated on the live order path: none.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def skew_rig(conn, tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))
     settings = load_settings()
-    assert settings.clock.max_skew_s == 2                      # the shipped R6 limit this case is about
+    assert settings.clock.max_skew_s == 2                      # the shipped clock-skew limit this case is about
 
     ntp = _FakeNtpServer()
     monkeypatch.setattr(ntplib.NTPClient, "request",
@@ -171,12 +171,12 @@ async def test_boot_with_skew_beyond_limit_freezes_entries_and_alerts(skew_rig, 
         assert checks["clock_skew"].passed and checks["mode_risk_state"].passed
         assert "frozen: none" in startup.body
         return
-    # FROZEN entries: through the §3.5.3 cause ledger (never a bare risk_state write) ...
+    # FROZEN entries: through the cause ledger (never a bare risk_state write) ...
     assert "clock_skew" in report.frozen_reasons
     assert rig.mode.risk_state() == RiskState.FROZEN
     causes = {c: d for c, _s, d in rig.latch.active_causes()}
     assert "clock_skew" in causes.get("startup_selftest", "")
-    # ... and at the gate, twice over: the risk-state rule AND the §7.1 clock_skew rule refuse.
+    # ... and at the gate, twice over: the risk-state rule AND the clock_skew rule refuse.
     assert verdict == "reject"
     assert not checks["mode_risk_state"].passed
     assert not checks["clock_skew"].passed and "no entries until resync" in checks["clock_skew"].headroom
@@ -188,7 +188,7 @@ async def test_boot_with_skew_beyond_limit_freezes_entries_and_alerts(skew_rig, 
 # ------------------------------------------------------------------------ until resync (entries)
 async def test_entries_stay_refused_while_skewed_even_after_the_warmup_lift(skew_rig):
     """The gate's own backstop, independent of the risk state: the boot-scoped skew verdict keeps the
-    §7.1 clock_skew rule refusing every entry while skewed."""
+    clock_skew rule refusing every entry while skewed."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
     await rig.boot()
@@ -207,8 +207,8 @@ async def test_resync_then_restart_reopens_entries(skew_rig):
     await rig.boot()
     assert rig.mode.risk_state() == RiskState.FROZEN
 
-    # Resync (owner fixes the Windows time service — runbook §10.4 13/14), then the restart the
-    # Phase-2 design needs (the skew verdict is measured at boot only).
+    # Resync (owner fixes the Windows time service), then the restart the
+    # RECOMMEND-mode design needs (the skew verdict is measured at boot only).
     await rig.lifecycle.shutdown(reason="owner")
     rig.ntp.offset_s = 0.2
     report = await rig.boot()
@@ -223,7 +223,7 @@ async def test_resync_then_restart_reopens_entries(skew_rig):
 
 # ----------------------------------------------------------------------- until resync (risk state)
 async def test_skew_freeze_holds_until_resync(skew_rig):
-    """CD-2 (fixed 2026-09-24): the 60 s warm-up lift used to clear the 'startup_selftest' cause that
+    """Fixed 2026-09-24: the 60 s warm-up lift used to clear the 'startup_selftest' cause that
     carries clock_skew — its self-test skips the NTP check. It now holds on the boot's skew verdict."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
@@ -234,11 +234,11 @@ async def test_skew_freeze_holds_until_resync(skew_rig):
     await rig.warmup_refresh()                                # warm-up is ready; the clock is NOT
 
     assert rig.ntp.requests == requests_at_boot               # (no resync was even attempted)
-    assert rig.mode.risk_state() == RiskState.FROZEN          # §9.4: FROZEN until resync
+    assert rig.mode.risk_state() == RiskState.FROZEN          # FROZEN until resync
     assert any(c == "startup_selftest" for c, _s, _d in rig.latch.active_causes())
 
 
-# ----------------------------------------------------------------------- mid-session (Phase-2 gap)
+# ----------------------------------------------------------------------- mid-session (RECOMMEND-mode gap)
 @pytest.mark.skip(reason=(
     "Accepted Phase-2 gap, not built: skew is measured at BOOT only — main.py 'Clock-skew verdict is "
     "boot-scoped (§3.2.12 self-test measures it; the health loop deliberately skips per-minute NTP). "

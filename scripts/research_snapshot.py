@@ -1,4 +1,4 @@
-"""Plan Q5.1: copy the tables the research studies read into ``data/research/market_<date>.duckdb``.
+"""Copy the tables the research studies read into ``data/research/market_<date>.duckdb``.
 
 Run only while mt-engine is stopped: DuckDB holds a file lock, and the source is attached READ_ONLY
 (``MarketStore.open()`` would run DDL against the live store). Exit 2 on refusal, 1 on a count mismatch.

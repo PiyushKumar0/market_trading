@@ -1,4 +1,4 @@
-"""Paper session prep (plan Q4.7): catch-up, the corporate-action check, pending exits, the deadline."""
+"""Paper session prep: catch-up, the corporate-action check, pending exits, the deadline."""
 
 from __future__ import annotations
 

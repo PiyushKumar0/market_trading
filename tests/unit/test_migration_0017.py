@@ -1,4 +1,4 @@
-"""0017_paper_exit_policy: an additive, nullable column; upgrade from a populated 0016 db (D14)."""
+"""0017_paper_exit_policy: an additive, nullable column; upgrade from a populated 0016 db."""
 
 from __future__ import annotations
 

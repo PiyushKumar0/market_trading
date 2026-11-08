@@ -1,9 +1,9 @@
-"""Foundational enums shared across tiers (R1).
+"""Foundational enums shared across tiers.
 
 These live in ``core`` (the dependency-graph root) so both ``engine.risk`` (which owns the mode /
-risk-state machines, R5) and ``engine.intelligence.schemas`` (whose ``GateVerdict`` records the mode
+risk-state machines) and ``engine.intelligence.schemas`` (whose ``GateVerdict`` records the mode
 + risk-state a verdict was issued under) can import them without a cross-tier dependency. Putting
-them anywhere else would force ``risk`` to import ``intelligence`` or vice-versa, breaking R1.
+them anywhere else would force ``risk`` to import ``intelligence`` or vice-versa, breaking the three-tier rule.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from enum import StrEnum
 
 
 class Mode(StrEnum):
-    """Operating mode (O2). Owner-controlled; the risk gate may only DOWNGRADE (§3.5.3)."""
+    """Operating mode. Owner-controlled; the risk gate may only DOWNGRADE."""
 
     OFF = "OFF"
     RECOMMEND = "RECOMMEND"
@@ -20,18 +20,18 @@ class Mode(StrEnum):
 
 
 class Routing(StrEnum):
-    """Order routing, orthogonal to Mode and valid ONLY in AUTO (§3.5.3)."""
+    """Order routing, orthogonal to Mode and valid ONLY in AUTO."""
 
     PAPER = "paper"
     LIVE = "live"
 
 
 class RiskState(StrEnum):
-    """Tier-2-controlled risk state (§3.5.3).
+    """Tier-2-controlled risk state.
 
     Reached by direct per-cause entry edges, NOT a linear chain — most-restrictive-wins. Re-arm
     requires every latching cause cleared (risk-forced downgrades to CLOSE_ONLY/KILLED need explicit
-    owner action, never a timer; R3/R5).
+    owner action, never a timer).
     """
 
     NORMAL = "NORMAL"
@@ -41,7 +41,7 @@ class RiskState(StrEnum):
 
 
 class Actor(StrEnum):
-    """Who originated a state change / order — for the audit chain (R8)."""
+    """Who originated a state change / order — for the audit chain."""
 
     OWNER = "owner"
     RISK_GATE = "risk_gate"
@@ -53,10 +53,10 @@ class Actor(StrEnum):
 
 
 class DegradeTier(StrEnum):
-    """Budget-governor degrade ladder (§5.6). Maps to a mode capability (D6)."""
+    """Budget-governor degrade ladder. Maps to a mode capability."""
 
     DG0 = "DG0"  # full operation
     DG1 = "DG1"  # trim context / cut heartbeats; analysis quality still full grade
     DG2 = "DG2"  # AUTO manage-only (no LLM-originated entries); RECOMMEND continues
     DG3 = "DG3"  # all intraday LLM off; sentiment off
-    DG4 = "DG4"  # zero SDK calls (== LLM-unavailable safe state, D7)
+    DG4 = "DG4"  # zero SDK calls (== LLM-unavailable safe state)

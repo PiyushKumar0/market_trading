@@ -1,9 +1,9 @@
-"""Paper session prep (plan Q4.7): what the unobserved session minutes did to the open paper positions,
+"""Paper session prep: what the unobserved session minutes did to the open paper positions,
 applied before the bridge forwards a tick.
 
 1. Catch-up, PENDING_EXIT included. An unadjusted ex-date after the window start voids without a walk:
-   Kite candles come corporate-action adjusted (A11) and the stops are not. A position no bar of the
-   window can close (no stop, no target, no exit session by the window's end: D14 time-only) is not
+   Kite candles come corporate-action adjusted and the stops are not. A position no bar of the
+   window can close (no stop, no target, no exit session by the window's end: time-only) is not
    walked, so needs no fetch. Otherwise the backfilled 1m bars are walked through ``exit_sim``; an exit
    closes by bookkeeping, and a symbol whose fetch failed voids. A minute without a candle inside a
    successful fetch had no trades.

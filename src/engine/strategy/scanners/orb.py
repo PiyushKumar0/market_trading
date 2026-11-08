@@ -1,7 +1,7 @@
-"""§6.1 ``orb`` — opening-range breakout (intraday, MIS).
+"""``orb`` — opening-range breakout (intraday, MIS).
 
-PINNED rule sketch (§6.1 row 1, **v2 2026-07-12**): range = first ``orb_minutes`` after session open
-(09:15 regular; ``ctx.session_open`` is shortened-session aware), **with the A14 auction open folded
+PINNED rule sketch (**v2 2026-07-12**): range = first ``orb_minutes`` after session open
+(09:15 regular; ``ctx.session_open`` is shortened-session aware), **with the auction open folded
 into the range seed (09:15) bar** — the pre-open auction print can sit outside that bar's
 tick-derived high/low, so the seed bar's effective range is
 ``[min(low, auction_open), max(high, auction_open)]``. Entry on a 1m close STRICTLY beyond the range
@@ -11,35 +11,35 @@ for BUY (mirror ``× (range_high − entry)`` for SELL); target = ``rr_target ×
 (unrounded) stop distance; suppressed when the symbol had a bulk/block deal on the PRIOR trading
 session (``flagged_instrument_days`` via ``ctx.flagged`` — NSE publishes deals EOD, so the prior
 session's are the freshest knowable intraday; volume breakouts around deal activity are
-untrustworthy, §4.4 job 9).
+untrustworthy).
 
 v2 note: v1 sized the stop as ``stop_atr_mult × ATR(14, 1m)`` — a noise-scale unit (~0.14% of price
 median) below the ₹20k MIS cost floor (round-trip ≈ 40–90% of the stop), which made negative net
 expectancy structural (2026-07-12 CPCV 0/15). The far range edge is the structural invalidation
 level: a breakout that trades back through it is dead. Sub-cost-floor candidates (risk < 2×
-round-trip breakeven, C3) are the §7.1 cost gate's suppression, NOT re-checked here.
+round-trip breakeven) are the cost gate's suppression, NOT re-checked here.
 
 Documented choices where the sketch is silent:
 
 * **Entry timestamp** = the trigger bar's CLOSE (``ts_minute + 1min``) — the moment the signal is
-  actionable. It must lie inside 09:30–14:30 (plan base window, both ends inclusive) INTERSECTED
-  with the owner trade window from ``ctx.trade_window`` (§7.1 — already session-clamped by
+  actionable. It must lie inside 09:30–14:30 (base window, both ends inclusive) INTERSECTED
+  with the owner trade window from ``ctx.trade_window`` (already session-clamped by
   ``NSECalendar.trade_window``). Missing window context ⇒ fail to zero. The MIS square-off buffer /
-  ``min_residual_window`` residual check is the gate's job (§7.1), not repeated here.
+  ``min_residual_window`` residual check is the gate's job, not repeated here.
 * **Volume median excludes the trigger bar** (its own breakout volume must not inflate the baseline)
-  and needs 20 completed prior session bars (the §7.1 ``warmup_ready`` gate guarantees this
+  and needs 20 completed prior session bars (the ``warmup_ready`` gate guarantees this
   lookback live).
 * **Both directions are emitted** (BUY above the range, SELL below): the sketch says "beyond range".
-  Whether SELL (MIS short) candidates are tradeable is downstream policy (§1.4.9 shorts gate / risk
-  gate) — the baseline records both for §6.1 attribution.
+  Whether SELL (MIS short) candidates are tradeable is downstream policy (shorts gate / risk
+  gate) — the baseline records both for strategy attribution.
 * **Score** = ``vol_ratio / (vol_ratio + 2 × vol_mult)`` — a saturating-free squash (owner-directed
   2026-09-02): 1/3 exactly at the volume threshold, 1/2 at twice it, asymptote 1 never reached. The
   previous ``min(1, vol_ratio / (2 × vol_mult))`` clamped at 1.0 from 2×-threshold volume upward,
   which most post-range bars clear — so on 2026-08-27/09-01/09-02 a large share of live fires tied
-  at exactly 1.0, the WO-1 ranking and the 2026-08-27 displacement margin had nothing to
+  at exactly 1.0, the score ranking and the 2026-08-27 displacement margin had nothing to
   discriminate with, and the window-open burst kept the whole day's sub-cap regardless of quality
   (three sessions of ``prescreen_cap_suppressed`` on later score-1.0 fires). Scores have been
-  ranking-RELEVANT since WO-1 (admission order + displacement), not merely informational; this is a
+  ranking-RELEVANT since ranked admission (admission order + displacement), not merely informational; this is a
   RANKING heuristic within the strategy, monotone in the one quality signal orb's own rule uses —
   it claims no edge and is not a learnable parameter.
 """
@@ -54,15 +54,15 @@ from engine.strategy.indicators import rolling_median_volume
 from engine.strategy.scanners.base import Scanner, register
 from engine.strategy.types import PendingSetup, ScanContext, Side, SignalCandidate, round_to_tick
 
-#: Plan-pinned base entry window (§6.1: "entries 09:30–14:30"), intersected with the owner window.
+#: Base entry window ("entries 09:30–14:30"), intersected with the owner window.
 BASE_ENTRY_START = time(9, 30)
 BASE_ENTRY_END = time(14, 30)
 
-_MEDIAN_WINDOW = 20   # §6.1: "20-bar median"
+_MEDIAN_WINDOW = 20   # "20-bar median"
 
 
 def _opening_range(bars: list[Bar], session_open: datetime, range_end: datetime) -> tuple[float, float] | None:
-    """The A14 auction-open-seeded opening range ``(high, low)``, or None if no range bars exist."""
+    """The auction-open-seeded opening range ``(high, low)``, or None if no range bars exist."""
     range_bars = [b for b in bars if session_open <= b.ts_minute < range_end]
     if not range_bars:
         return None
@@ -83,7 +83,7 @@ class OrbScanner(Scanner):
     strategy_id = "orb"
     style = "intraday"
 
-    DEFAULT_PARAMS = {           # §6.3 envelope defaults
+    DEFAULT_PARAMS = {           # parameter-envelope defaults
         "orb_minutes": 30,
         "vol_mult": 1.5,
         "stop_range_frac": 1.0,  # v2 2026-07-12: stop at the opposite range edge (replaces stop_atr_mult)
@@ -92,7 +92,7 @@ class OrbScanner(Scanner):
 
     def scan(self, bar: Bar, ctx: ScanContext) -> list[SignalCandidate]:
         if ctx.flagged:
-            return []  # bulk/block deal on the prior session — volume breakout suppressed (§6.1)
+            return []  # bulk/block deal on the prior session — volume breakout suppressed
         if ctx.session_open is None or ctx.trade_window is None:
             return []  # fail to zero on missing context (warm-up / provider gap)
         bars = ctx.intraday_bars
@@ -112,7 +112,7 @@ class OrbScanner(Scanner):
         if not (lo_edge <= entry_dt <= hi_edge):
             return []
 
-        # ---- opening range, auction-open-seeded (A14).
+        # ---- opening range, auction-open-seeded.
         orange = _opening_range(bars, ctx.session_open, range_end)
         if orange is None:
             return []
@@ -139,7 +139,7 @@ class OrbScanner(Scanner):
             return []
 
         # ---- levels anchored at the OPPOSITE range edge (v2 2026-07-12): the far edge is the
-        # structural invalidation level. Sub-cost-floor risk (C3) is the §7.1 cost gate's job.
+        # structural invalidation level. Sub-cost-floor risk is the cost gate's job.
         if side == "BUY":
             risk = p["stop_range_frac"] * (close_f - range_low)
         else:
@@ -164,7 +164,7 @@ class OrbScanner(Scanner):
         ]
 
     def pending(self, bar: Bar, ctx: ScanContext) -> list[PendingSetup]:
-        """Both range edges as arm levels while price sits INSIDE the opening range (§3.2.5 sweep).
+        """Both range edges as arm levels while price sits INSIDE the opening range.
 
         Reported without the volume/entry-window gates applied — those are conditions of the moment
         the break happens, which is exactly what the owner is deciding whether to be present for.
@@ -190,7 +190,7 @@ class OrbScanner(Scanner):
             f"1m close beyond the level on volume ≥ {p['vol_mult']:g}× 20-bar median; "
             f"entries legal {BASE_ENTRY_START:%H:%M}–{BASE_ENTRY_END:%H:%M} ∩ trade window"
         )
-        # The full would-be plan AT the trigger (§6.1 v2): risk spans the whole range, stop at the
+        # The full would-be plan AT the trigger (v2): risk spans the whole range, stop at the
         # opposite edge, fixed target at rr_target × risk — the owner never sees a naked level.
         risk = p["stop_range_frac"] * (range_high - range_low)
         return [

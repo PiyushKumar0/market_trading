@@ -1,8 +1,8 @@
-"""WO-10 / WO-10b VWAP-reversion experiment harness — pinned on SYNTHETIC 1m fixtures only.
+"""VWAP-reversion experiment harness — pinned on SYNTHETIC 1m fixtures only.
 
 Nothing in this file opens ``data/market.duckdb`` (or any store): every test builds its own 1m bars in
 memory and injects them through ``VwapReversionExperiment(loader=...)``. The pre-registration is what
-is under test — if one of these changes, WO-10 has drifted:
+is under test — if one of these changes, the harness has drifted:
 
 * the **stretch trigger** fires only past the threshold;
 * **fills are at the NEXT bar's OPEN, never the signal bar** — pinned so a same-bar fill would produce
@@ -19,12 +19,12 @@ is under test — if one of these changes, WO-10 has drifted:
   ABORTED report and never compute stage 2;
 * the cost charge is the **full round trip INCLUDING spread**, on every trade.
 
-And, for **WO-10b** (owner-directed 2026-08-14 — prior-session ATR seeding as a MODE, not a fork):
+And, for **prior-session ATR seeding** (owner-directed 2026-08-14 — a MODE, not a fork):
 
 * the **seeding chain**: session 2's first bucket continues session 1's FINAL 10m-ATR value;
 * the **overnight gap is excluded** — a fixture with a large gap where including the prev-close term
   would detectably change the ATR proves the first bucket's TR is high−low only;
-* **fail-closed on day 1**: a symbol's first session has no prior ATR and keeps WO-10's warm-up;
+* **fail-closed on day 1**: a symbol's first session has no prior ATR and keeps the unseeded warm-up;
 * **default-off is byte-identical**: the same fixture run both ways produces identical trades,
   identical stage-1 base rate and identical grid stats with the flag off;
 * the **split-reporting math** (10:00–11:35 vs 11:36–14:00, by entry-fill time) — reporting only.
@@ -252,7 +252,7 @@ def test_relative_volume_filter_uses_the_house_20_bar_median_and_gates_entries()
     assert len(_trades(frame, _CFG_UNCONDITIONED)) == 1          # filter OFF -> the same bar signals
 
 
-# --------------------------------------------------------------------------- next-bar-open fills (WO-2)
+# --------------------------------------------------------------------------- next-bar-open fills
 def test_entry_fills_at_next_bar_open_never_the_signal_bar() -> None:
     """THE fill pin: a same-bar fill would produce a different, detectably wrong number."""
     signal_pos = _SIGNAL_POS
@@ -269,7 +269,7 @@ def test_entry_fills_at_next_bar_open_never_the_signal_bar() -> None:
     assert tr.entry_price == pytest.approx(98.0)                 # …at its OPEN
     assert tr.entry_price != pytest.approx(closes[signal_pos])   # not the signal bar's close
 
-    # A same-bar-close fill (the WO-2 defect) would book a materially different trade: pin the gap so
+    # A same-bar-close fill (the old defect) would book a materially different trade: pin the gap so
     # this test cannot pass against a harness that quietly fills on the signal bar.
     wrong_gross = (tr.exit_price - closes[signal_pos]) / closes[signal_pos] * 100.0
     assert abs(wrong_gross - tr.gross_return_pct) > 0.4
@@ -457,7 +457,7 @@ def test_10m_atr_is_availability_lagged_by_one_bucket_no_lookahead() -> None:
     assert _ATR_READY_POS == ATR_RESAMPLE_MINUTES * ATR_PERIOD == 140
     assert frame.index[_ATR_READY_POS].time() == datetime(2026, 1, 5, 11, 35).time()
     assert atr[_ATR_READY_POS] == pytest.approx(0.5)
-    assert final == pytest.approx(0.5)          # the value WO-10b hands to the next session
+    assert final == pytest.approx(0.5)          # the value the seeding hands to the next session
 
     # Fewer than ATR_PERIOD complete buckets ⇒ no ATR at all ⇒ that session can never trade.
     short = frame.iloc[:100]
@@ -734,7 +734,7 @@ def test_no_data_reports_no_data_and_measures_nothing() -> None:
 
 def test_stage2_runs_the_3x1_grid_and_applies_the_house_promotion_rule(tmp_path) -> None:
     """Stage 1 clears zero ⇒ the pre-registered grid runs, each point validated by CPCV +
-    fold_pass_min(N=3) + the WO-3 margin floor, with the MIS cost floor passed through."""
+    fold_pass_min(N=3) + the margin floor, with the MIS cost floor passed through."""
     signal_pos, touch_pos = _SIGNAL_POS, _SIGNAL_POS + 5
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=touch_pos - 1)
     closes[touch_pos] = 101.0                       # reverts THROUGH VWAP -> a clearly profitable exit
@@ -836,7 +836,7 @@ def test_report_carries_every_required_block(tmp_path) -> None:
     assert payload["stage1"]["window_splits"] == []
 
 
-# ======================================================================= WO-10b: prior-session ATR
+# ======================================================================= prior-session ATR
 # (owner-directed 2026-08-14 — a MODE of the shipped harness, not a fork)
 def _two_session_frame(
     *, gap: float = 0.0, n: int = _SESSION_BARS, day1: str = "2026-01-05", day2: str = "2026-01-06"
@@ -866,7 +866,7 @@ def _session_features_chain(frame: pd.DataFrame, *, seeded: bool) -> list[Sessio
 
 
 def test_seeding_chain_continues_the_prior_sessions_final_atr() -> None:
-    """WO-10b: session 2's FIRST bucket continues session 1's FINAL 10m-ATR value."""
+    """Session 2's FIRST bucket continues session 1's FINAL 10m-ATR value."""
     frame = _two_session_frame()
     day1, day2 = _session_features_chain(frame, seeded=True)
 
@@ -919,12 +919,12 @@ def test_overnight_gap_never_enters_the_stop_unit() -> None:
 
 
 def test_day_one_is_fail_closed_no_prior_atr_means_wo10_warmup() -> None:
-    """A symbol's FIRST session has no prior ATR, so it keeps WO-10's 140-minute warm-up even in
+    """A symbol's FIRST session has no prior ATR, so it keeps the unseeded 140-minute warm-up even in
     seeded mode — 'no trades until its own warm-up completes' (pre-registered)."""
     frame = _two_session_frame()
     day1, day2 = _session_features_chain(frame, seeded=True)
 
-    assert np.isnan(day1.atr_10m[: _ATR_READY_POS]).all()      # day 1: unchanged from WO-10
+    assert np.isnan(day1.atr_10m[: _ATR_READY_POS]).all()      # day 1: unchanged from the unseeded mode
     assert np.isfinite(day1.atr_10m[_ATR_READY_POS])
     assert np.isfinite(day2.atr_10m[ATR_RESAMPLE_MINUTES])     # day 2: seeded, ATR from 09:25
 
@@ -944,7 +944,7 @@ def test_day_one_is_fail_closed_no_prior_atr_means_wo10_warmup() -> None:
 
 
 def test_seeded_mode_opens_the_registered_1000_window_from_day_two() -> None:
-    """The point of WO-10b: with seeding, the effective entry window is the registered 10:00-14:00."""
+    """The point of the seeding mode: with seeding, the effective entry window is the registered 10:00-14:00."""
     closes, volumes = _dip_session(signal_pos=_WINDOW_OPEN_POS - 1, dip_close=98.5)
     days = pd.bdate_range("2026-01-05", periods=4).strftime("%Y-%m-%d").tolist()
     frame = pd.concat([_session_frame(closes, volumes, day=d) for d in days])
@@ -957,7 +957,7 @@ def test_seeded_mode_opens_the_registered_1000_window_from_day_two() -> None:
     assert [tr.entry_ts.time() for tr in seeded[_CFG_1PCT]] == [
         datetime(2026, 1, 5, 10, 0).time()
     ] * 3                                                     # days 2-4 all fill at the registered 10:00
-    assert unseeded[_CFG_1PCT] == []                          # WO-10 could never reach 10:00
+    assert unseeded[_CFG_1PCT] == []                          # the unseeded mode could never reach 10:00
 
 
 def test_default_off_is_byte_identical_to_wo10() -> None:
@@ -1003,7 +1003,7 @@ def test_default_off_is_byte_identical_to_wo10() -> None:
     assert len(seeded_trades[_CFG_UNCONDITIONED]) > len(unseeded_trades[_CFG_UNCONDITIONED])
 
 
-# --------------------------------------------------------------- WO-10b split reporting (never a gate)
+# --------------------------------------------------------------- split reporting (never a gate)
 def test_split_of_boundary_is_1135_inclusive_on_the_entry_fill() -> None:
     def _ts(h: int, m: int) -> pd.Timestamp:
         return pd.Timestamp(f"{_DAY} {h:02d}:{m:02d}", tz=IST)
@@ -1011,7 +1011,7 @@ def test_split_of_boundary_is_1135_inclusive_on_the_entry_fill() -> None:
     assert MORNING_SPLIT_END == datetime(2026, 1, 5, 11, 35).time()
     assert split_of(_ts(10, 0)) == SPLIT_MORNING
     assert split_of(_ts(11, 35)) == SPLIT_MORNING          # inclusive upper edge of the morning
-    assert split_of(_ts(11, 36)) == SPLIT_MIDDAY           # exactly WO-10's first reachable fill
+    assert split_of(_ts(11, 36)) == SPLIT_MIDDAY           # exactly the unseeded mode's first reachable fill
     assert split_of(_ts(14, 0)) == SPLIT_MIDDAY
 
 

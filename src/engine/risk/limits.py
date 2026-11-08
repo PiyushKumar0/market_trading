@@ -1,10 +1,10 @@
-"""Typed, hash-verified access to ``config/limits.yaml`` (§7.1, §3.2.7). Tier-2-owned.
+"""Typed, hash-verified access to ``config/limits.yaml``. Tier-2-owned.
 
 ``LimitsEngine`` wraps a :class:`~engine.core.protected_store.ProtectedStore` and parses the raw dict
 :meth:`~engine.core.protected_store.ProtectedStore.load_verified` returns into a frozen, fully-typed
 :class:`LimitTable`. It does NOT decide the integrity-failure consequence: a hash mismatch raises
 :class:`~engine.core.protected_store.IntegrityError`, which propagates untouched to the caller — the
-gate maps that to FROZEN/kill per §2.4, not this module's job (mirrors ``ProtectedStore`` itself).
+gate maps that to FROZEN/kill, not this module's job (mirrors ``ProtectedStore`` itself).
 
 Every block in ``limits:`` is typed with ``extra="forbid"`` so a yaml typo or stray key fails loudly at
 load time rather than silently vanishing — EXCEPT each block's ``on_breach`` marker, which stays a plain
@@ -30,9 +30,9 @@ LIMITS_FILE = "limits.yaml"
 _invalid_sessions_logged: set[int] = set()
 
 
-# --------------------------------------------------------------------------- per-rule_id blocks (§7.1)
+# --------------------------------------------------------------------------- per-rule_id blocks
 class _Block(BaseModel):
-    """Base for every ``limits.<rule_id>`` block: frozen, unknown keys fail loud (R4)."""
+    """Base for every ``limits.<rule_id>`` block: frozen, unknown keys fail loud."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -126,7 +126,7 @@ class NoTradeWindows(_Block):
 
 
 class CatalystGuard(_Block):
-    """News-origination anti-manipulation surface (O11, §2.7 step 5). Owner-only, never learnable."""
+    """News-origination anti-manipulation surface. Owner-only, never learnable."""
 
     min_source_domains: int
     sentiment_min_long: float
@@ -138,7 +138,7 @@ class CatalystGuard(_Block):
 
 class TradeWindowMarker(_Block):
     """Static guardrails only — the live owner-set window lives in SQLite ``trade_window_state``
-    (:class:`engine.risk.mode.ModeManager`), not here (§3.2.7)."""
+    (:class:`engine.risk.mode.ModeManager`), not here."""
 
     must_be_within_session: bool
     mis_sub_window_must_be_nonempty_after_buffer: bool
@@ -212,7 +212,7 @@ class MinViableSize(_Block):
 
 # --------------------------------------------------------------------------- the ``limits:`` map
 class LimitsBlock(BaseModel):
-    """Every ``rule_id`` under ``limits:`` (§7.1 table). Unknown top-level rule_ids fail loud."""
+    """Every ``rule_id`` under ``limits:``. Unknown top-level rule_ids fail loud."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -248,8 +248,8 @@ class LimitsBlock(BaseModel):
 
 
 class LimitTable(BaseModel):
-    """The full parsed ``config/limits.yaml`` (§7.1). ``capital_base_inr`` and
-    ``analyst_confidence_min`` are top-level, OUTSIDE the ``limits:`` map (§6.3)."""
+    """The full parsed ``config/limits.yaml``. ``capital_base_inr`` and
+    ``analyst_confidence_min`` are top-level, OUTSIDE the ``limits:`` map."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -261,9 +261,9 @@ class LimitTable(BaseModel):
 
 # --------------------------------------------------------------------------- engine
 class LimitsEngine:
-    """Typed, cached, hash-verified reader of ``limits.yaml`` (§3.2.7).
+    """Typed, cached, hash-verified reader of ``limits.yaml``.
 
-    Read-only: there is no write path here (R4) — changes go through
+    Read-only: there is no write path here — changes go through
     ``ProtectedStore.owner_update`` and are picked up on the next :meth:`reload`.
     """
 
@@ -279,7 +279,7 @@ class LimitsEngine:
 
     def reload(self) -> LimitTable:
         """Force a re-verify + re-parse, discarding the cache. ``IntegrityError`` propagates
-        uncaught (R4) — the caller (self-test / gate) decides the consequence (§2.4)."""
+        uncaught — the caller (self-test / gate) decides the consequence."""
         self._table = self._parse()
         return self._table
 
@@ -288,7 +288,7 @@ class LimitsEngine:
         return self.load()
 
     def catalyst_guard(self) -> CatalystGuard:
-        """The ``catalyst_guard`` block (used by ``CatalystDigestJob`` / pre-screen, §2.7 step 5)."""
+        """The ``catalyst_guard`` block (used by ``CatalystDigestJob`` / pre-screen)."""
         return self.load().limits.catalyst_guard
 
     def _parse(self) -> LimitTable:
@@ -297,7 +297,7 @@ class LimitsEngine:
 
 
 def floor_limits_from(table: LimitTable) -> "FloorLimits":
-    """Bridge the §7.1 yaml percentages (−10.0 == −10%, drawdown 8.0 == 8%) to the
+    """Bridge the limits yaml percentages (−10.0 == −10%, drawdown 8.0 == 8%) to the
     :class:`~engine.risk.exposure.FloorLimits` fraction-of-1 convention (0.10, 0.08), and carry
     ``weekly_drawdown.rolling_sessions`` as the ladder's window (FloorLimits rejects < 1, so a
     signed value < 1 is logged as an ERROR and replaced by ``WEEKLY_DRAWDOWN_SESSIONS``)."""

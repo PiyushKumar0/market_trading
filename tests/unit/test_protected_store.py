@@ -1,4 +1,4 @@
-"""Protected-store integrity (R4, §2.4). Tamper detection + owner-only write path."""
+"""Protected-store integrity. Tamper detection + owner-only write path."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_register_then_load_ok(store):
 
 def test_tamper_detected(store, tmp_path):
     store.register_initial("limits.yaml", OWNER_OK)
-    # Tamper with the file out-of-band (the learner-tamper scenario, §2.4).
+    # Tamper with the file out-of-band (the learner-tamper scenario).
     (tmp_path / "config" / "limits.yaml").write_text("schema_version: 1\nlimits: {hacked: true}\n", encoding="utf-8")
     with pytest.raises(IntegrityError):
         store.load_verified("limits.yaml")
@@ -303,7 +303,7 @@ def test_a_restore_failure_propagates_and_leaves_the_mismatch_detectable(store, 
     assert _no_tmp_left(path)
 
 
-# Fix round 1: the restore target comes from durable state (design §4 invariant), temp names carry the pid.
+# Fix round 1: the restore target comes from durable state, temp names carry the pid.
 class _CommitThenInterrupt:
     """COMMIT really commits, then a KeyboardInterrupt lands (a SIGINT pending during COMMIT)."""
 

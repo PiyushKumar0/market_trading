@@ -1,9 +1,9 @@
-"""Config loading (§3.2.1).
+"""Config loading.
 
 Loads the NON-SECRET ``config/settings.yaml`` into a typed Pydantic model and resolves runtime paths.
-Secrets are NEVER here (Credential Manager / DPAPI, R10). The PROTECTED stores (``limits.yaml``,
+Secrets are NEVER here (Credential Manager / DPAPI). The PROTECTED stores (``limits.yaml``,
 ``envelope.yaml``) are NOT loaded here either — they go through ``ProtectedStore.load_verified`` so the
-gate only ever reads a hash-verified copy (R4). ``agents.yaml`` / ``costs.yaml`` are operational config
+gate only ever reads a hash-verified copy. ``agents.yaml`` / ``costs.yaml`` are operational config
 and loaded as plain dicts by their owners.
 
 Path resolution order: explicit arg > ``MT_CONFIG_DIR`` / ``MT_DATA_DIR`` env > repo defaults.
@@ -113,7 +113,7 @@ class TelegramCfg(BaseModel):
 
 
 class LifecycleCfg(BaseModel):
-    """Process-lifecycle notifications + liveness watchdog knobs (§2.2/§3.2.12).
+    """Process-lifecycle notifications + liveness watchdog knobs.
 
     The heartbeat writer (``ops/heartbeat.py``) and the standalone watchdog (``scripts/watchdog.py``,
     which raises ENGINE_DOWN) read these knobs; ``notify_started`` / ``notify_planned_stop`` gate the
@@ -127,16 +127,16 @@ class LifecycleCfg(BaseModel):
     watchdog_poll_s: int = 60
     notify_planned_stop: bool = True
     notify_started: bool = True
-    # --- active-period / catch-up knobs (§2.6/§10.1/§10.4) ---
+    # --- active-period / catch-up knobs ---
     active_period_starts: list[time] = Field(default_factory=lambda: [time(8, 0)])
     """Expected active-period start times (IST). The out-of-band watchdog raises
-    SCHEDULED_START_MISSED when a start did not occur within ``start_grace_s`` (§2.6/§10.4)."""
+    SCHEDULED_START_MISSED when a start did not occur within ``start_grace_s``."""
     start_grace_s: int = 900
-    """Grace after an expected start before SCHEDULED_START_MISSED fires (§10.4)."""
+    """Grace after an expected start before SCHEDULED_START_MISSED fires."""
     catchup_grace_s: int = 900
-    """Budget for the §2.6 startup catch-up before FROZEN-for-entries alerts escalate."""
+    """Budget for the startup catch-up before FROZEN-for-entries alerts escalate."""
     crashloop_window_s: int = 600
-    """Repeated fast respawns inside this window coalesce into ENGINE_CRASHLOOP (§2.2/§10.7)."""
+    """Repeated fast respawns inside this window coalesce into ENGINE_CRASHLOOP."""
 
 
 class ClockCfg(BaseModel):
@@ -163,24 +163,24 @@ class PaperSettings(BaseModel, extra="forbid"):
 
 
 class DataCfg(BaseModel):
-    minute_candles_adjusted: bool | None = None   # A11 result; None until scripts/a11_check.py runs
+    minute_candles_adjusted: bool | None = None   # minute-candles-adjusted check result; None until scripts/a11_check.py runs
     universe_max_watchlist: int = 50
     min_median_traded_value_inr: int = 50_000_000
     backfill_daily_years: int = 2
     backfill_minute_years: int = 1
-    # §3.2.4 batch-universe extended leg (2026-09-01, owner-directed after the JINDALSAW/movers
+    # Batch-universe extended leg (2026-09-01, owner-directed after the JINDALSAW/movers
     # review): criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance ∩ ₹5cr median)
     # persisted included=False / exclusion_reasons=['not_in_index'] for BATCH rules, news shadow and
     # pre-open advisory only — the tick watchlist and the risk gate stay scoped to the configured
-    # index (``universe.index_name``: NIFTY Total Market since O18, 2026-10-08; NIFTY 500 under O15
-    # before it). The flag is the rollback: False restores the
-    # pre-addendum universe shape exactly.
+    # index (``universe.index_name``: NIFTY Total Market since owner decision 2026-10-08;
+    # NIFTY 500 under owner decision 2026-09-04 before it). The flag is the rollback: False restores the
+    # earlier universe shape exactly.
     batch_universe_enabled: bool = False
     batch_universe_max: int = 600                 # top-N extended by median traded value (sanity cap)
 
 
 class RssFeedCfg(BaseModel):
-    """One §3.2.4 RSS source: where to fetch it and how often. Cadence is per-feed (publishers
+    """One RSS source: where to fetch it and how often. Cadence is per-feed (publishers
     differ in update rate and in how much politeness they want), so the scheduler arms one job
     per entry of :attr:`NewsFeedsCfg.rss` rather than a fixed set of named jobs."""
 
@@ -189,9 +189,9 @@ class RssFeedCfg(BaseModel):
 
 
 class NseAnnouncementsCfg(BaseModel):
-    """§2.7 (2026-09-04 amendment) exchange-announcements feed: NSE ``corporate-announcements``.
+    """Exchange-announcements feed (2026-09-04): NSE ``corporate-announcements``.
 
-    Its own cadence (the exchange disseminates all day, 300 s is the plan's pin) and its own
+    Its own cadence (the exchange disseminates all day, 300 s is the pinned value) and its own
     administrative-subject drop list — filings whose SUBJECT is routine compliance carry no event
     content and would only burn scorer budget. ``drop_subjects`` is owner config exactly like
     ``NewsCfg.drop_title_patterns``: a case-insensitive SUBSTRING match ("Newspaper Publication"
@@ -214,12 +214,12 @@ class NseAnnouncementsCfg(BaseModel):
 
 
 class NewsFeedsCfg(BaseModel):
-    """§3.2.4 ``NewsIngest`` feed set (§2.7 step 1). Headline-level only; bodies are never fetched (A3r).
+    """``NewsIngest`` feed set. Headline-level only; bodies are never fetched.
 
     ``rss`` is an open name → feed map: adding/removing a source is a settings.yaml edit (config_audit),
     not a code change — the 2026-08-04 lesson, when the corpus silently collapsed to ET-only.
     Moneycontrol RSS was RETIRED 2026-08-04: its whole feed ecosystem has been frozen since ~2024-04
-    (newest pubDate ~832 days old; 391 engine polls inserted zero headlines), which starved the §2.7
+    (newest pubDate ~832 days old; 391 engine polls inserted zero headlines), which starved the catalyst layer's
     ``min_source_domains`` corroboration gate. The Livemint markets/companies feeds that replace it
     were live-verified 2026-08-04 (HTTP 200, 35 items each, newest items minutes old)."""
 
@@ -230,7 +230,7 @@ class NewsFeedsCfg(BaseModel):
         "livemint_companies": RssFeedCfg(url="https://www.livemint.com/rss/companies", poll_s=900),
         # 2026-08-05 pool widening: both livemint feeds are ONE registrable domain, so the
         # corroboration pool was effectively two — three new DOMAINS make "any 2 of 5" clearable
-        # for genuine stories (§2.7 story-level counting). All three live-verified 2026-08-05.
+        # for genuine stories (story-level counting). All three live-verified 2026-08-05.
         "hbl_markets": RssFeedCfg(
             url="https://www.thehindubusinessline.com/markets/feeder/default.rss", poll_s=900),
         "hbl_companies": RssFeedCfg(
@@ -246,18 +246,18 @@ class NewsFeedsCfg(BaseModel):
             url="https://www.business-standard.com/rss/companies-101.rss", poll_s=900),
     })
     gdelt_doc_query: str = "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"
-    #: The exchange itself as a feed (§2.7 2026-09-04): filings carry ``symbol`` natively, so an
+    #: The exchange itself as a feed (2026-09-04): filings carry ``symbol`` natively, so an
     #: announcement is resolvable without the alias seed, and NSE counts as one corroborating domain.
     nse_announcements: NseAnnouncementsCfg = Field(default_factory=NseAnnouncementsCfg)
 
 
 class NewsCfg(BaseModel):
-    """News-intelligence ingest knobs (§2.7/§4.4 job 10). Owner-only operational config (config_audit)."""
+    """News-intelligence ingest knobs. Owner-only operational config (config_audit)."""
 
     feeds: NewsFeedsCfg = Field(default_factory=NewsFeedsCfg)
-    cluster_sim_threshold: float = 0.75   # §3.2.4 pinned clustering similarity [tunable, owner]
+    cluster_sim_threshold: float = 0.75   # pinned clustering similarity [tunable, owner]
     #: Case-insensitive substrings that mark a feed item as an auto-generated live-blog/ticker PAGE
-    #: title, not a news headline — dropped at ingest (2026-08-03 G1 finding: ET's "<Company> Share
+    #: title, not a news headline — dropped at ingest (2026-08-03 finding: ET's "<Company> Share
     #: Price Live Updates: ..." template glued up to 27 companies into one cluster and burned scorer
     #: budget on zero-content titles). Owner-editable like the feed set (config_audit).
     drop_title_patterns: list[str] = Field(default_factory=lambda: [
@@ -265,13 +265,13 @@ class NewsCfg(BaseModel):
         "stock market live updates",
         "results live updates",
         "share price highlights",
-        # Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , ..." — G1 verdict row 17):
+        # Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , ..." — verdict row 17):
         # the comma-spaced template never appears in written prose.
         "stock price ,",
-        # Multi-company ROUNDUP titles (2026-08-03 second G1 iteration): breadth commentary, not
+        # Multi-company ROUNDUP titles (2026-08-03 second iteration): breadth commentary, not
         # company events — and worse, they BRIDGE different companies' clusters (a roundup naming
         # Adani Ports + Adani Enterprises merges both families' clusters, cross-attributing every
-        # member). No catalyst signal is lost: §2.7 wants per-company events, not market wraps.
+        # member). No catalyst signal is lost: the catalyst layer wants per-company events, not market wraps.
         "stocks in news",
         "market wrap",
         "buzzing stocks",
@@ -294,7 +294,7 @@ class NewsCfg(BaseModel):
         "stock market live",
         "11:11",
         # HBL's "Q1 Results Highlights: ONGC, BSE, Bharti Airtel, ..." multi-company roundup —
-        # the G1 bridging shape, seen live 2026-08-05 before first ingest. Also drops
+        # the bridging shape, seen live 2026-08-05 before first ingest. Also drops
         # single-company "<X> Results Highlights" liveblog wrappers; the plain result article
         # on the same domain carries the event, so no catalyst signal is lost.
         "results highlights",
@@ -302,37 +302,37 @@ class NewsCfg(BaseModel):
     # RSS cadences are per-feed (``feeds.rss[name].poll_s``); only GDELT keeps a top-level knob.
     gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence — 900→3600 (2026-08-04: 429s
                                           # persisted at 1800 s and a single fresh probe still 429'd;
-                                          # O12 only needs the pre-open digest, so hourly costs nothing)
+                                          # only the pre-open digest is needed, so hourly costs nothing)
     request_timeout_s: float = 30.0       # per-fetch HTTP timeout — 10→30 (2026-08-04: 121 GDELT
                                           # ConnectTimeouts at the old 10 s, ~99% of polls dead)
-    backfill_lookback_h: int = 72         # off-period startup backfill window over RSS lookbacks (§4.4 job 10)
-    gdelt_backfill_max_days: int = 90     # GDELT DOC ~3-month window — no deeper backfill exists (E6)
+    backfill_lookback_h: int = 72         # off-period startup backfill window over RSS lookbacks
+    gdelt_backfill_max_days: int = 90     # GDELT DOC ~3-month window — no deeper backfill exists
 
 
 class CatCfg(BaseModel):
-    """§2.7 `cat` strategy knobs surfaced in settings.yaml (owner-only, deliberately NOT learnable).
+    """`cat` strategy knobs surfaced in settings.yaml (owner-only, deliberately NOT learnable).
 
     Only the settings.yaml-resident keys live here; the ``catalyst_guard`` block is a PROTECTED store
-    (limits.yaml via ProtectedStore.load_verified, §2.4 item 1) and is never loaded through Settings.
+    (limits.yaml via ProtectedStore.load_verified) and is never loaded through Settings.
     """
 
-    fanout_weight: float = 0.5            # sector/theme fan-out multiplier (§2.7 step 5)
+    fanout_weight: float = 0.5            # sector/theme fan-out multiplier
     # No max_event_age_days here: the clusterer window and the digest horizon are both the envelope
     # row cat.max_event_age_days (load_cat_params); a leftover settings key is ignored, not an error.
-    # --- v2 SHADOW scanner knobs (§2.7 2026-08-18 amendment, WO-18): the `ins` mechanics mirror.
+    # --- v2 SHADOW scanner knobs (cat v2, 2026-08-18): the `ins` mechanics mirror.
     # Frozen for the whole shadow window — moving one re-opens multiplicity and restarts the clock.
-    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
-                                          # rule's real exit is TIME; 5 not 6 because the §7.1
+    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance and the
+                                          # rule's real exit is TIME; 5 not 6 because the risk-limit
                                           # overnight_gap_mult arithmetic applies (ins, 08-17; chosen
-                                          # at 2.5x, 2.0x since O17)
-    hold_sessions: int = 20               # = the §7.1 swing max_holding cap — the EXISTING
+                                          # at 2.5x, 2.0x since owner decision 2026-09-24)
+    hold_sessions: int = 20               # = the risk-limit swing max_holding cap — the EXISTING
                                           # max-holding machinery is the exit path
     # Deliberately NO expected_edge_pct: `cat` has no validated edge (measuring it IS the shadow), so
-    # the §7.1 C3 check fail-closed-rejects every cat candidate. Adding the key is the §8.6 owner gate.
+    # the cost-gate check fail-closed-rejects every cat candidate. Adding the key is the owner promotion gate.
 
 
 class CatReversalCfg(BaseModel):
-    """§2.7 ``cat_reversal`` SHADOW knobs (2026-08-27) — OWNER-ONLY, deliberately NOT learnable.
+    """``cat_reversal`` SHADOW knobs (2026-08-27) — OWNER-ONLY, deliberately NOT learnable.
 
     A SEPARATE block from :class:`CatCfg` on purpose. ``cat`` v2 and ``cat_reversal`` are two
     experiments with independently pre-registered thresholds and independently running clocks; sharing
@@ -340,64 +340,64 @@ class CatReversalCfg(BaseModel):
     shadow window happened to be open. Frozen for the whole ``cat_reversal`` shadow window.
     """
 
-    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance and the
-                                          # rule's real exit is TIME; the §7.1 overnight_gap_mult
+    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance and the
+                                          # rule's real exit is TIME; the risk-limit overnight_gap_mult
                                           # arithmetic applies to a swing entry (ins, 08-17; chosen
-                                          # at 2.5x, 2.0x since O17)
-    hold_sessions: int = 10               # intended exit if the §8.6 gate ever opens = the longer
+                                          # at 2.5x, 2.0x since owner decision 2026-09-24)
+    hold_sessions: int = 10               # intended exit if the owner promotion gate ever opens = the longer
                                           # pre-registered horizon (T+10). INERT during the shadow:
-                                          # nothing is held, because C3 rejects every candidate.
+                                          # nothing is held, because the cost gate rejects every candidate.
     # Deliberately NO expected_edge_pct — and, unlike `cat`, the absence is not what enforces it: the
-    # strategy is listed in the gate's `no_edge_shadow_strategies`, so C3 rejects it whatever target
-    # the analyst supplies. Adding an edge here is the §8.6 owner gate, post-verdict.
+    # strategy is listed in the gate's `no_edge_shadow_strategies`, so the cost gate rejects it whatever target
+    # the analyst supplies. Adding an edge here is the owner promotion gate, post-verdict.
 
 
 class FilingsCfg(BaseModel):
-    """§2.8.4 corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
+    """Corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
     envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: these are read by no
-    decision path yet — event typing (§2.8.2) and the catalyst wiring are later stages, gated on the
-    §2.8.4 event study. Modelled here so the settings.yaml ``filings`` block is honored, not silently
+    decision path yet — event typing and the catalyst wiring are later stages, gated on the
+    filings event study. Modelled here so the settings.yaml ``filings`` block is honored, not silently
     dropped by pydantic's default extra-ignore (mirrors how ``news``/``cat`` are modelled)."""
 
-    insider_min_value_inr: int = 10_000_000       # abs ₹ floor for an insider_net_buy event (§2.8.2)
-    insider_min_value_over_adv: float = 0.05      # NOT applied anywhere (planned §2.8.2 AND floor)
-    pledge_delta_min_pct: float = 5.0             # QoQ promoter-pledge %-point change to flag (§2.8.2)
+    insider_min_value_inr: int = 10_000_000       # abs ₹ floor for an insider_net_buy event
+    insider_min_value_over_adv: float = 0.05      # NOT applied anywhere (planned AND floor)
+    pledge_delta_min_pct: float = 5.0             # QoQ promoter-pledge %-point change to flag
 
 
 class InsCfg(BaseModel):
-    """§6.1 ``ins`` (insider net-BUY swing) knobs — OWNER-ONLY, deliberately NOT learnable in Phase 2.
+    """``ins`` (insider net-BUY swing) knobs — OWNER-ONLY, deliberately NOT learnable.
 
-    Provenance: WO-16 (2026-08-14) re-ran the §2.8.4 insider_net_buy leg under corrected mechanics
-    (disclosure-date anchoring, next-session-open fills, spread-inclusive CNC costs, WO-3 margin floor
+    Provenance: on 2026-08-14 the filings event study's insider_net_buy leg was re-run
+    under corrected mechanics
+    (disclosure-date anchoring, next-session-open fills, spread-inclusive CNC costs, the margin floor
     on the CPCV stage) and it SURVIVED — T+10 +0.7297% / T+20 +1.5797% net, CPCV +0.0359%/day. It is
     the only recorded edge that did, and the reason this strategy exists.
 
-    ``stop_pct`` [4-8] and ``hold_sessions`` [10-20] are FUTURE §6.3 envelope rows; they stay static
-    owner settings here for Phase 2 (no protected-store churn until the learning phase needs them).
+    ``stop_pct`` [4-8] and ``hold_sessions`` [10-20] are FUTURE parameter-envelope rows; they stay static
+    owner settings here for now (no protected-store churn until the learning phase needs them).
     ``threshold_inr`` is owner-FIXED and never learnable at all — it defines the validated event
     population, so moving it re-opens multiplicity.
     """
 
-    stop_pct: float = 5.0                 # disaster stop: §7.1 sizing needs a risk distance, and the
+    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance, and the
                                           # validated design is stopless — this is the deliberate
                                           # deviation, wide enough to rarely interrupt the T+20 drift
-    hold_sessions: int = 20               # = the §7.1 swing max_holding cap = the validated T+20
+    hold_sessions: int = 20               # = the risk-limit swing max_holding cap = the validated T+20
                                           # horizon; the EXISTING max-holding machinery is the exit
     threshold_inr: int = 10_000_000       # ₹1cr trailing-10-session open-market net-BUY floor
-    expected_edge_pct: float = 1.58       # the validated T+20 NET drift, fed to the C3 cost gate
+    expected_edge_pct: float = 1.58       # the validated T+20 NET drift, fed to the cost gate
                                           # (target is None for `ins`, so the edge cannot be derived
                                           # from levels — see risk/gate.py `_rule_min_viable_size`)
 
 
 class Hi52Cfg(BaseModel):
-    """§6.1/§8.6 ``hi52`` (52wk-high-proximity swing, v2) knobs — OWNER-ONLY, never learnable.
+    """``hi52`` (52wk-high-proximity swing, v2) knobs — OWNER-ONLY, never learnable.
 
     Only the edge lives here. The rule's own parameters — including v2's three signal-time filter
     thresholds — stay in ``hi52.DEFAULT_PARAMS`` where the pre-registration froze them; splitting
     them across two files would give the same threshold two homes and one of them would drift.
 
-    Promoted out of shadow 2026-09-12 as a FORWARD TEST with a written kill rule (plan §8.6
-    addendum): the v2 backtest is CPCV-promotable but its edge sits in a survivorship-tainted index
+    Promoted out of shadow 2026-09-12 as a FORWARD TEST with a written kill rule: the v2 backtest is CPCV-promotable but its edge sits in a survivorship-tainted index
     population, so RECOMMEND mode IS the soak. Demotion = delete the ``hi52.expected_edge_pct`` key
     from ``settings.yaml`` and re-add the id to ``ops.main.NO_EDGE_SHADOW_STRATEGIES``.
 
@@ -423,25 +423,26 @@ class Hi52Cfg(BaseModel):
     #:     N    = equity × per_trade_risk.swing_position_pct/100
     #:            ÷ (per_trade_risk.overnight_gap_mult × hi52 stop_pct/100)
     #:
-    #: ``N`` is the §7.1 cap on a swing position's notional — implied by the sizing rule, never a
+    #: ``N`` is the risk-limit cap on a swing position's notional — implied by the sizing rule, never a
     #: round number chosen by hand: equity/6 at a 2% swing budget, the 2.0× overnight gap multiplier
-    #: (O17; 2.5× before it) and hi52's 6% stop (≈₹6,667 at the ₹40,000 base, ≈₹6,543 at the
+    #: (owner decision 2026-09-24; 2.5× before it) and hi52's 6% stop (≈₹6,667 at the ₹40,000 base,
+    #: ≈₹6,543 at the
     #: 2026-09-11 equity, ₹6,000 at the ``equity_floor_rung`` — the smallest equity the risk table
     #: still lets a position be opened at). The floor RISES as the book shrinks, so the registration
     #: is derived at that worst permitted book: 2.0336 − 0.4982 = 1.5354 ⇒ **1.53**, rounded DOWN
-    #: (pre-O17: ₹4,800, 1.47).
+    #: (before that decision: ₹4,800, 1.47).
     expected_edge_pct: float | None = None
 
 
 class Brk20Cfg(BaseModel):
-    """§6.1 ``brk20`` operational knobs — OWNER-ONLY, never learnable.
+    """``brk20`` operational knobs — OWNER-ONLY, never learnable.
 
     The RULE's parameters (``lookback_days``, ``vol_mult``, ``rr_target``, ``ex_skip_days``) live in
     ``brk20.DEFAULT_PARAMS`` (frozen code defaults: ``envelope.yaml`` has no ``brk20`` rows today;
-    plan §6.1 lists them as future §6.3 rows) and the WO-19 stop-geometry floor lives in
+    the strategy rules list them as future parameter-envelope rows) and the stop-geometry floor lives in
     ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds neither: it holds the ENTRY
     MECHANISM the 2026-09-12 pre-registered backtest selected, which is a property of how the level
-    is OFFERED rather than of how it is derived, and the C2 regime gate on origination.
+    is OFFERED rather than of how it is derived, and the regime gate on origination.
 
     Modelled here rather than left to pydantic's default extra-ignore for the reason ``FilingsCfg``
     states: an unmodelled ``brk20:`` block in settings.yaml is silently dropped, and the owner would
@@ -452,17 +453,17 @@ class Brk20Cfg(BaseModel):
     #: level is offered on y+1..y+N (``retest.RestingLevelBook``).
     #: 5 = the backtest's ``V2_limit_at_H20_N5``, the variant its pre-registered decision rule
     #: returned. NEVER learnable: this number IS the registered mechanism — N=1 (what shipped before
-    #: WO-R) and N=3 were both measured and both lost, and every other N was never run at all, so a
+    #: the retest re-arm) and N=3 were both measured and both lost, and every other N was never run at all, so a
     #: learner moving it would be selecting an entry mechanism no study measured. 0 or less is
     #: clamped to 1 by the book (a disabled mechanism is a code change, not a silent config value).
     retest_sessions: int = 5
-    #: C2 regime gate on brk20 ORIGINATION (``ops.main._brk20_regime_gate``). ``False`` plus a restart is
+    #: Regime gate on brk20 ORIGINATION (``ops.main._brk20_regime_gate``). ``False`` plus a restart is
     #: the rollback: crossings originate in any regime and none is journalled as blocked.
     regime_filter: bool = False
 
 
 class PrescreenCfg(BaseModel):
-    """§6.3/§3.2.5 ``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
+    """``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
 
     max_candidates_per_day: int = 48               # signal.candidate publications per trading day
@@ -471,15 +472,15 @@ class PrescreenCfg(BaseModel):
                                                    # settings.yaml — this default is the fallback)
     #: Per-strategy publication sub-cap. int = the same cap for every strategy; MAPPING
     #: {strategy_id: cap} = per-strategy values with the reserved key `default` binding any strategy
-    #: without a line of its own (WO-1 (iii), 2026-08-13 — owner knob, never learner-movable, §6.3).
+    #: without a line of its own (2026-08-13 — owner knob, never learner-movable).
     max_per_strategy_day: int | dict[str, int] | None = None
     #: Publication/forward admission ORDER: "ranked" = by score (prescreen) and per-strategy score
-    #: quantile (analyst forwarding); "arrival" = the pre-WO-1 order — the rollback flag, nothing else.
+    #: quantile (analyst forwarding); "arrival" = the earlier order — the rollback flag, nothing else.
     admission_mode: str = "ranked"
     #: Cumulative per-strategy sub-cap tranches by IST time-of-day (owner-directed 2026-09-02, after
     #: three straight sessions of window-open cap lockout): {strategy: {"HH:MM": cumulative_cap}}.
     #: Effective cap = min(max_per_strategy_day, released tranche); absent = flat caps (rollback).
-    #: Owner knob, never learner-movable (§6.3) — it decides which candidates get evaluated at all.
+    #: Owner knob, never learner-movable — it decides which candidates get evaluated at all.
     cap_release_schedule: dict[str, dict[str, int]] | None = None
     #: WHEN the analyst forward queue is drained (2026-08-14): "paced" = one slot per
     #: ``FORWARD_PACING_MIN`` minutes on a scheduler pulse, so candidates accumulate and the ranking
@@ -487,7 +488,7 @@ class PrescreenCfg(BaseModel):
     forward_drain_mode: str = "paced"
     #: How much better a later candidate must score to take a full cap's admission slot from an
     #: unevaluated incumbent of the same strategy (2026-08-27 — owner knob, never learner-movable,
-    #: §6.3, exactly like ``max_per_strategy_day`` above: it decides which candidates get evaluated
+    #: exactly like ``max_per_strategy_day`` above: it decides which candidates get evaluated
     #: at all). ``null`` DISABLES displacement, restoring the pre-2026-08-27 "whoever fires first
     #: keeps the slot all day" behaviour — the rollback flag, nothing else. Shipped value lives in
     #: settings.yaml with its reasoning; this default is the fallback.
@@ -495,16 +496,16 @@ class PrescreenCfg(BaseModel):
 
 
 class StrategyCfg(BaseModel):
-    """§3.2.5 strategy-layer operational config (pre-screen throttles). Scanner PARAMETERS live in
-    the learner-writable ``envelope_state`` (R4), never here."""
+    """Strategy-layer operational config (pre-screen throttles). Scanner PARAMETERS live in
+    the learner-writable ``envelope_state``, never here."""
 
     prescreen: PrescreenCfg = Field(default_factory=PrescreenCfg)
 
 
 class ReconcileCfg(BaseModel):
-    """§3.2.3 ReconcileJob drift thresholds (A13): alert if |Δvol|>vol_drift_pct or |Δclose|>close_drift_ticks
+    """ReconcileJob drift thresholds: alert if |Δvol|>vol_drift_pct or |Δclose|>close_drift_ticks
     on more than max_bad_bar_fraction of compared bars [tunable]. Offline spans are excluded from the
-    denominator (§2.6 — gap-backfilled, not drift)."""
+    denominator (gap-backfilled, not drift)."""
 
     vol_drift_pct: float = 2.0
     close_drift_ticks: int = 1
@@ -512,19 +513,19 @@ class ReconcileCfg(BaseModel):
 
 
 class BackfillCfg(BaseModel):
-    """§3.2.3 BackfillJob pacing + chunking (A2: ≤3 req/s; per-request range caps per Kite interval)."""
+    """BackfillJob pacing + chunking (≤3 req/s; per-request range caps per Kite interval)."""
 
-    req_per_s: int = 3                    # dry-run ESTIMATE only; real pacing is rate_limiter's A2 constant
+    req_per_s: int = 3                    # dry-run ESTIMATE only; real pacing is rate_limiter's constant
     minute_chunk_days: int = 60           # Kite historical max range per minute-interval request
     day_chunk_days: int = 2000            # Kite historical max range per day-interval request
 
 
 class UniverseCfg(BaseModel):
-    """§3.2.4 UniverseBuilder inputs (A8) — the index that seeds the eligible universe. The list is
-    best-effort-fetched (E5) with a seed-file fallback so universe build never depends on an NSE
+    """UniverseBuilder inputs — the index that seeds the eligible universe. The list is
+    best-effort-fetched with a seed-file fallback so universe build never depends on an NSE
     page being reachable.
 
-    O15 (owner-directed 2026-09-04): the index is NIFTY 500, widened from NIFTY200. The fields are
+    Owner decision 2026-09-04: the index is NIFTY 500, widened from NIFTY200. The fields are
     named generically because the index is now CONFIG, not a constant — swapping it is these three
     keys plus a seed file. ``extra="forbid"`` (deliberately narrower than the rest of this module,
     which takes pydantic's default ignore) exists for exactly that reason: the retired
@@ -532,13 +533,13 @@ class UniverseCfg(BaseModel):
     on them must fail loudly at boot rather than be silently ignored while the defaults below
     present a different universe as live.
 
-    O18 (owner-directed 2026-10-08): the index is NIFTY Total Market (≈750 = NIFTY 500 + Microcap
+    Owner decision 2026-10-08: the index is NIFTY Total Market (≈750 = NIFTY 500 + Microcap
     250), and a second list — the CORE index, NIFTY 500 — marks the evidence population. Legs whose
     registered edge or frozen shadow verdict was measured on NIFTY 500 (``hi52``, ``ins``, ``cat``,
     ``cat_reversal``) originate from — and the rec-outcome benchmark averages over — the core subset
     of the eligible set only (``MarketStore.get_core_eligible_symbols``); ``brk20``, the risk gate and the news/batch
     layer read the full eligible set. Pointing ``core_index_source_url`` at the same URL as
-    ``index_source_url`` makes every index member core (the pre-O18 shape, the rollback line).
+    ``index_source_url`` makes every index member core (the shape before 2026-10-08, the rollback line).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -560,39 +561,39 @@ class UniverseCfg(BaseModel):
 
 
 class JobTimesCfg(BaseModel):
-    """§10.1 scheduler fire-times (IST, trading days per calendar, R6). Every job is also §2.6
+    """Scheduler fire-times (IST, trading days per calendar). Every job is also
     catch-up-eligible on startup — these are fire-times, not a liveness assumption."""
 
-    instruments_ist: time = time(8, 15)         # §4.4 job 4 (A10/A8)
-    surveillance_ist: time = time(8, 20)        # §4.4 job 5 (A8)
-    universe_build_ist: time = time(8, 30)      # §3.2.4 UniverseBuilder
-    catalyst_digest_ist: time = time(8, 35)     # §4.4 job 14 (§2.7 step 5)
-    preopen_planner_ist: time = time(8, 50)     # §5.3
-    time_exit_check_ist: time = time(9, 30)     # D2 time exit (plan Q1.6)
-    reconcile_ist: time = time(15, 50)          # §4.4 job 2 (A13)
-    bhavcopy_ist: time = time(18, 0)            # §4.4 job 6
-    corp_actions_ist: time = time(20, 15)       # §4.4 job 7 (A12); 18:15→20:15 2026-07-24 (NSE maintenance)
-    earnings_ist: time = time(18, 30)           # §4.4 job 8 (R2)
-    rec_outcomes_ist: time = time(18, 30)       # plan Q2.3 — after daily_bars (18:05), whose run it waits for
-    signal_outcomes_ist: time = time(18, 40)    # review §9 #5/#6 — after rec_outcomes, whose EW returns it reads
-    weekly_summary_ist: time = time(19, 0)      # plan Q2.6 — after rec_outcomes (18:30)
-    deals_ist: time = time(20, 30)              # §4.4 job 9 (flagged_instrument_days); 18:45→20:30 2026-07-24
-    filings_pit_ist: time = time(18, 35)        # §2.8 filings_pit (insider trades, date-keyed)
-    filings_pit_fresh_ist: time = time(19, 0)   # §2.8 filings_pit_fresh (BSE fresh insider, date-keyed)
-    ins_crossings_ist: time = time(19, 15)      # §6.1 ins_crossings — MUST stay after filings_pit_fresh
+    instruments_ist: time = time(8, 15)
+    surveillance_ist: time = time(8, 20)
+    universe_build_ist: time = time(8, 30)      # UniverseBuilder
+    catalyst_digest_ist: time = time(8, 35)
+    preopen_planner_ist: time = time(8, 50)
+    time_exit_check_ist: time = time(9, 30)     # time exit
+    reconcile_ist: time = time(15, 50)
+    bhavcopy_ist: time = time(18, 0)
+    corp_actions_ist: time = time(20, 15)       # 18:15→20:15 2026-07-24 (NSE maintenance)
+    earnings_ist: time = time(18, 30)
+    rec_outcomes_ist: time = time(18, 30)       # after daily_bars (18:05), whose run it waits for
+    signal_outcomes_ist: time = time(18, 40)    # after rec_outcomes, whose EW returns it reads
+    weekly_summary_ist: time = time(19, 0)      # after rec_outcomes (18:30)
+    deals_ist: time = time(20, 30)              # flagged_instrument_days; 18:45→20:30 2026-07-24
+    filings_pit_ist: time = time(18, 35)        # filings_pit (insider trades, date-keyed)
+    filings_pit_fresh_ist: time = time(19, 0)   # filings_pit_fresh (BSE fresh insider, date-keyed)
+    ins_crossings_ist: time = time(19, 15)      # ins_crossings — MUST stay after filings_pit_fresh
                                                 # (19:00): it consumes that job's same-day BSE rows
-    filings_results_ist: time = time(18, 45)    # §2.8 filings_results (results + board-meeting dates, date-keyed)
-    isin_map_ist: time = time(18, 40)           # §2.8 isin_map — before filings_shp, which fetches mapped symbols only
-    filings_shp_ist: time = time(18, 50)        # §2.8 filings_shp (SHP + pledge, run-latest)
-    results_line_items_ist: time = time(19, 30)  # §2.8.4 results_line_items — after filings_results lists new filings
+    filings_results_ist: time = time(18, 45)    # filings_results (results + board-meeting dates, date-keyed)
+    isin_map_ist: time = time(18, 40)           # isin_map — before filings_shp, which fetches mapped symbols only
+    filings_shp_ist: time = time(18, 50)        # filings_shp (SHP + pledge, run-latest)
+    results_line_items_ist: time = time(19, 30)  # results_line_items — after filings_results lists new filings
     feed_freshness_ist: time = time(21, 30)     # feed census — after the EOD feeds (deals 20:30, features 20:45)
-    nightly_review_ist: time = time(21, 0)      # §5.5/§6.4
-    backup_ist: time = time(21, 0)              # §10.5 (watermark-driven)
-    sector_map_weekly_day: str = "SUN"          # §4.4 job 13; NOT read — the Sunday cadence is hard-coded in ops.main
+    nightly_review_ist: time = time(21, 0)
+    backup_ist: time = time(21, 0)              # (watermark-driven)
+    sector_map_weekly_day: str = "SUN"          # weekly sector-map job; NOT read — the Sunday cadence is hard-coded in ops.main
 
 
 class TotpAutomationCfg(BaseModel):
-    enabled: bool = False                          # OWNER-ACCEPTED RISK (A5/§7.3); default OFF
+    enabled: bool = False                          # OWNER-ACCEPTED RISK; default OFF
 
 
 class AuthCfg(BaseModel):

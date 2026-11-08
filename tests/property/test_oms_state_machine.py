@@ -1,9 +1,9 @@
-"""OMS state-machine property tests (WO-P3-1, 2026-09-10; plan §9.2).
+"""OMS state-machine property tests (2026-09-10).
 
 Random sequences of broker postbacks (acks, partial fills, rejects, cancels, modify storms,
-duplicates, out-of-order replays — the WebSocket can replay, A3) are driven through the ONE parser
+duplicates, out-of-order replays — the WebSocket can replay) are driven through the ONE parser
 (:func:`engine.oms.updates.parse_postback`) and the pure transition function. The properties are the
-§9.2 invariants that must hold in EVERY reachable state:
+invariants that must hold in EVERY reachable state:
 
 - no transition out of a terminal state;
 - **the platform-intent invariant (ratified 2026-09-10):** a non-terminal order never regresses along
@@ -18,14 +18,14 @@ duplicates, out-of-order replays — the WebSocket can replay, A3) are driven th
   transitions or lands as one of the :data:`~engine.oms.updates.NOOP_FLAGS`-annotated no-ops;
 - ``filled_qty`` monotone non-decreasing and equal, at every step, to the high-water fill an APPLIED
   postback reported (an independent model of the fill count, not a restatement of the machine's);
-- the modification counter never exceeds 20 (A2);
+- the modification counter never exceeds 20;
 - exactly one recorded event per applied transition (and never a silently dropped update);
 - an annotated no-op is exactly pure: the returned order **is** the one passed in;
 - a residual cancel preserves the fill count snapshotted when the cancel intent was raised;
-- PendingCorrelation never drops an update: held == pending + resolved + evicted + expired (A3), and
+- PendingCorrelation never drops an update: held == pending + resolved + evicted + expired, and
   an order that starts UNCORRELATED buffers its postbacks until :func:`correlate` resolves the id.
 
-The §9.2 R3 protection invariant belongs to ProtectionManager (WO-P3-6) and is not asserted here.
+The broker-resident protection invariant belongs to ProtectionManager and is not asserted here.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ BROKER_ORDER_ID = "251009000123456"
 
 
 def _postback(qty: int, *, status: str, filled: int, ts: datetime) -> dict:
-    """A verbatim-shaped Kite order postback (``OrderUpdateFrame.data`` field names, A3).
+    """A verbatim-shaped Kite order postback (``OrderUpdateFrame.data`` field names).
 
     ``ts`` is the BROKER clock (``exchange_update_timestamp``), which is what gates the
     MODIFY_PENDING -> ACKED edge — a replayed frame carries its original, older timestamp.
@@ -152,24 +152,24 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         "events": 0,        # every recorded OrderEvent
         "applied": 0,       # events NOT annotated as a no-op == claimed transitions
         "mutations": 0,     # steps that actually changed the order
-        "buffered": 0,      # postbacks held because the broker id was not known yet (A3)
+        "buffered": 0,      # postbacks held because the broker id was not known yet
         "expected_filled": 0,   # high-water fill an APPLIED postback reported (independent model)
         "cancel_snapshot": None,    # filled_qty when a cancel intent was first raised
         "fills_after_cancel": 0,    # fills that landed after that snapshot (a real fill still lands)
     }
     # What the CURRENT modify intent replaced, read from the amend's own event payload — exactly how
-    # the OrderManager recovers it from the persisted order_events row when the broker refuses (R8).
+    # the OrderManager recovers it from the persisted order_events row when the broker refuses.
     pending_prior: dict | None = None
 
     def apply_postback(cur: PlatformOrder, data: dict, at: datetime) -> PlatformOrder:
-        """Apply one postback and assert every §9.2 invariant the step must preserve."""
+        """Apply one postback and assert every invariant the step must preserve."""
         before = cur
         prev_state = cur.state
         prev_filled = cur.filled_qty
         upd = parse_postback(data)
         new, ev = apply_update(cur, upd, at=at)
 
-        # Never silently dropped: EVERY update yields exactly one recordable event (R8).
+        # Never silently dropped: EVERY update yields exactly one recordable event.
         assert ev is not None
         assert ev.at == at
         assert ev.from_state is prev_state
@@ -178,7 +178,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
 
         # A no-op is ANNOTATED, not merely from_state == to_state: a PARTIALLY_FILLED accretion is a
         # real transition on the self-edge, and the ProtectionManager must act on it (SL-M
-        # qty-modified upward as fills accrete, §3.2.8) — so the flag is the contract. NOOP_FLAGS is
+        # qty-modified upward as fills accrete) — so the flag is the contract. NOOP_FLAGS is
         # the published set, so a flag added later (illegal_transition was, in round 3) cannot slip
         # past this branch and be asserted as a transition.
         # The generator only emits legal shapes against legal states, so a table refusal surfacing as
@@ -192,7 +192,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
             stats["applied"] += 1
             stats["expected_filled"] = max(stats["expected_filled"], upd.filled_qty)
 
-        # ---- the platform-intent invariant (§9.2, ratified 2026-09-10)
+        # ---- the platform-intent invariant (ratified 2026-09-10)
         if prev_state is OrderState.CANCEL_PENDING:
             assert new.state is not OrderState.ACKED, (
                 "a postback must never clear a cancel intent — the §3.2.8 square-off would then "
@@ -293,7 +293,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                     OrderState.ACKED,
                     OrderState.PARTIALLY_FILLED,
                 ):
-                    # §3.2.8: the protective SL-M is qty-modified as fills accrete; the amend carries
+                    # The protective SL-M is qty-modified as fills accrete; the amend carries
                     # the new quantity onto the row (never below what is already filled).
                     order, ev = amend(order, qty=max(order.filled_qty, (n % qty) + 1), at=at)
                     pending_prior = ev.payload["prior_fields"]
@@ -317,7 +317,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                     )
                 elif op == "modify_reject" and order.state is OrderState.MODIFY_PENDING:
                     # The broker refused the modify: the row goes back to what it held before the
-                    # amend, and the A2 budget stays spent (the call was made).
+                    # amend, and the modification budget stays spent (the call was made).
                     order, ev = modify_rejected(
                         order, payload={"status": "REJECTED", "status_message": "modify failed"},
                         at=at, prior_fields=pending_prior,
@@ -337,7 +337,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                 else:
                     continue
             except ModificationCapExceeded:
-                # The ONLY sanctioned refusal of a legal-state intent (A2); the counter must be AT the cap.
+                # The ONLY sanctioned refusal of a legal-state intent; the counter must be AT the cap.
                 assert order.modifications == MODIFICATION_CAP
                 continue
             except IllegalTransition as exc:      # pragma: no cover - a table bug, surfaced loudly
@@ -347,7 +347,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
             stats["applied"] += 1
             stats["mutations"] += 1
             if order.state is OrderState.CANCEL_PENDING and stats["cancel_snapshot"] is None:
-                # Snapshot the fill count the moment the cancel intent is raised (§9.2 conservation).
+                # Snapshot the fill count the moment the cancel intent is raised (quantity conservation).
                 stats["cancel_snapshot"] = order.filled_qty
 
         # ---- invariants, checked after EVERY step
@@ -356,18 +356,18 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         if prev_state in TERMINAL_ORDER_STATES:
             assert order is before, "no transition out of a terminal state (§9.2)"
 
-    # Exactly one event per applied transition, and no order mutation without one (R8/§9.2).
+    # Exactly one event per applied transition, and no order mutation without one.
     assert stats["applied"] == stats["mutations"]
     assert stats["events"] >= stats["applied"]
 
-    # Nothing buffered was dropped (A3): every held update is still pending, or was resolved/evicted.
+    # Nothing buffered was dropped: every held update is still pending, or was resolved/evicted.
     acc = buffer.accounting()
     assert acc.held == stats["buffered"]
     assert acc.held == acc.pending + acc.resolved + acc.evicted + acc.expired
 
-    # Residual cancel / lapse never leaks the filled portion (§3.5.1, §9.2 quantity conservation):
+    # Residual cancel / lapse never leaks the filled portion (quantity conservation):
     # the terminal fill count is the one snapshotted when the cancel intent was raised, unless a
-    # REAL fill landed in the gap between the cancel request and its outcome (§3.2.8).
+    # REAL fill landed in the gap between the cancel request and its outcome.
     if stats["cancel_snapshot"] is not None and order.state in (
         OrderState.CANCELLED,
         OrderState.LAPSED,
@@ -407,7 +407,7 @@ def test_pending_correlation_never_drops_an_update(ops, max_entries: int) -> Non
             evicted_seen += len(evicted)
         elif op == "resolve":
             taken = pc.resolve(f"01JORDER{key}", bid)
-            # Entries, not bare payloads: the caller needs each update's ARRIVAL time (§3.5.1 audit).
+            # Entries, not bare payloads: the caller needs each update's ARRIVAL time (audit).
             assert all(e.broker_order_id == bid and e.at.tzinfo is not None for e in taken)
             assert [e.seq for e in taken] == sorted(e.seq for e in taken)
             resolved_seen += len(taken)
@@ -419,6 +419,6 @@ def test_pending_correlation_never_drops_an_update(ops, max_entries: int) -> Non
     assert acc.resolved == resolved_seen
     assert acc.evicted == evicted_seen
     assert acc.expired == expired_seen
-    # The conservation law: nothing is ever silently dropped (A3 — a dropped update is a lost order).
+    # The conservation law: nothing is ever silently dropped (a dropped update is a lost order).
     assert acc.held == acc.pending + acc.resolved + acc.evicted + acc.expired
     assert acc.pending <= max_entries

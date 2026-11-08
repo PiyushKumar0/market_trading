@@ -1,10 +1,10 @@
-"""Tick-partition compaction (§4.3 storage, WO-7).
+"""Tick-partition compaction.
 
 Fixtures are written by the REAL tick writer (``MarketStore.flush_ticks``) so the fragments under
 test have the exact shape the live engine produces — ULID-named one-file-per-flush partitions —
 and are read back through the REAL reader (``MarketStore.get_ticks``, which globs ``*.parquet``),
 which is what makes "row-identical before/after" a statement about the engine rather than about
-DuckDB. Acceptance (WO-7): N fragments → 1 file, rows identical, re-run is a no-op, and the CURRENT
+DuckDB. Acceptance: N fragments → 1 file, rows identical, re-run is a no-op, and the CURRENT
 trading date is never touched (the writer is still appending to it).
 """
 
@@ -55,7 +55,7 @@ def _write_fragments(
     store: MarketStore, d: date, *, symbol: str = "RELIANCE", n: int = 5, start: int = 0
 ) -> None:
     """``n`` separate flushes ⇒ ``n`` fragment files in that symbol-day (the live pathology: ~7.5 K
-    of these per symbol-day, 752,150 files for one session — audit F9). ``start`` offsets the tick
+    of these per symbol-day, 752,150 files for one session). ``start`` offsets the tick
     timestamps/volumes so a later batch carries genuinely new rows, not repeats."""
     base = datetime.combine(d, datetime.min.time(), tzinfo=IST) + timedelta(hours=10)
     for i in range(start, start + n):
@@ -386,7 +386,7 @@ def test_skipped_result_defaults_are_watermark_neutral() -> None:
 
 def test_two_concurrent_calls_exactly_one_does_the_work(store, tmp_path, monkeypatch) -> None:
     """2026-08-14 live: the post-arm one-shot and the 22:30 scheduled slot both reached
-    ``compact_ticks`` for the same partitions (WO-15's ``CatchUpRunner`` single-flight does not
+    ``compact_ticks`` for the same partitions (the ``CatchUpRunner`` single-flight does not
     cover this path), producing 78 read-time failures. The module-level lock makes this
     single-flight: exactly one caller does the work, the other returns the skip shape without ever
     touching the store or the filesystem."""
@@ -462,7 +462,7 @@ def test_vanished_fragments_log_a_warning_without_a_traceback_and_the_run_contin
 
 
 def test_a_run_is_bounded_and_resumes_where_it_stopped(store, tmp_path):
-    """Bounded + observable (the §2.6 filed proposal): the FIRST run faces the whole standing
+    """Bounded + observable: the FIRST run faces the whole standing
     backlog, so a run does at most ``max_symbol_days`` and the rest drains on the next one —
     oldest-first plus per-symbol-day idempotence makes the progress monotone."""
     for symbol in ("AAA", "BBB", "CCC"):
@@ -480,7 +480,7 @@ def test_a_run_is_bounded_and_resumes_where_it_stopped(store, tmp_path):
 
 
 def test_a_run_ends_before_the_next_symbol_day_once_stop_fires(store, tmp_path):
-    """2026-09-29: ``stop`` (the WO-21 window, or a stop signal) ends a run between symbol-days —
+    """2026-09-29: ``stop`` (the tick_compact no-run window, or a stop signal) ends a run between symbol-days —
     never inside one — and the result is unfinished, so its runner records no watermark and a later
     pass resumes it."""
     for symbol in ("AAA", "BBB", "CCC"):

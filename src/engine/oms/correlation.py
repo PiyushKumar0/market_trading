@@ -1,6 +1,6 @@
-"""Pending-correlation buffer for the postback-before-response race (WO-P3-1, 2026-09-10; §3.5.1/A3).
+"""Pending-correlation buffer for the postback-before-response race (2026-09-10).
 
-The race, verbatim from §3.5.1: *"an order update can arrive on the socket BEFORE the synchronous
+The race: *"an order update can arrive on the socket BEFORE the synchronous
 ``place_order()`` call returns the broker order_id. The state machine must tolerate this — an update
 for a broker order_id the platform has not yet recorded is held in a pending-correlation buffer and
 applied once the place call returns that id, never dropped and never mistaken for a stray/duplicate
@@ -9,14 +9,14 @@ order that would trigger a defensive cancel."*
 Two failure modes are designed out here:
 
 * **Dropping an update.** Nothing leaves this buffer without being handed to a caller. Eviction and
-  expiry RETURN the entries they remove (the caller logs them, §9.2 conservation property:
+  expiry RETURN the entries they remove (the caller logs them, conservation property:
   ``held == pending + resolved + evicted + expired``) — a silent drop is a lost order.
 * **Unbounded growth.** A broker id that never correlates (a stray from another session, a malformed
   frame) would otherwise leak forever. The buffer is capped; the OLDEST entry is evicted first and
   handed back, so the loss is always visible and always the least-recent one.
 
 Pure Tier 3: stdlib + ``core`` only. No clock is held — the caller passes arrival/`now` times from
-its own :class:`~engine.core.clock.Clock`, which keeps replay deterministic (§9.6).
+its own :class:`~engine.core.clock.Clock`, which keeps replay deterministic.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ class BufferedUpdate(BaseModel):
 
 
 class CorrelationAccounting(BaseModel):
-    """Conservation ledger (§9.2). ``held`` is every update ever offered to :meth:`hold`."""
+    """Conservation ledger. ``held`` is every update ever offered to :meth:`hold`."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -66,7 +66,7 @@ class CorrelationAccounting(BaseModel):
 
 
 class PendingCorrelation:
-    """Bounded, order-preserving buffer of postbacks whose broker order id is not yet known (A3)."""
+    """Bounded, order-preserving buffer of postbacks whose broker order id is not yet known."""
 
     def __init__(self, *, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
         if max_entries < 1:
@@ -84,7 +84,7 @@ class PendingCorrelation:
         """Buffer one update whose broker id the platform has not recorded yet.
 
         ``at`` is the arrival time (from the caller's ``Clock``) and is what :meth:`sweep` ages
-        against — the buffer holds no clock of its own so replay stays deterministic (§9.6).
+        against — the buffer holds no clock of its own so replay stays deterministic.
 
         Returns the entries evicted to stay within ``max_entries``, OLDEST first. The list is
         normally empty; when it is not, the caller must log every entry (never drop silently).
@@ -116,7 +116,7 @@ class PendingCorrelation:
         Returns the ENTRIES, not the bare payloads (2026-09-10 review): each carries the ``at`` the
         platform received it, which the caller passes into
         :func:`engine.oms.updates.apply_update` so the ``order_events`` row records when the broker
-        action reached us rather than when the buffer happened to drain (R8). ``seq`` is the arrival
+        action reached us rather than when the buffer happened to drain. ``seq`` is the arrival
         sequence, preserved for the same reason.
         """
         bid = str(broker_order_id)
@@ -166,7 +166,7 @@ class PendingCorrelation:
         return [e for e in self._entries if e.broker_order_id == bid]
 
     def accounting(self) -> CorrelationAccounting:
-        """The §9.2 conservation ledger: ``held == pending + resolved + evicted + expired``."""
+        """The conservation ledger: ``held == pending + resolved + evicted + expired``."""
         return CorrelationAccounting(
             held=self._held,
             pending=len(self._entries),

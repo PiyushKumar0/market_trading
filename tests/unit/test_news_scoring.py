@@ -1,10 +1,10 @@
-"""NewsScoringJob (§5.4 / §2.7 step 4) — the batch triggers and the §3.2.4 fan-out purity rule.
+"""NewsScoringJob — the batch triggers and the fan-out purity rule.
 
 The harness is faked (no SDK anywhere in the unit tier) but everything downstream of it is REAL: the
 fake returns raw JSON and the job's own ``news_analyst.parse_output`` validator turns it into scores,
-so the D7 per-item drop path (out-of-enum ``event_type``) is exercised end to end. The resolver is
+so the per-item drop path (out-of-enum ``event_type``) is exercised end to end. The resolver is
 the real :class:`EntityResolver` with a seeded alias map, because "the LLM never assigns a symbol"
-is only meaningfully tested against the real ambiguity rules (§2.7 step 3).
+is only meaningfully tested against the real ambiguity rules.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ CAL_DIR = config_dir() / "calendar"
 WED = date(2026, 6, 17)
 SUN = date(2026, 6, 14)
 
-#: The §5.4 agents.yaml definition, built directly (agents.yaml loading is test_agent_defs' job).
+#: The agents.yaml definition, built directly (agents.yaml loading is test_agent_defs' job).
 NEWS_DEF = AgentDef(
     agent_id="news_analyst",
     model="sonnet-5.5",
@@ -58,7 +58,7 @@ def at(d: date, hour: int, minute: int = 0) -> datetime:
 
 # --------------------------------------------------------------------------- fakes
 def score_item(cluster_id: str, **overrides) -> dict:
-    """One well-formed §5.4 cluster score (the model's raw JSON item, pre-validation)."""
+    """One well-formed cluster score (the model's raw JSON item, pre-validation)."""
     item = {
         "cluster_id": cluster_id,
         "scope": "stock",
@@ -104,7 +104,7 @@ class FakeHarness:
 
 
 class FakeGovernor:
-    """Admission + the §5.6 DG2 news cadence knob — the only two governor surfaces this job uses."""
+    """Admission + the DG2 news cadence knob — the only two governor surfaces this job uses."""
 
     def __init__(self, *, allowed: bool = True, cadence_min: int = 30) -> None:
         self.allowed = allowed
@@ -190,7 +190,7 @@ def seed_cluster(
     themes: tuple[str, ...] = (),
     domains: tuple[str, ...] = ("economictimes.com", "moneycontrol.com"),
 ) -> str:
-    """One UNSCORED cluster (step-2/step-3 columns only — scored_at NULL is what queues it)."""
+    """One UNSCORED cluster (clustering/resolver columns only — scored_at NULL is what queues it)."""
     store.upsert_news_clusters([{
         "cluster_id": cluster_id,
         "representative": representative,
@@ -224,7 +224,7 @@ def rows_by_id(store: MarketStore) -> dict[str, dict]:
     return {r["cluster_id"]: r for r in store.get_news_clusters()}
 
 
-# --------------------------------------------------------------------------- batch triggers (§5.4)
+# --------------------------------------------------------------------------- batch triggers
 async def test_seven_fresh_clusters_do_not_meet_the_batch_threshold(store, make_job, now_box):
     seed_many(store, 7, base=now_box[0] - timedelta(minutes=5))
     harness = FakeHarness()
@@ -246,13 +246,13 @@ async def test_eight_clusters_fire_one_batch(store, make_job, now_box):
     assert result.skipped_reason is None
     assert result.scored == 8
     assert len(harness.calls) == 1 and len(harness.calls[0]) == 8
-    assert harness.call_classes == ["batch"]         # the governor's admission key (§5.6)
-    assert harness.json_schemas[0] is not None       # structured output declared (D5)
+    assert harness.call_classes == ["batch"]         # the governor's admission key
+    assert harness.json_schemas[0] is not None       # structured output declared
     assert all(r["scored_at"] is not None for r in rows_by_id(store).values())
 
 
 async def test_oldest_cluster_older_than_the_cadence_triggers_a_batch(store, make_job, now_box):
-    """One cluster is below the ≥8 minimum but has waited out the 30-min cadence (§5.4)."""
+    """One cluster is below the ≥8 minimum but has waited out the 30-min cadence."""
     seed_cluster(store, "c-old", first_seen=now_box[0] - timedelta(minutes=45))
     harness = FakeHarness()
 
@@ -273,7 +273,7 @@ async def test_cluster_younger_than_the_cadence_does_not_trigger(store, make_job
 
 
 async def test_degraded_cadence_lengthens_the_age_trigger(store, make_job, now_box):
-    """§5.6 DG2: the governor coarsens news batching to 60 min, so a 45-min wait is not yet due."""
+    """DG2: the governor coarsens news batching to 60 min, so a 45-min wait is not yet due."""
     seed_cluster(store, "c-old", first_seen=now_box[0] - timedelta(minutes=45))
     harness = FakeHarness()
 
@@ -283,7 +283,7 @@ async def test_degraded_cadence_lengthens_the_age_trigger(store, make_job, now_b
     assert harness.calls == []
 
 
-# --------------------------------------------------------------------------- time gate (§5.4)
+# --------------------------------------------------------------------------- time gate
 async def test_outside_the_scoring_windows_the_job_skips(store, make_job, now_box):
     now_box[0] = at(WED, 17, 0)                      # after the close, before the evening sweep
     seed_many(store, 10, base=now_box[0] - timedelta(minutes=5))
@@ -305,7 +305,7 @@ async def test_the_evening_sweep_window_scores(store, make_job, now_box):
 
 
 async def test_force_ignores_both_the_time_gate_and_the_threshold(store, make_job, now_box):
-    """The pre-open batch (§5.4): fires at 08:15, scores ALL unscored regardless of the ≥8 minimum."""
+    """The pre-open batch: fires at 08:15, scores ALL unscored regardless of the ≥8 minimum."""
     now_box[0] = at(SUN, 8, 15)                      # not a trading day, not a scoring window
     seed_cluster(store, "c-1", first_seen=now_box[0] - timedelta(minutes=2))
     harness = FakeHarness()
@@ -321,7 +321,7 @@ async def test_force_ignores_both_the_time_gate_and_the_threshold(store, make_jo
     assert harness.calls == [["c-1"]]
 
 
-# --------------------------------------------------------------------------- chunking (§5.4 ≤30)
+# --------------------------------------------------------------------------- chunking (≤30)
 async def test_the_queue_is_chunked_at_thirty_clusters(store, make_job, now_box):
     ids = seed_many(store, 61, base=now_box[0] - timedelta(minutes=90))
     harness = FakeHarness()
@@ -333,11 +333,11 @@ async def test_the_queue_is_chunked_at_thirty_clusters(store, make_job, now_box)
     assert result.scored == 61
 
 
-# --------------------------------------------------------------------------- fan-out purity (§3.2.4)
+# --------------------------------------------------------------------------- fan-out purity
 async def test_llm_sectors_and_themes_are_intersected_with_the_resolver_tags(
     store, make_job, now_box, scoring_clock
 ):
-    """§3.2.4/§9.1: an LLM-emitted sector/theme absent from the resolver's tags causes NO fan-out."""
+    """An LLM-emitted sector/theme absent from the resolver's tags causes NO fan-out."""
     store.upsert_theme_map([
         {"theme": "EV", "keywords": ["electric vehicle"], "symbols": ["TATAMOTORS"],
          "updated_at": scoring_clock.now()},
@@ -357,12 +357,12 @@ async def test_llm_sectors_and_themes_are_intersected_with_the_resolver_tags(
     row = rows_by_id(store)["c-1"]
     assert list(row["sectors"]) == ["BANKS"]         # "IT" was never a resolver tag -> dropped
     assert list(row["themes"]) == ["EV"]             # "DEFENCE" likewise
-    # The in-prompt vocabulary is the theme_map keys (§5.4) — the model may emit nothing else.
+    # The in-prompt vocabulary is the theme_map keys — the model may emit nothing else.
     assert "EV" in harness.contexts[0].volatile_block
 
 
 async def test_an_llm_sector_with_no_resolver_tag_persists_nothing(store, make_job, now_box):
-    seed_cluster(store, "c-1", first_seen=now_box[0] - timedelta(minutes=45))   # no step-3 tags
+    seed_cluster(store, "c-1", first_seen=now_box[0] - timedelta(minutes=45))   # no resolver tags
     harness = FakeHarness(overrides={"c-1": {"sectors": ["BANKS"], "themes": ["EV"]}})
 
     await make_job(harness).run_batch()
@@ -372,11 +372,11 @@ async def test_an_llm_sector_with_no_resolver_tag_persists_nothing(store, make_j
     assert list(row["themes"]) == []
 
 
-# --------------------------------------------------------------------------- entities (§2.7 step 3)
+# --------------------------------------------------------------------------- entities
 async def test_only_entity_strings_found_in_the_shown_headline_reach_the_resolver(
     store, make_job, now_box, caplog
 ):
-    """The LLM never assigns a symbol: its VERBATIM strings re-enter the resolver (§3.2.4). A string
+    """The LLM never assigns a symbol: its VERBATIM strings re-enter the resolver. A string
     absent from the headline — injected (chaos case 21) or misaligned to the wrong cluster — must
     not attach another company, whether as an alias or as an exchange token."""
     seed_cluster(
@@ -452,12 +452,12 @@ async def test_ambiguous_and_unmatched_entity_strings_add_no_symbol(store, make_
 
     row = rows_by_id(store)["c-1"]
     assert list(row["symbols"]) == []                # "bharti" maps to 2 symbols => never a guess
-    # The unmatched string is recorded for the §5.5 weekly alias-suggestion loop.
+    # The unmatched string is recorded for the weekly alias-suggestion loop.
     unresolved = {(r["entity_text"], r["reason"]) for r in store.get_unresolved_entities()}
     assert ("Some Unknown Startup", "no_match") in unresolved
 
 
-# --------------------------------------------------------------------------- D7 drops
+# --------------------------------------------------------------------------- per-item drops
 async def test_out_of_enum_event_type_drops_that_cluster_and_leaves_it_unscored(
     store, make_job, now_box
 ):
@@ -472,7 +472,7 @@ async def test_out_of_enum_event_type_drops_that_cluster_and_leaves_it_unscored(
     assert result.scored == 1
     rows = rows_by_id(store)
     assert rows["c-good"]["scored_at"] is not None
-    assert rows["c-bad"]["scored_at"] is None        # unscored => excluded from origination (§2.7)
+    assert rows["c-bad"]["scored_at"] is None        # unscored => excluded from origination
 
 
 async def test_a_score_for_an_unsent_cluster_id_is_ignored(store, make_job, now_box):
@@ -495,7 +495,7 @@ async def test_governor_block_makes_no_call_and_leaves_the_queue_unscored(store,
 
     assert result.skipped_reason == SKIP_GOVERNOR
     assert result.scored == 0
-    assert harness.calls == []                       # zero SDK calls (§2.7 fail-safe: `cat` -> zero)
+    assert harness.calls == []                       # zero SDK calls (fail-safe: `cat` -> zero)
     assert all(r["scored_at"] is None for r in rows_by_id(store).values())
     assert governor.decisions == ["news_analyst"]
 
@@ -524,17 +524,17 @@ async def test_scored_at_and_scorer_model_are_platform_stamped(store, make_job, 
     await make_job(harness).run_batch()
 
     row = rows_by_id(store)["c-1"]
-    assert row["scored_at"] == now_box[0]            # Clock.now(), tz-aware IST (§3.2)
+    assert row["scored_at"] == now_box[0]            # Clock.now(), tz-aware IST
     assert row["scorer_model"] == "sonnet-5.5"       # the def's model NAME, not the API id
     assert row["scope"] == "sector"
     assert row["sentiment"] == pytest.approx(-0.4)
     assert row["materiality"] == pytest.approx(0.7)
     assert row["novelty"] == pytest.approx(0.25)
     assert row["event_type"] == "order_win"
-    assert row["untrusted"] is True                  # §2.4: every LLM score stays untrusted evidence
+    assert row["untrusted"] is True                  # every LLM score stays untrusted evidence
 
 
-# -------------------------------------------------------- chain-lock hold (§2.6 hardening ii, 09-09)
+# -------------------------------------------------------- chain-lock hold (09-09)
 # The 2026-07-28 news_chain_lock serialises the news_clusters read-modify-write. Held around the
 # WHOLE batch it also spanned one LLM await per chunk, so the per-feed polls (whose resolve deadline
 # covers lock ACQUISITION) queued behind it — 14 news_resolve_timeout on 2026-09-07, nine inside one
@@ -605,7 +605,7 @@ async def test_the_lock_covers_the_store_hops_but_never_the_model_call(store, ma
     seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
     lock = asyncio.Lock()
     probe = LockProbeStore(store, lock)
-    # An unmatchable (but verbatim) entity string makes _log_unmatched fire, so the §5.5
+    # An unmatchable (but verbatim) entity string makes _log_unmatched fire, so the
     # unresolved-entity hop — the job's OTHER write, easy to leave outside the hold — is pinned
     # under the lock too.
     harness = LockProbeHarness(lock, overrides={"c-000": {"entities": ["state utility"]}})
@@ -683,7 +683,7 @@ async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store,
     harness = LockProbeHarness(
         lock,
         overrides={"c-1": {"sectors": ["BANKS", "IT"], "themes": ["EV", "DEFENCE"]}},
-        # A rival poll merges a second source, a fresher last_seen, a new headline and the step-3
+        # A rival poll merges a second source, a fresher last_seen, a new headline and the resolver
         # tags it implies. _execute: the pipeline's own merge path is not the subject here.
         on_call=lambda: store._execute(
             "UPDATE news_clusters SET source_domains = ?, last_seen = ?, representative = ?, "
@@ -708,9 +708,9 @@ async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store,
     assert row["last_seen"] == merged_at
     assert row["representative"].startswith("Tata Motors")
     assert list(row["symbols"]) == ["TATAMOTORS"]    # the poll's resolved symbol is not reverted
-    assert list(row["sectors"]) == ["BANKS"]         # advisory ∩ the FRESH step-3 tags
+    assert list(row["sectors"]) == ["BANKS"]         # advisory ∩ the FRESH resolver tags
     assert list(row["themes"]) == ["EV"]
-    assert row["scored_at"] is not None              # ... and the step-4 columns still landed
+    assert row["scored_at"] is not None              # ... and the scoring columns still landed
     assert row["scorer_model"] == "sonnet-5.5"
 
 
@@ -775,7 +775,7 @@ async def test_a_stale_skip_is_excluded_from_the_chunk_failure_remaining_count(
     assert failed_log.remaining == 31                 # NOT 32: the stale id is not still queued
 
 
-# ------------------------------------------------------ batch single-flight (§2.6 hardening ii, 09-09)
+# ------------------------------------------------------ batch single-flight (09-09)
 async def test_two_concurrent_batches_send_each_cluster_to_the_model_exactly_once(
     store, make_job, now_box
 ):

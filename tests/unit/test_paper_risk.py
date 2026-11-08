@@ -1,4 +1,4 @@
-"""Paper equity and halts (plan Q4.8)."""
+"""Paper equity and halts."""
 
 from __future__ import annotations
 
@@ -226,7 +226,7 @@ async def test_paper_risk_is_wired_under_the_flag_and_never_inside_equity_tick(
         assert built["PaperRuntime"][0][1]["order_guard"] is guard
         ((_, _, exits),) = built["ExitManager"]
         assert built["PaperRisk"][0][1]["flatten"] == exits.flatten_all
-        # The paper OMS's broker rejections feed this PaperRisk's storm detector (§3.5.1).
+        # The paper OMS's broker rejections feed this PaperRisk's storm detector.
         noted: list[dt.datetime] = []
         monkeypatch.setattr(e.paper.risk, "note_reject", noted.append)
         built["OrderManager"][0][1]["on_reject"](None, at(10, 1))
@@ -317,7 +317,7 @@ async def test_a_reset_on_a_flat_book_opens_the_epoch_without_a_halt(conn, clock
 
 
 async def test_a_live_base_reaches_the_paper_tracker_and_the_epoch_reseed(conn, clock, make_risk, broker) -> None:
-    """O19 §2: the paper book reads the base per call, so a capital change needs no setter."""
+    """The paper book reads the base per call, so a capital change needs no setter."""
     base = {"v": Decimal("40000")}
     risk = make_risk(lambda: base["v"])
     assert risk.tracker.capital_base == Decimal("40000")
@@ -348,7 +348,7 @@ def test_the_effective_paper_state_is_the_worse_of_real_and_paper_halts(conn, re
     assert set(active_halts(conn)) == {f"c{i}" for i in range(len(rungs))}
 
 
-# ---------------------------------------------------------------- rejection storm (§3.5.1)
+# ---------------------------------------------------------------- rejection storm
 def sec(h: int, m: int, s: int, d: dt.date = D) -> dt.datetime:
     return dt.datetime.combine(d, dt.time(h, m, s), tzinfo=IST)
 

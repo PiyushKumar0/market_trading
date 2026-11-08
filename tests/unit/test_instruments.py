@@ -1,9 +1,9 @@
-"""InstrumentStore index-token seam + tradable indexing (§3.2.2, A2/A10/C7).
+"""InstrumentStore index-token seam + tradable indexing.
 
 Kite's full dump carries the NSE ``INDICES`` rows (``NIFTY 50`` token 256265, ``INDIA VIX`` token
 264969) with ``tick_size=0``/``lot_size=0`` — they cannot be a tradable :class:`Instrument`
 (``tick_size=Field(gt=0)``), so :meth:`InstrumentStore.refresh` must harvest them into a SEPARATE
-token map instead of silently dropping them (the A2 backfill_unknown_token bug). These tests pin:
+token map instead of silently dropping them (the backfill_unknown_token bug). These tests pin:
 the token-only resolution path (``token_for_symbol`` / ``symbol_for_token`` fall back to it), the
 fail-closed guarantee for the tradable seam (``by_symbol`` / ``round_to_tick`` still raise for an
 index), the atomic replace-snapshot semantics of a re-``refresh`` / ``seed``, and that both a sync-
@@ -48,7 +48,7 @@ MALFORMED_ROW = {  # tradable segment, no instrument_token → int(None) raises 
     "tradingsymbol": "BROKEN", "exchange": "NSE", "segment": "NSE",
     "tick_size": 0.05, "lot_size": 1, "instrument_type": "EQ",
 }
-# A RELIANCE stock future: its ``name`` is the underlying's tradingsymbol — the C7 join input that
+# A RELIANCE stock future: its ``name`` is the underlying's tradingsymbol — the NFO-underlying join input that
 # must flag the NSE EQUITY row is_fno=True (2026-07-31: shape-only derivation left every equity
 # False and mis_candidates empty, structurally rejecting all MIS proposals at the gate).
 RELIANCE_FUT_ROW = {
@@ -100,7 +100,7 @@ async def test_refresh_indexes_eq_and_routes_indices_to_token_seam(clock):
     assert store.symbol_for_token(256265) == "NIFTY 50"
     assert store.symbol_for_token(264969) == "INDIA VIX"
 
-    # But an index is never priced/sized/routed — the tradable seam stays fail-closed (A2).
+    # But an index is never priced/sized/routed — the tradable seam stays fail-closed.
     with pytest.raises(UnknownInstrument):
         store.by_symbol("NIFTY 50")
     with pytest.raises(UnknownInstrument):
@@ -190,11 +190,11 @@ async def test_malformed_index_row_is_skipped_not_indexed(clock):
     assert store.token_for_symbol("NIFTY 50") == 256265      # well-formed index still resolves
 
 
-# ================================================================== F1/F2 persistence + hydration
+# ================================================================== persistence + hydration
 # ------------------------------------------------------------------ snapshot_rows column-exactness
 async def test_snapshot_rows_columns_match_table_spec(clock):
     """The emitted dicts must carry EXACTLY the store's pinned ``instruments_daily`` columns — a DDL
-    column add/rename then fails here instead of silently dropping data at upsert time (F1)."""
+    column add/rename then fails here instead of silently dropping data at upsert time."""
     spec_cols, _pk = _TABLE_SPEC["instruments_daily"]
     # The store spec is the single source of truth; the store-side pinned tuple must track it.
     assert InstrumentStore._SNAPSHOT_COLUMNS == spec_cols
@@ -208,7 +208,7 @@ async def test_snapshot_rows_columns_match_table_spec(clock):
         assert set(row) == set(spec_cols)                    # no unknown/missing keys (upsert would raise)
         assert row["d"] == SNAPSHOT_DAY
     by_sym = {r["tradingsymbol"]: r for r in rows}
-    # Tradable rows carry the dump's own fields; the A8 surveillance/MIS join is left NULL (its own job).
+    # Tradable rows carry the dump's own fields; the surveillance/MIS join is left NULL (its own job).
     assert by_sym["RELIANCE"]["tick_size"] == Decimal("0.05")
     assert by_sym["RELIANCE"]["fno"] is False
     assert by_sym["RELIANCE"]["surveillance"] is None and by_sym["RELIANCE"]["mis_leverage"] is None
@@ -223,7 +223,7 @@ async def test_snapshot_rows_columns_match_table_spec(clock):
 # ------------------------------------------------------------------ snapshot -> hydrate round-trip
 async def test_snapshot_hydrate_round_trip_is_identical(clock):
     """refresh -> snapshot_rows -> hydrate rebuilds an identical token map (tradable + index, both
-    directions), with is_fno read verbatim from the stored column (F2)."""
+    directions), with is_fno read verbatim from the stored column."""
     src = InstrumentStore(clock)
     await src.refresh(FakeKite([RELIANCE_ROW, NIFTY_FUT_ROW, NIFTY50_ROW, INDIA_VIX_ROW]))
     rows = src.snapshot_rows(SNAPSHOT_DAY)
@@ -236,7 +236,7 @@ async def test_snapshot_hydrate_round_trip_is_identical(clock):
     assert dst.is_empty is False
     assert dst.hydrated is True                               # provenance flag flipped
     assert dst.index_count == 2
-    # §3.2.4 alias-seed source: the company name survives the round-trip (2026-08-03 G1 finding —
+    # Alias-seed source: the company name survives the round-trip (2026-08-03 finding —
     # a name-less snapshot left entity_aliases empty and every live headline unresolved).
     assert dst.by_symbol("RELIANCE").name == "RELIANCE INDUSTRIES LTD"
 
@@ -248,7 +248,7 @@ async def test_snapshot_hydrate_round_trip_is_identical(clock):
         assert dst.is_fno(sym) == src.is_fno(sym)
     assert dst.is_fno("NIFTY26JANFUT") is True               # stored fno honoured (not re-derived)
 
-    # Index seam identical, both directions; still fail-closed on the tradable seam (A2).
+    # Index seam identical, both directions; still fail-closed on the tradable seam.
     assert dst.token_for_symbol("NIFTY 50") == 256265
     assert dst.symbol_for_token(264969) == "INDIA VIX"
     with pytest.raises(UnknownInstrument):
@@ -270,7 +270,7 @@ def _stored_row(**over) -> dict:
 
 async def test_hydrate_skips_and_counts_malformed_rows(clock):
     """A malformed stored row (missing token, NULL/zero tick, missing index symbol) is skipped and
-    counted, never aborting the hydrate — the one good tradable + one good index still resolve (F2)."""
+    counted, never aborting the hydrate — the one good tradable + one good index still resolve."""
     good_index = {"d": SNAPSHOT_DAY, "instrument_token": 256265, "tradingsymbol": "NIFTY 50",
                   "segment": "INDICES", "instrument_type": "INDEX", "tick_size": None, "lot_size": None,
                   "fno": False}
@@ -293,10 +293,10 @@ async def test_hydrate_skips_and_counts_malformed_rows(clock):
         assert store.token_for_symbol(bad) is None
 
 
-# ================================================================== F1/F2 round-trip through the REAL store
+# ================================================================== round-trip through the REAL store
 @pytest.fixture
 def market_store(tmp_path, clock):
-    """A hermetic tmp DuckDB store (never data/market.duckdb) — the real upsert/get_latest path the F2
+    """A hermetic tmp DuckDB store (never data/market.duckdb) — the real upsert/get_latest path the
     cold-start hydrate uses, so the DECIMAL round-trip is exercised, not just the in-memory dict path."""
     s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
     s.open()
@@ -330,7 +330,7 @@ async def test_store_round_trip_is_lossless_including_subpaisa(market_store, clo
     assert dst.token_for_symbol("INDIA VIX") == 264969
     assert dst.symbol_for_token(256265) == "NIFTY 50"
 
-    # Normal equity intact; the tradable seam still fail-closed for indices (A2).
+    # Normal equity intact; the tradable seam still fail-closed for indices.
     assert dst.token_for_symbol("RELIANCE") == 408065
     assert dst.by_symbol("RELIANCE").tick_size == Decimal("0.05")
     with pytest.raises(UnknownInstrument):
@@ -342,7 +342,7 @@ async def test_store_round_trip_is_lossless_including_subpaisa(market_store, clo
 
 
 async def test_store_round_trip_still_rejects_corrupt_equity(market_store, clock, caplog):
-    """The A10 tick_size>0 invariant is NOT weakened: a persisted EQUITY row whose tick is genuinely 0
+    """The tick_size>0 invariant is NOT weakened: a persisted EQUITY row whose tick is genuinely 0
     (corrupt data, not an index) is still skipped + warned on hydrate — even though a full round-trip
     otherwise produces no skips."""
     src = InstrumentStore(clock)
@@ -370,9 +370,9 @@ async def test_store_round_trip_still_rejects_corrupt_equity(market_store, clock
     assert [r for r in caplog.records if r.getMessage() == "instrument.hydrate_row_skipped"]
 
 
-# ------------------------------------------------------------- C7 NFO->underlying join (2026-07-31)
+# ------------------------------------------------------------- NFO->underlying join (2026-07-31)
 async def test_equity_with_a_derivative_is_flagged_fno(clock):
-    """The C7 join: an NSE equity whose tradingsymbol appears as a derivative row's ``name`` is
+    """The NFO->underlying join: an NSE equity whose tradingsymbol appears as a derivative row's ``name`` is
     F&O-listed. Before 2026-07-31 only the DERIVATIVE rows were flagged, the equity lookup the
     platform actually performs always returned False, and mis_candidates was empty every day."""
     store = InstrumentStore(clock)
@@ -390,7 +390,7 @@ async def test_equity_without_derivatives_stays_non_fno(clock):
 
 
 async def test_fno_join_round_trips_through_snapshot_and_hydrate(clock):
-    """The joined flag must survive snapshot_rows -> hydrate verbatim (stored column, F2)."""
+    """The joined flag must survive snapshot_rows -> hydrate verbatim (stored column)."""
     src = InstrumentStore(clock)
     await src.refresh(FakeKite([RELIANCE_ROW, RELIANCE_FUT_ROW]))
     dst = InstrumentStore(clock)

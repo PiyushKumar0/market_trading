@@ -1,4 +1,4 @@
--- ------------------------------------- §3.2.11 owner-notification journal + retry outbox (WO-24d)
+-- ------------------------------------- owner-notification journal + retry outbox
 -- 2026-08-21: ``TelegramBot._send_text`` DROPPED on failure — logged, never queued, never stored.
 -- On this box's flaky path that is not a theoretical loss: 223 ConnectTimeouts on 08-20 and 186 on
 -- 08-19, so a RECOMMENDATION fired during an outage vanished with nothing on the platform able to

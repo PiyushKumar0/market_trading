@@ -1,4 +1,4 @@
-"""D8 live-impossibility pins (plan Q3.1 (b), (d), (f)): AST allow-lists, by file, over every
+"""Live-impossibility pins: AST allow-lists, by file, over every
 non-test Python root; the Telegram /mode AUTO refusal; the boot downgrade's owner alert."""
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def test_orders_enabled_is_never_passed_outside_tests() -> None:
 
 
 def test_kite_client_internals_are_touched_only_in_the_facade() -> None:
-    """No ``**`` splat into KiteClient(...); the D8 switch is reached only in kite_client.py and the raw
+    """No ``**`` splat into KiteClient(...); the live-impossibility switch is reached only in kite_client.py and the raw
     client only there and in session.py (its construction site), by attribute or getattr/setattr string."""
     owners = {"_orders_enabled": {"src/engine/broker/kite_client.py"},
               "_kc": {"src/engine/broker/kite_client.py", "src/engine/broker/session.py"}}

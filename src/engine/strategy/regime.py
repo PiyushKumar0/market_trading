@@ -1,6 +1,6 @@
 """The NIFTY 50 index regime: close > SMA50 > SMA50 twenty sessions earlier, all strict.
 
-ONE predicate for rsi2's uptrend leg and the brk20 sweep's C2 gate. ``scripts/backtest_regime_filter.py``
+ONE predicate for rsi2's uptrend leg and the brk20 sweep's regime gate. ``scripts/backtest_regime_filter.py``
 keeps its own copy (a completed registered study, byte-identical); ``tests/offline/test_research_filters.py``
 pins the two to agree.
 """

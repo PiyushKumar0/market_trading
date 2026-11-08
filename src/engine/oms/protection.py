@@ -1,4 +1,4 @@
-"""Paper ProtectionManager (plan Q4.5): one GTT per open paper position, and what follows its trigger.
+"""Paper ProtectionManager: one GTT per open paper position, and what follows its trigger.
 
 Per held paper position:
 
@@ -7,7 +7,7 @@ Per held paper position:
 * PROTECTION_FAILED: a ``failed`` GTT, or re-placements or exit retries exhausted; PAPER_ALERT goes out.
 * closed.
 
-Every exit goes through the injected Q4.6 exit routine, only in session and only once the broker book
+Every exit goes through the injected exit routine, only in session and only once the broker book
 is settled into the OMS; otherwise it queues for the next :meth:`ProtectionManager.tick`.
 SQLite runs on the event-loop thread and no write spans an ``await``.
 """
@@ -55,7 +55,7 @@ MAX_RETRIES = 3
 
 
 class ExitFn(Protocol):
-    """The Q4.6 exit routine. Sends nothing while the position has a working exit; marks it PENDING_EXIT."""
+    """The exit routine. Sends nothing while the position has a working exit; marks it PENDING_EXIT."""
 
     def __call__(self, position_id: str, reason: CloseReason, basis: str) -> Awaitable[None]: ...
 

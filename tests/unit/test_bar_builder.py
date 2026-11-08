@@ -1,13 +1,13 @@
-"""BarBuilder (§3.2.3 / §4.4 job 1): hand-computed tick sequences → exact bars.
+"""BarBuilder: hand-computed tick sequences → exact bars.
 
-Covers the pinned rules: pre-open drop + auction open on the 09:15 row (A14), the symmetric
-post-close drop (WO-5), volume = Δ(cumulative day volume) (A13), minute+5s-grace Clock-driven
-finalization, late-tick corrections incl. the official-bar-untouchable guard (WO-5), the
+Covers the pinned rules: pre-open drop + auction open on the 09:15 row, the symmetric
+post-close drop, volume = Δ(cumulative day volume), minute+5s-grace Clock-driven
+finalization, late-tick corrections incl. the official-bar-untouchable guard, the
 cumulative-decrease restatement guard (never negative volume), day rollover, and the mid-session
 first-tick rule. Time is controlled through an injected mutable Clock time source.
 
-WO-25a adds the late-tick cost tests: an in-range late tick must touch NO store method at all (the
-2026-08-24 death spiral), an out-of-range one must still amend through the WO-5 CAS path, the log
+Late-tick cost tests: an in-range late tick must touch NO store method at all (the
+2026-08-24 death spiral), an out-of-range one must still amend through the CAS path, the log
 must be deduped per (symbol, minute) behind a per-wall-minute aggregate, and the processing-lag
 watchdog must fire once per episode and recover.
 
@@ -95,7 +95,7 @@ def test_preopen_dropped_auction_open_stamped_grace_finalization(store, mclock, 
     bb = BarBuilder(store, mclock)
     feed(bb, now, tick("R", at(9, 6, 59), "100.10", 0))     # pre-open — dropped from bars
     feed(bb, now, tick("R", at(9, 14, 59), "100.25", 0))    # LAST pre-open print = auction open
-    feed(bb, now, tick("R", at(9, 15, 1), "101.00", 500))   # session: full cum → 09:15 bar (A13)
+    feed(bb, now, tick("R", at(9, 15, 1), "101.00", 500))   # session: full cum → 09:15 bar
     feed(bb, now, tick("R", at(9, 15, 30), "100.50", 700))
 
     now.set(at(9, 16, 4))                                   # grace: 09:15 bar closes at 09:16:05
@@ -110,14 +110,14 @@ def test_preopen_dropped_auction_open_stamped_grace_finalization(store, mclock, 
     assert bar.low == Decimal("100.50")
     assert bar.close == Decimal("100.50")
     assert bar.volume == 700                                # 500 (incl. auction volume) + 200
-    assert bar.auction_open == Decimal("100.25")            # stamped on the 09:15 row only (A14)
+    assert bar.auction_open == Decimal("100.25")            # stamped on the 09:15 row only
     assert bar.src == "self"
 
     stored = store.get_bars_1m("R", at(9, 15), at(9, 16))   # batch-written via MarketStore
     assert len(stored) == 1
     assert stored[0].volume == 700
     assert stored[0].auction_open == Decimal("100.25")
-    # Zero bar contamination from pre-open ticks (A14).
+    # Zero bar contamination from pre-open ticks.
     assert store.get_bars_1m("R", at(9, 0), at(9, 15)) == []
 
 
@@ -202,7 +202,7 @@ def test_late_tick_goes_to_corrections_and_amends_range(store, mclock, now):
     assert stored.close == Decimal("100.50")     # close never restated post-finalize
     assert stored.volume == 700                  # volume never restated post-finalize
 
-    # A late print INSIDE the (now amended) range: bar untouched AND no correction row — WO-25a makes
+    # A late print INSIDE the (now amended) range: bar untouched AND no correction row — the late-tick fix makes
     # the in-range case free, and "nothing to widen" was never worth a DuckDB INSERT.
     now.set(at(9, 16, 12))
     bb.on_tick(tick("R", at(9, 15, 45), "100.80", 721))
@@ -210,7 +210,7 @@ def test_late_tick_goes_to_corrections_and_amends_range(store, mclock, now):
     assert again.high == Decimal("102.00") and again.volume == 700
 
     corrections = store.get_corrections(D)          # ordered by tick_ts, not insertion order
-    assert len(corrections) == 1                    # only the amending print is recorded (WO-25a)
+    assert len(corrections) == 1                    # only the amending print is recorded
     outside = corrections[0]                        # the range-amending late print
     assert outside["tick_ts"] == at(9, 15, 59)
     assert outside["amended"] is True
@@ -224,7 +224,7 @@ def test_late_tick_goes_to_corrections_and_amends_range(store, mclock, now):
     assert bar_916.volume == 200
 
 
-# ---------------------------------------------- WO-5: official bars are untouchable by late ticks
+# ---------------------------------------------- official bars are untouchable by late ticks
 def _finalize_915_self_bar(bb: BarBuilder, now: _Now) -> None:
     """Build + finalize a 09:15 src='self' bar (high 101.00 / low 100.50, volume 700)."""
     feed(bb, now, tick("R", at(9, 15, 1), "101.00", 500))
@@ -235,7 +235,7 @@ def _finalize_915_self_bar(bb: BarBuilder, now: _Now) -> None:
 
 @pytest.mark.parametrize("src", ["kite_official", "gap_backfilled"])
 def test_late_tick_never_amends_a_non_self_bar(store, mclock, now, src):
-    """A reconciled/backfilled row is CANONICAL (§4.4 job 2) and reconcile never revisits a
+    """A reconciled/backfilled row is CANONICAL and reconcile never revisits a
     checkpointed day — a stray late tick must leave it byte-intact and say so in corrections_log."""
     bb = BarBuilder(store, mclock)
     _finalize_915_self_bar(bb, now)
@@ -262,7 +262,7 @@ def test_late_tick_never_amends_a_non_self_bar(store, mclock, now, src):
 
 
 def test_late_tick_queued_behind_a_reconcile_write_decides_on_the_current_row(store, mclock, now):
-    """TOCTOU pin (WO-5 iii): the amendment's read-decide-write happens in ONE store-lock hold, so a
+    """TOCTOU pin: the amendment's read-decide-write happens in ONE store-lock hold, so a
     reconcile write that lands while the tick thread is queued is seen by the decision — the late
     tick can never act on (or write back) the pre-reconcile snapshot it might have read first."""
     bb = BarBuilder(store, mclock)
@@ -300,7 +300,7 @@ def test_late_tick_queued_behind_a_reconcile_write_decides_on_the_current_row(st
     assert corr["amended"] is False and corr["reason"] == "official_bar_untouchable"
 
 
-# ------------------------------------------------- WO-5: post-close exclusion (symmetric to A14)
+# ------------------------------------------------- post-close exclusion (symmetric to the pre-open drop)
 def test_post_close_ticks_build_no_bar_and_are_counted(store, mclock, now):
     """Post-15:30 prints sit outside the nightly reconcile's comparison window forever, so they may
     never build a bar. Symmetric to pre-open: dropped from bars, counted, still persisted raw."""
@@ -358,7 +358,7 @@ def test_day_rollover_resets_state_and_flushes_open_bars(store, mclock, now):
     assert bar.auction_open is None           # no pre-open print seen on day 2
 
 
-# ------------------------------------------------------------------ feed_stats counters (R8)
+# ------------------------------------------------------------------ feed_stats counters
 def test_stats_snapshot_counts_finalized_and_written_then_resets(store, mclock, now):
     """The periodic feed_stats line reads bars_finalized/bars_written from here; reset-on-read."""
     bb = BarBuilder(store, mclock)
@@ -370,15 +370,15 @@ def test_stats_snapshot_counts_finalized_and_written_then_resets(store, mclock, 
     snap = bb.stats_snapshot()
     assert snap["bars_finalized"] == 2
     assert snap["bars_written"] == 2
-    assert (snap["late_ticks"], snap["late_store_calls"]) == (0, 0)   # WO-25a late-tick pressure
-    # reset-on-read (ticks_dropped: bar-exclusion reason -> count, WO-5)
+    assert (snap["late_ticks"], snap["late_store_calls"]) == (0, 0)   # late-tick pressure
+    # reset-on-read (ticks_dropped: bar-exclusion reason -> count)
     assert bb.stats_snapshot() == {
         "bars_finalized": 0, "bars_written": 0, "ticks_dropped": {},
         "late_ticks": 0, "late_store_calls": 0,
     }
 
 
-# ------------------------------------------------------------------ raw tick persistence (§4.3)
+# ------------------------------------------------------------------ raw tick persistence
 def test_raw_ticks_buffered_including_preopen(store, mclock, now):
     bb = BarBuilder(store, mclock)
     pre = tick("R", at(9, 10, 0), "99.90", 0)
@@ -390,7 +390,7 @@ def test_raw_ticks_buffered_including_preopen(store, mclock, now):
     assert [t.exchange_ts for t in persisted] == [pre.exchange_ts, live.exchange_ts]
 
 
-# ==================================================================== WO-25a: the late-tick cost
+# ==================================================================== the late-tick cost
 # 2026-08-24: once processing slipped past the finalize grace EVERY tick took the late path
 # (amend CAS + corrections INSERT + one INFO line), throughput fell below real time and the lag grew
 # without bound — 215,823 late_tick_past_grace lines by lunchtime, 201,537 of them 'in_range', i.e.
@@ -445,7 +445,7 @@ def test_in_range_late_tick_touches_no_store_method_at_all(store, mclock, now):
 
 
 def test_out_of_range_late_tick_still_amends_through_the_cas_path(store, mclock, now):
-    """The genuinely-amending case is unchanged: one ``amend_bar_1m_extremes`` (the WO-5 single-lock
+    """The genuinely-amending case is unchanged: one ``amend_bar_1m_extremes`` (the single-lock
     read-decide-write CAS) plus its ``corrections_log`` row. Only after it lands does the print
     become free — the amendment widens the REMEMBERED range in the same step."""
     spy = _SpyStore(store)
@@ -540,7 +540,7 @@ def test_late_ticks_summary_aggregates_the_wall_minute(store, mclock, now, caplo
     assert summary.window == at(9, 16).isoformat()
 
 
-# ------------------------------------------------------------- WO-25a: processing-lag watchdog
+# ------------------------------------------------------------- processing-lag watchdog
 async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, now, caplog):
     """2026-08-26 23:21 false page: an after-hours ticker reconnect replayed snapshot frames stamped
     ~17:35 and 'now − ts' read as a 5.8 h backlog on a stream with none. Guard (i): a previous-day
@@ -681,8 +681,7 @@ async def test_lag_watchdog_without_a_notify_sink_is_log_only(store, mclock, now
 # each stale tick re-opened it and the next fresh tick closed it: 14 ERROR/recovered pairs in 83 ms
 # and 6 owner pages. Both 2026-08-26 guards were inert by construction (same day; 15:30-15:45 is
 # deliberately watched via _LAG_WATCH_END_BUFFER), and there is no snapshot marker on the wire — so
-# the grace is driven by the supervisor's feed.health transitions instead (IMPLEMENTATION_PLAN §2.6,
-# "Tick-lag reconnect grace").
+# the grace is driven by the supervisor's feed.health transitions instead.
 
 
 def _health(state: str) -> FeedHealth:
@@ -882,7 +881,7 @@ async def test_an_in_child_reconnect_edge_arms_the_grace_mid_session(store, mclo
 
 def test_a_stale_minute_placeholder_never_evicts_a_real_cached_bar(store, mclock, now):
     """2026-09-02 review (CONFIRMED): ranged=False placeholders shared the 5-entry LRU with real
-    finalized bars, so a reconnect replaying 5+ distinct stale minutes wiped the whole WO-25a cache
+    finalized bars, so a reconnect replaying 5+ distinct stale minutes wiped the whole late-tick cache
     and put every current-minute tick back on the store path. A placeholder is only remembered when
     it does not displace a real range."""
     spy = _SpyStore(store)

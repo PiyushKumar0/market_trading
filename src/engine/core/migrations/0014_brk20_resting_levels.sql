@@ -1,5 +1,5 @@
--- ------------------------- §6.1 `brk20` RETEST re-arm: the broken level RESTS for 5 sessions
--- 2026-09-12 (WO-R). The 2026-09-12 pre-registered entry-mechanism backtest selected
+-- ------------------------- `brk20` RETEST re-arm: the broken level RESTS for 5 sessions
+-- 2026-09-12. The 2026-09-12 pre-registered entry-mechanism backtest selected
 -- `V2_limit_at_H20_N5` under its own decision rule: a limit resting at the broken level for up to
 -- FIVE sessions beat both market-on-confirmation (V1) and the three-session limit (V2-3) at T+10,
 -- and was the only variant geometry-viable there. The LIVE rule publishes that level exactly ONCE,
@@ -8,7 +8,7 @@
 -- (its fill rate reads 31.4% off the registered delay histogram, against V2-5's 59.1%).
 --
 -- The live cost of the one-shot publication is measured, not hypothetical: of 15 `brk20` proposals on
--- 2026-09-11, SIX died on the §7.1 `entry_sanity_band` because the rested level already sat >2% below
+-- 2026-09-11, SIX died on the risk gate's `entry_sanity_band` because the rested level already sat >2% below
 -- LTP by the time the sweep ran (IDEA 5.24%, PAYTM 4.01%, SAIL 2.88%, KOTAKBANK 4.65%, SYRMA 3.96%,
 -- CHENNPETRO 6.30%), and the band was the SOLE reject cause for three of them — the three top-scoring
 -- candidates of the day, because the score is monotone in breakout margin and a wide margin is
@@ -22,7 +22,7 @@
 -- calendar at write time (holidays and weekends are not sessions, and a calendar-blind +5 days would
 -- quietly shorten the window over every long weekend).
 --
--- Prices are TEXT decimal strings (§8.1: money never round-trips through a float) — the `ins_pending`
+-- Prices are TEXT decimal strings (money never round-trips through a float) — the `ins_pending`
 -- convention. `stop`/`target` are NULLABLE even though `brk20.scan_daily` always ships all three:
 -- `RawLevels` permits None, and a schema that cannot represent what the type permits turns a future
 -- level shape into an IntegrityError inside the sweep.
@@ -30,7 +30,7 @@
 -- This table grants NO edge and widens NO envelope. It changes WHEN an already-admitted level is
 -- offered for judgement, never the level, the band, the caps, the gate or the expectancy claim:
 -- every re-publication goes through the SAME `prescreen.admit` (same day cap, same per-strategy cap,
--- same same-day dedupe) and the same §7.1 gate as the original, and `brk20` stays exploratory.
+-- same same-day dedupe) and the same risk gate as the original, and `brk20` stays exploratory.
 CREATE TABLE brk20_resting_levels (
     symbol     TEXT NOT NULL,
     signal_d   TEXT NOT NULL,              -- IST crossing session, ISO-8601 (sorts chronologically)

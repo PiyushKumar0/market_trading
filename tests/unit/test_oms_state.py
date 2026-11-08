@@ -1,7 +1,7 @@
-"""OMS order state machine unit tests (WO-P3-1, 2026-09-10; plan §3.5.1/§3.5.2, §9.1).
+"""OMS order state machine unit tests (2026-09-10).
 
-Covers every edge of the §3.5.1 transition table (plus a forbidden sample per state), `filled_qty`
-preservation across the residual-cancel / lapse paths, the A2 modification cap (20) and the
+Covers every edge of the transition table (plus a forbidden sample per state), `filled_qty`
+preservation across the residual-cancel / lapse paths, the modification cap (20) and the
 cancel-and-replace threshold (18), and reject-reason capture.
 """
 
@@ -70,7 +70,7 @@ def make_order(state: OrderState, **kw) -> PlatformOrder:
     return PlatformOrder(**base)
 
 
-# ----------------------------------------------------------------- enums pinned to the plan / schema
+# ----------------------------------------------------------------- enums pinned to the diagram / schema
 def test_terminal_states_are_the_four_plan_states() -> None:
     assert TERMINAL_ORDER_STATES == frozenset(
         {OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED, OrderState.LAPSED}
@@ -105,7 +105,7 @@ def test_position_and_protection_states_match_plan_3_5_2() -> None:
         "PROTECTED",
         "PROTECTION_PENDING",
         "PROTECTION_FAILED",
-        "TIME_EXIT_ONLY",                  # 2026-10-15 amendment (D14)
+        "TIME_EXIT_ONLY",                  # 2026-10-15 addition (paper no-stop exit test)
     ]
 
 
@@ -172,10 +172,10 @@ def test_every_allowed_edge_is_traversable(frm: OrderState, to: OrderState) -> N
 
 _S = OrderState
 
-#: The §3.5.1 diagram TRANSCRIBED BY HAND from the plan, edge for edge. Compared for LITERAL EQUALITY
+#: The state diagram TRANSCRIBED BY HAND, edge for edge. Compared for LITERAL EQUALITY
 #: against the shipped table (2026-09-10 review finding: a derived/subset assertion is tautological —
 #: it passes for any widening of the table). Anything added to, or dropped from, the machine has to be
-#: re-transcribed here from the plan, so an unreviewed edge cannot reach the OMS.
+#: re-transcribed here by hand, so an unreviewed edge cannot reach the OMS.
 EXPECTED_DIAGRAM_TRANSITIONS = {
     _S.DRAFT: {_S.VALIDATED, _S.REJECTED},          # REJECTED: 2026-10-06 amendment (abandoned)
     _S.VALIDATED: {_S.SUBMITTED, _S.REJECTED},      # REJECTED: 2026-10-06 amendment (abandoned)
@@ -190,11 +190,11 @@ EXPECTED_DIAGRAM_TRANSITIONS = {
     _S.LAPSED: set(),
 }
 
-#: The broker-reality additions, transcribed from the ratified §8.4 WO-P3-1 decision (2026-09-10).
+#: The broker-reality additions, transcribed from the ratified decision (2026-09-10).
 #: Load-bearing exclusion: CANCEL_PENDING -> ACKED is ABSENT — a cancel intent is cleared only by
 #: CANCELLED or by the explicit :func:`cancel_rejected` door, never by a replayed/stale OPEN frame
 #: (the Reconciler's 5-minute re-read returns OPEN for an in-flight cancel; flipping the row back
-#: steers the §3.2.8 square-off coordination into the double-exit hazard).
+#: steers the square-off coordination into the double-exit hazard).
 EXPECTED_BROKER_REALITY_TRANSITIONS = {
     _S.SUBMITTED: {_S.PARTIALLY_FILLED, _S.FILLED, _S.CANCELLED},
     _S.ACKED: {_S.FILLED, _S.CANCELLED, _S.REJECTED},
@@ -223,7 +223,7 @@ def test_allowed_table_is_exactly_the_union_of_the_two_transcribed_tables() -> N
 
 
 def test_broker_reality_edges_are_disjoint_from_the_diagram() -> None:
-    # The additions beyond the literal §3.5.1 diagram are enumerated separately so they stay auditable.
+    # The additions beyond the literal diagram are enumerated separately so they stay auditable.
     for frm, tos in BROKER_REALITY_TRANSITIONS.items():
         assert not (tos & DIAGRAM_TRANSITIONS.get(frm, frozenset()))
 
@@ -247,7 +247,7 @@ def test_terminal_states_have_no_outgoing_edges() -> None:
 
 
 FORBIDDEN_SAMPLES = [
-    (OrderState.DRAFT, OrderState.SUBMITTED),           # must be VALIDATED first (R1 gate chain)
+    (OrderState.DRAFT, OrderState.SUBMITTED),           # must be VALIDATED first (gate chain)
     (OrderState.VALIDATED, OrderState.ACKED),           # no ack without a submit
     (OrderState.SUBMITTED, OrderState.MODIFY_PENDING),  # nothing to modify before an ack
     (OrderState.ACKED, OrderState.ACKED),               # self-edge: a duplicate, not a transition
@@ -275,7 +275,7 @@ def test_every_state_has_a_forbidden_sample() -> None:
     assert {f for f, _ in FORBIDDEN_SAMPLES} == set(OrderState)
 
 
-# ----------------------------------------------------------------- filled_qty conservation (§9.2)
+# ----------------------------------------------------------------- filled_qty conservation
 def test_residual_cancel_preserves_filled_qty() -> None:
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     pending, _ = transition(order, OrderState.CANCEL_PENDING, payload={}, at=AT)
@@ -358,7 +358,7 @@ def test_a_matching_fill_carries_no_mismatch_flag() -> None:
     assert "qty_mismatch" not in ev.payload
 
 
-# ----------------------------------------------------------------- modification cap (A2)
+# ----------------------------------------------------------------- modification cap
 def test_modification_cap_is_twenty_and_threshold_eighteen() -> None:
     assert MODIFICATION_CAP == 20
     assert MODIFY_REPLACE_THRESHOLD == 18
@@ -391,7 +391,7 @@ def test_negative_modifications_delta_rejected() -> None:
         transition(order, OrderState.MODIFY_PENDING, payload={}, at=AT, modifications_delta=-1)
 
 
-# ----------------------------------------------------------------- reject reason capture (A8/A9)
+# ----------------------------------------------------------------- reject reason capture
 def test_reject_captures_broker_status_message() -> None:
     order = make_order(OrderState.SUBMITTED)
     payload = {"status": "REJECTED", "status_message": "Insufficient margin (RMS:Margin Exceeds)"}
@@ -424,7 +424,7 @@ def test_platform_order_rejects_naive_timestamps() -> None:
         make_order(OrderState.DRAFT, created_at=datetime(2026, 9, 10, 10, 5))
 
 
-# ----------------------------------------------------------------- the ONE postback parser (§3.5.1)
+# ----------------------------------------------------------------- the ONE postback parser
 def postback(**kw) -> dict:
     """A Kite order postback as carried by ``OrderUpdateFrame.data`` (verbatim broker field names)."""
     data = {
@@ -577,7 +577,7 @@ def test_apply_update_captures_reject_reason() -> None:
     assert rejected.reject_reason == "RMS:Blocked for TATAMOTORS"
 
 
-# ----------------------------------------------------------------- pending correlation (A3, §3.5.1)
+# ----------------------------------------------------------------- pending correlation
 def test_pending_correlation_buffers_then_resolves_in_arrival_order() -> None:
     pc = PendingCorrelation(max_entries=8)
     for i in range(3):
@@ -617,7 +617,7 @@ def test_pending_correlation_sweep_returns_stale_entries() -> None:
 
 # ------------------------------------------------- cancel intent is cleared ONLY by a cancel outcome
 # 2026-09-10 review finding (major): a replayed/stale OPEN frame moved CANCEL_PENDING back to ACKED,
-# which would let the §3.2.8 square-off coordination send a market exit alongside a protective order
+# which would let the square-off coordination send a market exit alongside a protective order
 # that is in fact still resting (or already triggered) — the double-exit-into-a-short hazard.
 def test_stale_open_postback_never_clears_a_cancel_intent() -> None:
     order = make_order(OrderState.CANCEL_PENDING, broker_order_id="251009000123456")
@@ -646,7 +646,7 @@ def test_cancel_outcome_still_applies_from_cancel_pending() -> None:
 
 
 def test_a_fill_that_already_happened_still_lands_from_cancel_pending() -> None:
-    # §3.2.8: "the cancel is REJECTED because the protective order already triggered/filled in the gap".
+    # "the cancel is REJECTED because the protective order already triggered/filled in the gap".
     order = make_order(OrderState.CANCEL_PENDING, filled_qty=40, broker_order_id="251009000123456")
     filled, _ = apply_update(
         order, parse_postback(postback(status="COMPLETE", filled_quantity=QTY)), at=AT
@@ -671,7 +671,7 @@ def test_cancel_rejected_returns_an_unfilled_order_to_acked() -> None:
     assert back.state is OrderState.ACKED
     assert back.filled_qty == 0
     assert back.updated_at == AT + timedelta(seconds=3)
-    assert back.raw_broker_payload == payload              # the broker's rejection is kept (R8)
+    assert back.raw_broker_payload == payload              # the broker's rejection is kept
     assert ev.from_state is OrderState.CANCEL_PENDING and ev.to_state is OrderState.ACKED
     assert ev.payload["cancel_rejected"] is True
 
@@ -696,7 +696,7 @@ def test_cancel_rejected_only_applies_to_a_cancel_intent(state: OrderState) -> N
 # ------------------------------------------------- the broker REFUSED our modify (mirrors the above)
 def test_amend_records_the_pre_amend_values_on_its_event() -> None:
     # The frozen row keeps only the NEW values, so the old ones have to live somewhere the platform
-    # can read them back: the amend's own audit row (R8). modify_rejected restores from there.
+    # can read them back: the amend's own audit row. modify_rejected restores from there.
     order = make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, side="SELL", qty=40,
                        price=None, trigger_price=Decimal("98.50"), broker_order_id="251009000999999")
     _, ev = amend(order, qty=70, trigger_price=Decimal("99.10"), at=AT)
@@ -714,9 +714,9 @@ def test_modify_rejected_restores_the_pre_amend_fields_and_keeps_the_a2_spend() 
                                 prior_fields=ev.payload["prior_fields"])
     assert back.state is OrderState.ACKED                    # the pre-modify fill state
     assert back.qty == 40 and back.trigger_price == Decimal("98.50")   # the broker never applied it
-    assert back.modifications == 1                           # the A2 budget stays SPENT (A2)
+    assert back.modifications == 1                           # the modification budget stays SPENT
     assert back.updated_at == AT + timedelta(seconds=2)
-    assert back.raw_broker_payload == payload                # the broker's refusal is kept (R8)
+    assert back.raw_broker_payload == payload                # the broker's refusal is kept
     assert ev2.from_state is OrderState.MODIFY_PENDING and ev2.to_state is OrderState.ACKED
     assert ev2.payload["modify_rejected"] is True
     assert ev2.payload["fields_applied"] == {"qty": 40, "trigger_price": Decimal("98.50")}
@@ -733,7 +733,7 @@ def test_modify_rejected_returns_a_partial_to_its_pre_modify_fill_state() -> Non
 
 def test_modify_rejected_without_prior_fields_moves_the_state_only() -> None:
     # The caller could not find the amend's audit row: the state must still leave MODIFY_PENDING (it
-    # has no outgoing modify edge, so a stranded order breaks the §3.2.8 SL-M ladder), and the row
+    # has no outgoing modify edge, so a stranded order breaks the SL-M ladder), and the row
     # keeps what it has rather than inventing values the platform never held.
     order = make_order(OrderState.ACKED, qty=40, broker_order_id="251009000123456")
     pending, _ = amend(order, qty=70, at=AT)
@@ -773,7 +773,7 @@ def test_modify_ack_applies_when_the_broker_timestamp_is_newer() -> None:
 )
 def test_modify_ack_is_a_noop_when_the_frame_predates_the_modify(exchange_ts: str, case: str) -> None:
     # A replayed OPEN frame from BEFORE the modify must not be read as the modify's acknowledgement,
-    # or the order looks amended when the broker never applied it (§3.5.1 duplicate/out-of-order).
+    # or the order looks amended when the broker never applied it (duplicate/out-of-order).
     order = make_order(OrderState.MODIFY_PENDING, modifications=1,
                        broker_order_id="251009000123456",
                        updated_at=datetime(2026, 9, 10, 10, 5, 2, 400000, tzinfo=IST))
@@ -788,8 +788,8 @@ def test_modify_ack_within_the_same_second_still_applies() -> None:
 
     A literal ``broker_ts > updated_at`` drops the ack of a modify applied inside the same second —
     the normal case at ~100-300 ms postback latency — stranding the order in MODIFY_PENDING, which
-    has no outgoing modify edge. §3.2.8's SL-M qty ladder then breaks on the next fill accretion:
-    the stale-frame guard would have become an R3 protection hazard. Probed with the §9.2 property
+    has no outgoing modify edge. The SL-M qty ladder then breaks on the next fill accretion:
+    the stale-frame guard would have become a broker-resident protection hazard. Probed with the property
     generator, which never once reached a cleared modify intent under the literal comparison.
     """
     order = make_order(OrderState.MODIFY_PENDING, modifications=1, qty=40,
@@ -804,7 +804,7 @@ def test_modify_ack_within_the_same_second_still_applies() -> None:
 
 
 def test_a_fill_during_a_modify_applies_regardless_of_the_broker_clock() -> None:
-    # Only the ACK is clock-gated; a fill that already happened must always land (R5).
+    # Only the ACK is clock-gated; a fill that already happened must always land.
     order = make_order(OrderState.MODIFY_PENDING, modifications=1,
                        broker_order_id="251009000123456",
                        updated_at=datetime(2026, 9, 10, 10, 9, tzinfo=IST))
@@ -850,7 +850,7 @@ def test_stale_partial_frame_never_clears_a_modify_intent_or_reverts_the_amend()
 def test_a_stale_but_grown_frame_lands_the_fill_without_reverting_the_amend() -> None:
     """2026-09-10 round-3 review (major, both lenses): the `grew` exemption let a PRE-amend frame
     that carries a real fill clear MODIFY_PENDING *and* write its stale trigger back onto the row —
-    the §3.2.8 protective-SL revert, through the fill door instead of the ack door. The two decisions
+    the protective-SL revert, through the fill door instead of the ack door. The two decisions
     are now split: the fill lands and the state moves (it already happened), but a frame that
     predates the intent never rewrites the amended fields — they ride the event as evidence."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=5, order_type="SL-M",
@@ -880,7 +880,7 @@ def test_a_stale_but_grown_frame_lands_the_fill_without_reverting_the_amend() ->
 
 
 def test_a_partial_fill_during_a_modify_applies_however_old_the_frame_is() -> None:
-    # Only a re-report is gated; a fill that already happened is never held back (R5).
+    # Only a re-report is gated; a fill that already happened is never held back.
     order = make_order(OrderState.MODIFY_PENDING, modifications=1, filled_qty=40,
                        broker_order_id="251009000123456",
                        updated_at=datetime(2026, 9, 10, 10, 9, tzinfo=IST))
@@ -934,7 +934,7 @@ def test_apply_update_never_raises_an_illegal_transition_for_a_broker_frame() ->
     assert ev is not None and ev.from_state is ev.to_state is OrderState.DRAFT
     assert ev.payload["illegal_transition"] is True
     assert ev.payload["attempted_to_state"] == "ACKED"
-    assert ev.payload["status"] == "OPEN"                   # the verbatim broker payload (R8)
+    assert ev.payload["status"] == "OPEN"                   # the verbatim broker payload
 
 
 def test_same_state_postback_records_the_fields_the_broker_reported() -> None:
@@ -959,7 +959,7 @@ def test_a_zero_quantity_postback_never_overwrites_the_row_quantity() -> None:
     assert ev is not None and "fields_applied" not in ev.payload
 
 
-# ------------------------------------------------- amend: a modify carries its new parameters (R3)
+# ------------------------------------------------- amend: a modify carries its new parameters
 def test_amend_stages_the_new_qty_on_the_modify_pending_edge() -> None:
     order = make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, qty=40, side="SELL",
                        trigger_price=Decimal("98.50"), broker_order_id="251009000123456")
@@ -1000,7 +1000,7 @@ def test_amend_counts_against_the_a2_budget_and_stops_at_the_cap() -> None:
 
 
 def test_protective_sl_modified_upward_then_fills_end_to_end() -> None:
-    """§3.2.8 R3 path: the SL-M is sized to the first partial, qty-modified upward as fills accrete.
+    """Broker-resident protection path: the SL-M is sized to the first partial, qty-modified upward as fills accrete.
 
     Before the 2026-09-10 fix the modify could not carry the new qty, so the FILLED postback for the
     enlarged protective order raised FillQuantityError against the stale row qty — a fill that had
@@ -1075,7 +1075,7 @@ def test_fill_disagreeing_with_the_row_is_recorded_and_flagged_never_raised() ->
     assert ev is not None and ev.payload["qty_mismatch"] is True
 
 
-# ------------------------------------------------- garbled/missing quantity on a partial (§3.5.1)
+# ------------------------------------------------- garbled/missing quantity on a partial
 def test_partial_with_a_missing_quantity_is_still_a_partial_fill() -> None:
     # 2026-09-10 review finding: an OPEN postback carrying filled_quantity but no `quantity` was
     # parsed as a plain ACK and then swallowed as a same-state duplicate — a real fill went unseen.
@@ -1145,7 +1145,7 @@ def test_apply_update_is_pure_on_a_noop() -> None:
 
 
 def test_buffered_updates_are_applied_with_their_arrival_times() -> None:
-    """The A3 end-to-end sequence: buffer -> correlate -> apply, each with its OWN arrival time."""
+    """The end-to-end sequence: buffer -> correlate -> apply, each with its OWN arrival time."""
     pc = PendingCorrelation(max_entries=8)
     pc.hold("251009000123456", postback(status="OPEN"), at=AT)
     pc.hold("251009000123456", postback(filled_quantity=40), at=AT + timedelta(seconds=1))

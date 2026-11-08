@@ -1,18 +1,18 @@
-"""Shared BSE HTTP hardening — browser headers, bounded retry, error-page detection (§2.8, E5).
+"""Shared BSE HTTP hardening — browser headers, bounded retry, error-page detection.
 
-BSE's ``api.bseindia.com/BseIndiaAPI/api/*`` JSON endpoints are the §2.8 SHP/pledge-history source
+BSE's ``api.bseindia.com/BseIndiaAPI/api/*`` JSON endpoints are the SHP/pledge-history source
 (``SHPQNewFormat/w`` quarter index + ``CorporatesSHPSecuritybeta/w`` detail) and the bulk scrip master
 (``ListofScripData/w``). They gate on a CURRENT browser User-Agent (the default ``python-httpx`` UA and,
 since 2026-09, a stale Chrome version are rejected with 403) and the ``Origin``/``Referer`` site
 headers, but — unlike NSE — carry NO anti-bot cookie priming step.
 
-**The documented BSE quirk (§2.8 source verdicts):** a bad request does NOT 404. It returns HTTP
+**The documented BSE quirk:** a bad request does NOT 404. It returns HTTP
 **200** that either redirects to ``…/error_Bse.html`` (final URL) or serves that error HTML with a
 200 status. Either way the body is HTML, not JSON. A health check that trusts the status code alone
 is fooled; the ONLY reliable signal is "did the body parse as JSON?" (probe evidence: the guessed
 ``ShareholdingPattern/w`` endpoints both returned ``200`` + ``error_Bse.html``). :func:`bse_get`
 therefore treats a 200-whose-final-URL-is-``error_Bse.html`` OR a 200-whose-body-fails-``json.loads``
-as a failure and raises :class:`BseError`, so each feed's outer except-degrade-alert path (E5) fires
+as a failure and raises :class:`BseError`, so each feed's outer except-degrade-alert path fires
 exactly as it does for a genuine transport error.
 
 Contract (mirrors :mod:`engine.core.nse_http` in shape — this helper only re-raises; the per-feed
@@ -45,7 +45,7 @@ _log = get_logger("engine.core.bse_http")
 
 #: Canonical browser-shaped headers for the BSE API host — the single source of truth (each feed
 #: imports THIS; no per-feed copy drifts). BSE rejects the default ``python-httpx`` UA and requires
-#: the site ``Origin``/``Referer`` (probe evidence, §2.8).
+#: the site ``Origin``/``Referer`` (probe evidence).
 BSE_HEADERS = {
     "User-Agent": BROWSER_USER_AGENT,
     "Accept": "application/json, text/plain, */*",
@@ -54,7 +54,7 @@ BSE_HEADERS = {
     "Referer": "https://www.bseindia.com/",
 }
 
-#: The BSE error page a bad request masquerades as a 200 with (final URL OR served body), §2.8.
+#: The BSE error page a bad request masquerades as a 200 with (final URL OR served body).
 _BSE_ERROR_PAGE = "error_Bse.html"
 
 #: Backoff base (1s, 2s, 4s, …) — mirrors ``nse_http`` so both hosts pace transient retries alike.
@@ -65,16 +65,16 @@ _sleep = asyncio.sleep
 
 
 class BseError(RuntimeError):
-    """A BSE response that is a 200 but not real JSON (the ``error_Bse.html`` quirk, §2.8).
+    """A BSE response that is a 200 but not real JSON (the ``error_Bse.html`` quirk).
 
-    Raised by :func:`bse_get` so the caller's E5 except-degrade-alert path treats it exactly like a
+    Raised by :func:`bse_get` so the caller's except-degrade-alert path treats it exactly like a
     transport failure — never a silently-empty success that would be mistaken for "no data".
     """
 
 
 def _is_error_page(resp: httpx.Response) -> bool:
     """True when this 200 is really the BSE error page — by final-URL redirect target OR by a body
-    that does not parse as JSON (§2.8: status alone is not trustworthy; the JSON parse is)."""
+    that does not parse as JSON (status alone is not trustworthy; the JSON parse is)."""
     if str(resp.url).rsplit("/", 1)[-1].split("?", 1)[0].lower() == _BSE_ERROR_PAGE.lower():
         return True
     try:
@@ -87,7 +87,7 @@ def _is_error_page(resp: httpx.Response) -> bool:
 async def bse_get(
     http: httpx.AsyncClient, url: str, *, timeout: float, attempts: int = 3
 ) -> httpx.Response:
-    """GET ``url`` from the BSE API with browser headers, bounded retry, and error-page detection (§2.8).
+    """GET ``url`` from the BSE API with browser headers, bounded retry, and error-page detection.
 
     ``attempts`` bounds the number of GETs of ``url`` (the transient backoff retries draw from this
     budget). Returns the raw :class:`httpx.Response` (JSON-parseable, verified) — the caller

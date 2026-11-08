@@ -1,4 +1,4 @@
-"""Paper construction, the market-data bridge and the session-prep gate (plan Q4.1)."""
+"""Paper construction, the market-data bridge and the session-prep gate."""
 
 from __future__ import annotations
 
@@ -480,7 +480,7 @@ async def test_the_close_reconcile_runs_once_a_session_from_close_less_5_and_not
     assert calls == list(STEPS) * 4 and passes == [0, 1, 1, 1, 1]
 
 
-# ---------------------------------------------------------------- session prep and reconcile (Q4.7)
+# ---------------------------------------------------------------- session prep and reconcile
 NEXT = D + dt.timedelta(days=1)
 
 
@@ -636,7 +636,7 @@ async def test_a_restart_seeds_the_last_stored_mark_up_to_last_observed_and_prep
     assert runtime.mark("TCS") == Decimal("103")
 
 
-# ---------------------------------------------------------------- paper risk seams (Q4.8)
+# ---------------------------------------------------------------- paper risk seams
 async def test_marks_come_through_the_prep_gate_and_never_move_back(bus, make_runtime, prep, now) -> None:
     prep.gate = asyncio.Event()
     runtime = await make_runtime()

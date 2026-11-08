@@ -17,7 +17,7 @@ from engine.core.db import connect
 from engine.core.eventbus import EventBus
 from engine.core.migrations import apply_migrations
 
-# Since O19 the owner changes the capital from the dashboard, which rewrites these three value lines
+# Since 2026-10-17 the owner changes the capital from the dashboard, which rewrites these three value lines
 # in the live config/limits.yaml. The suite is written against the registration values, so a
 # session-scoped copy of config/ is pinned to them and MT_CONFIG_DIR points at it: no test may
 # depend on the live capital.
@@ -67,7 +67,7 @@ def pytest_unconfigure(config) -> None:
     shutil.rmtree(tmp, ignore_errors=True)
 
 # A fixed "now" on a real 2026 trading day (Wed 2026-06-17, not a holiday in config/calendar/2026.yaml),
-# inside the seeded 10:00–10:30 trade window. Frozen so the golden decision log is deterministic (§9.1).
+# inside the seeded 10:00–10:30 trade window. Frozen so the golden decision log is deterministic.
 FIXED_NOW = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
 
 

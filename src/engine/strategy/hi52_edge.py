@@ -1,8 +1,8 @@
 """``hi52``'s registered edge: the derivation, and the live map that caps it at the current limits.
 
 ``settings.yaml hi52.expected_edge_pct`` is the OUTPUT of this arithmetic at the registration
-inputs (``capital_base_inr`` 40,000, the ``equity_floor_rung``, §7.1 ``per_trade_risk``). The cost
-floor it must clear RISES as the book shrinks, so a capital change (O19) can leave that constant
+inputs (``capital_base_inr`` 40,000, the ``equity_floor_rung``, ``per_trade_risk``). The cost
+floor it must clear RISES as the book shrinks, so a capital change (owner decision) can leave that constant
 stale-high. :class:`StrategyEdges` is the runtime guard: it hands the gate ``min(registered,
 derived from the CURRENT limits table)`` for ``hi52`` and leaves every other strategy untouched. It
 only ever LOWERS an edge: a larger base derives a bigger number, but an edge registered at 1.53 was
@@ -44,7 +44,7 @@ _HUNDRED = Decimal("100")
 def sizing_notional(
     equity: Decimal, *, position_pct: Decimal, gap_mult: Decimal, stop_pct: Decimal
 ) -> Decimal:
-    """The §7.1 ``per_trade_risk`` cap on a swing position's NOTIONAL, in rupees.
+    """The ``per_trade_risk`` cap on a swing position's NOTIONAL, in rupees.
 
     ``qty_max = floor(position_pct% × equity / (gap_mult × stop_pct% × price))`` (``gate.py``
     ``_rule_per_trade_risk``), so ``qty_max × price <= position_pct% × equity / (gap_mult ×
@@ -82,12 +82,12 @@ def edge_at(
     stop_pct: Decimal = STOP_PCT,
     cost_model: CostModel | None = None,
 ) -> Decimal:
-    """``measured T+20 median GROSS − one CNC round trip at the §7.1-sized notional``, to 0.01.
+    """``measured T+20 median GROSS − one CNC round trip at the risk-sized notional``, to 0.01.
 
     Derived at the ``equity_floor_rung`` (``base × (1 + rung_pct/100)``), the smallest equity the
     risk table lets a new position be opened at — the WORST case, since the cost floor rises as the
     book shrinks. ROUND_FLOOR, never nearest: rounding an edge UP is the one direction that can buy
-    a candidate a C3 pass it did not earn (and a negative result rounds away from zero too).
+    a candidate a cost-gate pass it did not earn (and a negative result rounds away from zero too).
     """
     equity = base * (Decimal("1") + rung_pct / _HUNDRED)
     if base <= 0 or equity <= 0 or equity >= base:
@@ -153,7 +153,7 @@ class StrategyEdges(Mapping[str, Decimal]):
         return min(registered, derived)
 
     def edge_for_table(self, sid: str, table: LimitTable) -> Decimal:
-        """The edge the gate would use for ``sid`` if ``table`` were live (O19 capital preview).
+        """The edge the gate would use for ``sid`` if ``table`` were live (dashboard capital-change preview).
 
         Same rule as a live read: registered for every strategy but ``hi52``, ``min(registered,
         derived at table)`` for it, and the registered edge when the derivation fails. Leaves the live

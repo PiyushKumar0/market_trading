@@ -1,11 +1,11 @@
-# config/calendar/2024.yaml — NSE trading calendar for 2024 (R6, B2).
+# config/calendar/2024.yaml — NSE trading calendar for 2024.
 #
 # SETTLED HISTORY — verified: true, verified_through: "2024-12-31". 2024 is fully elapsed; every date
 # below is a closed historical fact (not a projection), sourced from the official NSE capital-market-
 # segment trading-holiday circulars plus corroborating broker/news coverage (>=2 independent sources per
 # fact, cross-checked against each other; see per-entry notes below for anything sources disagreed on).
-# FAIL-SAFE (R6): NSECalendar only counts a date as a trading day in strict mode when verified: true AND
-# the date is at/before verified_through — both hold here, so the 200-session warmup lookback (§7.1/B2)
+# FAIL-SAFE: NSECalendar only counts a date as a trading day in strict mode when verified: true AND
+# the date is at/before verified_through — both hold here, so the 200-session warmup lookback
 # can walk back through all of 2024 instead of hitting "calendar horizon < 200 sessions".
 #
 # PRIMARY sources (NSE circular archive, nsearchives.nseindia.com/content/circulars/):
@@ -37,7 +37,7 @@
 #     Normal Market 18:00-19:00 (Normal Market window independently matches NCL/CMPT/64632's SLBS window).
 
 year: 2024
-verified: true                            # settled history (R6) — see verified_through and sources above.
+verified: true                            # settled history — see verified_through and sources above.
 verified_through: "2024-12-31"
 source: "NSE/CMTR/59722 (2023-12-12) + NSE/CMTR/61518 (2024-04-08, May-20 election) + NSE/COM/60339 via NCL/COM/60353 (2024-01-19, Jan-22 Ram Mandir holiday) + NSE/CMTR/64960 via NCL/CMPT/64968 (2024-11-08, Nov-20 Maharashtra election) + NSE/MSD/61893 (2024-05-07, May-18 DR-drill timings) + NCL/CMPT/64632 (2024-10-19, muhurat SLBS window). Full text: nsearchives.nseindia.com/content/circulars/."
 

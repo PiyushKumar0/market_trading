@@ -1,6 +1,6 @@
-"""§9.4 chaos case 17 — Offline MULTI-DAY (e.g. 4 days incl. a weekend).
+"""Chaos case 17 — Offline MULTI-DAY (e.g. 4 days incl. a weekend).
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 17), "Must hold":
+Drill-catalog row (case 17), "Must hold":
 
     "startup backfills the bar/candle gap from the Kite candle API; re-runs each missed day's EOD jobs;
     detects any ex-date that fell in the gap, re-derives the adjusted trigger and cancel-and-replaces the
@@ -15,8 +15,8 @@ Two 4-day gaps, each a clean stop Thu 15:40 (before the EOD window) → restart 
 
 Composition (``tests/chaos/_lifecycle_rig.py``): real lifecycle + CatchUpRunner over the real
 ``build_job_registry`` inventory + Scheduler arming; for the backfill/warm-up clauses additionally a
-real ``MarketStore``, ``BackfillJob`` driven through ``regime_and_warmup_backfill`` (the exact §2.6
-step-4 call main.py's ``backfill_hook`` makes, incl. its ``token_valid()`` guard) and a real
+real ``MarketStore``, ``BackfillJob`` driven through ``regime_and_warmup_backfill`` (the exact startup
+backfill call main.py's ``backfill_hook`` makes, incl. its ``token_valid()`` guard) and a real
 ``WarmupGate``. The Kite historical-candle API is the faked boundary (:class:`FakeKiteCandles`:
 official candles for every NSE session — none for weekends/holidays, none for today's running daily
 candle, none for minutes that have not happened).
@@ -29,15 +29,14 @@ Clauses covered:
 * "re-runs each missed day's EOD jobs" — every date-keyed job runs once per missed TRADING day,
   ascending, never for a weekend/holiday; run-latest jobs (incl. backup, and the Sunday sector map
   whose fire-day fell in the gap) run exactly once for the whole gap. ``tick_compact`` is vetoed
-  in-session at a 09:30 boot (WO-21) and keeps its watermark debt for the post-session sweep —
+  in-session at a 09:30 boot and keeps its watermark debt for the post-session sweep —
   asserted so that deferral stays visible.
 * "re-arms schedules" — every registry job armed on a running scheduler after the boot.
 * "cold-start warmup_ready enforced" — a token-less restart (no candle API) cannot cover the gap:
   REGIME coverage is short ⇒ FROZEN-for-entries + ``WARMUP_FROZEN``; the post-login re-trigger (the
   same backfill hook + ``reapply_warmup_gate``) then fills the gap and lifts the freeze.
 
-The GTT clauses, rewritten for paper (plan Q4.5,
-``test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_resting``): paper never repairs a
+The GTT clauses, rewritten for paper (``test_case17_paper_gtt_across_the_gap_voids_on_an_ex_date_else_stays_resting``): paper never repairs a
 GTT across an ex-date; an ex-date in the unobserved window VOIDs the position in session prep, which
 deletes its restored GTT before any tick is forwarded (the prep here is a 3-line stand-in for
 ``SessionPrep``'s ex-date rule). Without one, "open CNC GTTs still resting" — the
@@ -77,7 +76,7 @@ from tests.chaos._lifecycle_rig import EngineProcess, RigEnv, run_session
 from tests.unit.test_protection_manager import Now, Rig, orders, tick
 
 A_BOOT, A_STOP, B_BOOT = time(9, 30), time(15, 40), time(9, 30)
-#: The EOD jobs the plan names for the per-missed-day replay (§2.6 step 5 date-keyed list).
+#: The EOD jobs named for the per-missed-day replay.
 PLAN_NAMED_DATE_KEYED = {JOB_RECONCILE, JOB_BHAVCOPY, JOB_DEALS, JOB_NIGHTLY_REVIEW}
 
 GAPS = {
@@ -126,7 +125,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     env, b, calls_b, _sent_b = await _gap_restart(tmp_path, monkeypatch, gap)
     calls = env.calls(since=calls_b)
     reg = b.registry
-    assert _in_session_window(env.clock, b.calendar)           # WO-21 at a 09:30 boot: no compaction
+    assert _in_session_window(env.clock, b.calendar)           # tick_compact no-run window at a 09:30 boot: no compaction
     date_keyed = {s.job_id for s in reg.specs(JobClass.DATE_KEYED)} - {JOB_TICK_COMPACT, JOB_WEEKLY_SUMMARY}
     assert PLAN_NAMED_DATE_KEYED <= date_keyed
     assert all(s.at > A_STOP for s in reg.specs(JobClass.DATE_KEYED)), "stop day must be a missed EOD"
@@ -145,7 +144,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     for job_id in sorted(morning_safety):                      # today's deadline jobs: run for today
         assert [j for j, _ in calls if j == job_id] == [job_id]
         assert b.catch_up.was_run(job_id, restart_day)
-    # EOD deadline jobs (earnings, CD-3): today's entries read the LAST missed day's run — one
+    # EOD deadline jobs (earnings): today's entries read the LAST missed day's run — one
     # replay, never one per missed day (the feed is forward-looking).
     for job_id in sorted(eod_safety):
         assert [j for j, _ in calls if j == job_id] == [job_id]
@@ -156,7 +155,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
     # Sunday's weekly sector map fell inside the gap: one run, recorded under that Sunday.
     sunday = next(d for d in off_days if d.weekday() == 6)
     assert b.catch_up.was_run(JOB_SECTOR_MAP, sunday)
-    # The lane jobs (tick_compact, market_backup): the lane starts nothing in-session (WO-21) — the
+    # The lane jobs (tick_compact, market_backup): the lane starts nothing in-session — the
     # debt stays on the watermark for the first sweep after the window.
     assert all(not b.catch_up.was_run(job_id, d) for job_id in LANE_JOB_IDS for d in missed)
     assert not {j for j, _ in calls} & LANE_JOB_IDS
@@ -176,7 +175,7 @@ async def test_case17_missed_days_eod_jobs_rerun_once_per_trading_day_and_schedu
 class FakeKiteCandles:
     """``KiteClient.historical`` boundary: the official candles the exchange published — one daily
     candle per NSE session strictly before today (the day interval never returns today's running
-    candle here; the §2.6 step-4 caller clamps to yesterday anyway), one minute candle per elapsed
+    candle here; the startup backfill caller clamps to yesterday anyway), one minute candle per elapsed
     continuous-session minute."""
 
     def __init__(self, env: RigEnv, is_trading_day) -> None:
@@ -210,7 +209,7 @@ class FakeKiteCandles:
 
 
 def _market_wiring(kite_holder: dict):
-    """The composition-root pieces for §2.6 steps 4 + 6 (main.py ``backfill_hook`` + ``WarmupGate``),
+    """The composition-root pieces for the startup backfill and warm-up gate (main.py ``backfill_hook`` + ``WarmupGate``),
     bound to a per-process FakeKiteCandles kept in ``kite_holder`` so a scenario can flip its token."""
 
     def warmup_gate_factory(proc: EngineProcess):

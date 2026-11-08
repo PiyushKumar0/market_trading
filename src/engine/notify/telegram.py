@@ -1,29 +1,29 @@
-"""Telegram owner control plane (§3.2.11, O8/R10).
+"""Telegram owner control plane.
 
 The two-way owner I/O surface. Depends on ``core`` plus read-only / command-routing views over
 ``risk`` (``ModeManager`` / ``KillSwitch``); it **never originates orders itself** — every owner
-command routes through those Tier-2 interfaces, exactly as the dashboard does (§3.2.11).
+command routes through those Tier-2 interfaces, exactly as the dashboard does.
 
-Two load-bearing security properties ship here in Phase 0:
+Two load-bearing security properties ship here:
 
-* **Owner-ID lock (R10):** :func:`_owner_only` rejects (logs + ignores) any update whose
+* **Owner-ID lock:** :func:`_owner_only` rejects (logs + ignores) any update whose
   ``effective_chat.id`` is not the configured ``owner_chat_id``. No other chat can reach a handler.
-* **Two-step confirmation (R10):** destructive / mode-up commands (``/mode AUTO``, ``/kill_reset``,
+* **Two-step confirmation:** destructive / mode-up commands (``/mode AUTO``, ``/kill_reset``,
   and later the stop-widening approvals) issue a one-time challenge phrase and stash a pending
   :class:`OwnerConfirmation`-style challenge; a follow-up ``/confirm <phrase>`` completes it. Killing
-  is single-step (fast, §7.2); only *reset* / mode-up are two-step.
+  is single-step (fast); only *reset* / mode-up are two-step.
 
-Phase 2 completes the §3.2.11 command surface: every row of :data:`_COMMANDS` now has a real handler.
-The Phase-2 data sources arrive as **optional keyword dependencies** — ``reco_book``, ``latch``,
+The command surface is complete: every row of :data:`_COMMANDS` now has a real handler.
+The RECOMMEND-mode data sources arrive as **optional keyword dependencies** — ``reco_book``, ``latch``,
 ``governor``, ``limits_engine``, ``exposure``, ``session``, ``conn`` — each defaulting to ``None``, in
 which case its command replies "… not wired" instead of pretending to act. ``engine.ops.main``
-composes them (§3.2.12); the bot itself never constructs a dependency and never originates an order.
+composes them; the bot itself never constructs a dependency and never originates an order.
 
-The §3.6 capture commands (``/taken``, ``/closed``, ``/veto``) speak **ticker, not rec_id** (WO-29):
+The capture commands (``/taken``, ``/closed``, ``/veto``) speak **ticker, not rec_id**:
 their first argument is resolved against the recommendation ledger, with the ULID id path kept intact
 underneath — see :meth:`TelegramBot._resolve_rec_arg`.
 
-Two RECOMMEND-mode honesty rules are encoded here (B7/§3.6): the platform places **zero API orders**,
+Two RECOMMEND-mode honesty rules are encoded here: the platform places **zero API orders**,
 so ``/close`` returns guidance rather than sending anything, and ``/approve`` writes only its
 ``owner_approvals`` row (a tracked position's stop is updated only if the injected recommendation book
 exposes ``apply_approval`` — probed, never required).
@@ -32,11 +32,11 @@ The command catalog is the single source of truth for handler registration, ``/h
 Telegram ``/`` autocomplete menu (``setMyCommands``, owner-chat-scoped), so the three never drift.
 One more handler sits outside it: inline-button taps, owner-guarded the same way, run only the verbs
 in :data:`_BUTTON_COMMANDS`. :meth:`TelegramBot.attach_bus` subscribes the outbound owner alerts (mode / risk-state / kill /
-trade-window / budget-tier) to the §3.2.1 topics, rendering them through the §8 catalog (R8).
+trade-window / budget-tier) to the control-plane topics, rendering them through the notification catalog.
 
 All owner-confirmed state changes use :data:`Actor.OWNER`. All times come from :class:`Clock` — the
-challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()`` (§3.2 convention).
-``send()`` formats text from a catalog message (§8/R8) or a plain string and calls
+challenge-expiry clock is the platform ``Clock``, never a bare ``datetime.now()``.
+``send()`` formats text from a catalog message or a plain string and calls
 ``bot.send_message(owner_chat_id, ...)``.
 """
 
@@ -108,7 +108,7 @@ _log = get_logger("engine.notify.telegram")
 class _Deduped(Exception):
     """The journal's unique ``dedupe_key`` index already holds this message."""
 
-#: HTTP transport budget (WO-25b, 2026-08-24). python-telegram-bot builds its ``HTTPXRequest`` with a
+#: HTTP transport budget (2026-08-24). python-telegram-bot builds its ``HTTPXRequest`` with a
 #: 5.0 s ``connect_timeout`` by default — and the LAN box's first TCP connect to ``api.telegram.org``
 #: was MEASURED at 4.25 s and 4.84 s on 08-24, i.e. INSIDE that default by fractions of a second. That
 #: is the whole explanation for three days of mass ConnectTimeout (139-223 failed sends/day): the
@@ -129,12 +129,12 @@ _GET_UPDATES_POOL_SIZE = 1
 #: Hard bounds on Telegram network awaits (2026-08-07): the library's own retry/connect behavior is
 #: not trusted to terminate under the LAN box's flaky network — a hanging send after
 #: ``catch_up_complete`` held the whole boot (no scheduler, no warm-up lift) until a manual restart,
-#: the second such wedge in three days. A send is best-effort (R8): late delivery is worthless,
+#: the second such wedge in three days. A send is best-effort: late delivery is worthless,
 #: so a bounded drop is strictly better than an unbounded wait. Start gets a longer budget (four
 #: network round-trips) and degrades to a DISABLED bot — the engine must boot without Telegram
 #: rather than never.
 #:
-#: ORDERING CONSTRAINT (WO-25b): these two must stay STRICTLY LONGER than the transport budget above,
+#: ORDERING CONSTRAINT: these two must stay STRICTLY LONGER than the transport budget above,
 #: whose worst case for one request is pool 10 + connect 20 + write 30 + read 30 = 90 s. If the outer
 #: ``wait_for`` fires first it PRE-EMPTS httpx, and every slow send is journalled as an anonymous
 #: ``TimeoutError`` instead of the ConnectTimeout / ReadTimeout that says WHICH leg is broken — which
@@ -151,7 +151,7 @@ _TELEGRAM_MAX_CHARS = 4096
 _SPLIT_CHUNK_CHARS = 4000
 _SPLIT_MAX_PARTS = 5
 
-# --------------------------------------------------------------------- notification journal (WO-24d)
+# --------------------------------------------------------------------- notification journal
 #: 2026-08-21: a failed send used to be a LOG LINE AND NOTHING ELSE — 223 ConnectTimeouts on 08-20,
 #: 186 on 08-19, and a recommendation fired inside one of those windows was simply gone. Every
 #: outbound message is now journalled to ``notifications`` (migration 0011) BEFORE the wire attempt,
@@ -162,7 +162,7 @@ _SPLIT_MAX_PARTS = 5
 #: link replays the backlog in the order the engine raised it instead of flooding the owner's chat
 #: with an out-of-order burst.
 #:
-#: :data:`_DRAIN_SCAN` is the WO-25b head-of-line fix (2026-08-24). The old pass SELECTed the five
+#: :data:`_DRAIN_SCAN` is the head-of-line fix (2026-08-24). The old pass SELECTed the five
 #: OLDEST pending rows and then SKIPPED any still inside its backoff window — so with 203 rows queued
 #: (mostly stale alert spam at 46 attempts each, i.e. backing off the full five minutes), the five
 #: oldest were almost always all in backoff and the pass did nothing. A fresh owner-action ack sat at
@@ -196,14 +196,14 @@ _ERROR_LABEL_CHARS = 200
 
 #: Kinds that NEVER expire, regardless of their catalog severity — the messages whose late delivery
 #: still beats no delivery. ``RECOMMENDATION`` is the load-bearing member: its catalog severity is
-#: ``info`` (it is not an alarm), yet losing one is losing the entire product (§3.6). The rest are the
-#: login and freeze/halt kinds: without the login nothing trades at all (R6), and a freeze/kill the
+#: ``info`` (it is not an alarm), yet losing one is losing the entire product. The rest are the
+#: login and freeze/halt kinds: without the login nothing trades at all, and a freeze/kill the
 #: owner never heard about is a position they think is armed when it is not.
 CRITICAL_KINDS: frozenset[str] = frozenset(
     {
         MessageKind.RECOMMENDATION.value,
         MessageKind.REC_FILL_SUSPECTED.value,
-        # §3.6 holdings reconcile (2026-09-07): raised at most ONCE per position per trading day, so
+        # Holdings reconcile (2026-09-07): raised at most ONCE per position per trading day, so
         # an expiry during an outage is not "one of twelve" — it is the whole day's only chance to
         # ask the owner for the `/closed` the ledger has been missing for weeks.
         MessageKind.POSITION_NOT_IN_HOLDINGS.value,
@@ -214,14 +214,14 @@ CRITICAL_KINDS: frozenset[str] = frozenset(
     }
 )
 
-# How long a pending two-step challenge stays valid before it must be re-issued (R10). A short TTL
+# How long a pending two-step challenge stays valid before it must be re-issued. A short TTL
 # keeps a stale confirm phrase from authorising a destructive action long after the owner asked.
 _CHALLENGE_TTL = timedelta(minutes=2)
 
 # Reply text for a command registered from the catalog but whose downstream is not yet wired.
 _PHASE0_STUB = "not yet implemented in Phase 0"
 
-# ------------------------------------------------------------------- ticker → rec_id (WO-29)
+# ------------------------------------------------------------------- ticker → rec_id
 #: 2026-08-26, the evening of the FIRST executed recommendation. ``rec_id`` is a 26-char ULID that no
 #: owner-facing surface has ever printed, so ``/taken <rec_id> …`` was untypable on the one day it
 #: mattered. The outcome-capture commands now resolve their first argument as a TICKER against the
@@ -234,10 +234,10 @@ _PHASE0_STUB = "not yet implemented in Phase 0"
 _ULID_CHARS = 26
 _ULID_ALPHABET = frozenset("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
 
-#: Owner-facing signatures for the §3.6 capture commands, defined ONCE: :data:`_COMMANDS` (which feeds
+#: Owner-facing signatures for the capture commands, defined ONCE: :data:`_COMMANDS` (which feeds
 #: ``/help`` and the Telegram autocomplete menu) and the handlers' own ``usage:`` replies both read
 #: these, so the advertised form and the rejected form can never disagree. The ticker comes first
-#: because it is the form the owner can actually type from the delivery message (WO-29).
+#: because it is the form the owner can actually type from the delivery message.
 _USAGE_TAKEN = "/taken <symbol|rec_id> <qty> <price>"
 _USAGE_CLOSED = "/closed <symbol|rec_id> <price>"
 VETO_REASONS = ("market", "price", "size", "trust", "away", "other")
@@ -262,7 +262,7 @@ _MAX_LIST_ROWS = 12
 
 
 class RecoBook(Protocol):
-    """The RECOMMEND outcome-capture seam (§3.6) — implemented by ``RecommendationBook``.
+    """The RECOMMEND outcome-capture seam — implemented by ``RecommendationBook``.
 
     Duck-typed on purpose (mirrors the ``FloorLimits`` seam in ``engine.risk.exposure``): the bot
     depends on these methods (take/close/veto/protect + decision_candidates) and nothing else.
@@ -270,8 +270,8 @@ class RecoBook(Protocol):
     — with a message meant for the owner — on an unknown ``rec_id`` or an invalid state transition;
     ``decision_candidates`` returns the candidate rows (``list[dict]``) used to resolve a ticker.
 
-    ``apply_approval`` is OPTIONAL and probed with ``hasattr``: in Phase 2 a stop-widen approval has
-    no order side effect (the human owns their orders, B7), so a book that cannot apply one is fine.
+    ``apply_approval`` is OPTIONAL and probed with ``hasattr``: in RECOMMEND mode a stop-widen approval has
+    no order side effect (the human owns their orders), so a book that cannot apply one is fine.
     """
 
     async def take(self, rec_id: str, qty: int, price: Decimal) -> str: ...
@@ -289,12 +289,12 @@ class RecoBook(Protocol):
 
 @dataclass(frozen=True)
 class _CommandSpec:
-    """One row of the §3.2.11 owner-command catalog.
+    """One row of the owner-command catalog.
 
     Single source of truth for handler registration, ``/help``, and the Telegram ``/`` autocomplete
     menu (``setMyCommands``) — so all three can never drift. ``live`` is True for a command with a real
-    handler and False for one registered as a logged stub replying ``_PHASE0_STUB``. Every §3.2.11
-    command is live as of Phase 2: a live command whose OPTIONAL dependency is unwired replies
+    handler and False for one registered as a logged stub replying ``_PHASE0_STUB``. Every
+    command is live: a live command whose OPTIONAL dependency is unwired replies
     "… not wired", which is a handler's honest answer, not a stub.
     """
 
@@ -325,7 +325,7 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("confirm", "/confirm <phrase>",
                  "Complete a pending two-step challenge (kill reset or →AUTO) with its phrase.", True),
     _CommandSpec("help", "/help", "List every command and what it does.", True),
-    # --- entries pause / re-arm (§3.5.3 per-cause latch) ---
+    # --- entries pause / re-arm (per-cause latch) ---
     _CommandSpec("pause_entries", "/pause_entries",
                  "Pause new entries (risk_state FROZEN); risk-reducing exits continue.", True),
     _CommandSpec("resume_entries", "/resume_entries",
@@ -333,7 +333,7 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
     _CommandSpec("rearm", "/rearm",
                  "Re-arm floor stops (weekly drawdown, equity floor, total-loss floor) the account is back "
                  "above; a stop still breached stays.", True),
-    # --- RECOMMEND outcome capture (§3.6) ---
+    # --- RECOMMEND outcome capture ---
     _CommandSpec("taken", _USAGE_TAKEN,
                  "Confirm you took a recommendation at qty/price (origin=recommended). The symbol is "
                  "enough while exactly one recommendation on it is open.", True),
@@ -377,11 +377,11 @@ _COMMANDS: tuple[_CommandSpec, ...] = (
 
 
 def _help_text() -> str:
-    """Render the full §3.2.11 command catalog as one owner-facing plain-text message (no markdown).
+    """Render the full command catalog as one owner-facing plain-text message (no markdown).
 
     Live commands list their usage signature + description; any non-live spec is grouped under a
     clearly labelled "not yet available" heading so the owner is never misled into thinking it acts
-    (as of Phase 2 every §3.2.11 command is live, so that section is normally empty).
+    (every command is live, so that section is normally empty).
     """
     live = [c for c in _COMMANDS if c.live]
     later = [c for c in _COMMANDS if not c.live]
@@ -405,7 +405,7 @@ def _menu_commands() -> list[BotCommand]:
 
 
 def _build_request(*, get_updates: bool = False) -> HTTPXRequest:
-    """One :class:`~telegram.request.HTTPXRequest` carrying the WO-25b timeout budget.
+    """One :class:`~telegram.request.HTTPXRequest` carrying the timeout budget.
 
     The library's defaults (connect 5 s, read/write 5 s, pool 1 s) are the bug: the measured first
     connect to ``api.telegram.org`` from this box is 4.25-4.84 s, so a normal day's sends were racing
@@ -426,7 +426,7 @@ def _build_request(*, get_updates: bool = False) -> HTTPXRequest:
 
 @dataclass
 class _PendingChallenge:
-    """A stashed two-step confirmation awaiting the owner's follow-up ``/confirm <phrase>`` (R10).
+    """A stashed two-step confirmation awaiting the owner's follow-up ``/confirm <phrase>``.
 
     ``apply`` is the coroutine that actually performs the destructive action once the phrase matches;
     it receives the proven :class:`OwnerConfirmation` and runs under :data:`Actor.OWNER`.
@@ -440,7 +440,7 @@ class _PendingChallenge:
 
 @dataclass(frozen=True)
 class _LedgerRec:
-    """One ``recommendations`` row flattened for owner-facing lookup and listing (WO-29).
+    """One ``recommendations`` row flattened for owner-facing lookup and listing.
 
     Only ``rec_id`` and ``delivered_at`` are actual columns: migration 0001 gives the table
     ``rec_id / payload / delivered_at / human_action / human_fill_price / outcome`` and nothing else,
@@ -455,16 +455,16 @@ class _LedgerRec:
     kind: str
     delivered_at: str | None
     #: A listed row can be from an earlier day (an entry expired inside the veto window, or a taken
-    #: position), so the listing must be able to say so. WO-V's next-session entry TTL, once the
+    #: position), so the listing must be able to say so. A next-session entry TTL, once the
     #: reason, was withdrawn 2026-09-23.
     valid_until: str | None = None
 
 
 class TelegramBot:
-    """Owner-only two-way Telegram control plane (O8/R10).
+    """Owner-only two-way Telegram control plane.
 
     Never originates orders; owner commands route through the injected ``ModeManager`` / ``KillSwitch``
-    (§3.2.11). Construction is cheap and import-safe; the network application is built in
+    . Construction is cheap and import-safe; the network application is built in
     :meth:`start`.
     """
 
@@ -492,7 +492,7 @@ class TelegramBot:
         self._mode = mode_manager
         self._kill = kill_switch
         self._bus = bus
-        # Phase-2 data sources. Every one is OPTIONAL: composition (§3.2.12) wires them in a later
+        # RECOMMEND-mode data sources. Every one is OPTIONAL: composition wires them in a later
         # wave, and until then the owning command replies "not wired" rather than half-acting.
         self._reco_book = reco_book
         self._latch = latch
@@ -501,7 +501,7 @@ class TelegramBot:
         self._exposure = exposure
         self._session = session
         self._conn = conn
-        #: async (trigger) -> owner-facing sweep verdict text (§3.2.5 sweep addendum, 2026-07-29).
+        #: async (trigger) -> owner-facing sweep verdict text (2026-07-29).
         self._scan_sweep_fn = scan_sweep_fn
         self._why_fn: Callable[[str], Awaitable[str]] | None = None
         self._paper: PaperControl | None = None
@@ -516,7 +516,7 @@ class TelegramBot:
         self._bus_attached = False
         # At most one challenge is pending at a time — a new destructive command supersedes the old.
         self._pending: _PendingChallenge | None = None
-        #: WO-24d outbox drainer: owned by this bot, started with polling, cancelled by stop().
+        #: Outbox drainer: owned by this bot, started with polling, cancelled by stop().
         self._drain_task: asyncio.Task[None] | None = None
         #: Consecutive FAILED drainer attempts, and whether this streak has already been logged loud.
         self._drain_fail_streak = 0
@@ -527,7 +527,7 @@ class TelegramBot:
         self._reco_book = book
 
     def set_scan_sweep_fn(self, fn: Callable[[str], Awaitable[str]]) -> None:
-        """Late-wire the ``/scan_now`` sweep (§3.2.5 addendum; the closure needs the pre-screen,
+        """Late-wire the ``/scan_now`` sweep (the closure needs the pre-screen,
         which is built after the bot in the composition root)."""
         self._scan_sweep_fn = fn
 
@@ -552,7 +552,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
-        """Build the application, register the command table, and begin polling (R10).
+        """Build the application, register the command table, and begin polling.
 
         Idempotent-ish: a second call while running is a no-op + warning. Uses long-polling (no public
         webhook) so the bot needs no inbound port on the LAN host.
@@ -560,7 +560,7 @@ class TelegramBot:
         if self._app is not None:
             _log.warning("telegram_start_noop", reason="already_started")
             return
-        # Explicit transport (WO-25b): the stock 5 s connect timeout is narrower than this box's
+        # Explicit transport: the stock 5 s connect timeout is narrower than this box's
         # measured connect time — see :func:`_build_request`. Both roles get their own instance.
         app = (
             ApplicationBuilder()
@@ -576,7 +576,7 @@ class TelegramBot:
         # is assigned only on SUCCESS so a half-started app can never serve sends.
         try:
             await asyncio.wait_for(self._start_network(app), timeout=_START_TIMEOUT_S)
-        except Exception:  # noqa: BLE001 - a broken Telegram must never hold or crash the boot (R8)
+        except Exception:  # noqa: BLE001 - a broken Telegram must never hold or crash the boot
             _log.exception("telegram_start_failed_disabled", timeout_s=_START_TIMEOUT_S)
             # The timeout may have landed AFTER start_polling succeeded — a live poller would then
             # keep dispatching owner commands on a "disabled" bot. Retain the app so stop() can
@@ -586,7 +586,7 @@ class TelegramBot:
             return
         self._app = app
         # The outbox drainer starts with polling and only on a SUCCESSFUL start: a disabled bot has no
-        # transport to drain to, and its journal rows simply wait for the next process (WO-24d).
+        # transport to drain to, and its journal rows simply wait for the next process.
         self._start_outbox_drainer()
         _log.info("telegram_started", owner_chat_id=self._owner_chat_id)
 
@@ -620,7 +620,7 @@ class TelegramBot:
 
         The outbox drainer is cancelled FIRST and unconditionally (before the ``app is None`` early
         return): a background task that outlives the connection it queries would raise into a closed
-        SQLite handle during the composition root's teardown (§2.6 shutdown order)."""
+        SQLite handle during the composition root's teardown (shutdown order)."""
         await self._stop_outbox_drainer()
         failed, self._failed_app = self._failed_app, None
         if failed is not None:
@@ -640,9 +640,9 @@ class TelegramBot:
     async def _publish_command_menu(self, app: Application) -> None:
         """Publish the live commands so the owner chat shows a ``/`` autocomplete menu (setMyCommands).
 
-        Scoped to the owner chat (the only chat that may command the bot, R10) rather than advertised
+        Scoped to the owner chat (the only chat that may command the bot) rather than advertised
         globally. Best-effort: a failure here must never take down the control plane, so it is logged,
-        not raised (R8) — the bot still works, the owner just types commands without autocomplete.
+        not raised — the bot still works, the owner just types commands without autocomplete.
         """
         from telegram import BotCommandScopeChat
 
@@ -651,18 +651,18 @@ class TelegramBot:
                 _menu_commands(), scope=BotCommandScopeChat(chat_id=self._owner_chat_id)
             )
             _log.info("telegram_commands_published", count=len(_menu_commands()))
-        except Exception:  # noqa: BLE001 - menu publish is best-effort (R8)
+        except Exception:  # noqa: BLE001 - menu publish is best-effort
             _log.exception("telegram_set_commands_failed")
 
-    # ------------------------------------------------------------------ outbound (§8/R8 catalog)
+    # ------------------------------------------------------------------ outbound (catalog)
     async def send(self, msg: Any) -> None:
-        """Send a catalog message (§8/R8) or plain text to the owner chat.
+        """Send a catalog message or plain text to the owner chat.
 
         Accepts a ``CatalogMessage`` (rendered via its ``.render()`` / ``.text`` / ``str()``) or a raw
         string. Outbound never blocks the engine: a
-        send failure is logged, not raised, so an alert path can never take down a caller (R8).
+        send failure is logged, not raised, so an alert path can never take down a caller.
 
-        JOURNAL FIRST (WO-24d, 2026-08-21): the row lands in ``notifications`` BEFORE the wire is
+        JOURNAL FIRST (2026-08-21): the row lands in ``notifications`` BEFORE the wire is
         touched, so a message raised during a Telegram outage — or before the transport has even
         started — exists on the platform regardless of what the network does next. That row is both
         the retry outbox (:meth:`_drain_outbox_once`) and what ``GET /notifications`` shows the owner.
@@ -726,9 +726,9 @@ class TelegramBot:
         self, app: Application, text: str, reply_markup: InlineKeyboardMarkup | None = None,
     ) -> str | None:
         """Put one already-bounded string on the wire (the choke point every outbound send/part
-        passes through). Best-effort: a hang or failure is logged, never raised (R8).
+        passes through). Best-effort: a hang or failure is logged, never raised.
 
-        RETURNS the failure verdict rather than swallowing it whole (WO-24d): ``None`` on success, or
+        RETURNS the failure verdict rather than swallowing it whole: ``None`` on success, or
         a bounded ``"ExcClass: first line"`` label for the journal's ``last_error``. The caller still
         never sees an exception — the outbox needs to know *whether* a send worked, and the log line
         alone could not tell it."""
@@ -742,12 +742,12 @@ class TelegramBot:
         except TimeoutError:
             _log.error("telegram_send_timeout", timeout_s=_SEND_TIMEOUT_S)
             return f"TimeoutError: send exceeded {_SEND_TIMEOUT_S:g}s"
-        except Exception as exc:  # noqa: BLE001 - alerting must never crash the caller (R8)
+        except Exception as exc:  # noqa: BLE001 - alerting must never crash the caller
             _log.exception("telegram_send_failed")
             return _error_label(exc)
         return None
 
-    # ------------------------------------------------------------------ notification journal (WO-24d)
+    # ------------------------------------------------------------------ notification journal
     def _journal_insert(self, msg: Any, text: str) -> str | None:
         """Write the ``pending`` row for one outbound message; return its id (None if not journalled).
 
@@ -788,7 +788,7 @@ class TelegramBot:
                 raise _Deduped from exc
             _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
             return None
-        except Exception as exc:  # noqa: BLE001 - journalling must never block a send (R8)
+        except Exception as exc:  # noqa: BLE001 - journalling must never block a send
             _log.warning("notification_journal_failed", op="insert", error=_error_label(exc))
             return None
 
@@ -825,7 +825,7 @@ class TelegramBot:
         except Exception as exc:  # noqa: BLE001 - see _journal_insert
             _log.warning("notification_journal_failed", op="attempt_failed", error=_error_label(exc))
 
-    # ------------------------------------------------------------------ outbox drainer (WO-24d)
+    # ------------------------------------------------------------------ outbox drainer
     def _start_outbox_drainer(self) -> None:
         """Start the background drain loop (idempotent). No state store ⇒ no outbox ⇒ no task."""
         if self._conn is None:
@@ -865,7 +865,7 @@ class TelegramBot:
     async def _drain_outbox_once(self) -> None:
         """One drain pass: expire what is stale, then retry what is DUE — critical first, else oldest.
 
-        WO-25b changed the SELECTION and nothing else (batch size, backoff, expiry and the outage
+        Only the SELECTION changed, nothing else (batch size, backoff, expiry and the outage
         streak are all untouched). The pass reads a wide window of the queue (:data:`_DRAIN_SCAN`) and
         decides eligibility in Python: expire the stale, drop anything still inside its backoff
         window, order what remains critical-first / chronological, attempt at most
@@ -957,7 +957,7 @@ class TelegramBot:
         return True
 
     def _note_drain_failure(self) -> None:
-        """Count a failed retry and raise ONE loud line per outage episode (§10.3-style alerting).
+        """Count a failed retry and raise ONE loud line per outage episode.
 
         Per streak, not per failure: with a dead link and five pending rows the drainer fails ten
         times a minute, and an ERROR per failure would bury the log it is trying to make legible."""
@@ -972,7 +972,7 @@ class TelegramBot:
 
     @staticmethod
     def _render(msg: Any) -> str:
-        """Render a catalog message or text into a Telegram string (§8/R8)."""
+        """Render a catalog message or text into a Telegram string."""
         if isinstance(msg, str):
             return msg
         for attr in ("render", "to_text"):
@@ -1019,9 +1019,9 @@ class TelegramBot:
         }
 
     def _register_handlers(self, app: Application) -> None:
-        """Wire every command in :data:`_COMMANDS` to its handler (all owner-guarded, R10).
+        """Wire every command in :data:`_COMMANDS` to its handler (all owner-guarded).
 
-        Live commands use their bound handler; Phase-2 stubs register a logged not-implemented reply.
+        Live commands use their bound handler; stubs register a logged not-implemented reply.
         Inline-button taps get one owner-guarded :meth:`_on_button`.
         """
         live = self._live_handlers()
@@ -1065,7 +1065,7 @@ class TelegramBot:
             _log.exception("telegram_button_edit_failed", rec_id=rec_id)
 
     def _stub(self, name: str) -> Callable[..., Awaitable[None]]:
-        """A Phase-0 handler that logs the command and replies that it is not yet implemented."""
+        """A stub handler that logs the command and replies that it is not yet implemented."""
 
         async def _handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             _log.info("telegram_cmd_stub", command=name, args=_args(context))
@@ -1104,7 +1104,7 @@ class TelegramBot:
         _log.info("telegram_cmd_status")
         await _reply(update, "\n".join(lines))
 
-    # ------------------------------------------------------------------ /scan_now (§3.2.5 sweep)
+    # ------------------------------------------------------------------ /scan_now
     async def _cmd_scan_now(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """On-demand scanner sweep (owner-directed 2026-07-29): live candidates enter the normal
         pipeline; the reply is ALWAYS an explicit verdict — candidates, pending arm levels, or an
@@ -1140,7 +1140,7 @@ class TelegramBot:
             return
         await _reply(update, text)
 
-    # ------------------------------------------------------------------ /paper (plan Q4.0)
+    # ------------------------------------------------------------------ /paper
     async def _cmd_paper(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """``on`` and ``reset`` are two-step and refused while an unexpired challenge is pending;
         ``off`` applies at once; ``status`` reads."""
@@ -1199,7 +1199,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /kill (single-step, wired)
     async def _cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Engage the kill switch — single-step (fast), owner-only (R10/§7.2)."""
+        """Engage the kill switch — single-step (fast), owner-only."""
         if self._kill is None:
             await _reply(update, "/kill: kill switch not wired.")
             return
@@ -1210,7 +1210,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /kill_reset (two-step, wired)
     async def _cmd_kill_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Begin the two-step kill reset (R10/§7.2). Stashes a challenge; /confirm completes it."""
+        """Begin the two-step kill reset. Stashes a challenge; /confirm completes it."""
         if self._kill is None:
             await _reply(update, "/kill_reset: kill switch not wired.")
             return
@@ -1228,7 +1228,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /mode (two-step for AUTO)
     async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner mode change. →AUTO is two-step (R10); ←OFF/RECOMMEND is single-step."""
+        """Owner mode change. →AUTO is two-step; ←OFF/RECOMMEND is single-step."""
         if self._mode is None:
             await _reply(update, "/mode: ModeManager not wired.")
             return
@@ -1264,7 +1264,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /trade_window (single-step)
     async def _cmd_trade_window(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show the current window, or set it (single-step, owner-ID + validation + audit, §3.2.7/§7.1).
+        """Show the current window, or set it (single-step, owner-ID + validation + audit).
 
         ``/trade_window`` with no args shows the current value; ``/trade_window HH:MM HH:MM`` sets it.
         The setter validates (start<end, non-empty MIS sub-window, within session) inside
@@ -1299,7 +1299,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /confirm (two-step completion)
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Complete a pending two-step challenge (R10). Verifies the one-time phrase + expiry."""
+        """Complete a pending two-step challenge. Verifies the one-time phrase + expiry."""
         pending = self._pending
         if pending is None:
             await _reply(update, "nothing to confirm.")
@@ -1333,7 +1333,7 @@ class TelegramBot:
             return
         await _reply(update, result)
 
-    # ------------------------------------------------------------------ challenge helper (R10)
+    # ------------------------------------------------------------------ challenge helper
     def _issue_challenge(
         self, action: str, apply: Callable[[OwnerConfirmation], Awaitable[str]]
     ) -> str:
@@ -1350,7 +1350,7 @@ class TelegramBot:
 
     # ------------------------------------------------------------------ /pause_entries /resume_entries
     async def _cmd_pause_entries(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner pause: latch the ``owner_pause`` cause at FROZEN (§3.5.3). Exits keep running (R3)."""
+        """Owner pause: latch the ``owner_pause`` cause at FROZEN. Exits keep running."""
         if self._latch is None:
             await _reply(update, "/pause_entries: risk-state latch not wired.")
             return
@@ -1365,7 +1365,7 @@ class TelegramBot:
         )
 
     async def _cmd_resume_entries(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner re-arm. Clears BOTH the owner pause and a rejection-storm freeze — §3.5.3 makes a
+        """Owner re-arm. Clears BOTH the owner pause and a rejection-storm freeze — the per-cause latch makes a
         rejection storm the one FROZEN cause that never auto-recovers; ``/resume_entries`` IS its
         recovery path. Any other cause still latching keeps entries closed, and the reply says so."""
         if self._latch is None:
@@ -1381,7 +1381,7 @@ class TelegramBot:
         await _reply(update, text)
 
     async def _cmd_rearm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner re-arm of floor stops (§7.1): clears only the rungs equity is back above."""
+        """Owner re-arm of floor stops: clears only the rungs equity is back above."""
         if self._latch is None or self._limits is None or self._exposure is None:
             await _reply(update, "/rearm: exposure, limits or risk latch not wired.")
             return
@@ -1395,7 +1395,7 @@ class TelegramBot:
             text += " Still below the line: " + ", ".join(still) + "."
         await _reply(update, text)
 
-    # ------------------------------------------------------------------ ticker → rec_id (WO-29)
+    # ------------------------------------------------------------------ ticker → rec_id
     def _ledger_recs(self, human_action: str | None) -> list[_LedgerRec]:
         """Delivered recommendations in ONE lifecycle state, oldest first (read-only SELECT).
 
@@ -1472,7 +1472,7 @@ class TelegramBot:
             row = self._conn.execute(
                 "SELECT payload FROM recommendations WHERE rec_id=?", (rec_id,)
             ).fetchone()
-        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
+        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane
             _log.exception("telegram_rec_kind_failed", rec_id=rec_id)
             return None
         return None if row is None else str(_payload_dict(row["payload"]).get("kind") or "entry")
@@ -1482,7 +1482,7 @@ class TelegramBot:
     ) -> str | None:
         """Resolve a capture command's first argument to a real ``rec_id`` — or reply and return None.
 
-        WO-29 (2026-08-26): ``rec_id`` is internal plumbing the owner has never been shown, so the
+        2026-08-26: ``rec_id`` is internal plumbing the owner has never been shown, so the
         argument is matched as a TICKER first and only then as an id:
 
         * **ticker, exactly one match** → that row's real ``rec_id``; everything downstream runs as if
@@ -1490,12 +1490,12 @@ class TelegramBot:
         * **ticker, several matches** → the list, with the FULL ids as the tiebreak handle, and NO
           action taken. Guessing which of two live recommendations the owner meant is a money decision
           the bot has no business making.
-        * **ULID-shaped** → returned verbatim, the pre-WO-29 id path unchanged (:func:`_is_ulid`).
+        * **ULID-shaped** → returned verbatim, the original id path unchanged (:func:`_is_ulid`).
         * **neither** → a refusal that names the argument AND lists what is actually actionable, so
           the owner's next message can be right rather than another guess.
 
         With no state store wired there is nothing to resolve against and the argument passes straight
-        through to the book, exactly as before WO-29: the book owns the id namespace and already
+        through to the book, exactly as it did before ticker matching: the book owns the id namespace and already
         answers an unknown id with an owner-facing ``ValueError``. A refusal the bot cannot justify
         would be worse than that round trip.
         """
@@ -1506,7 +1506,7 @@ class TelegramBot:
                 self._open_recs(include_skipped=include_skipped)
                 if human_action is None else self._ledger_recs(human_action)
             )
-        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane (R8)
+        except Exception:  # noqa: BLE001 - a failed lookup must never take down the control plane
             _log.exception("telegram_rec_lookup_failed", arg=arg)
             if _is_ulid(arg):
                 return arg                     # the id path needs no ledger read; don't strand it
@@ -1543,11 +1543,11 @@ class TelegramBot:
         await _reply(update, _no_match_reply(wanted, recs, human_action, now.date()))
         return None
 
-    # ------------------------------------------------------------------ RECOMMEND outcome capture (§3.6)
+    # ------------------------------------------------------------------ RECOMMEND outcome capture
     async def _cmd_taken(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner confirms they took a recommendation — creates the ``origin='recommended'`` position.
 
-        The first argument is a SYMBOL or a ``rec_id`` (WO-29); qty/price are validated BEFORE the
+        The first argument is a SYMBOL or a ``rec_id``; qty/price are validated BEFORE the
         ledger is touched, so a typo'd price costs a parse rather than a database read."""
         if self._reco_book is None:
             await _reply(update, "/taken: recommendation book not wired.")
@@ -1568,9 +1568,9 @@ class TelegramBot:
         await _reply(update, text)
 
     async def _cmd_closed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner marks a taken recommendation closed at ``price`` (§3.6 outcome capture).
+        """Owner marks a taken recommendation closed at ``price`` (outcome capture).
 
-        Resolves the symbol among the TAKEN-not-closed recommendations (WO-29) — the open set would
+        Resolves the symbol among the TAKEN-not-closed recommendations — the open set would
         be the wrong universe here: those are proposals, not positions."""
         if self._reco_book is None:
             await _reply(update, "/closed: recommendation book not wired.")
@@ -1592,7 +1592,7 @@ class TelegramBot:
 
     async def _cmd_veto(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Owner declines a recommendation. Recorded as vetoed — never silently as a non-fill,
-        which is a different (unbiased) training label (§6.5). An entry rec needs a reason code;
+        which is a different (unbiased) training label. An entry rec needs a reason code;
         exit/adjust recs take the bare form."""
         if self._reco_book is None:
             await _reply(update, "/veto: recommendation book not wired.")
@@ -1613,7 +1613,7 @@ class TelegramBot:
         await _reply(update, text)
 
     async def _cmd_protected(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Owner confirms the protective stop order is placed (D6)."""
+        """Owner confirms the protective stop order is placed."""
         if self._reco_book is None:
             await _reply(update, "/protected: recommendation book not wired.")
             return
@@ -1627,8 +1627,8 @@ class TelegramBot:
 
     async def _cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Exit guidance — the v1 answer, and an honest one: in RECOMMEND the platform places ZERO API
-        orders (B7), so there is nothing for this command to send. It marks nothing and changes no
-        state; the owner exits in their terminal and reports it with ``/closed`` (§3.6)."""
+        orders, so there is nothing for this command to send. It marks nothing and changes no
+        state; the owner exits in their terminal and reports it with ``/closed``."""
         args = _args(context)
         target = args[0] if args else "<position_id>"
         _log.info("telegram_cmd_close", position_id=args[0] if args else None)
@@ -1695,7 +1695,7 @@ class TelegramBot:
     async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Today's P&L off :class:`~engine.risk.exposure.ExposureTracker` (rebuilt from the tables).
 
-        ``origin='external'`` is excluded upstream (O5) — this is platform P&L, not account P&L. With
+        ``origin='external'`` is excluded upstream — this is platform P&L, not account P&L. With
         no mark source wired the open-MTM term would silently read ₹0 (marks fall back to avg entry),
         so it is reported as unavailable instead of as a number the owner might trust.
         """
@@ -1726,7 +1726,7 @@ class TelegramBot:
         await _reply(update, "\n".join(lines))
 
     async def _cmd_budget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Quota-week-to-date LLM spend vs the per-agent allocations + the active §5.6 degrade tier."""
+        """Quota-week-to-date LLM spend vs the per-agent allocations + the active degrade tier."""
         if self._governor is None:
             await _reply(update, "/budget: budget governor not wired.")
             return
@@ -1760,7 +1760,7 @@ class TelegramBot:
         await _reply(update, "\n".join(lines))
 
     async def _cmd_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Live headroom against the §7.1 caps: what is used vs what the protected store allows."""
+        """Live headroom against the risk-limit caps: what is used vs what the protected store allows."""
         if self._limits is None or self._exposure is None:
             await _reply(update, "/limits: limits engine / exposure tracker not wired.")
             return
@@ -1790,9 +1790,9 @@ class TelegramBot:
         _log.info("telegram_cmd_limits")
         await _reply(update, "\n".join(lines))
 
-    # ------------------------------------------------------------------ owner approvals (§3.4)
+    # ------------------------------------------------------------------ owner approvals
     async def _cmd_approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Approve one ``owner_approvals`` row (e.g. a stop-widen, R1)."""
+        """Approve one ``owner_approvals`` row (e.g. a stop-widen)."""
         await self._resolve_approval(update, context, "approved")
 
     async def _cmd_reject(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1802,10 +1802,10 @@ class TelegramBot:
     async def _resolve_approval(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, status: str
     ) -> None:
-        """Stamp the approval row and report it. NO side effect beyond the row in Phase 2 — the human
-        manages their own orders (B7). If the injected recommendation book knows how to push an
+        """Stamp the approval row and report it. NO side effect beyond the row in RECOMMEND mode — the human
+        manages their own orders. If the injected recommendation book knows how to push an
         approved stop onto a tracked position it is offered the approval (probe, never a requirement:
-        RecommendationBook deliberately has no apply_approval in Phase 2 — B7)."""
+        RecommendationBook deliberately has no apply_approval in RECOMMEND mode)."""
         verb = "approve" if status == "approved" else "reject"
         if self._conn is None:
             await _reply(update, f"/{verb}: state store not wired.")
@@ -1850,13 +1850,13 @@ class TelegramBot:
             return None
         try:
             return str(await apply(approval_id))
-        except Exception as exc:  # noqa: BLE001 - the row is already stamped; report, never crash (R8)
+        except Exception as exc:  # noqa: BLE001 - the row is already stamped; report, never crash
             _log.exception("telegram_apply_approval_failed", approval_id=approval_id)
             return f"(applying the approval failed: {exc})"
 
-    # ------------------------------------------------------------------ /token (§10.2 fallback path)
+    # ------------------------------------------------------------------ /token (fallback path)
     async def _cmd_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Complete the daily Kite login with a pasted ``request_token`` — the §10.2 fallback for when
+        """Complete the daily Kite login with a pasted ``request_token`` — the fallback for when
         the ``/kite/callback`` redirect cannot reach the engine (off-LAN)."""
         if self._session is None:
             await _reply(update, "/token: session manager not wired.")
@@ -1874,11 +1874,11 @@ class TelegramBot:
         _log.warning("telegram_cmd_token_ok")
         await _reply(update, "Session live ✅ — daily Kite login complete.")
 
-    # ------------------------------------------------------------------ outbound bus alerts (R8)
+    # ------------------------------------------------------------------ outbound bus alerts
     def attach_bus(self, bus: EventBus | None = None) -> None:
-        """Subscribe the owner-alert handlers to the §3.2.1 control-plane topics (R8).
+        """Subscribe the owner-alert handlers to the control-plane topics.
 
-        Every handler renders through the §8 catalog and calls :meth:`send`, which is best-effort — a
+        Every handler renders through the notification catalog and calls :meth:`send`, which is best-effort — a
         Telegram outage can never break a publisher (mode change, kill, risk-state latch). Attaching
         twice would double-send, so the second call is a no-op.
         """
@@ -1939,7 +1939,7 @@ class TelegramBot:
 def _owner_only(
     bot: TelegramBot, handler: Callable[..., Awaitable[None]]
 ) -> Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]:
-    """Owner-ID lock (R10): drop (log + ignore) any update not from the owner's chat.
+    """Owner-ID lock: drop (log + ignore) any update not from the owner's chat.
 
     Wraps a bound :class:`TelegramBot` handler. The check is on ``effective_chat.id`` — the only
     identity Telegram authenticates — and there is no reply to a non-owner (silent ignore, so the bot
@@ -2039,7 +2039,7 @@ def _parse_int(raw: str) -> int | None:
 
 
 def _parse_decimal(raw: str) -> Decimal | None:
-    """Parse a price argument as an exact :class:`Decimal` (money is never a float, §8.1). Thousands
+    """Parse a price argument as an exact :class:`Decimal` (money is never a float). Thousands
     separators are tolerated because owners type them; anything else is None."""
     try:
         return Decimal(raw.strip().replace(",", ""))
@@ -2071,18 +2071,18 @@ async def _book_result(call: Awaitable[str]) -> tuple[bool, str]:
 
     ``ValueError`` is the book's contract for "unknown rec / invalid transition" and already carries a
     message written for the owner, so it is surfaced verbatim; anything else is a bug, logged with a
-    traceback and reported — a bad book call must never take down the control plane (R8)."""
+    traceback and reported — a bad book call must never take down the control plane."""
     try:
         return True, await call
     except ValueError as exc:
         _log.warning("telegram_reco_book_rejected", error=str(exc))
         return False, str(exc)
-    except Exception as exc:  # noqa: BLE001 - report, never crash the bot (R8)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the bot
         _log.exception("telegram_reco_book_failed")
         return False, f"failed: {exc}"
 
 
-# ---------------------------------------------------------------------- ticker resolution (WO-29)
+# ---------------------------------------------------------------------- ticker resolution
 
 
 def _is_ulid(arg: str) -> bool:
@@ -2149,7 +2149,7 @@ def _rec_lines(recs: list[_LedgerRec], today: date) -> list[str]:
 
 
 def _ambiguous_reply(symbol: str, matches: list[_LedgerRec], today: date) -> str:
-    """Several live recommendations share a ticker: list them and act on NONE (WO-29)."""
+    """Several live recommendations share a ticker: list them and act on NONE."""
     return "\n".join(
         [
             f"{len(matches)} recommendations match {symbol} — nothing done. "
@@ -2165,7 +2165,7 @@ def _no_match_reply(
     """No recommendation answers to this argument: say so, then show what the owner CAN act on.
 
     A bare "unknown" would leave the owner guessing at a handle they have never been shown — the whole
-    defect WO-29 exists to close — so the actionable set ships with the refusal."""
+    defect the ticker matching exists to close — so the actionable set ships with the refusal."""
     label = "open" if human_action is None else human_action
     head = f"no {label} recommendation for {symbol}."
     if not recs:
@@ -2176,7 +2176,7 @@ def _no_match_reply(
 def _render_payload(raw: str | None) -> str:
     """Render an ``owner_approvals`` payload as owner-facing lines.
 
-    Structured data belongs in the audit log, prose belongs in the message (§8/R8) — dumping the raw
+    Structured data belongs in the audit log, prose belongs in the message — dumping the raw
     JSON blob into the chat is exactly the leak ``CatalogMessage.render`` exists to prevent."""
     if not raw:
         return ""

@@ -1,11 +1,11 @@
-"""NSE trading calendar (R6).
+"""NSE trading calendar.
 
 Loads ``config/calendar/<year>.yaml`` files and answers trading-day / session / next-trading-day
-questions, plus the owner-set ``trade_window`` (§7.1) clamped to the day's session. Consumed by the
+questions, plus the owner-set ``trade_window`` clamped to the day's session. Consumed by the
 scheduler, lifecycle, square-off timing, and the budget governor — without it ~15 days/year misbehave
-and the LLM loop burns credit on closed markets (R6).
+and the LLM loop burns credit on closed markets.
 
-FAIL-SAFE (R6): "no calendar, no trading." In ``strict`` mode (prod), a date is a trading day only if
+FAIL-SAFE: "no calendar, no trading." In ``strict`` mode (prod), a date is a trading day only if
 its year's calendar is loaded, the calendar is ``verified: true``, and the date is at/before
 ``verified_through``. ``ex_dates`` is unimplemented (raises): corp-action consumers read
 ``MarketStore.get_corp_actions``.
@@ -51,7 +51,7 @@ class _YearCalendar:
         self.shortened: dict[date, dict] = {
             date.fromisoformat(s["date"]): s for s in data.get("shortened_sessions", [])
         }
-        # Convention (R6): a muhurat day is closed for regular daytime trading and modelled ONLY in
+        # Convention: a muhurat day is closed for regular daytime trading and modelled ONLY in
         # special_sessions (session() returns its evening times); it must never ALSO appear in
         # ``holidays`` (a full-day closure), because is_trading_day checks holidays first — the overlap
         # would silently swallow the muhurat session. Fail loud at load rather than lose it at runtime.
@@ -73,7 +73,7 @@ class _YearCalendar:
 
 
 class NSECalendar:
-    """The NSE trading calendar (R6)."""
+    """The NSE trading calendar."""
 
     def __init__(
         self,
@@ -111,7 +111,7 @@ class NSECalendar:
     def is_trading_day(self, d: date) -> bool:
         cal = self._years.get(d.year)
         if cal is None:
-            return False  # no calendar, no trading (R6)
+            return False  # no calendar, no trading
         if d in cal.muhurat and not self._include_special:
             return False  # special sessions excluded (live engine): closed on a weekday too
         if d.weekday() in _WEEKEND:
@@ -203,19 +203,19 @@ class NSECalendar:
         horizons = [c.verified_through for c in self._years.values() if c.verified and c.verified_through]
         return max(horizons) if horizons else None
 
-    # ----------------------------------------------------------------- ex-dates (§2.6 / T12)
+    # ----------------------------------------------------------------- ex-dates
     def ex_dates(self, symbol: str, within_days: int) -> list[CorpAction]:
-        """Corporate actions for ``symbol`` within ``within_days`` (A12). No caller today; raises
+        """Corporate actions for ``symbol`` within ``within_days``. No caller today; raises
         rather than return a silent ``[]`` the planned GTT ex-date scan would read as "none due"."""
         raise NotImplementedError(
             "use MarketStore.get_corp_actions; implement before GTTManager.catch_up_ex_dates (T12)"
         )
 
-    # ----------------------------------------------------------------- trade window (§7.1/§3.2.7)
+    # ----------------------------------------------------------------- trade window
     def _sticky_window(self) -> TradeWindow:
         """Read the sticky owner-set window from SQLite ``trade_window_state``; else the seed.
 
-        The table ships with migrations v1 (Phase 0); the runtime setter is Phase 2 (§3.2.7). Until a
+        The table ships with migrations v1; the runtime setter is separate. Until a
         row exists, the settings.yaml seed governs.
         """
         if self._conn is not None:
@@ -234,7 +234,7 @@ class NSECalendar:
         return self._window_seed
 
     def trade_window(self, d: date) -> tuple[datetime, datetime]:
-        """The current sticky trade window for ``d``, clamped to the day's session (§7.1).
+        """The current sticky trade window for ``d``, clamped to the day's session.
 
         Single source the gate + scheduler read. Raises if ``d`` is not a trading day (callers gate on
         ``is_trading_day`` first).

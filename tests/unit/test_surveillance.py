@@ -1,4 +1,4 @@
-"""SurveillanceIngest (§4.4 job 5, A8/E5): per-source parsing (nested NSE JSON shapes + the T2T
+"""SurveillanceIngest: per-source parsing (nested NSE JSON shapes + the T2T
 series CSV), per-source reuse-yesterday on failure with ``unconfirmed_symbols`` + alert, the
 never-raise guarantee, and the held-position surveillance alert (per-list diff, over-the-gap
 wording, never breaking the refresh)."""
@@ -21,13 +21,13 @@ from tests.conftest import FIXED_NOW
 
 D = FIXED_NOW.date()
 
-#: The www API host is now cookie-primed by nse_get (A3): the first www fetch GETs this homepage first.
+#: The www API host is now cookie-primed by nse_get: the first www fetch GETs this homepage first.
 NSE_HOMEPAGE = "https://www.nseindia.com/"
 
 
 @pytest.fixture(autouse=True)
 def _no_backoff_wait(instant_backoff):
-    """A3/A4: nse_get retries transient failures with backoff — collapse the sleep so the reuse-yesterday
+    """nse_get retries transient failures with backoff — collapse the sleep so the reuse-yesterday
     (failing-source) tests don't actually wait. Backoff semantics are covered in test_nse_http.py."""
 
 
@@ -61,7 +61,7 @@ def make_client(fail_urls: set[str] = frozenset(), payloads: dict | None = None)
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if url == NSE_HOMEPAGE:
-            return httpx.Response(200)          # nse_get cookie-priming GET (A3) — mints the jar
+            return httpx.Response(200)          # nse_get cookie-priming GET — mints the jar
         if url in fail_urls:
             raise httpx.ConnectError("blocked by anti-bot", request=request)
         return overrides[url] if url in overrides else PAYLOADS[url]
@@ -99,7 +99,7 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     assert lists.degraded_sources == () and lists.unconfirmed_symbols == frozenset()
     assert lists.as_of == D
 
-    # flagged() is the §3.2.4 exclusion set: the four lists, NOT the SMS list.
+    # flagged() is the universe exclusion set: the four lists, NOT the SMS list.
     assert lists.flagged() == {"GSMSTK", "ASMLONG", "ASMSHORT", "T2TSTK", "T2TBZ", "ESMSTK"}
     assert lists.reasons_for("gsmstk") == ["surveillance_gsm"]      # case-insensitive
     assert lists.reasons_for("NORMALEQ") == []
@@ -108,7 +108,7 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     # EQUITY_L pass — companies only, never part of flagged()/reasons_for.
     assert lists.equity_master == {"NORMALEQ"}
 
-    # Last-good cache written per source (the reuse-yesterday fallback, E5) + the master.
+    # Last-good cache written per source (the reuse-yesterday fallback) + the master.
     cache = json.loads((tmp_path / "surveillance.json").read_text(encoding="utf-8"))
     assert set(cache) == {"gsm", "asm", "t2t", "esm", "equity_master"}
     assert cache["gsm"]["symbols"] == ["GSMSTK"]
@@ -117,12 +117,12 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
 
 async def test_current_refreshes_once_then_reuses(tmp_path, clock):
     ingest = make_ingest(tmp_path, clock)
-    first = await ingest.current()                      # §2.6: self-refresh on first use
+    first = await ingest.current()                      # self-refresh on first use
     assert first.gsm == {"GSMSTK"}
     assert await ingest.current() is first              # no second fetch round
 
 
-# --------------------------------------------------------------------------- failure model (E5)
+# --------------------------------------------------------------------------- failure model
 async def test_failed_source_reuses_yesterday_and_alerts(tmp_path, clock):
     await make_ingest(tmp_path, clock).refresh()        # seed the cache (yesterday's lists)
 
@@ -132,7 +132,7 @@ async def test_failed_source_reuses_yesterday_and_alerts(tmp_path, clock):
 
     assert lists.asm == {"ASMLONG", "ASMSHORT"}         # yesterday reused, never shrunk
     assert lists.degraded_sources == ("asm",)
-    assert lists.unconfirmed_symbols == {"ASMLONG", "ASMSHORT"}     # Phase-2 gate seam
+    assert lists.unconfirmed_symbols == {"ASMLONG", "ASMSHORT"}     # RECOMMEND-mode gate seam
     assert lists.gsm == {"GSMSTK"}                      # other sources unaffected
     assert len(msgs) == 1 and msgs[0].severity == "critical"
     assert msgs[0].data["degraded_sources"] == ["asm"]
@@ -165,13 +165,13 @@ async def test_failed_source_without_cache_is_empty_and_degraded(tmp_path, clock
 async def test_all_sources_down_never_raises(tmp_path, clock):
     msgs, sink = collect_alerts()
     ingest = make_ingest(tmp_path, clock, fail_urls=set(PAYLOADS), notify=sink)
-    lists = await ingest.refresh()                      # must not raise into the scheduler (E5)
+    lists = await ingest.refresh()                      # must not raise into the scheduler
     assert set(lists.degraded_sources) == {"gsm", "asm", "t2t", "esm"}
     assert lists.flagged() == frozenset()
     assert msgs
 
 
-# --------------------------------------------------------------------------- migration diff (A8 seam)
+# --------------------------------------------------------------------------- migration diff
 def test_new_entries_diff_for_held_position_migration():
     yesterday = SurveillanceLists(as_of=D, gsm={"OLDGSM"})
     today = SurveillanceLists(as_of=D, gsm={"OLDGSM"}, asm={"NEWASM"})
@@ -188,7 +188,7 @@ def test_new_listings_is_per_list_so_a_move_between_lists_counts():
     }
 
 
-# --------------------------------------------------------------------------- held-position alert (A8)
+# --------------------------------------------------------------------------- held-position alert
 HELD = "HELDX"
 
 

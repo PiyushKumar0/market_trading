@@ -1,8 +1,8 @@
-"""Per-cause risk-state latch ledger (§3.5.3). Tier-2-owned, sticky in SQLite.
+"""Per-cause risk-state latch ledger. Tier-2-owned, sticky in SQLite.
 
 ``RiskState`` is NOT a linear chain: ``FROZEN``/``CLOSE_ONLY``/``KILLED`` are reached by **direct
 per-cause entry edges**, composed **most-restrictive-wins**, and re-arm means *every* latching cause
-cleared (§3.5.3). :class:`RiskStateLatch` is the ledger that makes those three sentences executable:
+cleared. :class:`RiskStateLatch` is the ledger that makes those three sentences executable:
 one row per cause in ``risk_state_causes`` (active ⇔ ``cleared_at IS NULL``), and after every
 set/clear the resolved state — the most restrictive ACTIVE cause, or ``NORMAL`` when none remain — is
 pushed to :class:`~engine.risk.mode.ModeManager.set_risk_state`, which owns persistence, audit and the
@@ -16,10 +16,10 @@ other is live. A bare risk-state column cannot express that; a set of causes can
 that escalates the state by calling ``set_risk_state`` directly is invisible here, and the next
 :meth:`clear_cause` will relax the state right out from under it. Register the cause instead.
 
-Recovery policy (§3.5.3) lives with the *callers*, not here: data/auth-quality causes (stale feed,
+Recovery policy lives with the *callers*, not here: data/auth-quality causes (stale feed,
 clock skew, warm-up/regime, token invalid) call :meth:`clear_cause` the moment the condition clears;
 behavioural causes (consecutive_losses, daily soft-loss) clear at the next session; a rejection-storm
-freeze and an owner pause clear only on the owner's ``/resume_entries`` (§3.2.11).
+freeze and an owner pause clear only on the owner's ``/resume_entries``.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from engine.risk.mode import ModeManager
 
 _log = get_logger("engine.risk.causes")
 
-#: Most-restrictive-wins ordering (§3.5.3). Explicit ranks, not enum order: mirrors ``_RISK_RANK`` in
+#: Most-restrictive-wins ordering. Explicit ranks, not enum order: mirrors ``_RISK_RANK`` in
 #: ``engine.risk.exposure`` so the two composition points can never disagree.
 _RISK_RANK: dict[RiskState, int] = {
     RiskState.NORMAL: 0,
@@ -50,15 +50,15 @@ _RISK_RANK: dict[RiskState, int] = {
 #: ``risk_state_causes`` CHECK constraint (0003_phase2.sql) rejects it at the storage layer too.
 LATCHING_STATES: tuple[RiskState, ...] = (RiskState.FROZEN, RiskState.CLOSE_ONLY, RiskState.KILLED)
 
-#: Owner pause via ``/pause_entries`` (§3.2.11). Clears only on the owner's ``/resume_entries``.
+#: Owner pause via ``/pause_entries``. Clears only on the owner's ``/resume_entries``.
 CAUSE_OWNER_PAUSE = "owner_pause"
 
-#: ≥3 broker rejects in 60 s (§3.5.1). The ONE FROZEN cause §3.5.3 says never auto-recovers: it clears
+#: ≥3 broker rejects in 60 s. The ONE FROZEN cause that never auto-recovers: it clears
 #: only on the owner's ``/resume_entries``, which is why that command clears this cause too.
 CAUSE_REJECTION_STORM = "rejection_storm"
 
-#: Feed heartbeat silence past the §7.1 ``stale_data_guard`` budget (R2): set on the ticker
-#: supervisor's STALE transition, cleared on its next HEALTHY one (data-quality class, §3.5.3).
+#: Feed heartbeat silence past the ``stale_data_guard`` budget: set on the ticker
+#: supervisor's STALE transition, cleared on its next HEALTHY one (data-quality class).
 CAUSE_FEED_STALE = "feed_stale"
 
 
@@ -75,7 +75,7 @@ class RiskStateLatch:
         """Every currently-latching ``(cause, state, detail)``, most restrictive first.
 
         Rebuilt from the table on every call (never an in-process set), so a restart mid-freeze still
-        sees the freeze and cannot silently re-arm entries (§2.6).
+        sees the freeze and cannot silently re-arm entries.
         """
         rows = self._conn.execute(
             "SELECT cause, state, detail FROM risk_state_causes WHERE cleared_at IS NULL"
@@ -91,7 +91,7 @@ class RiskStateLatch:
 
     # ----------------------------------------------------------------- writes
     async def set_cause(self, cause: str, state: RiskState, detail: str, who: Actor) -> RiskState:
-        """Latch ``cause`` at ``state`` and apply the most-restrictive ACTIVE state (§3.5.3).
+        """Latch ``cause`` at ``state`` and apply the most-restrictive ACTIVE state.
 
         Idempotent: re-setting a cause that is already active keeps its original ``set_at`` (one
         episode, not a churn of timestamps) and re-applying the same resolved state is a no-op inside
@@ -135,7 +135,7 @@ class RiskStateLatch:
 
         Idempotent and safe on an unknown cause (nothing to stamp; the recompute still runs). Clearing
         one cause NEVER re-arms entries while another is active — that is the whole point of the
-        ledger (§3.5.3 "re-arm = every latching cause cleared").
+        ledger ("re-arm = every latching cause cleared").
 
         Returns the resolved state actually in force after the call.
         """
@@ -173,7 +173,7 @@ class RiskStateLatch:
         return resolved
 
     async def clear_stale_daily(self, today: str, who: Actor) -> list[str]:
-        """§3.5.3 behavioural auto-clear: day-scoped causes (``daily_loss_*``, ``consecutive_losses``)
+        """Behavioural auto-clear: day-scoped causes (``daily_loss_*``, ``consecutive_losses``)
         latch only for THEIR session — clear any still active from a prior day (called at startup /
         first tick of a new session). Returns the causes cleared."""
         rows = self._conn.execute(

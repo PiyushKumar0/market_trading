@@ -1,4 +1,4 @@
-"""``ins`` scanner (§6.1 addendum, 2026-08-17) — crossing row -> SignalCandidate translation.
+"""``ins`` scanner (2026-08-17) — crossing row -> SignalCandidate translation.
 
 PINNED worked example: a ₹1cr-threshold crossing worth ₹3cr on a symbol whose crossing-session close
 was 100.00, at a 6% stop. All arithmetic is hand-computed and params are passed explicitly,
@@ -49,7 +49,7 @@ def test_pinned_level_math_entry_stop_and_no_target():
 
 
 def test_target_is_none_for_every_crossing_magnitude():
-    """The absent target is STRUCTURAL, not an artefact of one fixture: `ins` exits on TIME (the §7.1
+    """The absent target is STRUCTURAL, not an artefact of one fixture: `ins` exits on TIME (the risk-limit
     20-td swing cap = the validated T+20 horizon), so no magnitude may conjure a price level."""
     for value in (10_000_000, 25_000_000, 100_000_000, 900_000_000):
         cand = scan_crossing(_crossing(value=value), params=P)
@@ -73,7 +73,7 @@ def test_stop_sits_the_configured_percent_below_entry_across_prices():
 
 
 def test_alternate_stop_pct_moves_only_the_stop():
-    """`ins.stop_pct` is an owner knob (a FUTURE §6.3 envelope row, range [4-8]): the whole envelope
+    """`ins.stop_pct` is an owner knob (a FUTURE parameter-envelope row, range [4-8]): the whole envelope
     must produce coherent levels, not just one value."""
     for stop_pct, expected in (("4.0", "96.00"), ("6.0", "94.00"), ("8.0", "92.00")):
         cand = scan_crossing(_crossing(), params={**P, "stop_pct": float(stop_pct)})
@@ -84,7 +84,7 @@ def test_alternate_stop_pct_moves_only_the_stop():
 
 # =========================================================================== tick-rounding degeneracy
 def test_tick_rounding_degeneracy_emits_nothing():
-    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the §7.1
+    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the
     ``levels_coherent`` shape is then unsatisfiable and the rule must emit NOTHING rather than ship
     an incoherent plan (the brk20 convention: coherence is tested AFTER rounding, not before).
 
@@ -111,7 +111,7 @@ def test_tick_rounding_boundary_the_smallest_price_that_still_emits():
 
 
 def test_non_positive_or_absurd_inputs_fail_to_none_never_raise():
-    """§3.2.5 fail-to-zero posture: bad data costs the candidate, never the sweep."""
+    """Fail-to-zero posture: bad data costs the candidate, never the sweep."""
     assert scan_crossing(_crossing(close="0"), params=P) is None
     assert scan_crossing(_crossing(close="-100.00"), params=P) is None
     assert scan_crossing(_crossing(), params={**P, "stop_pct": 0.0}) is None
@@ -144,7 +144,7 @@ def test_score_is_monotone_in_crossing_value():
 
 # =========================================================================== sweep
 def test_sweep_orders_by_score_desc_then_symbol_and_drops_degenerates():
-    """§9.6 determinism, matching ``brk20.sweep_daily``'s convention exactly."""
+    """Determinism, matching ``brk20.sweep_daily``'s convention exactly."""
     rows = [
         _crossing("CCC", value=10_000_000),      # score 0.5
         _crossing("AAA", value=100_000_000),     # score 1.0

@@ -1,14 +1,13 @@
-"""Plan §9.4 chaos case 4 — Token expiry / mid-day invalidation (A5).
+"""Chaos case 4 — Token expiry / mid-day invalidation.
 
-Must hold (§9.4 row 4, verbatim): "order placement fails-safe; FROZEN; protection already resting;
-owner alerted with re-login link (R6)".
+Must hold: "order placement fails-safe; FROZEN; protection already resting;
+owner alerted with re-login link".
 
-Scenario: 10:05 IST on a trading day, entries open, the Kite access token dies mid-session (A5 —
-revoked / expired early). The next live broker call gets ``TokenException``. Composed exactly as
+Scenario: 10:05 IST on a trading day, entries open, the Kite access token dies mid-session (revoked / expired early). The next live broker call gets ``TokenException``. Composed exactly as
 ``engine.ops.main`` wires it: the real ``SessionManager`` (behavioural validity + one-shot circuit
 breaker), the real ``KiteClient`` built with ``on_token_rejected=session.on_token_rejected`` and
-``make_order_guard`` (predicate (a), §3.5.3; ``orders_enabled=True``, which production never passes,
-D8), the §3.5.3 cause ledger, and the composition root's two hooks — ``_on_session_invalidated``
+``make_order_guard`` (predicate (a); ``orders_enabled=True``, which production never passes),
+the cause ledger, and the composition root's two hooks — ``_on_session_invalidated``
 (freeze + critical alert + LOGIN_PROMPT with the login URL) and ``_clear_token_freeze`` (login hook).
 Those two hooks are closures inside ``engine.ops.main.compose``; they are replicated here, and
 ``test_the_composed_engine_token_hooks_freeze_prompt_and_clear`` drives the composed engine's own
@@ -16,12 +15,12 @@ copies through the same token death and re-login, so the replica cannot drift si
 pykiteconnect's ``KiteConnect`` (the Kite HTTP edge) and the Telegram sink.
 
 Clauses:
-* "FROZEN" + "owner alerted with re-login link (R6)" —
+* "FROZEN" + "owner alerted with re-login link" —
   ``test_midday_token_death_freezes_entries_and_sends_the_login_link``.
 * "order placement fails-safe" — ``test_order_placement_fails_safe_on_a_dead_token``: an opening
   order is refused BEFORE the broker (and before the rate budget); a risk-reducing order is never
-  gated (R3) and its broker error surfaces instead of passing silently.
-* Recovery (the §3.5.3 auto-recovery class "token invalid ⇒ clears on successful re-login"):
+  gated and its broker error surfaces instead of passing silently.
+* Recovery (the auto-recovery class "token invalid ⇒ clears on successful re-login"):
   ``test_relogin_clears_the_freeze_and_rearms_the_breaker``.
 * "protection already resting" — real-side only (``test_protection_already_resting``): RECOMMEND
   places no broker-resident SL-M/GTT (the paper ProtectionManager, oms/protection.py, protects paper
@@ -147,7 +146,7 @@ def token_rig(conn, clock, tmp_path):
     kite = KiteClient(kc, RateLimiter(clock, burst=100), clock,
                       on_token_rejected=session.on_token_rejected,
                       order_guard=opsmain.make_order_guard(mode, kill, calendar, clock), orders_enabled=True)
-    mode.seed_trade_window_if_absent(WINDOW)          # lifecycle step 1b's first-run seed
+    mode.seed_trade_window_if_absent(WINDOW)          # the startup first-run trade-window seed
     store = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
     builder, gate = build_entry_gate(conn=conn, clock=clock, calendar=calendar, mode=mode, kill=kill,
                                      store=store)
@@ -161,7 +160,7 @@ async def _token_dies_mid_session(rig) -> None:
     """The token dies; the next live broker call is the first to find out (and re-raises)."""
     rig.kc.token_dead = True
     with pytest.raises(TokenException):
-        await rig.kite.margins()                     # never swallowed (R5/R8)
+        await rig.kite.margins()                     # never swallowed
 
 
 # ------------------------------------------------------------------------ FROZEN + login link
@@ -174,13 +173,13 @@ async def test_midday_token_death_freezes_entries_and_sends_the_login_link(token
 
     await _token_dies_mid_session(rig)
 
-    # FROZEN, through its own §3.5.3 cause.
+    # FROZEN, through its own risk-state cause.
     assert rig.session.token_valid() is False
     assert rig.mode.risk_state() == RiskState.FROZEN
     assert [c for c, _s, _d in rig.latch.active_causes()] == [CAUSE]
     _v, checks = await entry_checks(rig.builder, rig.gate, rig.clock, "RELIANCE")
     assert not checks["mode_risk_state"].passed
-    # Owner alerted — critical — with a TAPPABLE re-login link (R6), not just a notice.
+    # Owner alerted — critical — with a TAPPABLE re-login link, not just a notice.
     assert [s for s, _m in rig.alerts] == ["critical"] and "re-login" in rig.alerts[0][1]
     prompts = [m for m in rig.notified if m.kind is MessageKind.LOGIN_PROMPT]
     assert len(prompts) == 1
@@ -215,7 +214,7 @@ async def test_order_placement_fails_safe_on_a_dead_token(token_rig):
         await rig.kite.place_order(ENTRY_REQ, intent="entry")
     assert rig.kc.calls == []
 
-    # A risk-reducing order is NEVER gated (R3) — it goes to the broker, and the dead token's
+    # A risk-reducing order is NEVER gated — it goes to the broker, and the dead token's
     # rejection surfaces to the caller (fail loud, never a silent "placed"); no second page.
     with pytest.raises(TokenException):
         await rig.kite.place_order(EXIT_REQ, intent="risk_reducing")
@@ -248,7 +247,7 @@ async def test_relogin_clears_the_freeze_and_rearms_the_breaker(token_rig):
     assert len([m for m in rig.notified if m.kind is MessageKind.LOGIN_PROMPT]) == 2
 
 
-# ------------------------------------------------------------------------------- Phase-3-gated
+# ------------------------------------------------------------------------------- live-order-path-gated
 @pytest.mark.skip(reason=f"'protection already resting' — {REAL_SIDE_ONLY}")
 async def test_protection_already_resting():
     raise AssertionError("unreachable — skipped")

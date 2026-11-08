@@ -1,4 +1,4 @@
-"""Out-of-band engine watchdog (§2.2 / §3.2.12 / §10.7 — pinned spec).
+"""Out-of-band engine watchdog.
 
 A standalone, NON-wake Windows Scheduled Task run every ``lifecycle.watchdog_poll_s`` (~60 s) as the
 mt-engine service account (so the per-user DPAPI Telegram bot token decrypts). It exists to survive
@@ -6,11 +6,11 @@ the engine's death, therefore it imports ONLY ``engine.core.secrets`` (bot token
 ``engine.core.config`` (owner chat_id + lifecycle knobs, non-secrets) + ``httpx`` + stdlib — never
 ``engine.ops``/broker/notify.
 
-Storage discipline (§2.2): opens ``state.db`` READ-ONLY (sqlite URI ``mode=ro``) and keeps its own
+Storage discipline: opens ``state.db`` READ-ONLY (sqlite URI ``mode=ro``) and keeps its own
 debounce in a private file ``data/watchdog_state.json`` — it is NEVER a second writer to state.db
 (one-writer invariant; immune to the engine's disk-full/write-lock failure modes).
 
-Per tick, two out-of-band checks (§2.2, full algorithm there):
+Per tick, two out-of-band checks:
 
 (a) **missed scheduled start** — on a trading day, now > ``start_grace_s`` past a
     ``lifecycle.active_period_starts`` time with ``started_at`` not ≥ that start (and the engine not
@@ -24,15 +24,15 @@ Per tick, two out-of-band checks (§2.2, full algorithm there):
     never emits this kind); the debounce is stamped ONLY on a confirmed successful send, so a
     correlated network/Telegram outage retries every tick instead of losing the one real-time alert.
     A fresh boot heartbeat re-arms the alarm automatically. ``state == 'STOPPED'`` ⇒ SILENT
-    (intentional off is normal, §2.6). ``STOPPING`` + pid alive ⇒ not-a-crash (intentional teardown).
+    (intentional off is normal). ``STOPPING`` + pid alive ⇒ not-a-crash (intentional teardown).
 
-Spec-silent resolutions (documented):
+Design resolutions (documented):
 - The wedge force-kill runs only AFTER the confirmed-successful ``ENGINE_DOWN`` send ("the alert is
   sent first"): killing first and letting NSSM restart would clear the down-condition and lose the
   retried alert during a correlated outage. Remediation is merely delayed while the network is down —
-  capital is broker-protected throughout (R3) and a wedged engine cannot act anyway.
+  capital is broker-protected throughout and a wedged engine cannot act anyway.
 - A scheduled start is NOT flagged missed while the engine is already up across the fire-time
-  (state != STOPPED with a live pid): the active period is covered; §2.2 likewise does not re-emit
+  (state != STOPPED with a live pid): the active period is covered; the lifecycle alerts likewise do not re-emit
   ENGINE_STARTED when a running process rolls into a later active period.
 - Trading-day check: NSECalendar is not importable here (import allowlist above), so the calendar
   YAML (weekday minus full-day holidays and ``special_sessions``) is read directly via
@@ -82,7 +82,7 @@ TradingDayFn = Callable[[date], bool]
 # --------------------------------------------------------------------------- OS probes (stdlib/ctypes)
 def pid_alive(pid: int | None) -> bool:
     """True iff ``pid`` names a live OS process. Deliberate stdlib-only duplicate of
-    ``engine.ops.heartbeat.pid_alive`` — the watchdog may not import ``engine.ops`` (§3.2.12)."""
+    ``engine.ops.heartbeat.pid_alive`` — the watchdog may not import ``engine.ops``."""
     if not pid or pid <= 0:
         return False
     if sys.platform == "win32":
@@ -108,9 +108,9 @@ def pid_alive(pid: int | None) -> bool:
 
 
 def force_kill(pid: int) -> bool:
-    """Force-kill a wedged engine pid so NSSM's exit-triggered restart takes over (§2.2).
+    """Force-kill a wedged engine pid so NSSM's exit-triggered restart takes over.
 
-    Windows: ctypes ``OpenProcess(PROCESS_TERMINATE)`` + ``TerminateProcess`` (the §2.2-pinned
+    Windows: ctypes ``OpenProcess(PROCESS_TERMINATE)`` + ``TerminateProcess`` (the
     mechanism); POSIX fallback SIGKILL. Returns True iff the terminate call was accepted."""
     if sys.platform == "win32":
         import ctypes
@@ -155,7 +155,7 @@ class WatchdogConfig:
 
 @dataclass(frozen=True)
 class DebounceState:
-    """Private debounce persisted in data/watchdog_state.json (§2.2) — never in state.db."""
+    """Private debounce persisted in data/watchdog_state.json — never in state.db."""
 
     last_down_alert_at: datetime | None = None
     # (day, start) keys "YYYY-MM-DDTHH:MM" already alerted SCHEDULED_START_MISSED for.
@@ -183,7 +183,7 @@ def decide(
     is_pid_alive: PidAliveFn,
     is_trading_day: TradingDayFn,
 ) -> Decision:
-    """The pure §2.2 per-tick decision (checks (a) + (b)); all probes injected."""
+    """The pure per-tick decision (checks (a) + (b)); all probes injected."""
     alive = is_pid_alive(snap.pid)
     engine_up = snap.state in ("RUNNING", "STOPPING") and alive
 
@@ -195,20 +195,20 @@ def decide(
             if now <= start_dt + timedelta(seconds=cfg.start_grace_s):
                 continue  # not yet past grace
             if snap.started_at is not None and snap.started_at >= start_dt:
-                continue  # a start (manual or scheduled) covered it (§2.2)
+                continue  # a start (manual or scheduled) covered it
             if _missed_key(start_dt) in debounce.missed_start_alerted:
                 continue  # already alerted this (day, start)
             missed.append(start_dt)
 
     # ---- (b) engine down -------------------------------------------------------------------------
     if snap.state not in ("RUNNING", "STOPPING"):
-        return Decision(missed_starts=tuple(missed))  # STOPPED / no row ⇒ silent (§2.6 off-is-normal)
+        return Decision(missed_starts=tuple(missed))  # STOPPED / no row ⇒ silent (off-is-normal)
 
     last_known_alive = snap.last_alive_at or snap.started_at
     reason: str | None = None
     kill_pid: int | None = None
     if not alive:
-        reason = "crash"  # crash/kill/OOM — or an interrupted STOPPING shutdown (§2.2)
+        reason = "crash"  # crash/kill/OOM — or an interrupted STOPPING shutdown
     elif (
         snap.state == "RUNNING"
         and last_known_alive is not None
@@ -216,13 +216,13 @@ def decide(
         and snap.started_at is not None
         and (now - snap.started_at).total_seconds() > cfg.catchup_grace_s
     ):
-        reason = "wedged"  # alive-but-stuck: heartbeat starved past any legitimate catch-up (§2.2)
+        reason = "wedged"  # alive-but-stuck: heartbeat starved past any legitimate catch-up
         kill_pid = snap.pid
     if reason is None:
         return Decision(missed_starts=tuple(missed))
 
     # Re-arm predicate: one alert per outage; a fresh boot heartbeat (last_alive_at newer than the
-    # stamp) re-arms automatically (§2.2). Unset stamp ⇒ armed.
+    # stamp) re-arms automatically. Unset stamp ⇒ armed.
     armed = debounce.last_down_alert_at is None or (
         last_known_alive is not None and debounce.last_down_alert_at < last_known_alive
     )
@@ -260,10 +260,10 @@ def run_tick(
         ok = send(_engine_down_text(decision, now))
         summary["engine_down_sent"] = ok
         if ok:
-            # Stamp ONLY on confirmed send success — a failed send retries every tick (§2.2).
+            # Stamp ONLY on confirmed send success — a failed send retries every tick.
             debounce = replace(debounce, last_down_alert_at=now)
             if decision.kill_pid is not None:
-                # Alert-first honored; now force-kill the wedge so NSSM restarts it (§2.2).
+                # Alert-first honored; now force-kill the wedge so NSSM restarts it.
                 summary["killed_pid"] = decision.kill_pid if kill(decision.kill_pid) else None
 
     for start_dt in decision.missed_starts:
@@ -305,7 +305,7 @@ def _missed_start_text(start_dt: datetime, cfg: WatchdogConfig, now: datetime) -
 
 # --------------------------------------------------------------------------- IO shell
 def read_snapshot(db_path: Path) -> LifecycleSnapshot:
-    """Read the engine_lifecycle row STRICTLY read-only (sqlite URI mode=ro, §2.2). Any failure —
+    """Read the engine_lifecycle row STRICTLY read-only (sqlite URI mode=ro). Any failure —
     missing db/table/row (fresh install), or the engine holding an exclusive lock — degrades to an
     empty snapshot (silent tick) rather than ever creating/writing the db."""
     uri = f"file:{db_path.as_posix()}?mode=ro"
@@ -399,8 +399,8 @@ def make_trading_day_fn(calendar_dir: Path) -> TradingDayFn:
 
 
 def make_telegram_sender(token: str, chat_id: int, timeout_s: float = 10.0) -> SendFn:
-    """Direct Telegram Bot API sender (httpx) — deliberately NOT the engine's TelegramBot (§2.2:
-    ENGINE_DOWN is watchdog-sent out-of-band; a dead engine can't self-report)."""
+    """Direct Telegram Bot API sender (httpx) — deliberately NOT the engine's TelegramBot (ENGINE_DOWN
+    is watchdog-sent out-of-band; a dead engine can't self-report)."""
 
     def _send(text: str) -> bool:
         try:

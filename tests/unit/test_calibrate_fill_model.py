@@ -1,11 +1,11 @@
-"""``scripts/calibrate_fill_model.py`` - the R9 fill-model calibration (WO-P3-4, 2026-09-10).
+"""``scripts/calibrate_fill_model.py`` - the fill-model calibration (2026-09-10).
 
 Every fixture is engineered so each assertion has an arithmetic answer rather than a regression
 blob. The corpus is written as REAL Parquet partitions in the production layout
 (``ticks/date=<d>/symbol=<S>/*.parquet``, the 12 ``_TICK_COLUMNS``) via DuckDB ``COPY``, so the test
 exercises the same globbing/scan path the script uses over the live archive - not an injected frame.
 
-The cast on the one synthetic session (plan 3.2.9, method fixed by the work order):
+The cast on the one synthetic session:
 
 * ``CONSTSPREAD`` - constant ltp, constant L1 (999.50 / 1000.50). Its half-spread pct is a single
   value, so the per-symbol median is exact to the paisa. `median_half_spread_pct` is a PERCENT of
@@ -24,16 +24,16 @@ The cast on the one synthetic session (plan 3.2.9, method fixed by the work orde
   fall back to the consumer's own default (close = 1.0, ``basis: thin``) rather than fit a k off
   200 points.
 
-* ``NOL1`` - 900 mid-bucket ticks with bid == ask == 0 (the WARMING/backfilled shape, plan 3.2.9
+* ``NOL1`` - 900 mid-bucket ticks with bid == ask == 0 (the WARMING/backfilled shape, the fill model's
   "half-spread fallback"). Excluded from the spread stat (no ``symbols`` entry at all), still
   counted in the reported tick/sample counts and still producing slippage samples off the
   deterministic fallback half-spread.
 
-The 2026-09-10 round-3 k-floor policy (manager decision, plan 3.2.9 / 8.4) is pinned by four tests
+The 2026-09-10 round-3 k-floor policy (manager decision) is pinned by four tests
 below: a calibration may only TIGHTEN the model, so the shipped k is
 ``max(fitted p75, the consumer default for that bucket)`` - open 1.0 / mid 0.5 / close 1.0 - and a
 degenerate (p50 <= 0) or thin (n < 500) bucket ships the default outright. ``basis`` names which
-rule applied, and p50/p75/p90/n ride along in the YAML as the evidence for the Phase-4 (G4)
+rule applied, and p50/p75/p90/n ride along in the YAML as the evidence for the first live-ramp gate's
 live-vs-paper recalibration.
 """
 
@@ -235,7 +235,7 @@ def test_a_small_but_nonzero_fit_is_floored_to_the_consumer_default(tmp_path):
     LESS slippage than it charges with no calibration at all - and the evidence for that discount is
     a zero-inflated residual over a window-biased, survivorship-tainted corpus. So the shipped k is
     max(fit, default) and the bucket is stamped `floored_to_default`, with the fitted quantiles kept
-    verbatim beside it for the Phase-4 (G4) live-vs-paper recalibration.
+    verbatim beside it for the first live-ramp gate's live-vs-paper recalibration.
     """
     root = tmp_path / "parquet"
     _write_partition(root, DAY, _stream("SLOWDRIFT", 202, _at(10, 0), 900, delta=FLOOR_DELTA))
@@ -248,7 +248,7 @@ def test_a_small_but_nonzero_fit_is_floored_to_the_consumer_default(tmp_path):
     assert 0.0 < cell["p75"] < cfm.CONSUMER_DEFAULT_K["mid"]
     assert bucket.k == cfm.CONSUMER_DEFAULT_K["mid"] == 0.5   # the DEFAULT ships, not the fit
     assert bucket.basis == "floored_to_default"
-    # The fit is not discarded - it is the G4 recalibration evidence, carried in the YAML itself.
+    # The fit is not discarded - it is the first live-ramp gate's recalibration evidence, carried in the YAML itself.
     assert bucket.p50 == cell["p50"] and bucket.p75 == cell["p75"] and bucket.p90 == cell["p90"]
     assert any("only tighten" in c.lower() for c in out.report["caveats"])
 
@@ -333,7 +333,7 @@ def test_yaml_round_trips_through_the_strict_model(result, tmp_path):
         "half_spread_fallback_ticks", "symbols",
     }
     assert set(loaded["buckets"]) == {"open", "mid", "close"}
-    # The fitted quantiles ride ALONG with k: the YAML is the G4 recalibration evidence, so a
+    # The fitted quantiles ride ALONG with k: the YAML is the first live-ramp gate's recalibration evidence, so a
     # reader can see what the fit said and why the shipped k differs from it.
     assert set(loaded["buckets"]["open"]) == {
         "start", "end", "k", "basis", "n", "p50", "p75", "p90",
@@ -369,7 +369,7 @@ def test_report_carries_the_honest_caveats(result):
 # WHY these exist: the real corpus is 27 sessions x ~300 symbols, and an UN-compacted session holds
 # thousands of tiny fragments per symbol (a single symbol-day of 2026-09-09 measured 17-33 s to
 # read). A calibration that can only run over the whole corpus cannot be run at all on a trading
-# day, so the work order pins three bounding controls - `--days`, `--symbols-per-day` and a
+# day, so the design pins three bounding controls - `--days`, `--symbols-per-day` and a
 # compaction filter - and requires the report to state honestly what was actually covered.
 
 
@@ -711,7 +711,7 @@ def test_report_md_renders_the_coverage_table(tmp_path):
     assert compacted.isoformat() in text and fragmented.isoformat() in text
     assert "compacted" in text.lower()
     # The k table carries the basis, and the report states why the floor exists + that the fitted
-    # quantiles are kept for the Phase-4 (G4) live-vs-paper recalibration.
+    # quantiles are kept for the first live-ramp gate's live-vs-paper recalibration.
     assert "| basis |" in text
     assert "G4" in text and "only tighten" in text.lower()
 
@@ -739,7 +739,7 @@ def test_cli_wires_the_bounding_flags(corpus, tmp_path):
 # nor the ASOF fill lookup ordered them totally - so "the tick at t" and "the first tick at/after
 # t + 700 ms" were whichever row the scan happened to hand over. A calibration whose output moves
 # between runs cannot be reviewed, diffed, or reproduced from `source.days`; this is the same total-
-# ordering discipline WO-P3-3 pins for the replay stream.
+# ordering discipline the replay stream also pins.
 
 TIE_HI = 10.0             # the second print at each instant sits this far above the first
 

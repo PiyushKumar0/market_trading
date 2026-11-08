@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""News and planner scorecard (review A1). Read-only. Every section is interim and decides nothing.
+"""News and planner scorecard. Read-only. Every section is interim and decides nothing.
 
 * News: ``catalyst_watchlist`` rows by materiality tercile (order-statistic cuts over the rows read) x direction.
   Entry at the next session's open after d (a row carries no build time, and a post-open digest can grade a

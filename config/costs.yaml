@@ -1,14 +1,14 @@
-# config/costs.yaml — Zerodha brokerage / STT / txn / GST / DP rates (C2).
+# config/costs.yaml — Zerodha brokerage / STT / txn / GST / DP rates.
 #
-# Single source of truth for the CostModel (§3.2.5), used IDENTICALLY in backtests, recommendations,
-# and live decisions (C3). RE-SCRAPE zerodha.com/charges before EACH release — broker fees now change
-# mid-year (C2 warning). Verified 2026-06-11 per the plan's fact sheet.
+# Single source of truth for the CostModel, used IDENTICALLY in backtests, recommendations,
+# and live decisions. RE-SCRAPE zerodha.com/charges before EACH release — broker fees now change
+# mid-year. Verified 2026-06-11.
 #
-# ⚠ STALE-KNOWLEDGE TRAP (C2): the NSE transaction charge is 0.00307% per side. Training data often
+# ⚠ STALE-KNOWLEDGE TRAP: the NSE transaction charge is 0.00307% per side. Training data often
 # says 0.00325% or 0.00297% — BOTH wrong now. The effective date of the 0.00307% revision is
 # unconfirmed; flagged for re-verification.
 
-schema_version: 2          # 2 (2026-08-13): + spread_pct (market-microstructure leg, WO-2)
+schema_version: 2          # 2 (2026-08-13): + spread_pct (market-microstructure leg)
 verified_on: "2026-06-11"
 source: "https://zerodha.com/charges"
 
@@ -18,13 +18,13 @@ currency: INR
 # spread_pct — the MEASURED bid-ask spread, as a percentage of price (0.02 means 0.02%).
 #
 # NOT a Zerodha charge and NOT on the contract note: it is market-microstructure friction, kept
-# here because the CostModel is the single source of truth for trade friction (§3.2.5, C1-C4).
+# here because the CostModel is the single source of truth for trade friction.
 # It is the FULL quoted spread; each leg crosses HALF of it (buy ~ mid + spread/2, sell ~ mid -
 # spread/2), so one round trip pays the full spread_pct of notional. CostModel charges it as a
-# separate `spread` component; the statutory-fee components (and the C3 worked examples below)
+# separate `spread` component; the statutory-fee components (and the worked examples below)
 # are untouched, so the contract-note anchor still holds to the paisa.
 #
-# PROVENANCE (IMPROVEMENT_SPEC.md Part III, "Measurement provenance (spread/range, W2b)"):
+# PROVENANCE:
 #   48 symbol-days = 24 NIFTY200 symbols (8 top / 8 mid / 8 tail by tick-derived liquidity proxy)
 #   x sessions 2026-08-11 and 2026-08-12, from data/parquet/ticks; continuous session 09:15-15:20
 #   only; bid<=0 / ask<=0 / ask<bid rows dropped (223 closing-auction negative-spread rows on
@@ -33,8 +33,8 @@ currency: INR
 #   0.02 = the overall median ROUNDED UP to 2 dp - deliberately pessimistic vs the 0.0180
 #   measurement, still well inside the 0.0303 p75.
 #
-# PLAIN CONFIG (WO-2): owner-movable only. It is deliberately NOT in config/envelope.yaml and is
-# NOT learner-movable - it is a measurement of the market, not a strategy knob (R4). Re-measure it
+# PLAIN CONFIG: owner-movable only. It is deliberately NOT in config/envelope.yaml and is
+# NOT learner-movable - it is a measurement of the market, not a strategy knob. Re-measure it
 # (not "tune" it) when the universe or the tick corpus changes materially.
 spread_pct: 0.02
 
@@ -48,7 +48,7 @@ stt:                                                          # Securities Trans
   intraday: { buy_pct: 0.0,  sell_pct: 0.025 }               # 0.025% sell-side only (intraday)
 
 exchange_txn_charge:
-  nse_pct_per_side: 0.00307                                  # ⚠ NOT 0.00325 / 0.00297 (stale) — C2
+  nse_pct_per_side: 0.00307                                  # ⚠ NOT 0.00325 / 0.00297 (stale)
 
 sebi_charge:
   per_crore_inr: 10.0                                        # ₹10 per crore, both sides
@@ -64,16 +64,16 @@ gst:
 
 dp_charge:
   per_scrip_per_sell_day_inr: 15.34                          # delivery sells only; makes multi-scrip diversification
-                                                             # disproportionately expensive at small size (C4)
+                                                             # disproportionately expensive at small size
 
-# Worked round-trips the CostModel unit test asserts to the paisa (§9.1, from C3):
+# Worked round-trips the CostModel unit test asserts to the paisa:
 #   intraday ₹20,000 notional  ≈ ₹21   (breakeven 0.106%)
 #   delivery ₹20,000           ≈ ₹60   (breakeven 0.30%; dominated by ₹40 STT + ₹15.34 DP)
 #   5× MIS    ₹1,00,000 notional ≈ ₹83  (breakeven 0.083% of notional = 0.41% of capital/round-trip)
 #
 # BASIS: these are STATUTORY FEES ONLY — spread_pct is deliberately EXCLUDED. They are the
 # contract-note anchor (what the broker actually bills, re-scraped from zerodha.com/charges), and
-# the §9.1 tests assert them against `CostModel.fee_breakeven_pct` / the fee components. The full
+# the tests assert them against `CostModel.fee_breakeven_pct` / the fee components. The full
 # friction the gate and the sweeps price against is fees + spread (`CostModel.round_trip`), which
 # at ₹20k CNC is 0.2992% + 0.02% = 0.3192%.
 reference_roundtrips:

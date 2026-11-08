@@ -1,4 +1,4 @@
-"""Owner-alert cadence: one alert per EPISODE, not one per occurrence (WO-25b, 2026-08-24).
+"""Owner-alert cadence: one alert per EPISODE, not one per occurrence (2026-08-24).
 
 Measured that morning: 139-223 Telegram sends failed per day for three days, and the outbox that was
 supposed to protect them reached 203 rows — of which almost none were things the owner needed twice.
@@ -135,7 +135,7 @@ def test_the_window_is_thirty_minutes():
     assert REPEAT_AFTER == timedelta(minutes=30)
 
 
-# =========================================================================== harness alerts (D7)
+# =========================================================================== harness alerts
 class _Governor:
     """The three governor calls ``_run`` makes; the ledger itself is tested elsewhere."""
 
@@ -188,7 +188,7 @@ async def test_the_first_agent_failure_alerts_and_the_repeat_does_not(conn, hclo
     hticker.at = NOW + timedelta(minutes=5)
     second = await harness._fail(agent, "sdk_error", "connection reset", call_id="c2")
 
-    assert first.ok is False and second.ok is False        # D7 outcome unchanged for BOTH
+    assert first.ok is False and second.ok is False        # Failure outcome unchanged for BOTH
     assert len(alerts) == 1
     assert alerts[0][0] == "error" and "sdk_error" in alerts[0][1] and "c1" in alerts[0][1]
 
@@ -347,7 +347,7 @@ def test_only_auth_failed_is_account_wide():
     assert frozenset({"auth_failed"}) == ACCOUNT_FAIL_REASONS
 
 
-# =========================================================================== pipeline alerts (D7)
+# =========================================================================== pipeline alerts
 @pytest.fixture
 def pticker() -> Ticker:
     return Ticker(NOW)
@@ -448,7 +448,7 @@ async def test_a_working_analyst_closes_the_episode(pipeline, pticker):
 
 @pytest.mark.asyncio
 async def test_the_failure_is_logged_every_time_it_happens(pipeline, pticker, caplog):
-    """D7 is untouched: every occurrence still logs ``intraday_agent_failed`` and still resolves to
+    """The no-action rule is untouched: every occurrence still logs ``intraday_agent_failed`` and still resolves to
     no-proposal. Only the owner-facing cadence changed."""
     pipe, _parts = pipeline
 

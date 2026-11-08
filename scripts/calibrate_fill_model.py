@@ -1,37 +1,35 @@
 #!/usr/bin/env python
-"""R9 fill-model calibration (WO-P3-4, 2026-09-10) - plan sections 3.2.9 / 8.4.
+"""Fill-model calibration (2026-09-10).
 
 WHY this script exists: the PaperBroker's fill model is `slippage = half-spread + k * sigma_1m`
-(plan 3.2.9). Both terms have to come from THIS account's recorded tape, not from a literature
+Both terms have to come from THIS account's recorded tape, not from a literature
 constant - a wrong k is the difference between a paper expectancy the owner can act on and one that
-is quietly optimistic, which is exactly what gate G3 (section 8.5 item 5) and the G4 fill-deviation
+is quietly optimistic, which is exactly what the paper-to-live gate and the first live-ramp gate's fill-deviation
 check measure. The script produces `config/fill_model.yaml` (a NON-protected config: platform-written,
 owner informed) plus the evidence report that justifies every number in it.
 
 WHY the numbers are shaped the way they are:
 
 * **k per time-of-day bucket, never one global k.** The recorded corpus is window-biased - the engine
-  runs mostly in the morning window (plan 2.6), so a single blended k understates the close /
-  square-off period, which is precisely where a forced MIS exit pays. Buckets are pinned by the work
-  order: open 09:15-10:00, mid 10:00-14:30, close 14:30-15:30.
+  runs mostly in the morning window, so a single blended k understates the close /
+  square-off period, which is precisely where a forced MIS exit pays. Buckets are pinned: open 09:15-10:00, mid 10:00-14:30, close 14:30-15:30.
 * **k = the p75 of the normalised samples, not the mean.** A mean fill model is right half the time;
-  a paper broker that is right half the time flatters the ledger. p75 is the conservative choice the
-  plan asks for, and p50/p90 are reported alongside so the shape is visible rather than implied.
+  a paper broker that is right half the time flatters the ledger. p75 is the conservative choice, and p50/p90 are reported alongside so the shape is visible rather than implied.
 * **A CALIBRATION MAY ONLY TIGHTEN THE MODEL** (manager decision, 2026-09-10 round 3). The shipped
   k for a bucket is `max(fitted p75, the consumer's own default for that bucket)` -
   `CONSUMER_DEFAULT_K`, open 1.0 / mid 0.5 / close 1.0, mirrored from `engine.paper.fill_model`.
   WHY there is a floor at all: the residual `max(|fill - mid| - half_spread, 0)` is *zero-inflated*
   (over 700 ms a liquid name usually has not left its own quote, so a majority of samples are
   exactly 0), measured over a corpus that is window-biased (the engine is not up for the whole
-  session, plan 2.6) and survivorship-tainted (only names the universe builder admitted). Evidence
+  session) and survivorship-tainted (only names the universe builder admitted). Evidence
   of that shape cannot justify charging the paper broker LESS slippage than it charges with no
-  calibration at all - that is exactly the silent optimism gate G3 (plan 8.5 item 5) reads. So a fit
+  calibration at all - that is exactly the silent optimism the paper-to-live gate reads. So a fit
   above the default replaces it; a fit below it does not.
 * **The fitted quantiles ship ANYWAY, next to k.** Every bucket carries `p50`, `p75`, `p90`, `n` and
   a `basis` in `{fitted, floored_to_default, thin, degenerate}` in the YAML itself, so the config is
-  its own evidence: the Phase-4 live-vs-paper deviation tracker (plan 8.6 / gate G4) recalibrates
+  its own evidence: the live-AUTO live-vs-paper deviation tracker (first live-ramp gate) recalibrates
   against these numbers, and a reader can always see what the tape said and why the shipped k
-  differs from it. The finding is surfaced, not massaged (C9).
+  differs from it. The finding is surfaced, not massaged.
 * **A thin bucket is not fitted at all.** Under `THIN_BUCKET_MIN_SAMPLES` (500) a p75 is noise, so
   the bucket ships the consumer default with `basis: thin`.
 * **A DEGENERATE bucket is not fitted either** (2026-09-10 finding). When the fitted p50 is <= 0 the
@@ -40,7 +38,7 @@ WHY the numbers are shaped the way they are:
   outright that the estimator - a higher quantile, a signed adverse-only residual, a longer horizon -
   is what the owner may want to re-pin.
 * **half-spread is never 0, and is published as a PERCENT of mid.** L1 is absent on backfilled /
-  WARMING spans (plan 2.6). A zero half-spread makes the model non-conservative on restart days, so
+  WARMING spans. A zero half-spread makes the model non-conservative on restart days, so
   a non-L1 tick is charged the symbol-day's own median half-spread, else the day's corpus median,
   else 0 - and 0 only ever INFLATES the residual attributed to k, so the last rung still errs
   conservative. `symbols[].median_half_spread_pct` is a PERCENT (2026-09-10 round-3 fix: the field
@@ -62,8 +60,7 @@ WHY the numbers are shaped the way they are:
   half-spreads are about to disappear and those names will fall back to the tick multiple.
 
 WHY it reads Parquet directly: `market.duckdb` is held by the live engine. This script opens its own
-in-memory DuckDB over `data/parquet/ticks/date=*/symbol=*/*.parquet` (the same discipline the plan
-8.4 ReplayHarness note pins), so it can run beside a trading session. The archive is compacted
+in-memory DuckDB over `data/parquet/ticks/date=*/symbol=*/*.parquet`, so it can run beside a trading session. The archive is compacted
 concurrently, so a day whose files vanish mid-scan is retried and, if it still fails, recorded in
 `days_skipped` rather than silently dropped.
 
@@ -80,9 +77,9 @@ reads what was actually measured instead of assuming the whole corpus.
 WHY it is vectorised: the corpus is ~10^7 ticks across ~2.5M small Parquet files. Every step is
 DuckDB SQL (minute resample, sigma, ASOF forward-fill lookup, bucketing) and the only Python that
 touches per-tick data is a numpy percentile over the sampled residuals - a per-row Python loop here
-re-creates the measured Phase-1 pathologies the plan 3.2 hot-path invariants pin.
+re-creates the measured pathologies the hot-path invariants pin.
 
-Method, per the work order:
+Method:
 
 1. Session ticks only (09:15 <= t < 15:30, exchange_ts in IST).
 2. half-spread pct per tick = (ask - bid) / 2 / mid * 100 (a PERCENT) on ticks with `ask > bid > 0`;
@@ -143,9 +140,9 @@ THIN_BUCKET_MIN_SAMPLES = 500       # under this a p75 is noise -> consumer defa
 K_QUANTILE = 75.0                   # conservative, not the mean
 #: The consumer's OWN defaults (`engine.paper.fill_model.DEFAULT_K_EDGE / DEFAULT_K_MID`), mirrored
 #: here deliberately rather than imported: this script must not import `engine.paper` (it is an
-#: offline research tool, and the plan's import discipline runs the other way), so the mirror is the
+#: offline research tool, and the import discipline runs the other way), so the mirror is the
 #: contract. These are the FLOOR - a calibration may only tighten the model, never loosen it. Keep
-#: in step with `engine.paper.fill_model` if the plan ever re-pins the defaults.
+#: in step with `engine.paper.fill_model` if the defaults are ever re-pinned.
 CONSUMER_DEFAULT_K: dict[str, float] = {"open": 1.0, "mid": 0.5, "close": 1.0}
 SESSION_START = "09:15:00"
 SESSION_END = "15:30:00"
@@ -192,7 +189,7 @@ def _tod(column: str) -> str:
 
 
 # --- the YAML contract, as a strict model --------------------------------------------------------
-# The consumer (engine.paper, WO-P3-2) implements its OWN loader against this same contract; this
+# The consumer (engine.paper) implements its OWN loader against this same contract; this
 # model exists so the producer cannot emit a shape the contract does not allow. extra="forbid"
 # everywhere: a typo'd key must fail loudly here rather than be silently ignored downstream.
 
@@ -217,7 +214,7 @@ Basis = Literal["fitted", "floored_to_default", "thin", "degenerate"]
 
 class BucketModel(_Strict):
     """One time-of-day bucket: the shipped k, the `basis` that produced it, and the fitted
-    quantiles kept verbatim as the Phase-4 (gate G4) recalibration evidence."""
+    quantiles kept verbatim as the live-AUTO (first live-ramp gate) recalibration evidence."""
 
     start: str
     end: str
@@ -238,7 +235,7 @@ class SymbolModel(_Strict):
 
 
 class FillModel(_Strict):
-    """`config/fill_model.yaml` - the pinned WO-P3-4 contract, version 1."""
+    """`config/fill_model.yaml` - the pinned contract, version 1."""
 
     version: Literal[1]
     generated_at: datetime
@@ -754,7 +751,7 @@ def _finalise(
         #   degenerate - p50 collapsed onto the zero-inflated mass, so the quantiles measure the
         #                estimator, not the tape -> the consumer default
         #   otherwise  - a real fit, but a calibration may only TIGHTEN: max(fit, default)
-        # In every branch the fitted quantiles ship alongside k as the gate-G4 evidence.
+        # In every branch the fitted quantiles ship alongside k as the first live-ramp gate's evidence.
         # The floor comparison is made against the ROUNDED p75 deliberately, because that is the
         # value that would actually ship: comparing the raw one could stamp a bucket `fitted` and
         # then publish a k identical to the default it supposedly cleared.
@@ -890,7 +887,7 @@ def _caveats(
     symbols_per_day: int | None = None,
     compacted_only: bool = False,
 ) -> list[str]:
-    """The honest caveat block (C9). These are the three ways this calibration can be wrong."""
+    """The honest caveat block. These are the three ways this calibration can be wrong."""
     if acc.hour_hist:
         top = sorted(acc.hour_hist.items(), key=lambda kv: -kv[1])[:3]
         total = sum(acc.hour_hist.values()) or 1

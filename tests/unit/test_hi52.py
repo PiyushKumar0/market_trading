@@ -147,7 +147,7 @@ def test_unadjusted_history_symbol_is_skipped_by_the_sweep_and_counted():
     """Stored daily history is never re-adjusted across an ex-date (Kite rows are adjusted at fetch
     time but seeded once; bhavcopy rows are raw), so a structural ex-date inside the lookback leaves
     phantom pre-ex highs: the sweep must not read that symbol at all until the window rolls past —
-    and must count the refusal (§6.1 observability)."""
+    and must count the refusal."""
     counts: dict[str, int] = {}
     out = sweep_daily(
         {"RAW": _fresh_cross_rows(close_y=96.0), "IDX": _fresh_cross_rows(close_y=96.0)},

@@ -1,4 +1,4 @@
-"""scripts/llm_scorecard.py: the news and planner scorecard (review A1). Synthetic only."""
+"""scripts/llm_scorecard.py: the news and planner scorecard. Synthetic only."""
 
 from __future__ import annotations
 

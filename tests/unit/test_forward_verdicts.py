@@ -1,4 +1,4 @@
-"""Pre-registered forward verdicts (T4): fixed-cohort looks, the kill and analyst rules, the loader, the CLI."""
+"""Pre-registered forward verdicts: fixed-cohort looks, the kill and analyst rules, the loader, the CLI."""
 
 from __future__ import annotations
 

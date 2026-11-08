@@ -1,4 +1,4 @@
-"""Post-login recovery — the §2.6 cold-start RE-TRIGGER (third cold-start-family defect, 2026-07-21).
+"""Post-login recovery — the cold-start RE-TRIGGER (third cold-start-family defect, 2026-07-21).
 
 The every-startup recovery sequence (:meth:`engine.ops.lifecycle.SessionLifecycle.startup`) runs ONCE
 at boot: instruments load, regime + warm-up-gap backfill, warm-up evaluation, and ticker start. The
@@ -21,14 +21,14 @@ startup steps:
     (b) backfill     — regime daily history (NIFTY 50 / India VIX) + intraday warm-up-gap fill for the
                        watchlist — the SAME calls startup makes, shared via
                        :func:`regime_and_warmup_backfill`;
-    (c) warm-up      — re-evaluate the §2.6 step-6 gate and, once the FREEZING classes (REGIME /
+    (c) warm-up      — re-evaluate the startup warm-up gate and, once the FREEZING classes (REGIME /
                        unattributable — since 2026-09-17 an INTRADAY or DAILY shortfall is refused
                        per SYMBOL at the gate instead) are covered, LIFT the warm-up
                        FROZEN-for-entries through the lifecycle's own gate application
                        (:meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass);
-    (d) ticker       — start the feed with the subscription tokens — the SAME step-7 resume logic,
+    (d) ticker       — start the feed with the subscription tokens — the SAME ticker-resume logic,
                        shared via :func:`resume_ticker`;
-    (e) holdings     — §3.6 holdings reconcile (2026-09-07). NOT a recovery step: it restores nothing
+    (e) holdings     — holdings reconcile (2026-09-07). NOT a recovery step: it restores nothing
                        and gates nothing. It runs here because a fresh token is the first moment the
                        account can be read at all, and the owner's overnight sells are exactly what
                        the morning needs to know. Last in the ladder, and its own failures are already
@@ -76,7 +76,7 @@ Notify = Callable[[CatalogMessage], Awaitable[None]]
 AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
 
 
-# --------------------------------------------------------------------------- cold-start hydration (F2)
+# --------------------------------------------------------------------------- cold-start hydration
 async def hydrate_instruments_at_startup(
     instruments: InstrumentStore,
     store: MarketStore,
@@ -85,12 +85,12 @@ async def hydrate_instruments_at_startup(
     session_valid: bool,
     clock: Clock,
 ) -> str:
-    """Cold-start token-map recovery ladder (§2.6 / §4.3, F2). Returns the branch tag taken.
+    """Cold-start token-map recovery ladder. Returns the branch tag taken.
 
     A fresh process holds an EMPTY :class:`InstrumentStore`. If this boot is a restart after the 08:15
     ``instruments`` job, that job's ``job_runs`` watermark makes the catch-up runner skip it, so nothing
     would repopulate the token map — every backfill/warm-up/ticker lookup then fails (``unknown_token``
-    storm, warm-up frozen). Run this BEFORE the §2.6 step-4 backfill and step-6 warm-up (both inside
+    storm, warm-up frozen). Run this BEFORE the startup backfill and warm-up (both inside
     ``lifecycle.startup``) to rebuild the map, cheapest source first:
 
     - ``already_loaded`` — the store is non-empty (a refresh already ran this process); nothing to do.
@@ -160,9 +160,9 @@ async def resume_ticker(
     ticker: TickerSupervisor,
     ticker_tokens: Callable[[], list[int]],
 ) -> str:
-    """Resume the ticker into WARMING once a valid token exists (§2.6 step 7). Returns an outcome tag.
+    """Resume the ticker into WARMING once a valid token exists. Returns an outcome tag.
 
-    Extracted from the composition root so the SAME logic serves both startup step 7 and the post-login
+    Extracted from the composition root so the SAME logic serves both the startup ticker resume and the post-login
     re-trigger (rather than duplicating the guard). Idempotent: a ticker already running is left alone.
     Tags: ``skipped_no_token`` | ``already_running`` | ``skipped_no_tokens`` | ``started``.
     """
@@ -193,7 +193,7 @@ async def regime_and_warmup_backfill(
     *,
     daily_lookback_sessions: int = DAILY_LOOKBACK_SESSIONS,
 ) -> dict[str, int]:
-    """§2.6 step 4: warm the regime daily history (NIFTY 50 / India VIX — checkpointed, cheap on
+    """Warm the regime daily history (NIFTY 50 / India VIX — checkpointed, cheap on
     re-runs), repair the watchlist's daily lookback (the warm-up gate's own window — coverage-checked
     per symbol, so a healthy watchlist costs zero Kite requests), and gap-fill today's intraday minute
     bars for the watchlist from official candles so warm-up never needs live ticks. Extracted so
@@ -227,7 +227,7 @@ async def regime_and_warmup_backfill(
             written["watchlist_daily_gap_bars"] = daily_report.bars_written
     if session is not None and watch:
         # ``confirm_until`` clamped to session.close (2026-09-18): a post-close boot must not mark
-        # every after-hours minute no-trade — the §2.6 gate clamps to the close, so those were never
+        # every after-hours minute no-trade — the warm-up gate clamps to the close, so those were never
         # holes. The −2 min keeps a minute Kite has not published yet out of the confirmation.
         gap_report = await backfill.warmup_gap(
             watch, session.open, clock.now(),
@@ -252,13 +252,13 @@ class PostLoginRecoveryReport(BaseModel):
 
 # --------------------------------------------------------------------------- the re-trigger
 class PostLoginRecovery:
-    """The §2.6 post-login re-trigger (see module docstring).
+    """The post-login re-trigger (see module docstring).
 
     Registered via :meth:`SessionManager.add_login_hook`; :meth:`run` is the guarded four-step recovery
     fired fire-and-forget when a token becomes valid. Every step is guarded and logged individually —
     a step that raises marks itself failed and alerts, the others still run, and the loop never crashes.
 
-    :attr:`completed` is the §2.6 early-hydration handshake (2026-09-09).
+    :attr:`completed` is the early-hydration handshake (2026-09-09).
     :meth:`SessionManager._fire_login_hooks` creates ONE TASK PER HOOK, so registration order gives
     :class:`~engine.ops.early_hydration.EarlyHydration` no ordering against this recovery at all — the
     two run concurrently. This event is what sequences them: SET in ``__init__`` (an engine that never
@@ -309,7 +309,7 @@ class PostLoginRecovery:
         self._notify = notify
         self._alert = alert
         self._holdings_reconcile = holdings_reconcile
-        #: "This recovery is not running" (§2.6 early hydration, 2026-09-09 — see the class docstring).
+        #: "This recovery is not running" (early hydration, 2026-09-09 — see the class docstring).
         #: Starts SET so an engine that never fires a login hook blocks nothing. DEPTH-COUNTED
         #: (2026-09-09 review): a bare Event is set by whichever ``run()`` finishes FIRST, which would
         #: release the early-hydration chain while a SECOND overlapping login's recovery is still
@@ -422,12 +422,12 @@ class PostLoginRecovery:
 
     # ------------------------------------------------------------------ (e) holdings reconcile
     async def _step_holdings(self) -> tuple[str, str]:
-        """§3.6 holdings reconcile — NON-load-bearing (see the module docstring): it never fails the
+        """Holdings reconcile — NON-load-bearing (see the module docstring): it never fails the
         ladder. The job swallows its own broker errors and reports them as ``error``, which is
         recorded here as a ``skipped`` step: "could not read the account" is not a recovery failure,
         and marking it one would put a red step in every pre-login-token report.
 
-        ``observed`` (WO-D2) is the §3.6 journal rows this run actually wrote: ``checked`` on a
+        ``observed`` is the holdings-journal rows this run actually wrote: ``checked`` on a
         trading day, 0 on any other (this ladder calls ``run`` unconditionally — only the hourly tick
         is window-gated) and 0 when the journal write itself failed and was swallowed. Reporting it
         says whether the "sold outside the ledger" evidence grew, which ``checked`` alone cannot."""

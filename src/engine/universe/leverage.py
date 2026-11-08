@@ -1,16 +1,16 @@
-"""Zerodha MIS margins file → per-stock intraday leverage + MIS eligibility (§3.2.4 / §4.4 job 4, A8).
+"""Zerodha MIS margins file → per-stock intraday leverage + MIS eligibility.
 
 The Zerodha equity-margins file is the authority for which NSE stocks can be traded MIS and at what
-intraday leverage (the "MIS-eligible (Zerodha leverage file)" leg of the §3.2.4 universe rule). This
+intraday leverage (the "MIS-eligible (Zerodha leverage file)" leg of the universe rule). This
 module fetches and parses it; the :class:`~engine.universe.builder.UniverseBuilder` is its only
 consumer (the ``not_mis_eligible`` exclusion). Nothing writes it into ``instruments_daily``: the
-``mis_leverage`` / ``mis_eligible`` columns (§4.3) stay NULL.
+``mis_leverage`` / ``mis_eligible`` columns stay NULL.
 
-Best-effort source (E5, convention 11): injected ``httpx.AsyncClient``, defensive
+Best-effort source: injected ``httpx.AsyncClient``, defensive
 parsing. On fetch/parse failure the last good file is reused from a runtime JSON cache under ``data/``
 ("reuse yesterday" — survives restarts) with ``degraded=True`` + an owner alert; with no cache at all
 the map is EMPTY, which fails CLOSED: every symbol reads as not-MIS-eligible and the universe rule
-excludes it (A8 conservative default). A leverage-file failure can therefore never widen the universe.
+excludes it (conservative default). A leverage-file failure can therefore never widen the universe.
 """
 
 from __future__ import annotations
@@ -36,14 +36,14 @@ _log = get_logger("engine.universe.leverage")
 KITE_MIS_MARGINS_URL = "https://api.kite.trade/margins/equity"
 
 #: A stock is MIS-eligible iff it appears in the margins file with computed leverage strictly > 1×
-#: (a 1×/absent entry means no intraday margin product — CNC only). [VERIFY Phase-1] with the live file.
+#: (a 1×/absent entry means no intraday margin product — CNC only). [VERIFY] with the live file.
 MIS_ELIGIBLE_MIN_LEVERAGE = 1.0
 
 NotifySink = Callable[[CatalogMessage], Awaitable[None]]
 
 
 class MisLeverageMap(BaseModel):
-    """Per-stock MIS leverage snapshot (the §3.2.4 universe-rule input).
+    """Per-stock MIS leverage snapshot (the universe-rule input).
 
     ``leverages`` maps ``tradingsymbol -> leverage multiple`` (e.g. 5.0 = 20% MIS margin). Leverage
     is a ratio, not money — ``float`` is correct (mirrors ``instruments_daily.mis_leverage DOUBLE``).
@@ -60,7 +60,7 @@ class MisLeverageMap(BaseModel):
         return self.leverages.get(symbol.upper())
 
     def is_mis_eligible(self, symbol: str) -> bool:
-        """A8 fail-closed: unknown symbol ⇒ not eligible (never "assume leveraged")."""
+        """Fail-closed: unknown symbol ⇒ not eligible (never "assume leveraged")."""
         lev = self.leverages.get(symbol.upper())
         return lev is not None and lev > MIS_ELIGIBLE_MIN_LEVERAGE
 
@@ -86,7 +86,7 @@ def _row_leverage(row: dict[str, Any]) -> float | None:
 def parse_margins_payload(payload: Any) -> dict[str, float]:
     """Defensively parse the margins JSON (array or ``{"data": [...]}``) → ``symbol -> leverage``.
 
-    Rows without a tradingsymbol or a usable multiplier/margin are skipped, never fatal (E5).
+    Rows without a tradingsymbol or a usable multiplier/margin are skipped, never fatal.
     """
     rows = payload
     if isinstance(payload, dict):
@@ -108,14 +108,14 @@ def parse_margins_payload(payload: Any) -> dict[str, float]:
 
 
 class MisLeverageIngest:
-    """Fetch + cache the Zerodha MIS margins file (E5 best-effort; reuse-yesterday on failure).
+    """Fetch + cache the Zerodha MIS margins file (best-effort; reuse-yesterday on failure).
 
     Parameters
     ----------
     clock:
-        Single source of "now" (§3.2) — stamps ``as_of`` and the cache.
+        Single source of "now" — stamps ``as_of`` and the cache.
     http:
-        Injected ``httpx.AsyncClient`` (convention 11). Owned by the caller; never closed here.
+        Injected ``httpx.AsyncClient``. Owned by the caller; never closed here.
     cache_path:
         Runtime last-good JSON cache (e.g. ``data/universe/mis_margins.json``) — the
         "yesterday's data" reused on failure, surviving restarts.
@@ -140,7 +140,7 @@ class MisLeverageIngest:
         self._current: MisLeverageMap | None = None
 
     async def current(self) -> MisLeverageMap:
-        """The latest refreshed map, refreshing once if never refreshed this process (§2.6 catch-up)."""
+        """The latest refreshed map, refreshing once if never refreshed this process."""
         if self._current is None:
             return await self.refresh()
         return self._current
@@ -148,7 +148,7 @@ class MisLeverageIngest:
     async def refresh(self) -> MisLeverageMap:
         """Fetch + parse the margins file; on ANY failure reuse the cached last-good copy + alert.
 
-        Never raises into the caller's loop (E5). An empty degraded map (no cache either) fails
+        Never raises into the caller's loop. An empty degraded map (no cache either) fails
         CLOSED: no symbol is MIS-eligible until the file is reachable again.
         """
         try:
@@ -171,7 +171,7 @@ class MisLeverageIngest:
             )
             return self._current
 
-    # ------------------------------------------------------------------ cache (reuse-yesterday, E5)
+    # ------------------------------------------------------------------ cache (reuse-yesterday)
     def _write_cache(self, as_of: datetime, leverages: dict[str, float]) -> None:
         try:
             self._cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,7 +191,7 @@ class MisLeverageIngest:
                 return MisLeverageMap(as_of=as_of, degraded=True, leverages=leverages)
             except (OSError, ValueError, KeyError, TypeError):
                 _log.exception("mis_margins_cache_unreadable", path=str(self._cache_path))
-        # No usable cache: empty map ⇒ every symbol not-MIS-eligible (fail closed, A8).
+        # No usable cache: empty map ⇒ every symbol not-MIS-eligible (fail closed).
         return MisLeverageMap(as_of=self._clock.now(), degraded=True, leverages={})
 
     async def _alert(self, *, reason: str) -> None:

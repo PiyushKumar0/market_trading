@@ -1,5 +1,5 @@
-"""Per-strategy hindsight scorecard over ``rec_outcomes`` joined to ``recommendations`` (plan Q2.4), and
-the published signals scored in ``signal_outcomes`` with their pre-registered verdicts (review A1).
+"""Per-strategy hindsight scorecard over ``rec_outcomes`` joined to ``recommendations``, and
+the published signals scored in ``signal_outcomes`` with their pre-registered verdicts.
 
 HINDSIGHT: read by the owner surfaces only, never by scanner, threshold or promotion code.
 """

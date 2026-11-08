@@ -1,7 +1,7 @@
--- ---------------------------------------------------------------------- §6.1 mom rebalance state
--- WO-13 (2026-08-13, F11): ``ScanContext.mom_sessions_since_rebalance`` was hard-coded ``None`` in
+-- ---------------------------------------------------------------------- mom rebalance state
+-- 2026-08-13: ``ScanContext.mom_sessions_since_rebalance`` was hard-coded ``None`` in
 -- ``engine.ops.scan_context`` (LiveScanContextProvider.__call__), so live treated EVERY trading day
--- as rebalance-due while the sweep rebalances the book every ``rebalance_days`` (§6.3 default 15)
+-- as rebalance-due while the sweep rebalances the book every ``rebalance_days`` (envelope default 15)
 -- TRADING SESSIONS (``engine.learning.sweep``: ``valid_positions[::rebalance_days]``) — a live/
 -- backtest cadence mismatch. One row (id=1, singleton pattern per mode_state/kill_state/
 -- engine_lifecycle in 0001_initial.sql): the trading day the ``mom`` book was last rebalanced.

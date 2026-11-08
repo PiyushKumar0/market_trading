@@ -1,12 +1,12 @@
-"""Composition-root wiring (§3.2.12, §10.1/§4.4): the integrator's ``engine.ops.main`` seams.
+"""Composition-root wiring: the integrator's ``engine.ops.main`` seams.
 
 ``engine.ops.main`` is the only module allowed to import everything; it is not unit-tested elsewhere
 (it spawns uvicorn + the ticker child and idles on a stop signal). These tests lock the two pieces the
 integrator owns that ARE pure enough to assert without booting the whole engine:
 
-  * ``build_job_registry`` — the single §10.1/§4.4 job inventory feeding BOTH the live Scheduler and
-    the startup CatchUpRunner (same registry, §2.6): every Phase-1 job present, at its pinned fire-time,
-    in the right §2.6 step-5 class + dependency order, with the weekly Sunday sector-map fire-day.
+  * ``build_job_registry`` — the single job inventory feeding BOTH the live Scheduler and
+    the startup CatchUpRunner (same registry): every job present, at its pinned fire-time,
+    in the right catch-up class + dependency order, with the weekly Sunday sector-map fire-day.
   * ``_scheduled_runner`` — the live-scheduler wrapper that records the ``job_runs`` watermark on every
     fire (so the CatchUpRunner never re-runs a job the scheduler already ran today) and marks a failed
     run so catch-up retries it, never crashing the loop.
@@ -121,13 +121,13 @@ async def _noop_dated(_d: date) -> None:
 
 
 def _all_noop_fns() -> dict:
-    """A runner for every Phase-1 job id (DATE_KEYED ids need the dated signature)."""
+    """A runner for every PHASE1_JOB_IDS id (DATE_KEYED ids need the dated signature)."""
     date_keyed = {
         opsmain.JOB_RECONCILE, opsmain.JOB_BHAVCOPY, opsmain.JOB_DAILY_BARS,
         opsmain.JOB_DEALS, opsmain.JOB_FEATURES,
-        opsmain.JOB_FILINGS_PIT, opsmain.JOB_FILINGS_RESULTS,   # §2.8 date-keyed
+        opsmain.JOB_FILINGS_PIT, opsmain.JOB_FILINGS_RESULTS,   # filings date-keyed
         opsmain.JOB_FILINGS_PIT_FRESH, opsmain.JOB_INS_CROSSINGS,
-        opsmain.JOB_TICK_COMPACT,                               # §4.3/WO-7 date-keyed
+        opsmain.JOB_TICK_COMPACT,                               # tick-compaction date-keyed
     }
     return {jid: (_noop_dated if jid in date_keyed else _noop) for jid in PHASE1_JOB_IDS}
 
@@ -145,7 +145,7 @@ def market_store(tmp_path, clock):
     s.close()
 
 
-# --------------------------------------------------------------------------- cold-start hydrate ladder (F2)
+# --------------------------------------------------------------------------- cold-start hydrate ladder
 @pytest.mark.asyncio
 async def test_startup_hydrates_from_persisted_snapshot(market_store, clock):
     """Restart after 08:15: the table has yesterday's dump, no Kite session needed → HYDRATE branch."""
@@ -264,22 +264,22 @@ async def test_startup_skips_when_store_already_populated(market_store, clock):
 
 
 def test_registry_covers_every_phase1_job() -> None:
-    # Phase-1 fns only ⇒ the Phase-2 specs (fns.get returns None) are skipped, not half-registered.
+    # PHASE1_JOB_IDS fns only ⇒ the later specs (fns.get returns None) are skipped, not half-registered.
     reg = build_job_registry(load_settings(), _all_noop_fns())
     assert {s.job_id for s in reg.specs()} == set(PHASE1_JOB_IDS)
-    assert len(reg) == len(PHASE1_JOB_IDS) == 24   # +4 §2.8 filings, +1 WO-7 tick compaction,
-                                                   # +1 §6.1 ins_crossings (2026-08-17),
-                                                   # +1 §2.8.4 results_line_items, +1 isin_map,
+    assert len(reg) == len(PHASE1_JOB_IDS) == 24   # +4 filings, +1 tick compaction,
+                                                   # +1 ins_crossings (2026-08-17),
+                                                   # +1 results_line_items, +1 isin_map,
                                                    # +1 feed_freshness (2026-09-24),
                                                    # +1 claude_login_check (2026-10-11),
-                                                   # +1 §10.5 market_backup (2026-10-11)
+                                                   # +1 market_backup (2026-10-11)
 
 
 def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
-    """§8.3 wiring: digest 08:35 → planner 08:50 (run-latest, after the news chain in catch-up
+    """Wiring: digest 08:35 → planner 08:50 (run-latest, after the news chain in catch-up
     order), time exit 09:30 run-latest ahead of the post-arm news chain, reco-expiry 15:45
     run-latest, rec outcomes 18:30 date-keyed after daily_bars, nightly review 21:00 date-keyed
-    (§2.6 per missed day)."""
+    (per missed day)."""
     fns = _all_noop_fns()
     fns[opsmain.JOB_CATALYST_DIGEST] = _noop
     fns[opsmain.JOB_PREOPEN_PLANNER] = _noop
@@ -304,7 +304,7 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
     }
     for jid, (cls, at, order) in expected.items():
         assert (by_id[jid].job_class, by_id[jid].at, by_id[jid].order) == (cls, at, order), jid
-    # Catch-up dependency order (§2.7 steps 4-6): news chain before digest before planner.
+    # Catch-up dependency order: news chain before digest before planner.
     news = by_id[opsmain.JOB_NEWS_CHAIN].order
     assert news < by_id[opsmain.JOB_CATALYST_DIGEST].order < by_id[opsmain.JOB_PREOPEN_PLANNER].order
     assert by_id[opsmain.JOB_TIME_EXIT_CHECK].order < news
@@ -322,8 +322,8 @@ def test_registry_phase2_jobs_register_when_their_fns_exist(calendar) -> None:
 
 
 def test_registry_classes_and_fire_times_match_the_schedule() -> None:
-    """§10.1: instruments 08:15, surveillance 08:20, universe 08:30, reconcile 15:50, bhavcopy 18:00,
-    corp-actions 20:15, earnings 18:30, deals 20:30 — in their §2.6 step-5 classes."""
+    """Instruments 08:15, surveillance 08:20, universe 08:30, reconcile 15:50, bhavcopy 18:00,
+    corp-actions 20:15, earnings 18:30, deals 20:30 — in their catch-up classes."""
     settings = load_settings()
     by_id = {s.job_id: s for s in build_job_registry(settings, _all_noop_fns()).specs()}
 
@@ -347,7 +347,7 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         opsmain.JOB_FILINGS_PIT:       (JobClass.DATE_KEYED, time(18, 35)),
         opsmain.JOB_FILINGS_PIT_FRESH: (JobClass.DATE_KEYED, time(19, 0)),
         opsmain.JOB_FILINGS_RESULTS:   (JobClass.DATE_KEYED, time(18, 45)),
-        # §6.1 `ins` (2026-08-17): AFTER filings_pit_fresh's 19:00 — it consumes that job's rows.
+        # `ins` (2026-08-17): AFTER filings_pit_fresh's 19:00 — it consumes that job's rows.
         opsmain.JOB_INS_CROSSINGS:     (JobClass.DATE_KEYED, time(19, 15)),
         opsmain.JOB_FILINGS_SHP:     (JobClass.RUN_LATEST,   time(18, 50)),
         opsmain.JOB_RESULTS_LINE_ITEMS: (JobClass.RUN_LATEST, time(19, 30)),
@@ -356,9 +356,9 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
         # Stored claude.ai login health: before the 08:25 pre-open chain. Overnight news scoring and
         # early hydration (~06:30) can hit a dead login first; their auth_failed alerts carry the hint.
         opsmain.JOB_CLAUDE_LOGIN:      (JobClass.RUN_LATEST, time(8, 10)),
-        # WO-7 storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
+        # Tick-compaction storage housekeeping: post-EOD, after the nightly review's 21:00 slot.
         opsmain.JOB_TICK_COMPACT:      (JobClass.DATE_KEYED, time(22, 30)),
-        # §10.5 DuckDB export (2026-10-11): after the 21:00 SQLite backup, before compaction.
+        # DuckDB export (2026-10-11): after the 21:00 SQLite backup, before compaction.
         opsmain.JOB_MARKET_BACKUP:     (JobClass.RUN_LATEST, time(22, 0)),
     }
     for jid, (cls, at) in expected.items():
@@ -388,14 +388,14 @@ def test_registry_classes_and_fire_times_match_the_schedule() -> None:
 
 
 def test_instruments_runs_before_surveillance_in_dependency_order() -> None:
-    """A10/A8: instruments dump (tick sizes) must precede surveillance within the safety-critical class."""
+    """The instruments dump (tick sizes) must precede surveillance within the safety-critical class."""
     reg = build_job_registry(load_settings(), _all_noop_fns())
     safety = [s.job_id for s in reg.specs(JobClass.SAFETY_CRITICAL)]
     assert safety.index(JOB_INSTRUMENTS) < safety.index(opsmain.JOB_SURVEILLANCE)
 
 
 def test_sector_map_fires_only_on_sunday() -> None:
-    """§4.4 job 13: the sector/theme map refresh is a weekly Sunday cadence, not a trading-day job."""
+    """The sector/theme map refresh is a weekly Sunday cadence, not a trading-day job."""
     reg = build_job_registry(load_settings(), _all_noop_fns())
     sector = next(s for s in reg.specs() if s.job_id == JOB_SECTOR_MAP)
     assert sector.fire_day is not None
@@ -469,9 +469,9 @@ _FORWARDING_WRAPPERS: dict[str, tuple[str, type, bool]] = {
 async def test_sector_map_wrapper_classifies_the_batch_universe(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """O15 (2026-09-04): ``job_sector_map`` must feed sector_map the day's BATCH universe, not the
+    """Owner decision 2026-09-04: ``job_sector_map`` must feed sector_map the day's BATCH universe, not the
     tick watchlist. With the eligible set at NIFTY 500 and ``universe_max_watchlist`` still 200, a
-    watchlist-scoped run leaves every capped/extended name unclassified — and §7.1 caps the
+    watchlist-scoped run leaves every capped/extended name unclassified — and the risk limits cap the
     UNCLASSIFIED bucket at 1 open position, so the widened swing legs would be gate-blocked."""
     received: list[tuple[date, list[str]]] = []
 
@@ -682,8 +682,7 @@ class _OkResult:
 @pytest.mark.asyncio
 async def test_scheduled_runner_records_failed_status_on_notok_result(conn, clock, calendar) -> None:
     """2026-08-12 live bug: a job that degrades-without-raising (returns ``ok=False``) must sink the
-    watermark exactly like an exception — this is the bhavcopy shape (BhavcopyJob.run never raises,
-    E5). Before the fix this hit ``record_run`` with its default ``status='success'``."""
+    watermark exactly like an exception — this is the bhavcopy shape (BhavcopyJob.run never raises). Before the fix this hit ``record_run`` with its default ``status='success'``."""
     catch_up = CatchUpRunner(conn, clock, calendar)
 
     async def run_it(d: date) -> _OkResult:
@@ -739,7 +738,7 @@ async def test_scheduled_runner_records_nothing_for_an_unfinished_run(
     assert conn.execute("SELECT count(*) FROM job_runs").fetchone()[0] == 0
 
 
-# ---------------------------------------- scheduled fire vs today's watermark (§2.6 early hydration)
+# ---------------------------------------- scheduled fire vs today's watermark (early hydration)
 # Owner-directed 2026-09-09, after review REVERSED the first draft: the scheduled fire stays
 # UNCONDITIONAL. A draft skipped any job already watermarked for today, and that pinned the 06:30
 # digest/plan — and a universe built on a pre-08:00 instruments dump — for the whole day. Results and
@@ -773,8 +772,8 @@ async def test_scheduled_fire_runs_even_when_today_is_already_watermarked(
 
 
 def test_same_registry_arms_every_job_on_the_live_scheduler(conn, clock, calendar) -> None:
-    """§2.6/§10.1: the live Scheduler and the CatchUpRunner are fed the SAME JobRegistry — arming must
-    register every Phase-1 job id on APScheduler (the sector map as a weekly Sunday cron, the rest as
+    """The live Scheduler and the CatchUpRunner are fed the SAME JobRegistry — arming must
+    register every PHASE1_JOB_IDS id on APScheduler (the sector map as a weekly Sunday cron, the rest as
     calendar-guarded trading-day jobs)."""
     settings = load_settings()
     reg = build_job_registry(settings, _all_noop_fns())
@@ -791,7 +790,7 @@ def test_same_registry_arms_every_job_on_the_live_scheduler(conn, clock, calenda
 
 
 def test_pre_open_token_check_is_armed_at_0840(clock, calendar) -> None:
-    """WO-21 (iii): the pre-open token probe is a calendar-guarded 08:40 daily fire, and it is
+    """The pre-open token probe is a calendar-guarded 08:40 daily fire, and it is
     deliberately NOT a registry job — a watermark would make a pre-open check catch-up-eligible,
     and a token check replayed at 14:00 answers a question nobody is asking."""
     from engine.ops.token_check import TokenCheckJob
@@ -831,7 +830,7 @@ def test_live_interval_jobs_are_armed(clock, calendar) -> None:
 
 
 def test_holdings_reconcile_is_armed_hourly(clock, calendar) -> None:
-    """§3.6 holdings reconcile (2026-09-07): an hourly in-session tick. The cadence is the point —
+    """Holdings reconcile (2026-09-07): an hourly in-session tick. The cadence is the point —
     the check answers "did the owner sell this?", which is worth asking a few times a session and
     pointless to ask every minute."""
     settings = load_settings()
@@ -925,7 +924,7 @@ async def test_clusterer_and_digest_read_the_one_cat_envelope_row(
     ``cat.max_event_age_days`` off the same boot ``envelope_state`` read (the settings key is gone)."""
     from engine.datafeeds.news_pipeline import load_cat_params
 
-    def promoted(conn) -> None:      # a §6.4 promotion moved the row off its envelope.yaml default
+    def promoted(conn) -> None:      # a promotion moved the row off its envelope.yaml default
         conn.execute("INSERT INTO envelope_state (parameter, value, bounds_sha256, set_by) "
                      "VALUES ('cat.max_event_age_days', '5', 'x', 'promotion')")
 
@@ -977,7 +976,7 @@ def test_attach_feature_snapshots_mints_one_id_per_candidate() -> None:
     """2026-08-04 defect: batch-rule (brk20) candidates reached the analyst with
     features_snapshot_id: null, and intraday.py Rule 6 mandates no_action on a missing id — every
     brk20 candidate was structurally un-recommendable. The composition root must mint the same
-    §4.3 feature link the per-bar ScanContext path mints."""
+    feature link the per-bar ScanContext path mints."""
     from types import SimpleNamespace
 
     minted: list[str] = []
@@ -997,7 +996,7 @@ def test_attach_feature_snapshots_mints_one_id_per_candidate() -> None:
 
 
 def test_attach_feature_snapshots_degrades_to_none_never_raises() -> None:
-    """Scan-path posture (§3.2.5): a FeatureEngine failure costs that candidate its feature link,
+    """Scan-path posture: a FeatureEngine failure costs that candidate its feature link,
     never the sweep. Mixed batch: the healthy symbol still gets its id."""
 
     class FlakyFeatures:
@@ -1012,7 +1011,7 @@ def test_attach_feature_snapshots_degrades_to_none_never_raises() -> None:
     assert [c.features_snapshot_id for c in out] == [None, "snap-COALINDIA"]
 
 
-# --------------------------------------------------------------------------- brk20 RETEST re-arm (WO-R)
+# --------------------------------------------------------------------------- brk20 RETEST re-arm
 #: A retest tick's day — Thu 2026-06-18, the session after the 06-17 crossing used in test_retest.py.
 RETEST_D = date(2026, 6, 18)
 
@@ -1080,7 +1079,7 @@ def test_the_retest_rearm_does_nothing_at_all_outside_the_trade_window() -> None
     """The re-arm rides the 60 s forward-drain pulse, which runs all day; the window verdict is the
     sweep's own `_sweep_window_active` (a live session, inside the owner trade window, in a mode that
     originates). Outside it NOTHING happens — not the expiry sweep, not the journal read, and above
-    all not a `prescreen.admit` that would spend an unrefundable §3.2.5 day slot on a candidate the
+    all not a `prescreen.admit` that would spend an unrefundable prescreen day slot on a candidate the
     pipeline is guaranteed to drop as `signal_candidate_out_of_window`."""
     book, screen = _FakeRestingBook([_brk20_cand("AAA")]), _FakeScreen()
     minted: list[str] = []
@@ -1112,7 +1111,7 @@ def test_the_retest_rearm_admits_through_the_same_prescreen_and_mints_after_it()
     cap, same-day dedupe — as a fresh sweep candidate, with `in_window=True` stating the window
     verdict the pre-screen (Clock-free by design) cannot take itself.
 
-    The §4.3 snapshot is minted AFTER that admit, the sweep's own discipline: a candidate the caps
+    The feature snapshot is minted AFTER that admit, the sweep's own discipline: a candidate the caps
     suppress must never spend a snapshot write, and a candidate with a null id is structurally
     un-recommendable (intraday.py Rule 6), so it cannot simply be left off either."""
     due = [_brk20_cand("AAA"), _brk20_cand("BBB")]
@@ -1148,7 +1147,7 @@ def test_the_retest_rearm_admits_through_the_same_prescreen_and_mints_after_it()
 def test_the_republication_line_counts_ADMITTED_candidates_only(caplog) -> None:
     """`brk20_retest_republished` is a PUBLICATION count. Emitted at offer time it would also count
     every candidate the day cap, the brk20 sub-cap or the same-day dedupe suppressed — the raw-vs-
-    published ambiguity the WO-9 funnel exists to remove. The book logs `brk20_retest_offered`; this
+    published ambiguity the funnel exists to remove. The book logs `brk20_retest_offered`; this
     line is emitted here, per accepted candidate, off the book's `offers` detail."""
     due = [_brk20_cand("AAA"), _brk20_cand("BBB")]
     book, screen = _FakeRestingBook(due), _FakeScreen(accept={"AAA"})
@@ -1165,9 +1164,8 @@ def test_the_republication_line_counts_ADMITTED_candidates_only(caplog) -> None:
 
 
 def test_an_unreadable_limits_table_re_offers_nothing(caplog) -> None:
-    """The band is the only thing between this mechanism and re-publishing a level the §7.1 gate is
-    certain to reject, so an unverifiable limits store fails to ZERO rather than to a constant (§2.4
-    item 1: limits are read at the enforcement site or not used). The staleness bound rides the SAME
+    """The band is the only thing between this mechanism and re-publishing a level the risk gate is
+    certain to reject, so an unverifiable limits store fails to ZERO rather than to a constant (limits are read at the enforcement site or not used). The staleness bound rides the SAME
     load, so neither can be read against a different snapshot than the other. Expiry — pure
     housekeeping that reads no limit — still runs."""
     book, screen = _FakeRestingBook([_brk20_cand("AAA")]), _FakeScreen()
@@ -1197,7 +1195,7 @@ def test_an_empty_book_costs_one_read_and_no_admission() -> None:
 def test_the_skip_screen_names_exactly_what_the_gate_would_hard_reject() -> None:
     """The mechanism the backtest measured books ONE trade per signal. A level already HELD, or
     carrying a pending entry recommendation, is rejected by `gate._rule_per_stock_exposure` as
-    `already held or pending` — a HARD reason no shrink can cure — but only AFTER the §3.2.5 day slot
+    `already held or pending` — a HARD reason no shrink can cure — but only AFTER the prescreen day slot
     and one of the day's analyst calls are spent. Two more narrowings keep the re-offer inside the
     population and the corporate-action safety brk20 originated under."""
     reasons = opsmain._retest_skip_reasons(
@@ -1520,7 +1518,7 @@ async def test_the_composition_root_really_arms_the_retest_rearm(
 
 def test_the_unverified_limits_fallback_base_is_the_registration_base() -> None:
     """A boot on an unverified limit table builds the ExposureTracker on this constant; it must stay
-    the registration base. Since O19 the live base can differ (the owner changes it from the
+    the registration base. Since the owner's dashboard capital change the live base can differ (the owner changes it from the
     dashboard); the fallback is display-only on a FROZEN boot and may lag the live value."""
     assert Decimal(str(PINNED_CAPITAL["capital_base_inr"])) == opsmain._FALLBACK_CAPITAL_BASE_INR
 
@@ -1539,7 +1537,7 @@ class _Limits:
 
 
 def test_the_real_tracker_base_reads_through_the_limits_engine_on_every_call() -> None:
-    """O19 §2: no boot-time copy, so a ``LimitsEngine.reload()`` reaches the real brakes."""
+    """No boot-time copy, so a ``LimitsEngine.reload()`` reaches the real brakes."""
     limits = _Limits("40000")
     base = opsmain._limits_capital_base(limits)
     assert base() == Decimal("40000")
@@ -1566,7 +1564,7 @@ def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
 async def test_the_real_tracker_is_built_on_the_live_base(
     tmp_path, monkeypatch, migrated_db_template, caplog
 ) -> None:
-    """O19 §2: the composed tracker reads the verified table on every call — an owner update plus the
+    """The composed tracker reads the verified table on every call — an owner update plus the
     gate's ONE ``reload()`` moves it (no boot-time copy) — and an unverifiable table at boot warns
     and falls back to the shipped base instead of crashing the boot."""
     built: dict[str, list] = {}
@@ -1598,7 +1596,7 @@ async def test_the_prescreen_displacement_margin_is_the_owner_setting(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
     """2026-08-27 cap displacement: how much better a later candidate must score to take a full cap's
-    slot from an unevaluated incumbent is an owner knob in settings.yaml (§6.3) — the composed
+    slot from an unevaluated incumbent is an owner knob in settings.yaml — the composed
     pre-screen must be handed THAT value, not a constructor default."""
     def owner_knob(settings) -> None:
         settings.strategy.prescreen.displacement_margin = 0.37
@@ -1614,8 +1612,8 @@ async def test_the_prescreen_displacement_margin_is_the_owner_setting(
 async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """O19 §3.3: ONE ``StrategyEdges`` on the hash-verified limits and the gate's own cost model, so
-    the gate's C3 edge and the pipeline's registered edge can never disagree after a capital change."""
+    """ONE ``StrategyEdges`` on the hash-verified limits and the gate's own cost model, so
+    the gate's cost-gate edge and the pipeline's registered edge can never disagree after a capital change."""
     built: dict[str, list] = {}
     for name in ("StrategyEdges", "RiskGate", "RecommendationPipeline"):
         spy(monkeypatch,name, built)
@@ -1645,7 +1643,7 @@ def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, con
     from engine.strategy.cost_model import CostModel
     from engine.strategy.hi52_edge import StrategyEdges
 
-    def at_base(inr: int) -> str:     # base-agnostic: the shipped base itself moves with O19 changes
+    def at_base(inr: int) -> str:     # base-agnostic: the shipped base itself moves with capital changes
         text, n = re.subn(r"(?m)^capital_base_inr: \d+\b", f"capital_base_inr: {inr}", shipped)
         assert n == 1
         return text
@@ -1674,7 +1672,7 @@ def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, con
 async def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """O19 §2 on the paper side: an owner update plus the gate's ONE ``reload()`` moves both."""
+    """On the paper side: an owner update plus the gate's ONE ``reload()`` moves both."""
     built: dict[str, list] = {}
     for name in ("PaperRisk", "PaperRuntime", "RiskGate"):
         spy(monkeypatch, name, built)
@@ -1693,7 +1691,7 @@ async def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime(
 
 def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> None:
     """5 sessions = `V2_limit_at_H20_N5`. The number IS the registered mechanism — N=1 (what shipped
-    before WO-R) and N=3 were both measured and both lost, every other N was never run — so it is an
+    before the retest re-arm) and N=3 were both measured and both lost, every other N was never run — so it is an
     owner-only key and the code default must agree with the shipped settings, not shadow it."""
     assert load_settings().brk20.retest_sessions == DEFAULT_RETEST_SESSIONS == 5
     # …and it is NOT in the learnable envelope: the rule's own params live in brk20.DEFAULT_PARAMS.
@@ -2391,7 +2389,7 @@ async def test_a_first_observation_of_a_ready_intraday_class_pages_nobody() -> N
 
 
 def test_the_intraday_notice_is_silent_while_a_freezing_class_holds_entries_frozen() -> None:
-    """Re-review 2026-09-13: with a FREEZING class ALSO short, lifecycle step 6 DID freeze and
+    """Re-review 2026-09-13: with a FREEZING class ALSO short, the startup warm-up gate DID freeze and
     WARMUP_FROZEN owns that state — a 60 s notice saying "entries are NOT frozen" would state the
     opposite of the live risk state. Nothing is said and the memo is left alone, so the intraday
     shortfall is reported on the first tick after the freeze lifts, when the wording is true. The
@@ -2470,9 +2468,9 @@ async def test_the_prescreen_reads_the_same_warmup_snapshot_as_the_gate_context(
         assert snapshot() is refreshed                          # the holder the boot and the 60 s job fill
 
 
-# =========================================================================== WO-15 boot ordering
-# (i) boot catch-up runs load-bearing data steps only; the news chain + digest + planner fire as
-# one-shots AFTER scheduler.start(); (iii) engine_ready never waits on the chain.
+# =========================================================================== deferred boot catch-up ordering
+# Boot catch-up runs load-bearing data steps only; the news chain + digest + planner fire as
+# one-shots AFTER scheduler.start(); engine_ready never waits on the chain.
 # The machinery is pinned in test_catchup_runner.py; here it is the composition root's boot TAIL.
 
 
@@ -2488,7 +2486,7 @@ class _FakeScheduler:
         self._events.append("scheduler_armed")
 
     def is_running(self) -> bool:
-        """WO-25c: the boot-contract surface the real Scheduler exposes off APScheduler's own state."""
+        """The boot-contract surface the real Scheduler exposes off APScheduler's own state."""
         return self.started
 
 
@@ -2513,7 +2511,7 @@ def _post_arm_registry(events: list[str], *, gate: asyncio.Event | None = None,
 
 
 def test_every_post_arm_job_is_a_registered_never_safety_critical_job(calendar) -> None:
-    """WO-15's deferred set must name real registry ids — a typo would silently defer nothing (and
+    """The deferred set must name real registry ids — a typo would silently defer nothing (and
     silently never fire it, since the post-arm pass selects BY id)."""
     fns = _all_noop_fns()
     fns[opsmain.JOB_CATALYST_DIGEST] = _noop
@@ -2531,7 +2529,7 @@ def test_every_post_arm_job_is_a_registered_never_safety_critical_job(calendar) 
 
 
 def test_early_hydration_set_is_the_real_pre_open_chain() -> None:
-    """§2.6 early hydration (2026-09-09): same typo risk as the deferred set — the hook selects BY id,
+    """Early hydration (2026-09-09): same typo risk as the deferred set — the hook selects BY id,
     so a name that is not a registry job would silently hydrate nothing. Also pins the deliberate
     exclusions: ``instruments`` (Kite regenerates its dump ~08:00, so a 06:30 refresh could pin a
     stale map), the Sunday-only ``sector_map``, and DATE_KEYED jobs (``hydrate_ahead`` rejects them)."""
@@ -2567,8 +2565,8 @@ async def test_scheduler_is_armed_before_the_deferred_chain_fires(conn, clock, c
 
 @pytest.mark.asyncio
 async def test_armed_event_is_set_after_the_one_shot_is_dispatched(conn, clock, calendar) -> None:
-    """§2.6 early hydration (2026-09-09): the login hook must never run the pre-open chain ahead of
-    ``scheduler.start()`` (the WO-15 firing-point rule), so it waits on this event — released AFTER
+    """Early hydration (2026-09-09): the login hook must never run the pre-open chain ahead of
+    ``scheduler.start()`` (the deferred boot catch-up firing-point rule), so it waits on this event — released AFTER
     the post-arm one-shot is dispatched, not before. Released first, the woken hook wins the
     single-flight pass lock and the one-shot degrades to a ``skipped_in_flight`` no-op (the deferred
     chain would then only run at its own 08:25 clock). Dispatched first, the one-shot holds the lock
@@ -2604,7 +2602,7 @@ async def test_armed_event_is_set_after_the_one_shot_is_dispatched(conn, clock, 
 
 @pytest.mark.asyncio
 async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn, clock, calendar) -> None:
-    """WO-15 acceptance: a boot whose news chain never returns (the 2026-08-10 wedge: 8 h inside
+    """Deferred-catch-up acceptance: a boot whose news chain never returns (the 2026-08-10 wedge: 8 h inside
     lifecycle.startup, ahead of arming) must still reach engine_ready. The whole boot tail runs under
     a timeout — if the chain were replayed inside the boot pass again, this test would hang."""
     events: list[str] = []
@@ -2614,7 +2612,7 @@ async def test_news_backlog_boot_reaches_engine_ready_in_load_bearing_time(conn,
     scheduler = _FakeScheduler(events)
 
     async def boot_tail() -> asyncio.Task | None:
-        await catch_up.catch_up()                  # what SessionLifecycle.startup awaits (2.6 step 5)
+        await catch_up.catch_up()                  # what SessionLifecycle.startup awaits
         task = start_scheduler_and_fire_post_arm(scheduler, catch_up, armed=asyncio.Event())
         events.append("engine_ready")
         return task
@@ -2653,7 +2651,7 @@ async def test_a_failing_post_arm_chain_records_a_failed_watermark_and_never_rai
 
 @pytest.mark.asyncio
 async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, calendar, monkeypatch) -> None:
-    """WO-15 risk note: flipping ``DEFER_POST_ARM_JOBS`` off restores the old boot exactly — the
+    """Risk note: flipping ``DEFER_POST_ARM_JOBS`` off restores the old boot exactly — the
     deferred set empties (so the boot pass runs the chain again) and no one-shot is fired."""
     monkeypatch.setattr(opsmain, "DEFER_POST_ARM_JOBS", False)
     events: list[str] = []
@@ -2669,7 +2667,7 @@ async def test_rollback_flag_restores_the_pre_wo15_firing_point(conn, clock, cal
     assert scheduler.started is True               # arming still happens, unconditionally
 
 
-# ================================ compaction lane + WO-21 (ii): no in-session tick compaction (2026-08-20)
+# ================================ compaction lane: no in-session tick compaction (2026-08-20)
 # An 11:26 IST crash-recovery boot fired the post-arm compaction backlog DURING the session: ~16 GB
 # peak, tick processing >1 h behind wall clock, /db/query unresponsive, Telegram timing out. Since
 # 2026-09-29 compaction runs in its own runner (CompactionLane), which starts no pass inside that
@@ -2811,7 +2809,7 @@ def test_in_session_window_bounds(calendar, when: datetime, inside: bool) -> Non
     assert opsmain._in_session_window(_clock_at(when), calendar) is inside
 
 
-# =========================================================================== WO-14 (c) translation
+# =========================================================================== advisory-outcome translation
 # preopen_planner/nightly_review return a tri-state; the composition-root wrappers translate it into
 # the ok-bearing watermark verdict. A governor block is a CORRECT outcome (success watermark, no
 # retry - a blind retry loop spends LLM budget); only a harness failure is retryable.
@@ -2917,14 +2915,14 @@ async def test_harness_failure_sinks_the_watermark_and_the_sweep_retry_is_govern
 ) -> None:
     """The retry is bounded by the governor, not by a counter: the re-run re-enters ``can_invoke``,
     so a governor that has since closed the tap ends the retry chain with a success watermark and
-    zero spend (WO-14: 'a retried run is still governor-gated at execution')."""
+    zero spend ('a retried run is still governor-gated at execution')."""
     nightly = _FakeAdvisoryJob(harness_ok=False)
 
     async def job_nightly_review(d) -> AdvisoryRun:
         return AdvisoryRun(await nightly.run(d))               # mirrors engine.ops.main
 
     # Fire-time brought forward of the real 21:00 slot so the frozen 10:05 clock is PAST it — the
-    # sweep only replays days whose fire-time has come (§2.6 _missed_days).
+    # sweep only replays days whose fire-time has come (_missed_days).
     spec = JobSpec(JOB_NIGHTLY_REVIEW, JobClass.DATE_KEYED, time(9, 0), job_nightly_review, order=80)
     reg = JobRegistry()
     reg.register(spec)
@@ -2943,7 +2941,7 @@ async def test_harness_failure_sinks_the_watermark_and_the_sweep_retry_is_govern
     assert result.jobs_failed == []
 
 
-# =========================================================== WO-23: §4.5 retention actually WIRED
+# =========================================================== retention actually WIRED
 # ``MarketStore.apply_retention`` (ticks 30 d, news/clusters/sentiment 1 y, corrections 90 d) was
 # designed, implemented and unit-tested — and never CALLED from any scheduled job. It now hangs off
 # the nightly tick_compact pass, which already owns the closed tick partitions.
@@ -3010,10 +3008,10 @@ async def test_retention_is_gated_on_a_clean_pass(result: TickCompactionResult) 
 async def test_tick_compact_closure_calls_retention_after_the_pass(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """WO-23: the composed engine's ``tick_compact`` job runs the retention sweep AFTER the pass and
+    """The composed engine's ``tick_compact`` job runs the retention sweep AFTER the pass and
     hands back the pass's own verdict — the dropped retention call was the defect. Buffered ticks are
     written BEFORE compaction reads the partitions (a session tail left for the next morning's flush
-    would land beside a date a post-midnight run already compacted), and the run stops at the WO-21
+    would land beside a date a post-midnight run already compacted), and the run stops at the tick_compact no-run
     window and on a stop signal (2026-09-29: a worker still compacting at shutdown held the process
     past NSSM's grace on every stop during a run)."""
     events: list[tuple] = []
@@ -3037,7 +3035,7 @@ async def test_tick_compact_closure_calls_retention_after_the_pass(
         assert await _spec(e, opsmain.JOB_TICK_COMPACT).run(run_for) is verdict
         assert events == [("flush", 15.0), ("compact", run_for, e.clock.today()), ("retention", verdict)]
         (stop,) = stops
-        assert stop() is True                       # 10:05 on a trading day: inside the WO-21 window
+        assert stop() is True                       # 10:05 on a trading day: inside the tick_compact no-run window
         c.time.set(datetime.combine(e.clock.today(), time(22, 30), tzinfo=IST))
         assert stop() is False
         c.stop_event.set()
@@ -3057,7 +3055,7 @@ async def test_run_gives_tick_compact_its_own_lane(tmp_path, monkeypatch, migrat
 
 
 async def test_market_backup_runs_in_compaction_lane_only(tmp_path, monkeypatch, migrated_db_template) -> None:
-    """§10.5 DuckDB export (2026-10-11): a lane job — never in the boot catch-up (the main runner never
+    """DuckDB export (2026-10-11): a lane job — never in the boot catch-up (the main runner never
     holds it), never on the stop path (the shutdown hook is the SQLite snapshot alone), and its 22:00
     fire starts a lane pass, so it never overlaps the compaction it shares the lane with."""
     assert opsmain.LANE_JOB_IDS == {opsmain.JOB_TICK_COMPACT, opsmain.JOB_MARKET_BACKUP}
@@ -3388,10 +3386,10 @@ async def test_the_export_retry_hold_does_not_flap_the_failure_report(calendar, 
     assert len(held) <= len(unheld)
 
 
-# =========================================================================== WO-25c boot contract
+# =========================================================================== boot contract
 # 2026-08-24, the 12:44:58 mid-session restart: `startup_complete` logged at 12:46:56 and run() then
-# logged NOTHING for 11 h. It had parked in the pre-arm warm-up seeding — two bare awaits that WO-15
-# left standing in front of `scheduler.start()` — so APScheduler was never started: no forward drain,
+# logged NOTHING for 11 h. It had parked in the pre-arm warm-up seeding — two bare awaits that the deferred boot catch-up
+# change left standing in front of `scheduler.start()` — so APScheduler was never started: no forward drain,
 # no health pulse, no EOD job, while ticks/bars/features kept flowing and made the engine look alive.
 # Layer 1: the seeding can no longer gate arming. Layer 2: a plain asyncio task (never an APScheduler
 # job — it has to work when the scheduler is the broken thing) checks the boot contract and pages.
@@ -3482,7 +3480,7 @@ async def test_a_raising_boot_seed_never_reaches_the_boot_path(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_wedged_seeding_boot_still_arms_the_scheduler(conn, clock, calendar) -> None:
-    """WO-25c acceptance. Before the fix the wedged seed sat bare in front of
+    """Boot-contract acceptance. Before the fix the wedged seed sat bare in front of
     ``start_scheduler_and_fire_post_arm`` and the scheduler was never armed for the rest of the day.
     The boot tail must now reach arming — and engine_ready — regardless."""
     events: list[str] = []
@@ -3741,10 +3739,10 @@ async def test_boot_runs_its_steps_in_the_order_its_comments_state(monkeypatch) 
     """``_boot``'s own comments, as orders: the owner channel comes up before startup recovery (its
     notifications must not be dropped); the login API binds before the token probe and before
     ``lifecycle.startup`` (2026-07-21 lockout); the LIVE probe precedes the instruments hydrate,
-    which precedes startup (F2); the boot-phase ticks run alongside startup and are gone before the
+    which precedes startup; the boot-phase ticks run alongside startup and are gone before the
     seeding; the seeding follows startup; the scheduler is armed before the compaction lane is
-    spawned (the post-arm one-shot fires inside the arming, WO-15); and ``engine_ready`` is raised
-    last (WO-25c: the other half of the boot contract)."""
+    spawned (the post-arm one-shot fires inside the arming); and ``engine_ready`` is raised
+    last (the other half of the boot contract)."""
     events: list[str] = []
 
     def sync(name: str, result: object = None):
@@ -3921,7 +3919,7 @@ async def test_reconcile_catchup_freeze_branching() -> None:
 async def test_catchup_sweep_runs_the_main_pass_then_the_compaction_lane() -> None:
     """The sweep's main pass is the whole main registry (compaction is not in it, so nothing is
     vetoed there), the freeze still reconciles, and the compaction lane is offered its pass AFTER
-    — the lane itself applies the WO-21 window (2026-09-04 11:39: an in-session sweep replay of
+    — the lane itself applies the tick_compact no-run window (2026-09-04 11:39: an in-session sweep replay of
     ``tick_compact`` cost the afternoon in store stalls and late ticks)."""
     from engine.core.enums import RiskState
     from engine.ops.jobs import CatchUpResult
@@ -3977,7 +3975,7 @@ _WINDOW = TradeWindow(start=time(9, 20), end=time(15, 0))
 
 
 class _FakeMode:
-    """The two ``ModeManager`` seams the sweep predicate reads (§3.2.7 window + O2 mode)."""
+    """The two ``ModeManager`` seams the sweep predicate reads (trade window + mode)."""
 
     def __init__(self, *, window: TradeWindow | None = _WINDOW, mode_: Mode = Mode.RECOMMEND) -> None:
         self._window, self._mode = window, mode_
@@ -4009,7 +4007,7 @@ class _FakeKillSwitch:
 
 
 def test_the_retest_never_offers_into_a_state_the_pipeline_drops(calendar) -> None:
-    """2026-09-12 review of WO-R: the retest's once-a-day offer is spent at OFFER time and it has
+    """2026-09-12 review of the retest re-arm: the retest's once-a-day offer is spent at OFFER time and it has
     no freeze-lift path to redo a dropped publication, so it must not offer while the pipeline is
     certain to drop (FROZEN, killed) nor while a sweep is running (that sweep may have re-armed
     a fresh crossing of the same symbol whose dedupe slot the stale level would otherwise take)."""
@@ -4113,9 +4111,9 @@ async def test_freeze_lift_sweeps_on_the_frozen_to_normal_edge(calendar) -> None
 async def test_freeze_lift_does_not_sweep_before_the_boot_completes(
     calendar, caplog, tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """The RECOVERY publishes lifts of its own — the self-test's ``clear_stale_daily`` (step 1c) and
-    step 5's ``catchup_safety_jobs`` clear — ahead of step 4's data-gap backfill, step 5's daily_bars
-    catch-up, step 6's warm-up gate and step 7's ticker resume. A sweep there reads a daily history
+    """The RECOVERY publishes lifts of its own — the self-test's ``clear_stale_daily`` and
+    the ``catchup_safety_jobs`` clear — ahead of the data-gap backfill, the daily_bars
+    catch-up, the warm-up gate and the ticker resume. A sweep there reads a daily history
     still missing the last session(s) and charges those pairs through ``prescreen.admit``, deduping
     the real window-open sweep out of exactly them. Nothing is lost by waiting: no sweep has run yet,
     so there is nothing to redo."""
@@ -4388,7 +4386,7 @@ async def test_freeze_lift_takes_every_window_open_branch(tmp_path, monkeypatch,
 
     # …and in the composed engine, no OTHER branch keys on the trigger: a freeze_lift sweep hands every
     # leg the same input, makes the same ONE ranked admission of all five legs (not a second
-    # leftover-capacity one — the §8.6 promotion: a rule that can reach RECOMMEND contests the same
+    # leftover-capacity one — the owner promotion: a rule that can reach RECOMMEND contests the same
     # slots as brk20/ins/cat), publishes the same candidates, consumes the same `ins` crossings and
     # arms the retest tick exactly as a window_open sweep. (The owner notification: the single-flight
     # entry-point test.)
@@ -4441,7 +4439,7 @@ def _batch_cand(strategy_id: str, symbol: str, score: float) -> SignalCandidate:
 async def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_order(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """ADMISSION and PUBLICATION are two separable consequences of one ranked list, and the §8.6
+    """ADMISSION and PUBLICATION are two separable consequences of one ranked list, and the owner
     promotion deliberately bought `hi52` only the first (2026-09-12 review).
 
     `prescreen._rank` sorts a batch by RAW score ACROSS strategies, and those scores are not
@@ -4462,10 +4460,10 @@ async def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_or
     ]
     assert [c.symbol for c in _publication_order(ranked)] == \
         ["DDD", "CCC", "EEE", "AAA", "BBB"]
-    # The work order's own case: a 0.99 hi52 and a 0.55 brk20 both admitted publish brk20 FIRST.
+    # The motivating case: a 0.99 hi52 and a 0.55 brk20 both admitted publish brk20 FIRST.
     pair = [_batch_cand(hi52.STRATEGY_ID, "AAA", 0.99), _batch_cand(brk20.STRATEGY_ID, "DDD", 0.55)]
     assert [c.symbol for c in _publication_order(pair)] == ["DDD", "AAA"]
-    # …by a STABLE sort, so the admit order within each leg survives untouched — and §9.6 replay
+    # …by a STABLE sort, so the admit order within each leg survives untouched — and replay
     # determinism holds, the key reading `strategy_id` and never a clock.
     assert [c.symbol for c in _publication_order(list(reversed(ranked)))] == \
         ["DDD", "CCC", "EEE", "BBB", "AAA"]
@@ -4489,11 +4487,11 @@ async def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_or
 async def test_the_hi52_promotion_is_one_state_in_both_of_its_halves(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """The §8.6 promotion is TWO wirings and a demotion is two edits; either half alone leaves a
+    """The owner promotion is TWO wirings and a demotion is two edits; either half alone leaves a
     half-promoted rule, so both halves are pinned here (2026-09-12 review — nothing asserted the
     promotion itself, and `NO_EDGE_SHADOW_STRATEGIES`' own docstring makes the case for a test).
 
-    Half one: hi52 is OUT of the unconditional-C3-reject set. Half two: an expected edge IS
+    Half one: hi52 is OUT of the unconditional-cost-gate-reject set. Half two: an expected edge IS
     registered, because a targetless proposal with no registered edge is the gate's ordinary
     `_NO_TARGET` reject and the rule would never reach RECOMMEND.
     """
@@ -4501,14 +4499,14 @@ async def test_the_hi52_promotion_is_one_state_in_both_of_its_halves(
     live = load_settings()
     assert live.hi52.expected_edge_pct is not None
     # …asserted on the MAP the composition root actually hands the gate, not on a source string.
-    # hi52 1.53 = registered_edge_pct() under O17's 2.0x gap mult (1.47 at 2.5x) — the derivation is
+    # hi52 1.53 = registered_edge_pct() under the owner's 2026-09-24 2.0x gap mult (1.47 at 2.5x) — the derivation is
     # pinned in tests/unit/test_hi52_edge.py; this pins the WIRING of its output.
     assert _strategy_expected_edge_pct(live) == {
         ins.STRATEGY_ID: Decimal("1.58"), hi52.STRATEGY_ID: Decimal("1.53"),
     }
     # …while the shadows it left behind stay shadows.
     assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}
-    # …through the live StrategyEdges wrapper over this map (O19 §3.3; its identity is
+    # …through the live StrategyEdges wrapper over this map (its identity is
     # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52 —
     # here as the composed gate actually holds both halves.
     built: dict[str, list] = {}
@@ -4549,7 +4547,7 @@ async def test_a_second_trigger_is_skipped_while_a_sweep_is_in_flight(caplog) ->
     """Single-flight (2026-09-11 review): the window edge and the warm-up refresh ride 60 s timers
     armed by the same scheduler.start(), so a lift and the sweep it interrupts fire in the same tick.
     A sweep is two passes over the eligible universe's daily history, each taking MarketStore._lock —
-    two at once is the WO-25c contention profile that wedged an 11-hour boot."""
+    two at once is the contention profile that wedged an 11-hour boot."""
     lock = asyncio.Lock()
     running, release = asyncio.Event(), asyncio.Event()
     calls: list[str] = []
@@ -4674,7 +4672,7 @@ async def test_every_sweep_trigger_goes_through_the_single_flight_entry_point(
 async def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_set(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """O18 (2026-10-08): with the index widened to NIFTY Total Market, hi52 and both cat legs
+    """Owner decision 2026-10-08: with the index widened to NIFTY Total Market, hi52 and both cat legs
     originate from the CORE (NIFTY 500) subset — their registered edge / frozen verdict population —
     while brk20 keeps scanning the full eligible set."""
     async with _sweep_world(tmp_path, monkeypatch, migrated_db_template) as (c, w):
@@ -4686,7 +4684,7 @@ async def test_sweep_evidence_bound_legs_read_the_core_set_brk20_the_eligible_se
 
 
 def test_ticker_tokens_carry_todays_batch_symbols_until_the_day_rolls() -> None:
-    """The §7.1 gate's only price source is the tick cache, and brk20/hi52/ins/cat originate over the
+    """The risk gate's only price source is the tick cache, and brk20/hi52/ins/cat originate over the
     ELIGIBLE set — 27 of 84 brk20 slots and 1 of 16 hi52 slots reached the gate with ltp=None and
     failed closed (2026-09-11). Exercises the PRODUCTION composition (`ticker_tokens` delegates to it
     verbatim), roll included, rather than re-assembling the same list here."""
@@ -4737,7 +4735,7 @@ async def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
     """CONSTRAINT: the warm-up coverage set stays the WATCHLIST. A batch symbol in it means one missing
-    bar on a name nobody trades FREEZES entries — the exact failure this work order exists to stop —
+    bar on a name nobody trades FREEZES entries — the exact failure this change exists to stop —
     while the FEED does carry the batch admissions, after watchlist + held, on every sweep and every
     universe build."""
     from engine.ops.warmup import WarmupGate
@@ -4995,7 +4993,7 @@ _PAPER_BUILDERS = ("PaperRuntime", "OrderManager", "PositionBook", "ExitManager"
 async def test_nothing_paper_is_built_unless_the_subsystem_is_enabled(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """Plan §1.1/Q4.1/Q4.9: every paper construction lives in ``_compose_paper``, which the composition
+    """Every paper construction lives in ``_compose_paper``, which the composition
     calls once, under the flag, before the pipeline and the scheduler. Disabled, nothing paper is
     constructed and every paper seam the pipeline, the scheduler and the shutdown see is None."""
     events: list[str] = []
@@ -5059,7 +5057,7 @@ def test_every_live_engine_calendar_excludes_special_sessions() -> None:
 async def test_the_capital_changer_is_built_once_on_the_live_objects_and_handed_to_the_app(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """O19 Task 5b: ONE CapitalChanger, on the real tracker, the gate's StrategyEdges, the paper
+    """ONE CapitalChanger, on the real tracker, the gate's StrategyEdges, the paper
     book's mark and the market store's last 1m close (the price a held symbol gets when neither live
     cache has one), reaches the dashboard through ``_create_app``; the paper runtime seeds its marks
     from that same store."""

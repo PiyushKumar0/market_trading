@@ -1,4 +1,4 @@
-"""Structured logging (R8).
+"""Structured logging.
 
 Self-contained on the stdlib so ``core`` has no hard third-party logging dependency and is importable
 in any environment (incl. the test tier without the heavy deps). Emits one JSON object per line with
@@ -111,7 +111,7 @@ def configure_logging(
     """Configure the root logger once. Idempotent.
 
     Writes JSON lines to stderr and (if ``logs_dir`` given) to a rotating ``engine.log`` file kept 90
-    days (§4.5). With a log file, stderr gets WARNING and above only: under NSSM it becomes
+    days. With a log file, stderr gets WARNING and above only: under NSSM it becomes
     ``service.err.log``, whose job is pre-logger output and crashes, and a full copy of every line
     there had doubled log volume (~1.6 GB by 2026-10).
     """
@@ -146,7 +146,7 @@ def configure_logging(
         root.addHandler(file_handler)
 
     # Third-party libraries log at INFO by default; httpx in particular logs every request URL —
-    # which for the Telegram Bot API embeds the bot token — on every ~10s getUpdates poll (R8).
+    # which for the Telegram Bot API embeds the bot token — on every ~10s getUpdates poll.
     for noisy in ("httpx", "httpcore", "telegram", "apscheduler"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

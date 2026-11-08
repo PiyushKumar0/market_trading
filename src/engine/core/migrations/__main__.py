@@ -1,4 +1,4 @@
-"""Entry point for ``python -m engine.core.migrations [db_path]`` (§4.2)."""
+"""Entry point for ``python -m engine.core.migrations [db_path]``."""
 
 from __future__ import annotations
 

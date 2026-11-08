@@ -1,6 +1,6 @@
--- ------------------------- paper book storage (plan Q3.3)
+-- ------------------------- paper book storage
 -- Additive only. Prices are TEXT like the rest of the schema. gtts: trigger_low = stop, trigger_high =
--- target (NULL for a single-trigger GTT); paper GTT ids start at 900001 (the broker seeds the counter, Q4.1).
+-- target (NULL for a single-trigger GTT); paper GTT ids start at 900001 (the broker seeds the counter).
 -- positions.close_basis / strategy_id / exit_session are set for paper positions, NULL for real ones.
 -- paper_state is NOT seeded: the control module inserts the (disabled) row on first use.
 -- Precheck on the live state.db, read-only, 2026-10-07 03:50 IST: orders 0 rows, no duplicate entry

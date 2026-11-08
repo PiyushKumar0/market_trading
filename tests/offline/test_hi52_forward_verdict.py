@@ -34,7 +34,7 @@ from engine.core.config import config_dir  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
 
 COST_PCT = float(CostModel.from_config().breakeven_pct(fv.REFERENCE_NOTIONAL, fv.PRODUCT))
-#: The §7.1 table from the pinned test config (conftest: registration capital, O19).
+#: The risk-limits table from the pinned test config (conftest: registration capital, the owner's dashboard capital change).
 _LIMITS = config_dir() / "limits.yaml"
 START = fv.PROMOTION_DATE               # Monday 2026-09-14
 
@@ -278,7 +278,7 @@ def test_the_notional_override_is_shouted_not_whispered(tmp_path):
     # …and the derived path says nothing of the sort, and names the equity it used.
     cost2, sizing2 = fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None)
-    # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000 (O17; Rs 4,800 at the pre-O17 2.5x)
+    # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000 (owner decision 2026-09-24; Rs 4,800 at the earlier 2.5x)
     assert sizing2["override"] is False and Decimal(sizing2["notional_inr"]) == Decimal("6000")
     # Another rule's stop (cat's 5%, scripts/cat_shadow_verdict.py) moves the notional: Rs 7,200.
     assert Decimal(fv.resolve_cost_floor(

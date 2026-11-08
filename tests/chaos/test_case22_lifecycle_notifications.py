@@ -1,19 +1,19 @@
-"""§9.4 chaos case 22 — Lifecycle notifications (§2.2): (a) clean planned stop, (b) crash mid-active-
+"""Chaos case 22 — Lifecycle notifications: (a) clean planned stop, (b) crash mid-active-
 period, (c) crash during intentional-off.
 
-Plan row (IMPLEMENTATION_PLAN.md §9.4, case 22), "Must hold":
+Drill-catalog row (case 22), "Must hold":
 
     "(a) clean stop ⇒ exactly one ENGINE_STOPPED (reason + positions-protected); intend_to_run=false;
-    watchdog then silent — no ENGINE_DOWN, no false alarm across the idle gap (§2.6 "off is normal");
+    watchdog then silent — no ENGINE_DOWN, no false alarm across the idle gap ("off is normal");
     restart ⇒ ENGINE_STARTED then clean STARTUP_REPORT (no crash notice). (b) kill -9 while
     intend_to_run=true ⇒ watchdog fires one ENGINE_DOWN within down_stale_s (~90 s) — positions
-    broker-protected (R3); NSSM restart (gated to the true sentinel) ⇒ ENGINE_STARTED +
+    broker-protected; NSSM restart (gated to the true sentinel) ⇒ ENGINE_STARTED +
     STARTUP_REPORT(crash_recovered); no duplicate ENGINE_DOWN on the next poll (edge-triggered).
     (c) engine killed while intend_to_run=false ⇒ watchdog stays silent (it should be off). All three:
     capital protection unaffected; alerts are operational, not capital emergencies"
 
 ``intend_to_run`` is carried by ``engine_lifecycle.state`` in the shipped schema (migration 0001):
-``RUNNING``/``STOPPING`` = intends to run, ``STOPPED`` = intentional off (the watchdog's §2.2 predicate
+``RUNNING``/``STOPPING`` = intends to run, ``STOPPED`` = intentional off (the watchdog's predicate
 is ``state != 'STOPPED'``). Every scenario composes the real lifecycle + heartbeat thread + the real
 ``scripts/watchdog.py`` IO shell over one on-disk state.db (``tests/chaos/_lifecycle_rig.py``); the
 watchdog's Telegram sender and the OS process table are the faked boundary.
@@ -21,7 +21,7 @@ watchdog's Telegram sender and the OS process table are the faked boundary.
 Clauses covered: all of (a), (b), (c) as quoted, except the two below.
 
 Real-side only / out of process scope (skipped, ``test_case22_capital_protection_unaffected``):
-"positions broker-protected (R3)" / "capital protection unaffected" needs broker-resident SL-M/GTT
+"positions broker-protected" / "capital protection unaffected" needs broker-resident SL-M/GTT
 orders, which RECOMMEND does not place (the paper ProtectionManager covers paper positions only); the alerts'
 positions-protected WORDING is asserted here. "NSSM restart (gated to the true sentinel)" is the
 service manager's ``AppExit`` config (scripts/nssm_install.ps1), not engine code — the restart is
@@ -164,7 +164,7 @@ async def test_case22b_kill9_pages_once_edge_triggered_then_crash_recovered_rest
     assert env.watchdog_poll() == SILENT
     assert len(env.pages) == 1                                 # still exactly one page for outage #1
 
-    # …and a SECOND outage is a new page (re-armed by B's heartbeat, §2.2) — one, not one per poll.
+    # …and a SECOND outage is a new page (re-armed by B's heartbeat) — one, not one per poll.
     env.at(killed_at + timedelta(seconds=600))
     await b.heartbeat_synced()
     await b.kill_9()
@@ -208,7 +208,7 @@ async def test_case22c_killed_after_intentional_stop_stays_silent(tmp_path, monk
 
 
 def test_case22_capital_protection_unaffected() -> None:
-    """'positions broker-protected (R3)' / 'capital protection unaffected' across (a)/(b)/(c),
+    """'positions broker-protected' / 'capital protection unaffected' across (a)/(b)/(c),
     including a kill -9: real positions have no resting SL-M/GTT in RECOMMEND, and paper protection
-    across process death is the in-process GTT book plus the Q4.7 catch-up (case 03 skips the same)."""
+    across process death is the in-process GTT book plus the paper session-prep catch-up (case 03 skips the same)."""
     pytest.skip(f"case 22 capital-protection clause: {BROKER_RESIDENT_R3}")

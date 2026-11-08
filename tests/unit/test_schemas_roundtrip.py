@@ -1,4 +1,4 @@
-"""Structured-output schema round-trip (Phase-0 deliverable, §8.1; temporal handling §9.1).
+"""Structured-output schema round-trip.
 
 Asserts:
 - each of the five action types validates back into its Pydantic model;
@@ -104,7 +104,7 @@ def test_decimal_prices_round_trip_as_strings() -> None:
     assert isinstance(model, EnterAction)
     assert model.entry_price == Decimal("1402.50")
     dumped = model.model_dump(mode="json")
-    # Prices serialise to JSON STRINGS, never floats (locked convention, §8.1).
+    # Prices serialise to JSON STRINGS, never floats (locked convention).
     assert isinstance(dumped["entry_price"], str)
     assert dumped["entry_price"] == "1402.50"
     assert isinstance(dumped["stop_price"], str)
@@ -180,7 +180,7 @@ def test_action_union_exports_json_schema_with_discriminator() -> None:
 
 def test_decimal_fields_typed_string_in_wire_schema() -> None:
     # The LLM-facing (SDK structured-output) schema must type prices as "string", never a JSON number,
-    # so the model cannot emit a float that corrupts a price/tick (§8.1 decimal-as-string convention).
+    # so the model cannot emit a float that corrupts a price/tick (decimal-as-string convention).
     schema = action_proposal_json_schema()
     props = schema["$defs"]["EnterAction"]["properties"]
     assert props["stop_price"].get("type") == "string"          # mandatory decimal
@@ -191,7 +191,7 @@ def test_decimal_fields_typed_string_in_wire_schema() -> None:
 
 def test_naive_platform_valid_until_rejected_by_parse_and_stamp() -> None:
     # A naive platform-supplied valid_until must be caught by the post-stamp re-validation, not slip
-    # through model_copy unchecked (§9.1 no-naive-datetime invariant).
+    # through model_copy unchecked (no-naive-datetime invariant).
     naive_stamp = {**STAMP, "valid_until": datetime(2026, 6, 17, 10, 5)}  # no tzinfo
     with pytest.raises(ValidationError):
         parse_and_stamp(RAW_BY_ACTION["enter"], **naive_stamp)
@@ -230,10 +230,10 @@ def test_intraday_guidance_schema_is_flat_and_covers_the_union() -> None:
 
 def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
     """2026-08-12 live bug (9 schema_invalid failures, one terminal): the FLAT guidance schema
-    (§8.1 — the CLI degrades on unions) advertises ``thesis``/``confidence`` for EVERY action, so
+    (the CLI degrades on unions) advertises ``thesis``/``confidence`` for EVERY action, so
     the model legitimately attaches them when declining — the validation side must accept what the
     guidance side invites. Foreign fields (never advertised for no_action semantics, e.g. a
-    quantity) stay rejected: ``extra="forbid"`` keeps its R1 teeth."""
+    quantity) stay rejected: ``extra="forbid"`` keeps its teeth."""
     from engine.intelligence.schemas import NoActionOutput
 
     out = NoActionOutput.model_validate({
@@ -255,7 +255,7 @@ def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
         })
 
 
-# ------------------------------------------------- guidance-extras sanitizer (WO-21, 2026-08-20)
+# ------------------------------------------------- guidance-extras sanitizer (2026-08-20)
 # The FLAT wire schema advertises every action's fields for EVERY action; the authoritative union
 # forbids extras on each variant. On 2026-08-20 BOTH first-ever ``enter`` outputs (ICICIAMC,
 # POLICYBZR brk20) burned all three retries on ``extra_forbidden`` and died — 8 of 13 intraday calls
@@ -303,7 +303,7 @@ def test_enter_with_no_action_extras_parses_and_is_stamped() -> None:
 
 def test_sanitizer_does_not_admit_genuinely_foreign_keys() -> None:
     """A key the guidance schema never advertised is a confabulation, not a schema mismatch — it
-    must still die schema_invalid (R1 structural coherence: the union stays authoritative)."""
+    must still die schema_invalid (structural coherence: the union stays authoritative)."""
     from engine.intelligence.schemas import parse_intraday
 
     with pytest.raises(ValidationError):
@@ -445,7 +445,7 @@ def test_clamp_never_softens_min_length_or_numeric_constraints() -> None:
 def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
     """2026-09-03: the wire schema must NOT carry maxLength for `thesis`. Advertised for one session
     as 'prevention', it made the runtime bounce verbose StructuredOutput inputs turn after turn -
-    3-4x output tokens per call and the first-ever intraday max-turns sdk_error (terminal, no D7
+    3-4x output tokens per call and the first-ever intraday max-turns sdk_error (terminal, no
     retry) - while the client-side clamp would have truncated the same output for free. Prose
     fields stay uncapped on the wire; the clamp is the converging mechanism."""
     from engine.intelligence.schemas import intraday_guidance_json_schema
@@ -462,7 +462,7 @@ def test_guidance_schema_has_no_regime_note() -> None:
     assert "regime_note" not in NoActionOutput.model_fields
 
 
-# ------------------------------------------------- exit-reason enum (2026-09-11, WO-B)
+# ------------------------------------------------- exit-reason enum (2026-09-11)
 # ``reason`` is advertised as free text (it is no_action's prose field) while ExitAction declares it a
 # CLOSED Literal, so EVERY position-event exit died literal_error on attempt 1 — 47 of 47 since
 # 2026-09-03, 85 rows from 08-27, 10 lost terminally before the retry started echoing the pydantic
@@ -517,7 +517,7 @@ def test_exit_with_a_code_and_no_reason_key_at_all_parses() -> None:
     "override", [{}, {"exit_reason": "horizon_expired"}], ids=["no-exit-reason", "out-of-enum-code"]
 )
 def test_an_exit_without_a_valid_code_dies_on_reason_alone(override) -> None:
-    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one (R1) — the
+    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one — the
     live 09-10 failure, reproduced. A confabulated code is not mapped either, nor does it become a foreign
     key: it is dropped like any other advertised extra. Either way the payload dies on ``reason`` alone —
     one literal_error at exit.reason, nothing else."""

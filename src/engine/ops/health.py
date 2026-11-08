@@ -1,18 +1,18 @@
-"""Health monitor (§3.2.12, R2/R8/§2.6).
+"""Health monitor.
 
 Watches feed staleness, clock skew, disk, the ticker subprocess, and SQLite WAL size; alerts the owner
-via the injected callback (R8). Crucially it distinguishes three conditions that look alike but mean
-different things (§2.6):
+via the injected callback. Crucially it distinguishes three conditions that look alike but mean
+different things:
 
 - **WARMING** — just started; the ticker is reconnecting and warm-up is backfilling. Feed-stale alarms
   are SUPPRESSED (a fresh start has no recent ticks yet — that is not an incident).
-- **feed-lost-while-running** — a real incident: ticks were flowing and stopped (R2 stale-data guard).
+- **feed-lost-while-running** — a real incident: ticks were flowing and stopped (the stale-data guard).
 - **intentionally-off** — the engine is deliberately stopped between active periods. NORMAL, no alarm.
   STOPPED never raises ``feed_stale``; but this pulse only runs while the engine is UP, so an armed,
   in-session STOPPED feed means no market data and becomes ``feed_stopped_in_session`` after a grace.
 
 Missed scheduled active-period starts are NOT detected here — the out-of-band ``scripts/watchdog.py`` owns
-SCHEDULED_START_MISSED (§2.6/§10.4); ``watchdog_missed_start`` has no production caller.
+SCHEDULED_START_MISSED; ``watchdog_missed_start`` has no production caller.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
 
 #: How long one ``store.aping()`` may take before the store is called STALLED (seconds). A healthy
 #: ping is a lock acquisition plus ``SELECT 1`` — sub-millisecond — so 10 s is not a latency budget,
-#: it is the line past which "slow" is no longer a plausible explanation (WO-24b-prime).
+#: it is the line past which "slow" is no longer a plausible explanation.
 STORE_PING_TIMEOUT_S = 10.0
 
 #: Consecutive stalled pulses before the stall becomes an OWNER-FACING health problem (2026-09-03).
@@ -49,7 +49,7 @@ STORE_PING_TIMEOUT_S = 10.0
 #: pulse later is an incident — two pulses means the store has been unreachable for ~60 s.
 STORE_STALL_ALARM_PULSES = 2
 
-#: How long an UNCHANGED problem set stays quiet between owner alerts (WO-25b, 2026-08-24). The pulse
+#: How long an UNCHANGED problem set stays quiet between owner alerts (2026-08-24). The pulse
 #: is 60 s and used to alert on every one of them — 57 identical ``health problems: ['feed_stale']``
 #: messages in a single morning, the bulk of the 203-deep notification backlog that then starved a
 #: fresh owner ack. A CHANGE in the problem set still alerts immediately; this only governs repeats.
@@ -61,8 +61,7 @@ HEALTH_REPEAT_MIN = 30
 _STACK_FRAME_LIMIT = 40
 _STACK_DUMP_MAX_CHARS = 60_000
 
-#: While a probe is pending, issue a FRESH one every Nth consecutive pending pulse (WO-26a,
-#: 2026-08-25). Strict single-flight produced a watchdog that could freeze with the freeze: on 08-25
+#: While a probe is pending, issue a FRESH one every Nth consecutive pending pulse (2026-08-25). Strict single-flight produced a watchdog that could freeze with the freeze: on 08-25
 #: the first probe never got a worker thread and the pulse then reported ``probe_pending=true,
 #: consecutive=264`` for 4 h 24 min — 264 log lines, all of them repeating the same one observation
 #: made at 09:15. Re-probing every 5th pending pulse (~5 min) costs one thread per five minutes and
@@ -87,7 +86,7 @@ class HealthReport(BaseModel):
     wal_size_mb: float | None = None
     problems: list[str] = Field(default_factory=list)
     #: problem -> owner-facing detail line. Rides the ALERT TEXT so a page is diagnosable without a
-    #: shell (2026-09-01 review); never part of the WO-25b episode identity, which stays the problem
+    #: shell (2026-09-01 review); never part of the alert-episode identity, which stays the problem
     #: SET alone — evolving detail (minutes counting up) must not re-trigger an unchanged episode.
     problem_details: dict[str, str] = Field(default_factory=dict)
 
@@ -97,7 +96,7 @@ class HealthReport(BaseModel):
 
 
 class HealthMonitor:
-    """Periodic health checks + state-aware alerting (§3.2.12)."""
+    """Periodic health checks + state-aware alerting."""
 
     def __init__(
         self,
@@ -146,7 +145,7 @@ class HealthMonitor:
         # volume. Pulse-counted, not wall-clock, so cadence is deterministic in tests.
         self._memory_log_every = memory_log_every
         self._pulse_count = 0
-        # --- store stall watchdog (WO-24b-prime, after the 2026-08-21 14-minute freeze) ---
+        # --- store stall watchdog (after the 2026-08-21 14-minute freeze) ---
         # The health pulse kept beating through the entire freeze while every store-touching path
         # was wedged, which is exactly what makes it the right host for the probe: it is the one
         # timer proven to survive the failure it is watching for.
@@ -155,7 +154,7 @@ class HealthMonitor:
         #: The probe currently being watched. A pulse that finds it still pending normally starts no
         #: other one — the pending probe IS evidence — but every ``_STORE_REPROBE_EVERY``th such
         #: pulse it is ABANDONED for a fresh one, because evidence from 4 hours ago is not evidence
-        #: about now (WO-26a).
+        #: about now.
         self._store_probe: asyncio.Future | None = None
         #: Probes abandoned that way and still unfinished. Kept referenced (a dropped pending future
         #: would surface as a loop warning) and reported as ``abandoned=`` — a rising count is the
@@ -168,7 +167,7 @@ class HealthMonitor:
         #: One stack dump per STALL EPISODE, not per pulse. Reset by the next successful probe, so a
         #: second, later freeze dumps again while a 14-minute one does not dump fourteen times.
         self._store_stacks_dumped = False
-        # --- problem-set alert episodes (WO-25b) ---
+        # --- problem-set alert episodes ---
         #: The problem set the owner was last alerted about (sorted tuple; () = "all clear"), and when.
         #: Together they make ``_alert_problems`` fire on a CHANGE, repeat at most every
         #: :data:`HEALTH_REPEAT_MIN` minutes, and announce recovery exactly once.
@@ -205,15 +204,15 @@ class HealthMonitor:
             report.feed_state = getattr(fh, "state", "UNKNOWN")
             report.last_tick_age_s = getattr(fh, "last_tick_age_s", None)
             if report.feed_state == "STALE" and self._session_open():
-                # feed-lost-WHILE-RUNNING (R2) — a real incident. Out-of-session STALE is
+                # feed-lost-WHILE-RUNNING — a real incident. Out-of-session STALE is
                 # definitional (no ticks exist at night) and spammed an alert per minute from
                 # midnight 2026-07-31 after the date rollover — never an incident. Calendar-less
                 # wiring returns False here, keeping a misconfigured deploy quiet, not noisy.
                 report.problems.append("feed_stale")
-            # WARMING / STOPPED never raise feed_stale (§2.6: warming is expected). An armed,
+            # WARMING / STOPPED never raise feed_stale (warming is expected). An armed,
             # in-session STOPPED feed is paged separately: _check_feed_stopped, after its grace.
 
-        # --- clock skew (R6) ---
+        # --- clock skew ---
         if check_skew:
             try:
                 skew = await self._clock.check_skew()
@@ -223,7 +222,7 @@ class HealthMonitor:
                     report.problems.append("clock_skew")
             except ClockSkewUnavailable:
                 report.clock_skew_ok = False
-                report.problems.append("clock_skew_unverifiable")  # conservative (R6)
+                report.problems.append("clock_skew_unverifiable")  # conservative
 
         # --- disk free ---
         try:
@@ -239,7 +238,7 @@ class HealthMonitor:
         if wal.exists():
             report.wal_size_mb = wal.stat().st_size / (1024**2)
             if report.wal_size_mb > self._wal_warn_mb:
-                report.problems.append("large_wal")  # checkpoint at EOD (§4.1)
+                report.problems.append("large_wal")  # checkpoint at EOD
 
         # --- origination liveness (2026-09-01: the catchup_safety_jobs latch froze entries for two
         #     whole sessions with zero pages — the engine hummed, exits flowed, nothing said "you are
@@ -280,10 +279,10 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - telemetry must never affect the health verdict
             _log.debug("process_memory_log_failed")
 
-        # --- store stall watchdog (WO-24b-prime): make the NEXT freeze diagnose itself. The probe
+        # --- store stall watchdog: make the NEXT freeze diagnose itself. The probe
         #     can never raise into the pulse (the pulse surviving is the entire premise). A stall
         #     still there on the STORE_STALL_ALARM_PULSES-th consecutive pulse — or a probe still
-        #     swallowed after a fresh one answered (the WO-26a anomaly: the pool is losing
+        #     swallowed after a fresh one answered (the probe-anomaly case: the pool is losing
         #     threads) — is a problem like any other and pages through the episode cadence below.
         #     In-session only, like feed_stale: the 22:30 compaction legitimately holds the store
         #     lock for minutes and never runs in session; a night-time wedge surfaces as EOD job
@@ -380,7 +379,7 @@ class HealthMonitor:
             self._funnel_zero_since = None
             return
         # Same day, forward count static. A stall needs BOTH new work beyond the baseline AND
-        # remaining capacity — a day whose §5.6 forward cap is spent goes quiet by design, and an
+        # remaining capacity — a day whose budget-governor forward cap is spent goes quiet by design, and an
         # unreadable cap (None) narrows eligibility to the unambiguous zero-forwarded shape.
         # cap=None (unreadable) ⇒ only the unambiguous zero-forwarded shape is eligible; a KNOWN cap
         # is authoritative even at 0 (2026-09-02 review: a deliberate cap=0 full pause used to page
@@ -438,10 +437,10 @@ class HealthMonitor:
         )
         _log.error("feed_stopped_in_session", stopped_min=round(stopped_min, 1), token_valid=token)
 
-    # ------------------------------------------------------------------ problem-set episodes (WO-25b)
+    # ------------------------------------------------------------------ problem-set episodes
     async def _alert_problems(self, problems: list[str],
                               details: Mapping[str, str] | None = None) -> None:
-        """Owner-alert the problem set as an EPISODE, not once per pulse (WO-25b, 2026-08-24).
+        """Owner-alert the problem set as an EPISODE, not once per pulse (2026-08-24).
 
         The pulse runs every 60 s and used to alert on every pulse a problem existed: 57 identical
         ``health problems: ['feed_stale']`` messages in one morning, which is most of what built the
@@ -494,7 +493,7 @@ class HealthMonitor:
 
     # ------------------------------------------------------------------ store stall watchdog
     async def _probe_store(self) -> None:
-        """One liveness probe of the market store per pulse, single-flight (WO-24b-prime).
+        """One liveness probe of the market store per pulse, single-flight.
 
         Three outcomes, and the difference between them is the diagnosis:
 
@@ -502,7 +501,7 @@ class HealthMonitor:
           has not returned since the last pulse is the finding, and issuing one per pulse would
           queue a thread per minute behind the same seized resource. But every
           ``_STORE_REPROBE_EVERY``th consecutive pending pulse the old probe is ABANDONED and a
-          fresh one issued (WO-26a): a probe pending since 09:15 says nothing about 13:39, and on
+          fresh one issued: a probe pending since 09:15 says nothing about 13:39, and on
           2026-08-25 that is exactly what the pulse spent 4.4 h saying — 264 identical lines, no
           new information, while the actual fault (a starved thread pool, not a seized lock) was
           invisible because it could only have been seen by a probe that got a worker.
@@ -643,12 +642,12 @@ class HealthMonitor:
             return False
         now = self._clock.now()
         session = self._calendar.session(now.date())
-        if session is None:  # holiday / weekend / unverified horizon (R6)
+        if session is None:  # holiday / weekend / unverified horizon
             return False
         return session.open <= now <= session.close
 
     async def watchdog_missed_start(self, expected: str) -> None:
-        """Alert that an expected scheduled active-period start did not occur (§2.6/§10.4).
+        """Alert that an expected scheduled active-period start did not occur.
 
         No production caller; kept as an in-process seam — ``scripts/watchdog.py`` owns the live alert.
         """
