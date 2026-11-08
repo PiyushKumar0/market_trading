@@ -1,26 +1,24 @@
-# config/calendar/2026.yaml — NSE trading calendar for 2026 (R6, B2).
+# config/calendar/2026.yaml — NSE trading calendar for 2026.
 #
 # CIRCULAR-COMPLETE (as of the official NSE circular below) but still 2026 is a LIVE / partially-elapsed
 # year — ⚠ OWNER CROSS-CHECK REQUESTED before relying on this for size-critical decisions. All fixed-date
-# AND movable/lunar holidays from the official 2026 circular are now filled in (previously only the fixed
-# dates were), plus one ad-hoc election holiday added by a later partial-modification circular (same
-# pattern as 2024's Jan-22/May-20/Nov-20 ad-hoc closures — see config/calendar/2024.yaml). Two things are
-# NOT yet settled and may still change before year-end: (1) the Nov-8 muhurat SESSION TIMINGS (date is
-# confirmed, times are not — see the special_sessions comment below); (2) NSE has amended each of the last
-# two years' base circulars mid-year for elections, so a further ad-hoc 2026 holiday is plausible and this
-# file will need another pass if/when one is announced.
+# AND movable/lunar holidays from the official 2026 circular are filled in, plus one ad-hoc election holiday
+# added by a later partial-modification circular (same pattern as 2024's Jan-22/May-20/Nov-20 ad-hoc
+# closures — see config/calendar/2024.yaml). NSE has amended each of the last two years' base circulars
+# mid-year for elections, so a further ad-hoc 2026 holiday is plausible and this file will need another pass
+# if/when one is announced.
 #
-# FAIL-SAFE (R6): NSECalendar refuses to mark any date a trading day unless `verified: true` AND the date
-# is at/before `verified_through`. Set below so the 200-session warmup lookback (§7.1/B2) can rely on 2026.
+# FAIL-SAFE: NSECalendar refuses to mark any date a trading day unless `verified: true` AND the date is
+# at/before `verified_through`. Set below so the 200-session warmup lookback can rely on 2026.
 
 year: 2026
 verified: true                           # circular-complete (owner cross-check requested — see header).
 verified_through: "2026-12-31"
 source: "NSE CM-segment trading-holiday circular NSE/CMTR/71775 (2025-12-12, Ref 172/2025) + partial-modification circular declaring 2026-01-15 a Capital Market segment trading holiday (Maharashtra Municipal Corporation elections; corroborated by AngelOne, Business Standard, ScanX, Upstox, The Statesman, PL Capital — exact NSE download-ref not independently located, see concerns). Full text: nsearchives.nseindia.com/content/circulars/."
 
-# Regular session times (IST). Stable; A14 pre-open + continuous + post-close.
+# Regular session times (IST). Stable; pre-open + continuous + post-close.
 sessions:
-  pre_open:   { start: "09:00", end: "09:15" }      # auction; ticks excluded from bars (A14)
+  pre_open:   { start: "09:00", end: "09:15" }      # auction; ticks excluded from bars
   continuous: { start: "09:15", end: "15:30" }
   post_close: { start: "15:40", end: "16:00" }      # CNC/MTF market orders at close price
 
@@ -56,13 +54,9 @@ holidays:
 # Muhurat trading (Diwali evening special session). Deliberately NOT in `holidays` — see the note above and
 # calendar.py:53-63.
 special_sessions:
-  # Date CONFIRMED (NSE/CMTR/71775: "Muhurat Trading will be conducted on Sunday, November 08, 2026").
-  # Timings NOT yet announced as of this pass (searched — NSE typically issues the timing circular in
-  # Sept/Oct of the event year, e.g. NSE/CMTR/70319 for 2025 was dated 2025-09-22, ~1 month before Diwali).
-  # start/end below are an UNVERIFIED PLACEHOLDER (a morning slot) inconsistent with the historical evening/
-  # afternoon muhurat pattern (2024: Normal Market 18:00-19:00; 2025: Normal Market 13:45-14:45) — left
-  # unchanged per instructions rather than guessed. Owner: replace once NSE's timing circular lands.
-  - { date: "2026-11-08", name: "Diwali Muhurat Trading — DATE confirmed, TIMINGS not yet announced (placeholder, see comment above)", start: "09:15", end: "10:15" }
+  # Date per NSE/CMTR/71775 ("Muhurat Trading will be conducted on Sunday, November 08, 2026"); timings per
+  # NSE/CMTR/76941: Normal Market 14:20-15:30 (pre-open 14:05-14:20), set by the owner on 2026-11-08.
+  - { date: "2026-11-08", name: "Diwali Muhurat Trading", start: "14:20", end: "15:30" }
 
 # Shortened / special sessions (e.g. BCP days) — fill if/when the circular announces any.
 shortened_sessions: []
