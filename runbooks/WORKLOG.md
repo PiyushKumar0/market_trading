@@ -142,37 +142,38 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **Rollback:** with the engine stopped, copy the backup over `data\state.db`; `git revert 2b16551` plus a reseed for
   the caps.
 
-## 2026-11-05 01:40 — Fibonacci retracement study run: F2 and F4 supported, F1 null, F3 brk20 refuted; nothing wired (owner: "Do test with the retracement logic as well included with the analysis, especially for swing trades")
+## 2026-11-05 01:40 — Fibonacci retracement study run: pullback clustering and the deeper brk20 entry supported, the pullback edge null, the brk20 confluence filter refuted; nothing wired (owner: "Do test with the retracement logic as well included with the analysis, especially for swing trades")
 
 - **Question:** stock picking uses Fibonacci retracement nowhere (no scanner, rule or prompt). The analyst cited a
   61.8% retracement once, as commentary (PATANJALI brk20, 2026-09-29).
-- **Registered** `73e6ef1` before any code or data run: F1 `edge/fib_pullback` (N 3), F2 `price_structure/fib`
-  (N 1), F3 `selection_filter/{brk20,hi52,ins}` (N 6, 6, 1), F4 `entry_mechanism/brk20` (N 6). The registration
-  text left the plan with this commit (`git show ba0540f:IMPLEMENTATION_PLAN.md`); the rules stay in the script.
+- **Registered** `73e6ef1` before any code or data run: the pullback edge `edge/fib_pullback` (N 3), pullback
+  clustering `price_structure/fib` (N 1), the confluence filter `selection_filter/{brk20,hi52,ins}` (N 6, 6, 1), the
+  deeper brk20 entry `entry_mechanism/brk20` (N 6). The rules live in the script.
 - **Built** `ba0540f`: `scripts/backtest_fib.py` and 90 synthetic tests, by one Opus agent started 12:35 in market
   hours on the owner's "Now". Audited; 112 passed, ruff clean.
 - **Run** 2026-11-04 15:31–15:33, as registered (COMMANDS "Fibonacci retracement study"). Report
   `data\reports\fib_retracement_2026-11-02.{json,md}`.
-  - F1 NOT SUPPORTED (null): limits at 38.2/50/61.8% did no better than the neighbouring non-Fibonacci depths
+  - Pullback edge NOT SUPPORTED (null): limits at 38.2/50/61.8% did no better than the neighbouring non-Fibonacci depths
     (permutation p 0.36/0.49/0.25). Every depth had median net +0.95% to +1.65% over the whole sample; in 2026 the
     depths up to 56% are negative, the deeper ones about +0.2%.
-  - F2 SUPPORTED: pullbacks ended within ±1 pp of a Fibonacci level 639 times against 558 expected (ratio 1.145,
+  - Pullback clustering SUPPORTED: pullbacks ended within ±1 pp of a Fibonacci level 639 times against 558 expected (ratio 1.145,
     CI [1.033, 1.266]; placebo 1.004). It comes from 50% (1.24) and 61.8% (1.38); 38.2% has none (1.03).
-  - F3: brk20 REFUTED (confluence n 411, median net −1.40% against FULL +0.61%, p 1.0); hi52 (n 13) and ins (n 7)
+  - Confluence filter: brk20 REFUTED (confluence n 411, median net −1.40% against FULL +0.61%, p 1.0); hi52 (n 13) and ins (n 7)
     INSUFFICIENT.
-  - F4 SUPPORTED, winner 61.8%: median net +1.53% (n 978, fill rate 12%) against V2-5's +0.61% (n 5,025, 59%).
+  - Deeper brk20 entry SUPPORTED, winner 61.8%: median net +1.53% (n 978, fill rate 12%) against the five-session
+    limit's +0.61% (n 5,025, 59%).
 - **Post-hoc checks (descriptive; they change no verdict).** Scripts and logs in `..\mt_build_notes\section3\fib_*`.
   - Both scripts reproduce the registered numbers exactly. Seven sampled trades and legs (2022–2026), re-derived
     from raw `bars_1d` by independent code, all match.
-  - F2 survives symbol clustering (CI [1.041, 1.260]) and legs ≥ ₹50 wide (1.12, placebo 0.98), and beats 97.7% of
+  - The clustering excess survives a symbol-clustered bootstrap (CI [1.041, 1.260]) and legs ≥ ₹50 wide (1.12, placebo 0.98), and beats 97.7% of
     random centre triplets. But it is no sharper at ±0.5 pp (1.09, placebo 1.10), and it fades by year: 1.24 in
     2023, 1.03 in 2025. The excess is 81 legs out of 13,707.
-  - F4 is a depth effect, not a Fibonacci one: median net rises with depth through the non-Fibonacci depths, and
-    67.8% (+2.00%, n 701) beats 61.8%. Strict trade-through fills change almost nothing (61.8% +1.50%, V2-5
-    +0.60%). 61.8% led V2-5 in every signal year, by +1.56, +0.87, +1.52, +0.49 and +0.15 pp (2022–2026); in 2026
+  - The deeper entry is a depth effect, not a Fibonacci one: median net rises with depth through the non-Fibonacci
+    depths, and 67.8% (+2.00%, n 701) beats 61.8%. Strict trade-through fills change almost nothing (61.8% +1.50%,
+    five-session limit +0.60%). 61.8% led the five-session limit in every signal year, by +1.56, +0.87, +1.52, +0.49 and +0.15 pp (2022–2026); in 2026
     every depth lost 1.9–2.7%.
-  - V2-5's trades on the signals the 61.8% limit filled had median net −2.93% (n 968); the rest +1.39% (n 4,057).
-    Net per admitted signal: V2-5 +1.02%, 61.8% +0.33%.
+  - The five-session limit's trades on the signals the 61.8% limit filled had median net −2.93% (n 968); the rest
+    +1.39% (n 4,057). Net per admitted signal: five-session limit +1.02%, 61.8% +0.33%.
   - Confluent brk20 fills sit at least 4.3% (median 8.6%) under the 60-session high; the rest a median 4.1%.
 - **Recorded:** the six ledger rows (null, supported, refuted, insufficient, insufficient, supported); IMPLEMENTATION_PLAN "Pending verdicts"
   holds the owner decision (whether a deeper brk20 entry gets its own registration once the kill rule reads);
@@ -473,7 +474,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **Read from the code; this changes the report's recommendations:**
   - The exit-rec noise was already fixed (2026-09-12). One gap remains: `time_exit_check` lacks
     the sold-outside screen.
-  - The live brk20 retest window offers y+1..y+6, one session more than the registered V2-5's y+1..y+5
+  - The live brk20 retest window offers y+1..y+6, one session more than the registered five-session limit's y+1..y+5
     (`retest.py:182-183`, `:474-483`).
   - Owner-facing wording problems, none fixed yet:
     - catalyst, earnings and breakout prompt sections print "none" when their job never ran;
@@ -540,7 +541,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **Cleanup:** the `..\mt_s3` worktree was removed (junctions unlinked first; the live venv and node_modules were
   verified intact), and the `wip/section3` branch deleted. Not pushed.
 
-## 2026-10-26 05:10 — Section-3 fixes built on `wip/section3`, reviewed and validated; NOT merged (owner: "Yes, work on section 3. Review and validate them.")
+## 2026-10-26 05:10 — The plan's open fixes built on `wip/section3`, reviewed and validated; NOT merged (owner asked for them built, reviewed and validated)
 
 - **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on phase3 3f82c40 (8678428..193457f). Nothing is
   merged, pushed or deployed. It touches the paper OMS (`on_reject`), so it waits for owner review.
