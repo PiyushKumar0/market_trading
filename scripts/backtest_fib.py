@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Fibonacci retracement study (registered 2026-11-04).
 
-F1: a limit at a retracement depth of the 60-session up-leg (``edge/fib_pullback``, N = 3), with the
-non-Fibonacci neighbours as controls. F2: do completed pullbacks stop near the Fibonacci depths
-(``price_structure/fib``, N = 1). F3: Fibonacci confluence on the selection-filter study's swing populations
-(``selection_filter/<strategy>``). F4: brk20's limit at a Fibonacci retracement of the breakout leg against
-V2-5 (``entry_mechanism/brk20``, N = 6). Arm (ii) construct and cost throughout (``backtest_regime_filter``).
+Fibonacci-pullback edge (``fib_pullback_edge``): a limit at a retracement depth of the 60-session up-leg
+(``edge/fib_pullback``, N = 3), with the non-Fibonacci neighbours as controls. Pullback-depth clustering
+(``pullback_clustering``): do completed pullbacks stop near the Fibonacci depths (``price_structure/fib``,
+N = 1). brk20 confluence filter (``brk20_confluence``): Fibonacci confluence on the selection-filter
+study's swing populations (``selection_filter/<strategy>``). Deeper brk20 entry (``brk20_deep_entry``):
+brk20's limit at a Fibonacci retracement of the breakout leg against the 5-session limit at the broken level
+(``entry_mechanism/brk20``, N = 6). The time-only-arm construct and cost throughout (``backtest_regime_filter``).
 Evidence only; SUPPORTED goes to the owner and wires nothing. Never run before the pre-registration is
 committed. Exit codes: 0 ran, 2 refused.
 """
@@ -54,25 +56,25 @@ DESCRIPTIVE = (0.236, 0.786)
 DEPTHS = FIB + CONTROLS + DESCRIPTIVE
 HALF, OUTER = 0.01, 0.03
 RATIO_MIN = 1.10
-F2_MIN_LEGS = 100
+PULLBACK_CLUSTERING_MIN_LEGS = 100
 CONFLUENCE_TOL = 0.01
-F4_WINDOW = bb.FILL_WINDOW[bb.VARIANT_V2_N5]
+BRK20_DEEP_ENTRY_WINDOW = bb.FILL_WINDOW[bb.VARIANT_LIMIT_5]
 L20_LOOKBACK = int(bb.PRE_REGISTERED_PARAMS["lookback_days"])
 T20 = rf.T20
 #: Ratios are rounded to this many decimals before meeting a registered boundary, so a tick-exact 15%,
 #: 1% or window edge is not decided by binary-float representation; far below one tick at any price.
 DP = 9
 
-F1_N, F2_N, F4_N = 3, 1, 6
-F3_N = {"brk20": 6, "hi52": 6, "ins": 1}
-F3_STRATEGIES = tuple(F3_N)
-FAMILIES = {"edge/fib_pullback": F1_N, "price_structure/fib": F2_N,
-            **{f"selection_filter/{s}": n for s, n in F3_N.items()}, "entry_mechanism/brk20": F4_N}
-F1_ALPHA = registration_alpha(F1_N)
+FIB_PULLBACK_EDGE_N, PULLBACK_CLUSTERING_N, BRK20_DEEP_ENTRY_N = 3, 1, 6
+BRK20_CONFLUENCE_N = {"brk20": 6, "hi52": 6, "ins": 1}
+BRK20_CONFLUENCE_STRATEGIES = tuple(BRK20_CONFLUENCE_N)
+FAMILIES = {"edge/fib_pullback": FIB_PULLBACK_EDGE_N, "price_structure/fib": PULLBACK_CLUSTERING_N,
+            **{f"selection_filter/{s}": n for s, n in BRK20_CONFLUENCE_N.items()}, "entry_mechanism/brk20": BRK20_DEEP_ENTRY_N}
+FIB_PULLBACK_EDGE_ALPHA = registration_alpha(FIB_PULLBACK_EDGE_N)
 
 ANY_DAY = "any_pullback_day"
 CONFLUENCE = "confluence"
-BASE = "V2-5"
+BASE = "limit_5_sessions"
 COMPLETED, SKIPPED, FAILED, INCOMPLETE, CENSORED = "completed", "skipped", "failed", "incomplete", "censored"
 NOT_QUALIFIED = "not_qualified"
 NO_WINNER = "none"
@@ -82,18 +84,18 @@ LEG_RULE = (f"h = earliest highest high in y-{LEG_WINDOW - 1}..y with h >= {LEG_
             f"h-{LOW_WINDOW}..h-1; (H-L)/L >= {MIN_LEG:.0%}; bars from L's session through the compared session "
             "usable; no structural ex-date after L's session up to and including the compared session; "
             "level = H - d(H-L) to the tick")
-F1_RULE = (f"SUPPORTED iff n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min({F1_N}), median net > 0, excess CI "
-           f"lower bound > 0 and permutation p < 0.05/{F1_N} against {DRAWS} same-size subsamples of its two "
+FIB_PULLBACK_EDGE_RULE = (f"SUPPORTED iff n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min({FIB_PULLBACK_EDGE_N}), median net > 0, excess CI "
+           f"lower bound > 0 and permutation p < 0.05/{FIB_PULLBACK_EDGE_N} against {DRAWS} same-size subsamples of its two "
            f"neighbours' pooled trades (no p when the pool is smaller); INSUFFICIENT if n < {rf.MIN_N}")
-F2_RULE = (f"SUPPORTED iff the pooled ratio >= {RATIO_MIN:.2f}, its 95% bootstrap CI lower bound (h-date clusters, "
+PULLBACK_CLUSTERING_RULE = (f"SUPPORTED iff the pooled ratio >= {RATIO_MIN:.2f}, its 95% bootstrap CI lower bound (h-date clusters, "
            f"{BOOT_REPS} reps) > 1 and it exceeds the pooled placebo ratio; INSUFFICIENT if the three windows hold "
-           f"< {F2_MIN_LEGS} legs")
-F3_RULE = (f"SUPPORTED iff confluence n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min(N), median net > max(0, "
+           f"< {PULLBACK_CLUSTERING_MIN_LEGS} legs")
+BRK20_CONFLUENCE_RULE = (f"SUPPORTED iff confluence n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min(N), median net > max(0, "
            f"FULL median) and permutation p < 0.05/N against {DRAWS} same-size subsamples of FULL; "
            f"INSUFFICIENT if n < {rf.MIN_N}")
-F4_RULE = (f"SUPPORTED iff n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min({F4_N}) and median net > max(0, "
+BRK20_DEEP_ENTRY_RULE = (f"SUPPORTED iff n >= {rf.MIN_N}, CPCV-promotable at fold_pass_min({BRK20_DEEP_ENTRY_N}) and median net > max(0, "
            f"{BASE} median net); the highest median among supported depths wins; INSUFFICIENT if n < {rf.MIN_N}")
-TOUCH_CAVEAT = ("F1, F3's brk20 and F4 fill on TOUCH at min(open, level): a touch is not a guaranteed fill, so "
+TOUCH_CAVEAT = ("The Fibonacci-pullback edge, the brk20 confluence filter's brk20 and the deeper brk20 entry fill on TOUCH at min(open, level): a touch is not a guaranteed fill, so "
                 "fill rates and nets are optimistic.")
 
 
@@ -171,14 +173,14 @@ def level(leg: Leg, d: float) -> float:
     return float(round_to_tick(leg.H - d * (leg.H - leg.L)))
 
 
-# ----------------------------------------------------------------------------- F1 populations
+# ----------------------------------------------------------------------------- fib_pullback_edge populations
 @dataclass(frozen=True)
 class Fill:
     event: rc.Event
     leg: Leg
 
 
-def f1_events(sym: str, s, legs: Legs, atr: np.ndarray, counts: dict[float, dict[str, int]],
+def fib_pullback_edge_events(sym: str, s, legs: Legs, atr: np.ndarray, counts: dict[float, dict[str, int]],
               depths=DEPTHS) -> dict[float, list[Fill]]:
     """Per depth, the admitted touches of the limit resting at the leg-as-of-(t-1) level on session t."""
     out: dict[float, list[Fill]] = {d: [] for d in depths}
@@ -305,7 +307,7 @@ def permutation_block(sample: list[float], pool: list[float]) -> dict[str, Any]:
     return {"p": p, "n": len(sample), "pool_n": len(pool), "draws": DRAWS, "seed": SEED}
 
 
-def decide_f1(r: dict[str, Any], k: str) -> str:
+def decide_fib_pullback_edge(r: dict[str, Any], k: str) -> str:
     c = r["cohorts"][k]
     if c["n"] < rf.MIN_N:
         return rf.INSUFFICIENT
@@ -316,14 +318,14 @@ def decide_f1(r: dict[str, Any], k: str) -> str:
     return rf.NOT_SUPPORTED
 
 
-def study_f1(series: dict[str, Any], legs: dict[str, Legs], structural: dict[str, list[date]], source: str,
+def study_fib_pullback_edge(series: dict[str, Any], legs: dict[str, Legs], structural: dict[str, list[date]], source: str,
              cost: Decimal) -> dict[str, Any]:
     fills: dict[str, list[Fill]] = {key(d): [] for d in DEPTHS} | {ANY_DAY: []}
     by_depth: dict[float, dict[str, int]] = {d: {} for d in DEPTHS}
     any_counts: dict[str, int] = {}
     for sym, s in series.items():
         atr = rc._atr(s)
-        for d, got in f1_events(sym, s, legs[sym], atr, by_depth).items():
+        for d, got in fib_pullback_edge_events(sym, s, legs[sym], atr, by_depth).items():
             fills[key(d)] += got
         fills[ANY_DAY] += pullback_day_events(sym, s, legs[sym], atr, any_counts)
     counts = {key(d): c for d, c in by_depth.items()} | {ANY_DAY: any_counts}
@@ -331,21 +333,21 @@ def study_f1(series: dict[str, Any], legs: dict[str, Legs], structural: dict[str
                            cost) for k, v in fills.items()}
     roles = ({key(d): "fib" for d in FIB} | {key(d): "control" for d in CONTROLS}
              | {key(d): "descriptive" for d in DESCRIPTIVE} | {ANY_DAY: "descriptive"})
-    out = {"family": "edge/fib_pullback", "family_n": F1_N, "alpha": F1_ALPHA, "roles": roles,
+    out = {"family": "edge/fib_pullback", "family_n": FIB_PULLBACK_EDGE_N, "alpha": FIB_PULLBACK_EDGE_ALPHA, "roles": roles,
            "population": {"source": source, "label": rc.SURVIVORSHIP_LABEL, "n_symbols": len(series),
                           "counts": counts},
-           **rf.report(pairs, F1_N, float(cost))}
+           **rf.report(pairs, FIB_PULLBACK_EDGE_N, float(cost))}
     bench = Bench(series, structural)
     out["benchmark"] = {k: benchmark_block(v, bench) for k, v in pairs.items()}
     nets = {k: [t.net for _, t in v if t is not None] for k, v in pairs.items()}
     out["permutation"] = {key(d): {**permutation_block(nets[key(d)], [x for a in NEIGHBOURS[d] for x in nets[key(a)]]),
                                    "pool": [key(a) for a in NEIGHBOURS[d]]} for d in FIB}
     out["classic"] = {key(d): classic_block(fills[key(d)], cost, structural) for d in FIB}
-    out["decision"] = {key(d): decide_f1(out, key(d)) for d in FIB}
+    out["decision"] = {key(d): decide_fib_pullback_edge(out, key(d)) for d in FIB}
     return out
 
 
-# ----------------------------------------------------------------------------- F2
+# ----------------------------------------------------------------------------- pullback_clustering
 class LegOutcome(NamedTuple):
     symbol: str
     h: int
@@ -354,7 +356,7 @@ class LegOutcome(NamedTuple):
     r: float | None
 
 
-def f2_legs(sym: str, s, legs: Legs, counts: dict[str, int]) -> list[LegOutcome]:
+def pullback_clustering_legs(sym: str, s, legs: Legs, counts: dict[str, int]) -> list[LegOutcome]:
     """Every leg starting at a strict 60-session new high, scanned h+1..h+60 to completion or failure."""
     out: list[LegOutcome] = []
     n = len(s)
@@ -412,7 +414,7 @@ def _per_leg(r: np.ndarray, centres) -> tuple[np.ndarray, np.ndarray]:
     return obs, exp
 
 
-def bootstrap_f2(h_dates: list[date], r: np.ndarray, *, reps: int = BOOT_REPS, seed: int = SEED) -> dict[str, Any]:
+def bootstrap_pullback_clustering(h_dates: list[date], r: np.ndarray, *, reps: int = BOOT_REPS, seed: int = SEED) -> dict[str, Any]:
     """Pooled Fibonacci ratio over ``reps`` resamples of the distinct h dates with replacement; percentile 95% CI."""
     if not h_dates:
         return {"ci_lo": None, "ci_hi": None, "n_clusters": 0, "reps": reps, "seed": seed, "undefined_reps": reps}
@@ -435,9 +437,9 @@ def histogram(r: np.ndarray) -> list[int]:
     return np.bincount(bins, minlength=100).tolist()
 
 
-def decide_f2(r: dict[str, Any]) -> str:
+def decide_pullback_clustering(r: dict[str, Any]) -> str:
     fib, placebo, lo = r["pooled"]["fib"], r["pooled"]["placebo"], r["bootstrap"]["ci_lo"]
-    if fib["obs"] < F2_MIN_LEGS:
+    if fib["obs"] < PULLBACK_CLUSTERING_MIN_LEGS:
         return rf.INSUFFICIENT
     if (fib["ratio"] is not None and _q(fib["ratio"]) >= RATIO_MIN and lo is not None and lo > 1
             and placebo["ratio"] is not None and _q(fib["ratio"]) > _q(placebo["ratio"])):
@@ -445,28 +447,28 @@ def decide_f2(r: dict[str, Any]) -> str:
     return rf.NOT_SUPPORTED
 
 
-def f2_report(outcomes: list[LegOutcome], counts: dict[str, int]) -> dict[str, Any]:
+def pullback_clustering_report(outcomes: list[LegOutcome], counts: dict[str, int]) -> dict[str, Any]:
     done = [o for o in outcomes if o.kind == COMPLETED]
     r = np.array([o.r for o in done], dtype="float64")
     held = np.array([o.r for o in done if o.h_date >= rc.HELD_OUT_FROM], dtype="float64")
-    out = {"family": "price_structure/fib", "family_n": F2_N,
+    out = {"family": "price_structure/fib", "family_n": PULLBACK_CLUSTERING_N,
            "counts": {k: counts.get(k, 0) for k in (COMPLETED, SKIPPED, FAILED, INCOMPLETE, CENSORED, NOT_QUALIFIED)},
            "centres": {key(c): centre_counts(r, c) for c in FIB + CONTROLS},
            "pooled": {"fib": pooled(r, FIB), "placebo": pooled(r, CONTROLS)},
-           "bootstrap": bootstrap_f2([o.h_date for o in done], r),
+           "bootstrap": bootstrap_pullback_clustering([o.h_date for o in done], r),
            "held_out": {"n": int(held.size), "fib": pooled(held, FIB), "placebo": pooled(held, CONTROLS)},
            "histogram_1pp": histogram(r)}
-    out["decision"] = decide_f2(out)
+    out["decision"] = decide_pullback_clustering(out)
     return out
 
 
-def study_f2(series: dict[str, Any], legs: dict[str, Legs]) -> dict[str, Any]:
+def study_pullback_clustering(series: dict[str, Any], legs: dict[str, Legs]) -> dict[str, Any]:
     counts: dict[str, int] = {}
-    outcomes = [o for sym, s in series.items() for o in f2_legs(sym, s, legs[sym], counts)]
-    return f2_report(outcomes, counts)
+    outcomes = [o for sym, s in series.items() for o in pullback_clustering_legs(sym, s, legs[sym], counts)]
+    return pullback_clustering_report(outcomes, counts)
 
 
-# ----------------------------------------------------------------------------- F3
+# ----------------------------------------------------------------------------- brk20_confluence
 def confluent(ev: rc.Event, legs: Legs) -> bool | None:
     """Fill within 1% of a Fibonacci level of the leg as of the session before the fill; ``None`` when that
     leg does not qualify."""
@@ -477,7 +479,7 @@ def confluent(ev: rc.Event, legs: Legs) -> bool | None:
     return min(_q(abs(fill / level(leg, d) - 1)) for d in FIB) <= CONFLUENCE_TOL
 
 
-def decide_f3(r: dict[str, Any]) -> str:
+def decide_brk20_confluence(r: dict[str, Any]) -> str:
     c, full, p = r["cohorts"][CONFLUENCE], r["cohorts"][rf.FULL], r["permutation"]["p"]
     if c["n"] < rf.MIN_N:
         return rf.INSUFFICIENT
@@ -487,8 +489,8 @@ def decide_f3(r: dict[str, Any]) -> str:
     return rf.NOT_SUPPORTED
 
 
-def study_f3(pop: rc.Population, cost: Decimal) -> dict[str, Any]:
-    n = F3_N[pop.strategy]
+def study_brk20_confluence(pop: rc.Population, cost: Decimal) -> dict[str, Any]:
+    n = BRK20_CONFLUENCE_N[pop.strategy]
     pairs = rf.measure(pop, cost)
     legs: dict[str, Legs] = {}
     flags = []
@@ -502,11 +504,11 @@ def study_f3(pop: rc.Population, cost: Decimal) -> dict[str, Any]:
            **rf.report(groups, n, float(cost))}
     conf, full = ([t.net for _, t in groups[k] if t is not None] for k in (CONFLUENCE, rf.FULL))
     out["permutation"] = permutation_block(conf, full)
-    out["decision"] = decide_f3(out)
+    out["decision"] = decide_brk20_confluence(out)
     return out
 
 
-# ----------------------------------------------------------------------------- F4
+# ----------------------------------------------------------------------------- brk20_deep_entry
 def fib_fill(d: float):
     """The limit at ``H_t - d(H_t - L20)`` on t in y+1..y+5: H_t the highest high over y..t-1, L20 the lowest
     low of the 20 sessions before y; touch fill at min(open, level)."""
@@ -517,7 +519,7 @@ def fib_fill(d: float):
         l20, top = float(s.low[y - L20_LOOKBACK:y].min()), float(s.high[y])
         if not (math.isfinite(l20) and math.isfinite(top)):
             return None
-        for t in range(y + 1, min(y + F4_WINDOW, len(s) - 1) + 1):
+        for t in range(y + 1, min(y + BRK20_DEEP_ENTRY_WINDOW, len(s) - 1) + 1):
             if t > y + 1:
                 top = max(top, float(s.high[t - 1]))
             x = float(round_to_tick(top - d * (top - l20)))
@@ -541,7 +543,7 @@ def matched(a: list[rf.Pair], b: list[rf.Pair]) -> dict[str, Any]:
             f"median_net_{BASE}": round(statistics.median(nb[k] for k in common), 4) if common else None}
 
 
-def decide_f4(r: dict[str, Any], k: str) -> str:
+def decide_brk20_deep_entry(r: dict[str, Any], k: str) -> str:
     c, base = r["cohorts"][k], r["cohorts"][BASE]["median_net"]
     if c["n"] < rf.MIN_N:
         return rf.INSUFFICIENT
@@ -559,14 +561,14 @@ def winner(r: dict[str, Any]) -> str:
     return top[0] if len(top) == 1 else WINNER_TIE
 
 
-def study_f4(base: rc.Population, by_depth: dict[float, rc.Population], cost: Decimal) -> dict[str, Any]:
+def study_brk20_deep_entry(base: rc.Population, by_depth: dict[float, rc.Population], cost: Decimal) -> dict[str, Any]:
     pops = {BASE: base} | {key(d): p for d, p in by_depth.items()}
     groups = {k: rf.measure(p, cost) for k, p in pops.items()}
-    out = {"family": "entry_mechanism/brk20", "family_n": F4_N,
+    out = {"family": "entry_mechanism/brk20", "family_n": BRK20_DEEP_ENTRY_N,
            "population": {k: {**rf.population_block(p), "fill_rate": fill_rate(p)} for k, p in pops.items()},
-           **rf.report(groups, F4_N, float(cost))}
+           **rf.report(groups, BRK20_DEEP_ENTRY_N, float(cost))}
     out["matched"] = {key(d): matched(groups[key(d)], groups[BASE]) for d in by_depth}
-    out["decision"] = {key(d): decide_f4(out, key(d)) for d in by_depth}
+    out["decision"] = {key(d): decide_brk20_deep_entry(out, key(d)) for d in by_depth}
     out["winner"] = winner(out)
     return out
 
@@ -591,23 +593,23 @@ def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None) -> dict[st
     structural = bb.load_structural_ex_dates(conn)
     legs = {sym: legs_for(s, structural.get(sym, [])) for sym, s in series.items()}
     m = rf.meta("scripts/backtest_fib.py", f"Fibonacci retracement, pre-registered {REGISTERED}",
-                db, end, symbols, max_symbols, F1_N, cost_model)
+                db, end, symbols, max_symbols, FIB_PULLBACK_EDGE_N, cost_model)
     m |= {"family_n": FAMILIES, "fold_pass_min": {f: fold_pass_min(n) for f, n in FAMILIES.items()},
           "alpha": {f: registration_alpha(n) for f, n in FAMILIES.items()},
           "seed": SEED, "draws": DRAWS, "boot_reps": BOOT_REPS, "leg_rule": LEG_RULE,
           "leg_window": LEG_WINDOW, "low_window": LOW_WINDOW, "min_leg": MIN_LEG, "pullback_max": PULLBACK_MAX,
           "complete_max": COMPLETE_MAX, "fib": FIB, "controls": CONTROLS,
           "neighbours": {key(d): [key(a) for a in v] for d, v in NEIGHBOURS.items()}, "descriptive": DESCRIPTIVE,
-          "f2_half": HALF, "f2_outer": OUTER, "ratio_min": RATIO_MIN, "f2_min_legs": F2_MIN_LEGS,
-          "confluence_tol": CONFLUENCE_TOL, "f4_window": F4_WINDOW, "l20_lookback": L20_LOOKBACK,
-          "rules": {"f1": F1_RULE, "f2": F2_RULE, "f3": F3_RULE, "f4": F4_RULE}}
-    f1 = study_f1(series, legs, structural, source, cost)
-    f2 = study_f2(series, legs)
-    pops = {s: rf.build_population(s, conn, db, end, symbols, max_symbols) for s in F3_STRATEGIES}
+          "pullback_clustering_half": HALF, "pullback_clustering_outer": OUTER, "ratio_min": RATIO_MIN, "pullback_clustering_min_legs": PULLBACK_CLUSTERING_MIN_LEGS,
+          "confluence_tol": CONFLUENCE_TOL, "brk20_deep_entry_window": BRK20_DEEP_ENTRY_WINDOW, "l20_lookback": L20_LOOKBACK,
+          "rules": {"fib_pullback_edge": FIB_PULLBACK_EDGE_RULE, "pullback_clustering": PULLBACK_CLUSTERING_RULE, "brk20_confluence": BRK20_CONFLUENCE_RULE, "brk20_deep_entry": BRK20_DEEP_ENTRY_RULE}}
+    fib_pullback_edge = study_fib_pullback_edge(series, legs, structural, source, cost)
+    pullback_clustering = study_pullback_clustering(series, legs)
+    pops = {s: rf.build_population(s, conn, db, end, symbols, max_symbols) for s in BRK20_CONFLUENCE_STRATEGIES}
     by_depth = {d: rc.brk20_population(conn, end, symbols=symbols, max_symbols=max_symbols, fill=fib_fill(d))
                 for d in FIB}
-    return {"meta": m, "f1": f1, "f2": f2, "f3": {s: study_f3(p, cost) for s, p in pops.items()},
-            "f4": study_f4(pops["brk20"], by_depth, cost)}
+    return {"meta": m, "fib_pullback_edge": fib_pullback_edge, "pullback_clustering": pullback_clustering, "brk20_confluence": {s: study_brk20_confluence(p, cost) for s, p in pops.items()},
+            "brk20_deep_entry": study_brk20_deep_entry(pops["brk20"], by_depth, cost)}
 
 
 # ----------------------------------------------------------------------------- rendering
@@ -630,9 +632,9 @@ def _cohorts(b: dict[str, Any], n: int) -> list[str]:
     return out
 
 
-def _f1_lines(b: dict[str, Any]) -> list[str]:
+def _fib_pullback_edge_lines(b: dict[str, Any]) -> list[str]:
     p = b["population"]
-    out = ["", f"F1 FIBONACCI PULLBACK ENTRY ({b['family']}, N={b['family_n']}, alpha {b['alpha']:.4f})",
+    out = ["", f"FIBONACCI-PULLBACK EDGE [fib_pullback_edge] ({b['family']}, N={b['family_n']}, alpha {b['alpha']:.4f})",
            f"  {p['source']}  [{p['label']}]  symbols {p['n_symbols']}",
            "  roles: " + ", ".join(f"{k}={v}" for k, v in b["roles"].items()),
            "  counts: " + "; ".join(f"{k} {c}" for k, c in p["counts"].items())]
@@ -653,13 +655,13 @@ def _f1_lines(b: dict[str, Any]) -> list[str]:
                    f"{'-' if c['hit_rate_net'] is None else format(c['hit_rate_net'] * 100, '.1f')}% "
                    f"exits {c['exit_reasons']}")
     out += [f"  DECISION {b['family']} {k}: {d}" for k, d in b["decision"].items()]
-    out.append(f"  rule: {F1_RULE}")
+    out.append(f"  rule: {FIB_PULLBACK_EDGE_RULE}")
     return out
 
 
-def _f2_lines(b: dict[str, Any]) -> list[str]:
+def _pullback_clustering_lines(b: dict[str, Any]) -> list[str]:
     fib, plc, bt, ho = b["pooled"]["fib"], b["pooled"]["placebo"], b["bootstrap"], b["held_out"]
-    out = ["", f"F2 DO PULLBACKS STOP AT FIBONACCI LEVELS? ({b['family']}, N={b['family_n']}; no trades, no geometry)",
+    out = ["", f"PULLBACK-DEPTH CLUSTERING [pullback_clustering]: DO PULLBACKS STOP AT FIBONACCI LEVELS? ({b['family']}, N={b['family_n']}; no trades, no geometry)",
            "  legs: " + ", ".join(f"{k} {v}" for k, v in b["counts"].items()),
            "  centre      obs  shoulders  expected   ratio"]
     for k, c in b["centres"].items():
@@ -671,13 +673,13 @@ def _f2_lines(b: dict[str, Any]) -> list[str]:
             f"  held-out (h >= {rc.HELD_OUT_FROM}, diagnostic): completed {ho['n']}, Fibonacci ratio "
             f"{num(ho['fib']['ratio'], '.3f')}, placebo {num(ho['placebo']['ratio'], '.3f')}",
             "  histogram of r, 1-pp bins from 0%: " + " ".join(str(v) for v in b["histogram_1pp"]),
-            f"  DECISION {b['family']}: {b['decision']}", f"  rule: {F2_RULE}"]
+            f"  DECISION {b['family']}: {b['decision']}", f"  rule: {PULLBACK_CLUSTERING_RULE}"]
     return out
 
 
-def _f3_lines(f3: dict[str, Any]) -> list[str]:
-    out = ["", "F3 FIBONACCI CONFLUENCE ON THE SWING SIGNALS (the regime-filter study's populations, arm (ii))"]
-    for s, b in f3.items():
+def _brk20_confluence_lines(brk20_confluence: dict[str, Any]) -> list[str]:
+    out = ["", "BRK20 CONFLUENCE FILTER [brk20_confluence]: FIBONACCI CONFLUENCE ON THE SWING SIGNALS (the regime-filter study's populations, time-only arm)"]
+    for s, b in brk20_confluence.items():
         p, q = b["population"], b["permutation"]
         out += [f" [{s}] {b['family']} N={b['family_n']} alpha {b['alpha']:.4f}  {p['source']}  [{p['label']}]",
                 f"  symbols {p['n_symbols']}  admitted events {p['n_events']}  leg undefined {p['leg_undefined']}  "
@@ -685,12 +687,12 @@ def _f3_lines(f3: dict[str, Any]) -> list[str]:
         out += _cohorts(b, b["family_n"])
         out += [f"  permutation p {num(q['p'], '.4f')} (confluence median vs {q['draws']} FULL subsamples, "
                 f"seed {q['seed']})", f"  DECISION {b['family']}: {b['decision']}"]
-    out.append(f"  rule: {F3_RULE}")
+    out.append(f"  rule: {BRK20_CONFLUENCE_RULE}")
     return out
 
 
-def _f4_lines(b: dict[str, Any]) -> list[str]:
-    out = ["", f"F4 BRK20 LIMIT AT A FIBONACCI LEVEL ({b['family']}, N={b['family_n']}; window y+1..y+{F4_WINDOW}, "
+def _brk20_deep_entry_lines(b: dict[str, Any]) -> list[str]:
+    out = ["", f"DEEPER BRK20 ENTRY [brk20_deep_entry]: BRK20 LIMIT AT A FIBONACCI LEVEL ({b['family']}, N={b['family_n']}; window y+1..y+{BRK20_DEEP_ENTRY_WINDOW}, "
                f"L20 over the {L20_LOOKBACK} sessions before y)"]
     for k, p in b["population"].items():
         out.append(f"  {k:<8} {p['source']}  [{p['label']}]  events {p['n_events']}  fill rate "
@@ -700,7 +702,7 @@ def _f4_lines(b: dict[str, Any]) -> list[str]:
         out.append(f"  matched {k} vs {BASE} (same signals, descriptive): n={mt['n']} med net "
                    f"{num(mt['median_net'])} vs {num(mt[f'median_net_{BASE}'])}")
     out += [f"  DECISION {b['family']} {k}: {d}" for k, d in b["decision"].items()]
-    out += [f"  WINNER: {b['winner']}", f"  rule: {F4_RULE}"]
+    out += [f"  WINNER: {b['winner']}", f"  rule: {BRK20_DEEP_ENTRY_RULE}"]
     return out
 
 
@@ -714,13 +716,13 @@ def render(doc: dict[str, Any]) -> str:
     if not m["registered_population"]:
         out += ["POPULATION OVERRIDDEN (--symbols/--max-symbols): smoke run, NOT the registered study", ""]
     out.append("GEOMETRY FIRST - median GROSS at T+20 vs one round trip (margin floor per session)")
-    blocks = [("F1", doc["f1"])] + [(f"F3 {s}", b) for s, b in doc["f3"].items()] + [("F4", doc["f4"])]
+    blocks = [("fib_pullback_edge", doc["fib_pullback_edge"])] + [(f"brk20_confluence {s}", b) for s, b in doc["brk20_confluence"].items()] + [("brk20_deep_entry", doc["brk20_deep_entry"])]
     for label, b in blocks:
         for k, g in b["geometry"].items():
             out.append(f"  {label:<9} {k:<16} n={g['n']:<6} median gross {num(g['median_gross_pct'])}%  "
                        f"cost {g['cost_floor_pct']:.4f}%  margin floor {num(g['margin_floor_pct_per_session'], '.5f')}"
                        f"%/session  GEOMETRY: {g['verdict']}")
-    out += _f1_lines(doc["f1"]) + _f2_lines(doc["f2"]) + _f3_lines(doc["f3"]) + _f4_lines(doc["f4"])
+    out += _fib_pullback_edge_lines(doc["fib_pullback_edge"]) + _pullback_clustering_lines(doc["pullback_clustering"]) + _brk20_confluence_lines(doc["brk20_confluence"]) + _brk20_deep_entry_lines(doc["brk20_deep_entry"])
     out += ["", "Every population is a " + rc.SURVIVORSHIP_LABEL + ".", TOUCH_CAVEAT]
     return rc.ascii_text("\n".join(out))
 

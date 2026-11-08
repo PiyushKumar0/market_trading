@@ -2,7 +2,7 @@
 
 **Before any substantive work, read `FABLE_HANDOFF.md`** — the methodology transfer that supplements this file. Where the two conflict, `FABLE_HANDOFF.md` wins, so change the two together.
 
-**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet, and an item's text is deleted when it ships. Comments, docs, commit messages and memory state the reason in words and name things ("the cost gate", "the owner's 2026-10-17 capital-change decision"); never cite a retired document or an item number such as `§2.6`, `WO-21` or `D14`.
+**Docs:** the code is the record of what is built; `IMPLEMENTATION_PLAN.md` holds only what is not built yet, and an item's text is deleted when it ships. Comments, docs, commit messages and memory state the reason in words and name things ("the cost gate", "the owner's 2026-10-17 capital-change decision"); never cite a retired document, or an item in one by its section, work-order or decision number.
 
 ## Model policy — Fable is the manager, not the workhorse
 

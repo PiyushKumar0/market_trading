@@ -1,4 +1,4 @@
-"""Pre-registered filings experiments E1-E3 (``scripts/filings_experiments.py``).
+"""Pre-registered filings experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness) (``scripts/filings_experiments.py``).
 
 PURE flag/slice builder tests (cluster-active window edges, results T+1/T+2 incl. after-hours shift,
 adverse-pledge 90d window, person-category value-share dominance, liquidity terciles, crossing
@@ -190,7 +190,7 @@ def _min_bars(sym: str, day: date, n: int = 40, base: float = 100.0) -> list[Bar
     return out
 
 
-def test_e3_populated_insider_leg_slices(tmp_path, clock):
+def test_insider_robustness_populated_insider_leg_slices(tmp_path, clock):
     store = _store(tmp_path, clock)
     try:
         base = date(2026, 1, 1)
@@ -202,7 +202,7 @@ def test_e3_populated_insider_leg_slices(tmp_path, clock):
             "broadcast_dt": _bdt(dates[25], 10),
         }])
         cm = CostModel.from_config()
-        res = fe.run_e3(store, cm, clock, ["AAA"], base, dates[-1],
+        res = fe.run_insider_robustness(store, cm, clock, ["AAA"], base, dates[-1],
                         insider_min_value_inr=10_000_000)
         assert res["n_events"] == 1
         # slice (a): entry 2026-01-26 -> 2026H1 bucket
@@ -212,22 +212,22 @@ def test_e3_populated_insider_leg_slices(tmp_path, clock):
         assert fe.CATEGORY_GROUP_PROMOTER in res["slices"]["by_category"]
         # slice (c): a single event cannot be terciled -> honest single 'all' bucket
         assert "all" in res["slices"]["by_liquidity"]
-        md = fe.render_e3(res)
+        md = fe.render_insider_robustness(res)
         assert "insider_net_buy robustness slices" in md and "T+20" in md
     finally:
         store.close()
 
 
-def test_e3_empty_is_honest(tmp_path, clock):
+def test_insider_robustness_empty_is_honest(tmp_path, clock):
     store = _store(tmp_path, clock)
     try:
         base = date(2026, 1, 1)
         dates = [base + timedelta(days=i) for i in range(60)]
         store.upsert_bars_1d([_daily("AAA", d, 100 + i) for i, d in enumerate(dates)])
         cm = CostModel.from_config()
-        res = fe.run_e3(store, cm, clock, ["AAA"], base, dates[-1], insider_min_value_inr=10_000_000)
+        res = fe.run_insider_robustness(store, cm, clock, ["AAA"], base, dates[-1], insider_min_value_inr=10_000_000)
         assert res["n_events"] == 0
-        md = fe.render_e3(res)
+        md = fe.render_insider_robustness(res)
         assert "NO insider_net_buy crossings" in md            # honest whole-study empty
     finally:
         store.close()
@@ -250,12 +250,12 @@ def test_e1_runs_end_to_end_honest_empty(tmp_path, clock):
             "broadcast_dt": _bdt(dl[30], 10),
         }])
         cm = CostModel.from_config()
-        res = fe.run_e1(store, cm, clock, ["AAA"], days[0], days[-1], insider_min_value_inr=10_000_000)
-        assert res["experiment"] == "e1"
+        res = fe.run_catalyst_orb(store, cm, clock, ["AAA"], days[0], days[-1], insider_min_value_inr=10_000_000)
+        assert res["experiment"] == "catalyst_orb"
         assert isinstance(res["n_trades_total"], int)
         assert set(res["cohorts"]) == {"A_insider_buy_cluster", "B_results_t1_t2", "C_unconditioned"}
         assert res["round_trip_pct"] > 0.0                     # a real MIS round trip was modelled
-        md = fe.render_e1(res)
+        md = fe.render_catalyst_orb(res)
         assert "Cohort stats" in md and "Discriminator" in md
         # The name promises an EMPTY run: if the fixture ever yields trades this fails loudly instead
         # of silently skipping the honest-n=0 check.
@@ -287,14 +287,14 @@ def test_e2_runs_end_to_end_honest_empty(tmp_path, clock):
              "pledged_pct": 18.0, "broadcast_dt": _bdt(date(2025, 4, 15), 12)},
         ])
         cm = CostModel.from_config()
-        res = fe.run_e2(store, cm, clock, ["AAA"], dates[0], dates[-1],
+        res = fe.run_rsi2_catalyst_veto(store, cm, clock, ["AAA"], dates[0], dates[-1],
                         insider_min_value_inr=10_000_000, pledge_delta_min_pct=5.0)
-        assert res["experiment"] == "e2"
+        assert res["experiment"] == "rsi2_catalyst_veto"
         assert res["regime_applied"] is True                   # NIFTY 50 frame present
         assert set(res["cohorts"]) == {"ADVERSE", "FAVORABLE", "NEUTRAL"}
-        md = fe.render_e2(res)
+        md = fe.render_rsi2_catalyst_veto(res)
         assert "Cohort stats" in md and "Discriminator" in md
-        assert res["n_trades_total"] == 0                      # see e1: fail loudly, never skip
+        assert res["n_trades_total"] == 0                      # see catalyst_orb: fail loudly, never skip
         assert "honest n=0" in md
     finally:
         store.close()

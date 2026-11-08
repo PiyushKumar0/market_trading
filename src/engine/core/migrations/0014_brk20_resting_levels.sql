@@ -1,11 +1,11 @@
 -- ------------------------- `brk20` RETEST re-arm: the broken level RESTS for 5 sessions
 -- 2026-09-12. The 2026-09-12 pre-registered entry-mechanism backtest selected
--- `V2_limit_at_H20_N5` under its own decision rule: a limit resting at the broken level for up to
--- FIVE sessions beat both market-on-confirmation (V1) and the three-session limit (V2-3) at T+10,
+-- the five-session limit under its own decision rule: a limit resting at the broken level for up to
+-- FIVE sessions beat both market-on-confirmation (next open) and the three-session limit at T+10,
 -- and was the only variant geometry-viable there. The LIVE rule publishes that level exactly ONCE,
 -- on the crossing session, under the pre-screen's same-day (symbol, strategy) dedupe — i.e. it ships
 -- the N=1 variant, which was not among the registered variants and has no measured return at all
--- (its fill rate reads 31.4% off the registered delay histogram, against V2-5's 59.1%).
+-- (its fill rate reads 31.4% off the registered delay histogram, against the five-session limit's 59.1%).
 --
 -- The live cost of the one-shot publication is measured, not hypothetical: of 15 `brk20` proposals on
 -- 2026-09-11, SIX died on the risk gate's `entry_sanity_band` because the rested level already sat >2% below

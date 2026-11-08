@@ -285,7 +285,7 @@ async def test_empty_tables_render_without_raising(store, conn, assembler, agent
     # The health line renders even on an empty store (never-run is honest, not an outage claim).
     assert "platform health (current, authoritative): LLM self-test never-run" in volatile
     # The gap-scan decision: never silently "none".
-    assert "gap scan vs prior close:\n  - not computed: no trustworthy pre-open price source (A14" in volatile
+    assert "gap scan vs prior close:\n  - not computed: no trustworthy pre-open price source (indicative" in volatile
 
 
 async def test_watchlist_renders_symbol_grade_event_without_the_retired_levels(

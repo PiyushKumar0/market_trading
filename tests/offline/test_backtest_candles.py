@@ -3,7 +3,7 @@
 The tape is a temp :class:`MarketStore` holding ONE session of 09:15..15:29 one-minute bars for the
 cast below, flat filler names ``FILL000..FILL159`` (enough to clear ``session_min_symbols`` without
 overriding the pre-registered PARAMS) and 20 prior daily bars per measured symbol. The test checks the
-JSON document's conventions and shape, the ``R1|E1`` cell, and the ASCII report.
+JSON document's conventions and shape, the ``momentum_burst|fixed_exit`` cell, and the ASCII report.
 """
 
 from __future__ import annotations
@@ -85,27 +85,27 @@ def _session(sym: str, segments, *, gappy_bk: int | None = None) -> list[Bar]:
 
 
 CAST: dict[str, list] = {
-    # The R1|E1 cell books exactly two trades, both entered at 102.00: R1_POS out at the E1 target
-    # 106.00 (the 107 print) and TWICE once (one trade per symbol per day). R1_NEG (1.9x volume) and
-    # SHORTDAY (under the medvol20 floor) must not add a third. The R2..R5 pairs populate the other
+    # The momentum_burst|fixed_exit cell books exactly two trades, both entered at 102.00: MOMENTUM_BURST_POS out at the fixed_exit target
+    # 106.00 (the 107 print) and TWICE once (one trade per symbol per day). MOMENTUM_BURST_NEG (1.9x volume) and
+    # SHORTDAY (under the medvol20 floor) must not add a third. The three_soldiers..vwap_reclaim pairs populate the other
     # cells, whose outcomes the smoke test does not assert.
-    "R1_POS": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
+    "MOMENTUM_BURST_POS": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
                (11, 11, (102.0, 102.0, 102.0, 102.0, 1000)),
                (12, 12, (102.0, 107.0, 102.0, 103.0, 1000)),
                (13, 13, (103.0, 103.0, 101.0, 101.0, 1000)),
                (14, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
-    "R1_NEG": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 1900)),
+    "MOMENTUM_BURST_NEG": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 1900)),
                (11, 74, (102.0, 102.0, 102.0, 102.0, 1000))],
-    "R2_POS": [(0, 7, FLAT100), (8, 8, (100.1, 101.0, 100.1, 101.0, 1000)),
+    "THREE_SOLDIERS_POS": [(0, 7, FLAT100), (8, 8, (100.1, 101.0, 100.1, 101.0, 1000)),
                (9, 9, (101.0, 102.0, 101.0, 102.0, 1000)),
                (10, 10, (102.0, 103.0, 102.0, 103.0, 1600)),
                (11, 72, (103.0, 103.0, 103.0, 103.0, 1000)),
                (73, 74, (200.0, 200.0, 200.0, 200.0, 1000))],
-    "R2_NEG": [(0, 7, FLAT100), (8, 8, (100.1, 101.0, 100.1, 101.0, 1000)),
+    "THREE_SOLDIERS_NEG": [(0, 7, FLAT100), (8, 8, (100.1, 101.0, 100.1, 101.0, 1000)),
                (9, 9, (101.0, 102.0, 101.0, 102.0, 1000)),
                (10, 10, (102.0, 103.0, 102.0, 103.0, 1400)),
                (11, 74, (103.0, 103.0, 103.0, 103.0, 1000))],
-    "R3_POS": [(0, 5, FLAT100), (6, 6, (100.0, 106.0, 100.0, 105.5, 1000)),
+    "ENGULF_PULLBACK_POS": [(0, 5, FLAT100), (6, 6, (100.0, 106.0, 100.0, 105.5, 1000)),
                (7, 7, (105.5, 105.5, 105.0, 105.0, 1000)),
                (8, 8, (105.0, 105.0, 104.0, 104.0, 1000)),
                (9, 9, (104.0, 104.0, 103.0, 103.0, 1000)),
@@ -113,22 +113,22 @@ CAST: dict[str, list] = {
                (11, 11, (104.5, 104.5, 104.5, 104.5, 1000)),
                (12, 12, (104.5, 104.5, 102.5, 103.0, 1000)),
                (13, 74, (102.0, 102.0, 102.0, 102.0, 1000))],
-    "R3_NEG": [(0, 5, FLAT100), (6, 6, (100.0, 106.0, 100.0, 105.5, 1000)),
+    "ENGULF_PULLBACK_NEG": [(0, 5, FLAT100), (6, 6, (100.0, 106.0, 100.0, 105.5, 1000)),
                (7, 7, (105.5, 105.5, 105.0, 105.0, 1000)),
                (8, 8, (105.0, 105.0, 104.0, 104.0, 1000)),
                (9, 9, (104.0, 104.0, 103.0, 103.0, 1000)),
                (10, 10, (103.0, 105.0, 103.0, 104.5, 1100)),
                (11, 74, (104.5, 104.5, 104.5, 104.5, 1000))],
-    "R4_POS": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
+    "VWAP_HOLD_BUY_POS": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
                (10, 10, (101.0, 101.2, 100.6, 101.2, 1000)),
                (11, 74, (101.2, 101.2, 101.2, 101.2, 1000))],
-    "R4_NEG": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
+    "VWAP_HOLD_BUY_NEG": [(0, 3, FLAT100), (4, 9, (101.0, 101.0, 101.0, 101.0, 1000)),
                (10, 10, (101.0, 101.2, 101.0, 101.2, 1000)),
                (11, 74, (101.2, 101.2, 101.2, 101.2, 1000))],
-    "R5_POS": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
+    "VWAP_RECLAIM_POS": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
                (10, 10, (99.0, 100.5, 99.0, 100.5, 1600)),
                (11, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
-    "R5_NEG": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
+    "VWAP_RECLAIM_NEG": [(0, 3, FLAT100), (4, 9, (99.0, 99.0, 99.0, 99.0, 1000)),
                (10, 10, (99.0, 100.5, 99.0, 100.5, 1400)),
                (11, 74, (100.5, 100.5, 100.5, 100.5, 1000))],
     "TWICE": [(0, 9, FLAT100), (10, 10, (100.0, 102.0, 100.0, 102.0, 2000)),
@@ -150,11 +150,11 @@ def _tape() -> list[Bar]:
     return bars
 
 
-# --------------------------------------------------------------------------- the DAILY tape (R3)
+# --------------------------------------------------------------------------- the DAILY tape (engulf_pullback)
 #: Constant per-symbol daily bars around a close of 100.00, so every true range is the plain
 #: high-low and ATR% is the range itself: the six measured symbols carry ATR% 1..6.
 DAILY_ATR_PCT: dict[str, float] = {
-    "R1_POS": 1.0, "R2_POS": 2.0, "R3_POS": 3.0, "R4_POS": 4.0, "R5_POS": 5.0, "TWICE": 6.0,
+    "MOMENTUM_BURST_POS": 1.0, "THREE_SOLDIERS_POS": 2.0, "ENGULF_PULLBACK_POS": 3.0, "VWAP_HOLD_BUY_POS": 4.0, "VWAP_RECLAIM_POS": 5.0, "TWICE": 6.0,
 }
 N_DAILY_SESSIONS = 20                      # more than the 14-session lookback
 
@@ -216,13 +216,13 @@ def test_main_writes_json_and_prints_an_ascii_table(db_file, tmp_path, capsys):
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert doc["meta"]["product"] == "MIS"
     assert "OPEN of the 1m bar at signal.last_minute + 1" in doc["meta"]["entry_convention"]
-    assert "next 1m OPEN" in doc["meta"]["exit_conventions"]["E2"]
+    assert "next 1m OPEN" in doc["meta"]["exit_conventions"]["trail_exit"]
     assert len(doc["results"]) == 10
-    assert doc["results"]["R1|E1"]["example_trades"]                  # the audit sample is on record
-    # R1 books R1_POS (E1 target 106.00) and TWICE (its 104.00 squareoff), both entered at 102.00.
-    r1 = doc["results"]["R1|E1"]["splits"][bt.SPLIT_ALL]
-    assert r1["n"] == 2
-    assert r1["mean_gross_pct"] == pytest.approx(((106.0 + 104.0) / 2 / 102.0 - 1.0) * 100.0, abs=1e-3)
+    assert doc["results"]["momentum_burst|fixed_exit"]["example_trades"]                  # the audit sample is on record
+    # momentum_burst books MOMENTUM_BURST_POS (fixed_exit target 106.00) and TWICE (its 104.00 squareoff), both entered at 102.00.
+    burst = doc["results"]["momentum_burst|fixed_exit"]["splits"][bt.SPLIT_ALL]
+    assert burst["n"] == 2
+    assert burst["mean_gross_pct"] == pytest.approx(((106.0 + 104.0) / 2 / 102.0 - 1.0) * 100.0, abs=1e-3)
 
     text = capsys.readouterr().out
     assert text.isascii()                                             # the Windows console is cp1252

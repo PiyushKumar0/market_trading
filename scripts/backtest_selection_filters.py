@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Selection-filter study (pre-registered 2026-10-07).
 
-Expect null. Per strategy (brk20 V2-N5 fills, hi52 v2), the arm (ii) construct over the admitted
+Expect null. Per strategy (brk20 5-session-limit fills, hi52 v2), the time-only-arm construct over the admitted
 events; each of five pinned filters, evaluated at the signal session y from bars through y, splits
 the same events (pass vs all). Family N = 5 per strategy, deflated together; no combinations.
 Evidence only; wires nothing. Exit codes: 0 ran, 2 refused.

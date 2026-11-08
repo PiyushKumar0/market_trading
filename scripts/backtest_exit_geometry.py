@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Exit-geometry study (pre-registered 2026-10-07).
 
-Per strategy (brk20 V2-N5 fills, hi52 v2, ins), three arms walked through ``exit_sim`` from the
+Per strategy (brk20 5-session-limit fills, hi52 v2, ins), three arms walked through ``exit_sim`` from the
 research fill: (i) the shipped stop/target re-anchored to the fill, (ii) time only (REFERENCE),
 (iii) a ``fill - 2.5 x ATR14`` catastrophe stop. Family N = 2 per strategy. Evidence only; wires
 nothing. Exit codes: 0 ran, 2 refused.
@@ -166,7 +166,7 @@ def run(conn, db: Path, end: date, *, symbols=None, max_symbols=None, strategies
                 "overnight_gap_mult": lim.per_trade_risk.overnight_gap_mult,
                 "cnc_notional_inr": str(lim.per_stock_exposure.cnc_notional_inr),
                 "max_deployed_capital_inr": str(lim.capital_cap.max_deployed_capital_inr),
-                "note": "daily-band leg not modelled; arm (ii) has no stop and cannot be sized",
+                "note": "daily-band leg not modelled; the time-only arm has no stop and cannot be sized",
             },
             "held_out_from": str(rc.HELD_OUT_FROM),
         },

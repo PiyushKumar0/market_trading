@@ -346,7 +346,7 @@ class ContextAssembler:
         if len(clusters) > news_analyst.MAX_CLUSTERS_PER_CALL:
             raise ValueError(
                 f"news batch of {len(clusters)} exceeds the {news_analyst.MAX_CLUSTERS_PER_CALL}-cluster "
-                "cap (§5.4) - the caller must chunk"
+                "cap - the caller must chunk"
             )
         stable = "\n".join([
             "== SCORING TASK (stable) ==",

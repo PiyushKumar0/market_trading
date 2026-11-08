@@ -319,9 +319,9 @@ class BackfillJob:
         untouched by this path (its ``src`` CHECK constraint is not widened; no new ``src`` value),
         so every feature input is unchanged by construction: only the warm-up gate's verdict moves.
 
-        Confirmation runs in TWO PHASES because the last guard is a cross-symbol one. Phase 1, inside
-        the per-symbol loop, only COLLECTS candidates (no write); phase 2, after the loop, applies the
-        correlation guard and writes. A minute must clear all four guards to be confirmed:
+        Confirmation runs in TWO PASSES because the last guard is a cross-symbol one. The collect pass,
+        inside the per-symbol loop, only COLLECTS candidates (no write); the write pass, after the loop,
+        applies the correlation guard and writes. A minute must clear all four guards to be confirmed:
 
         * **A — Kite answered.** The symbol's ``returned`` set (every in-span minute Kite published,
           across chunks) must be NON-EMPTY. If Kite returned no candles at all for the span, a broker
@@ -351,7 +351,7 @@ class BackfillJob:
         report = BackfillReport(interval="minute")
         chunk_days = self._chunk_days("minute")
         symbols = list(symbols)
-        # Phase-1 accumulators (see the contract above). ``cutoff`` is taken ONCE, before the sweep:
+        # Collect-pass accumulators (see the contract above). ``cutoff`` is taken ONCE, before the sweep:
         # an earlier cutoff is the conservative one, and a long sweep must not confirm later minutes
         # for the symbols it happens to reach last.
         cutoff: datetime | None = (
@@ -424,7 +424,7 @@ class BackfillJob:
                     BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat(), bars=written)
                 )
                 report.bars_written += written
-                # PHASE 1 — collect only. Guard A (Kite answered for this span) gates both the
+                # COLLECT PASS — no writes. Guard A (Kite answered for this span) gates both the
                 # candidates and the correlation denominator; guard B (a LATER candle proves the
                 # feed reached past the minute) and guard C (the cutoff) filter the candidates.
                 if cutoff is not None and returned:
@@ -438,7 +438,7 @@ class BackfillJob:
                         pending[symbol] = candidates
             if aborted:
                 break
-        # PHASE 2 — guard D and the writes. An aborted sweep confirms NOTHING: it stopped early, so
+        # WRITE PASS — guard D and the writes. An aborted sweep confirms NOTHING: it stopped early, so
         # ``answered`` is not the denominator the correlation guard was calibrated on (conservative).
         if pending and not aborted:
             miss_count: dict[datetime, int] = {}

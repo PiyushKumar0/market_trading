@@ -340,7 +340,7 @@ brk20:
                                # the session after the crossing y): it may be RE-PUBLISHED on y+2..y+N
                                # when the live price comes back inside the entry_sanity_band
                                # (src/engine/strategy/retest.py, migration 0014).
-                               # 5 = `V2_limit_at_H20_N5`, the variant the 2026-09-12
+                               # 5 = the five-session limit, the variant the 2026-09-12
                                # pre-registered entry-mechanism backtest returned under its own
                                # decision rule (median net +0.0513% at T+10 — the only variant
                                # geometry-viable there — and +0.9168% at T+20; CPCV fold pass

@@ -12,10 +12,10 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
 :data:`PARAMS` dict and one :data:`RULES` dict, both fixed at import time and both transcribed from
-the pre-registration paragraph. **TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``F1``, ``F2``). Every
+the pre-registration paragraph. **TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``failed_breakout``, ``gap_fade``). Every
 other entry in :data:`RULES` is a REPORTING-ONLY cell, marked ``registered=False``, and is never a
-competitor F1/F2 is picked from: two of them are the pre-registration's stated reporting variants (F1 at 12:00,
-F2 with a 15:15-only exit) and two are EXECUTION-CONSERVATISM cells (the stop evaluated on the 1m
+competitor failed_breakout/gap_fade is picked from: two of them are the pre-registration's stated reporting variants (failed_breakout at 12:00,
+gap_fade with a 15:15-only exit) and two are EXECUTION-CONSERVATISM cells (the stop evaluated on the 1m
 HIGH instead of the 1m close) that can only make a fade look WORSE. The CLI exposes no flag that
 changes a signal parameter.
 
@@ -29,7 +29,7 @@ a pre-registered origination proposal, never a wiring: this script wires nothing
 ===============================================================================================
 THE TWO RULES (transcribed from the pre-registration; every clause is evaluated at a bar CLOSE)
 ===============================================================================================
-**F1 - failed-breakout fade.** At the decision bar ``T`` (11:00 IST):
+**failed_breakout - failed-breakout fade.** At the decision bar ``T`` (11:00 IST):
 
 * the symbol's 1m close broke ABOVE its opening-range high at some bar in ``[09:30, 10:30)``
   ("before 10:30"). The OR high is ``max(high)`` over ``09:15..09:29`` - the first fifteen 1m bars,
@@ -46,19 +46,19 @@ THE TWO RULES (transcribed from the pre-registration; every clause is evaluated 
   the two took place.
 * the T bar's close is back BELOW the OR high (strictly).
 
-**F2 - gap fade.** At the decision bar ``T`` (10:00 IST):
+**gap_fade - gap fade.** At the decision bar ``T`` (10:00 IST):
 
 * the 09:15 bar's OPEN is ``>= +2.0%`` above the PRIOR CLOSE, and
 * the T bar's close is below the session open (strictly).
 
 **Both:** SHORT at the OPEN of the bar immediately after T (11:01 / 10:01). The stop is the SESSION
 HIGH SO FAR - ``max(high)`` over ``09:15..T``, fixed at entry, never trailed. The exit is the first
-1m close ABOVE the fade-failure level - the OR HIGH for F1, the T BAR's HIGH for F2 - filled at the
+1m close ABOVE the fade-failure level - the OR HIGH for failed_breakout, the T BAR's HIGH for gap_fade - filled at the
 FOLLOWING bar's open; else the 15:15 squareoff (the 15:15 bar's close, or the last bar at or before
 it). Whichever comes first. No target.
 
 **The stop is structurally DOMINATED and the report says so rather than hiding it:** the session
-high through T is by construction ``>=`` the OR high (F1) and ``>=`` the T bar's high (F2), so a
+high through T is by construction ``>=`` the OR high (failed_breakout) and ``>=`` the T bar's high (gap_fade), so a
 close above the stop is also a close above the failure level and the failure exit fires on the same
 bar at the same price. Under the registered close-trigger the stop can therefore never be the SOLE
 reason for an exit; ``n_exits_stop_first`` is reported and is expected to be 0. That is exactly why
@@ -89,14 +89,14 @@ LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here 
 ===============================================================================================
 * Every signal input is computed from bars with ``ts_minute <= T`` ONLY. The feature SQL filters
   ``time <= T`` BEFORE it aggregates, so a bar after T is not merely unused - it is not in the
-  relation. The stop level (session high) and the F2 exit level (the T bar's high) come from that
+  relation. The stop level (session high) and the gap_fade exit level (the T bar's high) come from that
   same pre-T relation.
 * The ``rel_volume_tod`` denominator uses STRICTLY PRIOR sessions. Today's own volume never enters
   its own median.
 * Entry is the OPEN of the bar AFTER T. The decision bar's own close is never a fill price.
 * A close-triggered exit fills at the NEXT bar's OPEN - the first price an order placed on that
   close could actually reach - never at the close that triggered it.
-* The F2 prior close is the symbol's last ``bars_1d`` close STRICTLY BEFORE ``d``.
+* The gap_fade prior close is the symbol's last ``bars_1d`` close STRICTLY BEFORE ``d``.
 * The index-regime split is computed from the same T-bar snapshot as the signal, not from the
   session's outcome. The ATR tercile (the candle study's statistic, imported definition) is computed over the 14
   daily sessions STRICTLY BEFORE the signal day, so the signal day's own range never enters the
@@ -124,7 +124,7 @@ EX-DATE VETO (universal, one window, both rules)
 A symbol-day is VETOED when ``corp_actions`` carries ANY ex-date in the 35 CALENDAR days ending at
 ``d`` (the `brk20`/`hi52` window). Kite minute candles are adjusted AT FETCH TIME, so a
 series stitched across an ex-date can hold two unit systems, and the 20-session ``rel_volume_tod``
-denominator is distorted by a split's volume multiplier either way. F2 additionally compares two
+denominator is distorted by a split's volume multiplier either way. gap_fade additionally compares two
 SERIES (a ``bars_1d`` prior close against a ``bars_1m`` open); that cross-source comparison gets its
 own guards - a prior close older than ``prior_close_max_age_days`` (7) is a suspension, not a gap,
 and a ``bars_1d``/``bars_1m`` prior-close disagreement over 3% is a unit mismatch rather than the
@@ -231,13 +231,13 @@ PARAMS: dict[str, Any] = {
     # --- the opening range (completed bars only: 09:15..09:29)
     "or_start": "09:15",
     "or_end_exclusive": "09:30",
-    # --- F1: the breakout must happen in [09:30, 10:30)
+    # --- failed_breakout: the breakout must happen in [09:30, 10:30)
     "break_window_end_exclusive": "10:30",
-    "f1_rvol_min": 1.5,
+    "failed_breakout_rvol_min": 1.5,
     "rvol_lookback_sessions": 20,
     "rvol_min_valid_sessions": 10,
-    # --- F2: the gap
-    "f2_gap_min_pct": 2.0,
+    # --- gap_fade: the gap
+    "gap_fade_min_pct": 2.0,
     "prior_close_max_age_days": 7,
     "prior_close_source_max_disagreement_pct": 3.0,
     # --- execution
@@ -275,7 +275,7 @@ class RuleSpec:
 
     ``family`` is the REGISTERED rule a cell belongs to. The ATR tercile cuts are taken once per
     family (the candle study's posture), so a symbol-day sits in the same cell under every variant of its rule and
-    the cells compare populations rather than cuts. F1 and F2 measure different populations at
+    the cells compare populations rather than cuts. failed_breakout and gap_fade measure different populations at
     different decision bars, so their cuts are never pooled with each other.
     """
 
@@ -296,38 +296,38 @@ class RuleSpec:
 # can only make the short look worse.
 # ================================================================================================
 RULES: dict[str, RuleSpec] = {
-    "F1": RuleSpec(
-        "F1", "F1", KIND_FAILED_BREAKOUT, "11:00", EXIT_OR_HIGH, STOP_SESSION_HIGH, TRIGGER_CLOSE,
+    "failed_breakout": RuleSpec(
+        "failed_breakout", "failed_breakout", KIND_FAILED_BREAKOUT, "11:00", EXIT_OR_HIGH, STOP_SESSION_HIGH, TRIGGER_CLOSE,
         True,
         "failed-breakout fade: broke the OR high before 10:30 on rvol>=1.5, back below it at 11:00",
     ),
-    "F2": RuleSpec(
-        "F2", "F2", KIND_GAP, "10:00", EXIT_T_BAR_HIGH, STOP_SESSION_HIGH, TRIGGER_CLOSE, True,
+    "gap_fade": RuleSpec(
+        "gap_fade", "gap_fade", KIND_GAP, "10:00", EXIT_T_BAR_HIGH, STOP_SESSION_HIGH, TRIGGER_CLOSE, True,
         "gap fade: open >= +2.0% vs the prior close, 10:00 close below the session open",
     ),
-    "F1_T1200": RuleSpec(
-        "F1_T1200", "F1", KIND_FAILED_BREAKOUT, "12:00", EXIT_OR_HIGH, STOP_SESSION_HIGH,
-        TRIGGER_CLOSE, False, "REPORTING ONLY: F1 with the decision bar at 12:00",
+    "failed_breakout_T1200": RuleSpec(
+        "failed_breakout_T1200", "failed_breakout", KIND_FAILED_BREAKOUT, "12:00", EXIT_OR_HIGH, STOP_SESSION_HIGH,
+        TRIGGER_CLOSE, False, "REPORTING ONLY: failed_breakout with the decision bar at 12:00",
     ),
-    "F2_1515_only": RuleSpec(
-        "F2_1515_only", "F2", KIND_GAP, "10:00", None, None, TRIGGER_CLOSE, False,
-        "REPORTING ONLY: F2 held to the 15:15 squareoff, no failure exit and no stop",
+    "gap_fade_1515_only": RuleSpec(
+        "gap_fade_1515_only", "gap_fade", KIND_GAP, "10:00", None, None, TRIGGER_CLOSE, False,
+        "REPORTING ONLY: gap_fade held to the 15:15 squareoff, no failure exit and no stop",
     ),
-    "F1_stop_on_1m_high": RuleSpec(
-        "F1_stop_on_1m_high", "F1", KIND_FAILED_BREAKOUT, "11:00", EXIT_OR_HIGH,
+    "failed_breakout_stop_on_1m_high": RuleSpec(
+        "failed_breakout_stop_on_1m_high", "failed_breakout", KIND_FAILED_BREAKOUT, "11:00", EXIT_OR_HIGH,
         STOP_SESSION_HIGH, TRIGGER_HIGH, False,
-        "REPORTING ONLY (execution conservatism): F1 with the stop evaluated on the 1m HIGH",
+        "REPORTING ONLY (execution conservatism): failed_breakout with the stop evaluated on the 1m HIGH",
     ),
-    "F2_stop_on_1m_high": RuleSpec(
-        "F2_stop_on_1m_high", "F2", KIND_GAP, "10:00", EXIT_T_BAR_HIGH, STOP_SESSION_HIGH,
+    "gap_fade_stop_on_1m_high": RuleSpec(
+        "gap_fade_stop_on_1m_high", "gap_fade", KIND_GAP, "10:00", EXIT_T_BAR_HIGH, STOP_SESSION_HIGH,
         TRIGGER_HIGH, False,
-        "REPORTING ONLY (execution conservatism): F2 with the stop evaluated on the 1m HIGH",
+        "REPORTING ONLY (execution conservatism): gap_fade with the stop evaluated on the 1m HIGH",
     ),
 }
 
 #: The rules the trial count is computed over. Everything else in :data:`RULES` is reported beside
 #: them and can never be selected in their place.
-PRE_REGISTERED_RULES: tuple[str, ...] = ("F1", "F2")
+PRE_REGISTERED_RULES: tuple[str, ...] = ("failed_breakout", "gap_fade")
 TRIAL_COUNT_N = len(PRE_REGISTERED_RULES)
 
 SPLIT_ALL = "all"
@@ -528,7 +528,7 @@ def load_daily(
 ) -> dict[str, tuple[list[date], list[float], list[float], list[float]]]:
     """``symbol -> (days, highs, lows, closes)`` ascending, from ``bars_1d`` up to ``end``.
 
-    Feeds two things: F2's PRIOR CLOSE (the exchange's own previous-close reference, which is the
+    Feeds two things: gap_fade's PRIOR CLOSE (the exchange's own previous-close reference, which is the
     30-minute closing VWAP and NOT the 15:29 print - so it is the right anchor for a gap and the
     wrong one to compare a 1m close against without tolerance) and the ATR(14,1d) tercile split.
     """
@@ -559,11 +559,11 @@ def load_daily(
 def load_prior_close_1m(
     conn: duckdb.DuckDBPyConnection, start: date, end: date
 ) -> dict[tuple[str, date], float]:
-    """``(symbol, d) -> the session's LAST 1m close at or after 15:00``, for the F2 cross-check.
+    """``(symbol, d) -> the session's LAST 1m close at or after 15:00``, for the gap_fade cross-check.
 
     Restricted to the closing half hour: the last bar of a full session is 15:29, and a session with
     no bar at all after 15:00 is truncated (or a muhurat session), in which case the cross-check is
-    simply unavailable and F2 falls back to the ``bars_1d`` close alone - counted, never vetoed on
+    simply unavailable and gap_fade falls back to the ``bars_1d`` close alone - counted, never vetoed on
     the absence of a CHECK.
     """
     sql = """
@@ -1026,7 +1026,7 @@ def run_study(
     # ---------------------------------------------------------------- ATR cells, cut ONCE per family
     # The candle study's posture: the cuts are taken over the DISTINCT measured (symbol, signal day) pairs of the
     # rule family, so a symbol-day sits in the same cell under every variant of its rule and the
-    # cells compare populations rather than cuts. F1 and F2 measure different populations at
+    # cells compare populations rather than cuts. failed_breakout and gap_fade measure different populations at
     # different decision bars, so their cuts are never pooled with one another.
     cuts_by_family: dict[str, tuple[float, float] | None] = {}
     for fam in sorted({spec.family for spec in rule_defs.values()}):
@@ -1069,13 +1069,13 @@ def run_study(
         "of its LATEST day only. Every cell here is an upper bound on the tradeable short side."
     )
     notes.append(
-        "PINNED INTERPRETATION (F1): rel_volume_tod is measured at the DECISION bar T, the tdc "
+        "PINNED INTERPRETATION (failed_breakout): rel_volume_tod is measured at the DECISION bar T, the tdc "
         "definition verbatim. Measuring it at the breakout minute was NOT computed, so no selection "
         "between the two readings took place."
     )
     notes.append(
         "THE STOP IS DOMINATED UNDER THE CLOSE TRIGGER: the session high through T is by "
-        "construction >= the OR high (F1) and >= the T bar's high (F2), so a close above the stop "
+        "construction >= the OR high (failed_breakout) and >= the T bar's high (gap_fade), so a close above the stop "
         "is also a close above the failure level and the failure exit fires first at the same "
         "price. 'n_exits_stop_first' is 0 for every close-trigger rule and the diagnostics prove "
         "it rather than assume it. The *_stop_on_1m_high cells are where the stop actually binds."
@@ -1146,7 +1146,7 @@ def run_study(
         "meta": {
             "script": "scripts/backtest_fade.py",
             "strategy_id": "fade",
-            "research_id": "R4",
+            "research_id": "fade_short_side",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "window": {"start": str(start), "end": str(end)},
             "n_sessions": len(all_sessions),
@@ -1174,7 +1174,7 @@ def run_study(
             "shorts_gated_for_auto_by_1_4_9": True,
             "entry_convention": "SHORT at the OPEN of the bar immediately after T",
             "exit_convention": (
-                "first 1m CLOSE above the failure level (F1: OR high; F2: the T bar's high) -> fill "
+                "first 1m CLOSE above the failure level (failed_breakout: OR high; gap_fade: the T bar's high) -> fill "
                 "at the FOLLOWING bar OPEN; stop = the session high through T (dominated under the "
                 "close trigger); else the 15:15 bar CLOSE"
             ),
@@ -1232,7 +1232,7 @@ def select_rule(
 ) -> tuple[dict[date, list[tuple[str, float | None]]], dict[str, int]]:
     """``(d -> [(symbol, gap_pct or None)], veto counts)`` - the rule's signals, no cap and no rank.
 
-    Every predicate reads the T-bar snapshot only. F2's prior close is the symbol's last ``bars_1d``
+    Every predicate reads the T-bar snapshot only. gap_fade's prior close is the symbol's last ``bars_1d``
     close strictly before ``d``, guarded three ways (ex-date, age, cross-source agreement) before it
     is allowed to define a gap.
     """
@@ -1256,7 +1256,7 @@ def select_rule(
                 if rv is None or not math.isfinite(rv):
                     veto["rvol_unavailable"] += 1
                     continue
-                if rv < float(params["f1_rvol_min"]):
+                if rv < float(params["failed_breakout_rvol_min"]):
                     veto["rvol_below_min"] += 1
                     continue
                 if f.close_t[sym] >= orh:
@@ -1287,7 +1287,7 @@ def select_rule(
                 if cross is None:
                     veto["prior_close_crosscheck_unavailable"] += 1
                 gap = (f.open_0915[sym] / float(prev_c) - 1.0) * 100.0
-                if gap < float(params["f2_gap_min_pct"]):
+                if gap < float(params["gap_fade_min_pct"]):
                     veto["gap_below_min"] += 1
                     continue
                 if f.close_t[sym] >= f.open_0915[sym]:

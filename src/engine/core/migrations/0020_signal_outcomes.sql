@@ -2,7 +2,7 @@
 -- read by owner surfaces, verdict code and research only — never by a scanner, threshold, gate, prompt
 -- or promotion path (the rec_outcomes rule). Constructs:
 --   rule         — the strategy's measured construct: hi52/ins open of d; brk20 a touch of the resting level
---                  on signal_d..signal_d+4 sessions (V2-5's y+1..y+5), first publication only; no stop/target
+--                  on signal_d..signal_d+4 sessions (the five-session limit's y+1..y+5), first publication only; no stop/target
 --   rule_blocked — the same brk20 construct for a crossing the brk20 regime gate blocked (brk20_regime_blocked)
 --   next_open    — open of the first session after d (strictly after the analyst's decision), every row
 -- T+k exits at the close of the k-th regular session counting the fill session as 1 (muhurat excluded).

@@ -218,10 +218,10 @@ def test_main_writes_json_and_prints_an_ascii_table(db_file, tmp_path, capsys):
     assert "OPEN of the bar immediately after T" in doc["meta"]["entry_convention"]
     assert "FOLLOWING bar OPEN" in doc["meta"]["exit_convention"]
     assert doc["coverage"]["bars_1m_by_year"]                        # the per-year shape is on record
-    # H1 books WINNER (102.00 in, 102.00 out) and STOPPER (102.00 in, 95.00 out at the 11:06 open).
-    h1 = doc["results"]["H1"]["splits"][bt.SPLIT_ALL]
-    assert h1["n"] == 2
-    assert h1["median_gross_pct"] == pytest.approx((95.0 / 102.0 - 1.0) * 100.0 / 2, abs=1e-3)
+    # The hypothesis books WINNER (102.00 in, 102.00 out) and STOPPER (102.00 in, 95.00 out at the 11:06 open).
+    rule = doc["results"]["trend_day"]["splits"][bt.SPLIT_ALL]
+    assert rule["n"] == 2
+    assert rule["median_gross_pct"] == pytest.approx((95.0 / 102.0 - 1.0) * 100.0 / 2, abs=1e-3)
 
     text = capsys.readouterr().out
     assert text.isascii()                                            # the Windows console is cp1252

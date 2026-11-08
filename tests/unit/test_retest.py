@@ -1,6 +1,6 @@
 """``brk20`` RETEST re-arm — the durable resting-level book (2026-09-12).
 
-The 2026-09-12 pre-registered entry-mechanism backtest selected ``V2_limit_at_H20_N5`` (a limit
+The 2026-09-12 pre-registered entry-mechanism backtest selected ``limit_5_sessions`` (a limit
 resting at the broken level for five sessions) and the live rule shipped N=1 — the level published
 once, on the session after the crossing. These tests pin the mechanism that closes that gap AND, just
 as load-bearing, the four ways it must stay narrow: it re-offers the SAME levels, only inside the
@@ -132,7 +132,7 @@ def test_the_window_is_counted_in_TRADING_sessions_not_calendar_days(book, conn,
 
 
 def test_expiry_is_n_minus_1_sessions_after_signal_d(book, conn, rcalendar, rclock) -> None:
-    """V2-5 rests the level on y+1..y+5 and ``signal_d`` is y+1, so re-offers fall on y+2..y+5."""
+    """5-session-limit rests the level on y+1..y+5 and ``signal_d`` is y+1, so re-offers fall on y+2..y+5."""
     monday = date(2026, 6, 22)                            # a weekend and the 06-26 holiday follow
     assert book._expiry(monday) == date(2026, 6, 29)
     assert RestingLevelBook(conn, rcalendar, rclock, sessions=1)._expiry(monday) == monday

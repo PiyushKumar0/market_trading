@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Market-wide pause study.
 
-Per strategy (hi52, ins), the regime-filter study's populations, arm (ii) construct and cost (``backtest_regime_filter``), split at the
+Per strategy (hi52, ins), the regime-filter study's populations, time-only-arm construct and cost (``backtest_regime_filter``), split at the
 signal session y: PAUSE if the core equal-weight return compounded over the 20 sessions ending at y is < 0,
 otherwise TRADE. The EW series is ``research_common.core_ew``, a survivorship-tainted proxy. Family
 ``regime_filter/<strategy>`` = the regime-filter study plus this rule, N = 2. Evidence only; SUPPORTED goes to the owner and wires

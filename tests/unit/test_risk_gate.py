@@ -260,7 +260,7 @@ CASES: tuple[Case, ...] = (
     Case("proposal_stale", "expired", "fail", False,
          act={"valid_until": NOW - timedelta(seconds=1)}),
     Case("proposal_stale", "valid_until == now", "boundary", False, act={"valid_until": NOW}),
-    # 2026-07-28 review F4: direction from action.side, never inferred from the stop.
+    # 2026-07-28 review: direction from action.side, never inferred from the stop.
     Case("levels_coherent", "BUY stop below entry, target above", "pass", True),
     Case("levels_coherent", "BUY stop ABOVE entry (inverted short shape)", "fail", False,
          act={"stop_price": Decimal("105"), "target_price": Decimal("95")}),

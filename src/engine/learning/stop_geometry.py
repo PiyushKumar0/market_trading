@@ -1,6 +1,6 @@
 """PRE-REGISTERED diagnostic: stop geometry / adverse-excursion recovery on intraday longs.
 
-**C-alpha-experiment (diagnostic). STOPS FOR OWNER REVIEW. Promotion is NOT sought.** This module is
+**Research-only diagnostic. STOPS FOR OWNER REVIEW. Promotion is NOT sought.** This module is
 research machinery only: nothing here is imported by a scanner, the gate, the OMS or any scheduled
 job; it writes NO ``param_sets`` row and — unlike :mod:`engine.learning.vwap_reversion` — it does not
 call :class:`engine.learning.validate.ValidationPipeline` **at all**. Pre-registration: *"Promotion is NOT sought
@@ -164,7 +164,7 @@ _log = get_logger("engine.learning.stop_geometry")
 EXPERIMENT_ID = "stop_geometry"
 
 #: The banner every report leads with (design requirement 5).
-BANNER = "C-CATEGORY: STOPS FOR OWNER REVIEW - no live wiring, promotion NOT sought"
+BANNER = "RESEARCH ONLY: STOPS FOR OWNER REVIEW - no live wiring, promotion NOT sought"
 
 #: Costs: MIS, Rs20,000 per trade, the corrected surface INCLUDING spread.
 PRODUCT = "MIS"

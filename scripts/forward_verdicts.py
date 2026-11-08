@@ -44,11 +44,11 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
 - **Population:** the brk20 crossings admitted on or after R (`brk20_resting_levels` rows), under the regime gate.
 - **Construct** (`signal_outcomes` `rule`):
   - entry: a limit resting at the broken level on `signal_d` (y+1, the session after the crossing session y)
-    through `signal_d` + 4 sessions (V2-5);
+    through `signal_d` + 4 sessions (the registered five-session limit);
   - fill: on the first regular daily bar whose low touches the level, at min(open, level). Touch fills are
     optimistic, as in the regime-filter study;
-  - exit: at the close of the 20th regular session, counting the fill session (the regime-filter study's arm (ii); V2-5 itself
-    measured close(fill+20)). No stop, no target;
+  - exit: at the close of the 20th regular session, counting the fill session (the regime-filter study's time-only arm;
+    the five-session limit itself measured close(fill+20)). No stop, no target;
   - voids: a structural ex-date between `signal_d` and the exit voids the crossing;
   - cost: one CNC round trip at the per-trade-risk notional implied by the signal's own stop at the floor-rung equity,
     fixed at the row's first scoring.

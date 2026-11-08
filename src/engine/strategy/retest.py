@@ -2,7 +2,7 @@
 
 WHAT THIS IMPLEMENTS, AND WHAT SELECTED IT. The 2026-09-12 pre-registered ``brk20`` entry-mechanism
 backtest (``scripts/backtest_brk20.py``) compared three entry variants on one signal
-population and its DECISION RULE — fixed before the run — returned ``V2_limit_at_H20_N5``: a limit
+population and its DECISION RULE — fixed before the run — returned ``limit_5_sessions``: a limit
 resting at the candidate's own ``raw_levels.entry`` (``round_to_tick(H20)``) for up to FIVE sessions,
 filled on the first session whose low reaches the level. That variant was the only one
 geometry-viable at T+10 (median net +0.0513% against a 0.3192% round trip) and CPCV-promotable there
@@ -11,7 +11,7 @@ geometry-viable at T+10 (median net +0.0513% against a 0.3192% round trip) and C
 The rule as SHIPPED does not implement it. ``brk20`` publishes the level exactly ONCE, on the
 session after the crossing, under the pre-screen's same-day ``(symbol, strategy)`` dedupe — the N=1
 variant, which was not among the registered variants, has no measured return, and whose fill rate reads 31.4%
-off the registered delay histogram against V2-5's 59.1%. The live cost of that gap is measured: of 15
+off the registered delay histogram against 5-session-limit's 59.1%. The live cost of that gap is measured: of 15
 ``brk20`` proposals on 2026-09-11, SIX died on the ``entry_sanity_band`` with the level already
 >2% below LTP at sweep time, the band being the SOLE reject cause for three of them — and those three
 are the day's top three ``brk20`` scores, because the score is monotone in breakout margin and a wide
@@ -100,7 +100,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime seam is duck-ty
 _log = get_logger("engine.strategy.retest")
 
 #: Default retest window, in TRADING sessions counting ``signal_d`` (y+1..y+N). 5 = the backtest's
-#: V2-5, the variant its pre-registered decision rule selected. Owner-only and deliberately NOT learnable:
+#: 5-session-limit, the variant its pre-registered decision rule selected. Owner-only and deliberately NOT learnable:
 #: the number IS the registered mechanism, so a learner allowed to move it would be selecting an
 #: entry mechanism the study never measured (N=1 and N=3 were both measured and both lost; every
 #: other N was never run at all).
@@ -473,7 +473,7 @@ class RestingLevelBook:
 
     def _expiry(self, signal_d: date) -> date:
         """The (``sessions`` − 1)-th TRADING session after ``signal_d`` (weekends/holidays are not
-        days): ``signal_d`` is y+1, so the level is offered on y+1..y+N, V2-5's window for N=5.
+        days): ``signal_d`` is y+1, so the level is offered on y+1..y+N, 5-session-limit's window for N=5.
 
         Raises only what the calendar raises past its verified horizon; every caller is inside a
         ``try`` that turns that into "no row written" rather than a dead sweep.

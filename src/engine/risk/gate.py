@@ -690,7 +690,7 @@ class RiskGate:
         led.add(
             "min_residual_window", ok,
             f"{_q(remaining)} min to MIS cutoff {cutoff}",
-            f">= {need} min (C3: a full round trip for a near-zero hold)",
+            f">= {need} min (a full round trip for a near-zero hold)",
             f"{_q(remaining - Decimal(need))} min",
         )
 

@@ -19,10 +19,10 @@ owner-only floor knobs, never learnable); the assertions in the unit test make a
 this study and the live rule impossible. What IS registered is exactly THREE ENTRY VARIANTS
 (:data:`VARIANTS`), fixed before this file ran:
 
-* ``V1_next_open``       — the next session's OPEN after the fresh cross (market-on-confirmation).
-* ``V2_limit_at_H20_N3`` — the SHIPPED mechanism: a resting limit at the candidate's own
+* ``next_open``       — the next session's OPEN after the fresh cross (market-on-confirmation).
+* ``limit_3_sessions`` — the SHIPPED mechanism: a resting limit at the candidate's own
   ``raw_levels.entry``, filled within 3 sessions.
-* ``V2_limit_at_H20_N5`` — the same at 5 sessions.
+* ``limit_5_sessions`` — the same at 5 sessions.
 
 The honest trial count cited to the research-validation deflation machinery is therefore **N = 3**
 (:data:`TRIAL_COUNT_N`), ``fold_pass_min(3) = 60%``. There is no ``--vol-mult``, no ``--lookback``,
@@ -56,38 +56,38 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   index after a big run reads as eligible throughout that run and a dropped name is mislabelled the
   other way. Every rendering carries the label; the JSON carries
   ``population_is_survivorship_tainted_proxy: true``.
-* **Entry.** Per variant, see :func:`fill_for`. V1 fills at ``open(y+1)`` — no same-bar fill
+* **Entry.** Per variant, see :func:`fill_for`. Next-open fills at ``open(y+1)`` — no same-bar fill
   anywhere: every input to the signal is strictly before the decision timestamp, and the first price
-  the study can book is the first price an order placed after that close could reach. V2-N rests a
+  the study can book is the first price an order placed after that close could reach. A limit variant rests a
   limit at the candidate's OWN ``raw_levels.entry`` (``round_to_tick(H20)`` — the price the live
   mechanism actually rests, not the raw float) and fills on the FIRST session in ``y+1 .. y+N`` whose
   ``low <= level``, at ``min(open, level)``: a session that gaps through fills at its open, never at
   a price the tape did not print. Unfilled at N ⇒ NO TRADE, and the FILL RATE is reported as a
   first-class number — an unfilled breakout is the mechanism's real cost.
   TWO DELIBERATE DIVERGENCES FROM ``engine.paper.broker``'s tick fill model, both stated because
-  they bias the V2 numbers UPWARD and a reader must be able to discount them: (i) that model
+  they bias the limit numbers UPWARD and a reader must be able to discount them: (i) that model
   requires a strict TRADE-THROUGH and this one counts a daily ``low == level`` touch as a fill, so
-  the V2 fill rates here are an UPPER bound; (ii) that model never fills better than the limit,
+  the limit fill rates here are an UPPER bound; (ii) that model never fills better than the limit,
   while ``min(open, level)`` books the opening print when a session opens below the level — which is
   what a marketable-on-open limit actually gets, and is the only defensible read of a daily bar.
 * **Exit.** The CLOSE of the horizon session, measured FROM THE FILL: ``close(fill + k) / fill_px -
   1``, horizons k = 5 / 10 / 20 TRADING SESSIONS. This is a deliberate divergence from the
   ``hi52``/``scripts/event_study.py`` signal-anchored convention (``close(T+k) / open(T+1)``), and
   the reason is the question being asked: the variants fill on DIFFERENT sessions, so a signal
-  anchor would charge V2 for the days it spent waiting and would compare two different holding
+  anchor would charge the limit variants for the days it spent waiting and would compare two different holding
   periods. The fill anchor measures the mechanism.
 * **Event admission — ONE SIGNAL population; THREE DIFFERENT TRADE SETS.** A signal is admitted only
   when a full ``y + MAX_FILL_WINDOW + max(HORIZONS)`` of forward bars exists AND every one of those
-  bars is usable (finite, positive OHLC). So the latest possible V2-5 fill still has a complete T+20
+  bars is usable (finite, positive OHLC). So the latest possible 5-session-limit fill still has a complete T+20
   and the fill rate has an honest denominator. A signal short of that is dropped whole, never
   measured at the short horizons only.
   **What is shared is the SIGNAL population, never the TRADE set** (2026-09-12 correction — the
-  earlier "one shared population … same event set" phrasing was wrong and is struck): a V2 limit
+  earlier "one shared population … same event set" phrasing was wrong and is struck): a limit
   fills only when price RETURNS to the broken level, i.e. conditional on the breakout not running
-  away, so V2's trades are a pullback-SELECTED subset of the admitted signals (V1 8,292 / V2-3 4,230
-  / V2-5 4,898 on the registered run) and any V1-vs-V2 number quoted pooled is a per-FILLED-TRADE comparison
+  away, so the limit variants' trades are a pullback-SELECTED subset of the admitted signals (next-open 8,292 / 3-session-limit 4,230
+  / 5-session-limit 4,898 on the registered run) and any next-open vs limit number quoted pooled is a per-FILLED-TRADE comparison
   across two different event sets. That is why :func:`matched_cohort_decomposition` exists and is
-  reported next to every pooled cell: it re-quotes V1 on exactly the signals each V2 variant filled
+  reported next to every pooled cell: it re-quotes next-open on exactly the signals each limit variant filled
   (the entry PRICE-and-timing effect) and on exactly the ones it never filled (the SELECTION effect).
 * **Costs.** ONE full round trip per trade, both legs, from the repo's single source of truth:
   ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread —
@@ -122,16 +122,16 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   and emits a hard ``GEOMETRY: viable/dead at T+N`` verdict line. ORB was killed twice by cost
   geometry, not by signal quality.
 * **Matched-cohort decomposition (2026-09-12, manager-directed).** Because the trade sets are not
-  shared, the pooled V1-vs-V2 gap mixes two different things, and the report separates them in
-  labelled cells (:func:`matched_cohort_decomposition`, STEP 3B): the **PRICE effect** = V2 minus V1
-  on exactly the signals V2 FILLED (same events; V2 pays the level instead of open(y+1), AND for
+  shared, the pooled next-open vs limit gap mixes two different things, and the report separates them in
+  labelled cells (:func:`matched_cohort_decomposition`, STEP 3B): the **PRICE effect** = limit minus next-open
+  on exactly the signals the limit variant FILLED (same events; the limit pays the level instead of open(y+1), AND for
   fills at delay ≥ 2 sessions its holding window also starts later by the fill delay because exits
   are anchored on the fill — so the cell is an entry price-and-timing effect, not a pure price
   effect; the delay histogram beside it says how much of the cohort that caveat covers), and the
-  **SELECTION effect** = V1 on the filled cohort minus V1 on the UNFILLED cohort (same entry
+  **SELECTION effect** = next-open on the filled cohort minus next-open on the UNFILLED cohort (same entry
   mechanism, the only difference is which signals came back to the level). Each cell reports n,
   median/mean gross and net and hit rate at every horizon, and the block NAMES which of the two
-  effects carries V2's advantage. This is a DESCRIPTIVE decomposition of the registered result, not a
+  effects carries the limit's advantage. This is a DESCRIPTIVE decomposition of the registered result, not a
   fourth trial: it introduces no new variant, no new parameter and no new selection, and the
   registered decision rule is still evaluated on the pooled cells exactly as registered.
 * **Reporting rule (2026-09-12 amendment; a TIGHTENING of how a result is REPORTED, not a new
@@ -140,7 +140,7 @@ CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to 
   trip). The two gates are built on different statistics and could disagree silently: the CPCV fold
   series is a per-fill-day MEAN (house convention, ``scripts/backtest_hi52.py``) while every geometry
   and decision statistic is a MEDIAN, so a tail-driven variant can read "promotable" while its
-  typical trade cannot pay the toll (V1 at T+10 on the registered run: CPCV 60.0% pass, median net −0.3192%
+  typical trade cannot pay the toll (next-open at T+10 on the registered run: CPCV 60.0% pass, median net −0.3192%
   → reported NOT viable). The amendment can only WITHHOLD a promotable label, never grant one, so it
   cannot promote anything the original rule refused; the original rule's outcome is re-stated
   verbatim beside the tightened one and the report says whether the tightening changes it.
@@ -232,13 +232,13 @@ PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS
 #: "the best of T+5/T+10/T+20" would be three more trials wearing one name.
 DECISION_HORIZON = 10
 
-VARIANT_V1 = "V1_next_open"
-VARIANT_V2_N3 = "V2_limit_at_H20_N3"
-VARIANT_V2_N5 = "V2_limit_at_H20_N5"
-VARIANTS: tuple[str, ...] = (VARIANT_V1, VARIANT_V2_N3, VARIANT_V2_N5)
+VARIANT_NEXT_OPEN = "next_open"
+VARIANT_LIMIT_3 = "limit_3_sessions"
+VARIANT_LIMIT_5 = "limit_5_sessions"
+VARIANTS: tuple[str, ...] = (VARIANT_NEXT_OPEN, VARIANT_LIMIT_3, VARIANT_LIMIT_5)
 
-#: Sessions a V2 limit rests for, per variant. ``None`` = V1, which is not a resting limit at all.
-FILL_WINDOW: dict[str, int | None] = {VARIANT_V1: None, VARIANT_V2_N3: 3, VARIANT_V2_N5: 5}
+#: Sessions a limit rests for, per variant. ``None`` = next-open, which is not a resting limit at all.
+FILL_WINDOW: dict[str, int | None] = {VARIANT_NEXT_OPEN: None, VARIANT_LIMIT_3: 3, VARIANT_LIMIT_5: 5}
 
 #: The widest fill window any variant uses. The shared admission rule reserves this many sessions
 #: AHEAD of the longest horizon, so the latest possible fill still has a complete T+20 and all three
@@ -287,8 +287,8 @@ REPORTING_RULE_AMENDMENT = (
     "refused can be promoted by it; both outcomes are reported side by side."
 )
 
-#: Label stems for the matched-cohort cells. ``filled`` = the signals that V2 variant DID fill (the
-#: matched cohort — same events as V2's own trades); ``unfilled`` = the ones its limit never caught.
+#: Label stems for the matched-cohort cells. ``filled`` = the signals that limit variant DID fill (the
+#: matched cohort — same events as the limit variant's own trades); ``unfilled`` = the ones its limit never caught.
 COHORT_FILLED = "filled"
 COHORT_UNFILLED = "unfilled"
 
@@ -345,7 +345,7 @@ class Trade:
     fill_date: date
     fill_idx: int
     fill_px: float
-    fill_delay_sessions: int      # fill_idx - signal idx; 1 for V1 by construction
+    fill_delay_sessions: int      # fill_idx - signal idx; 1 for next-open by construction
     margin: float
     tercile: str | None
     gross: dict[int, float] = field(default_factory=dict)
@@ -616,7 +616,7 @@ def bars_usable(series: Series, i: int, span: int) -> bool:
 def fill_for(series: Series, sig: Signal, variant: str) -> tuple[int, float] | None:
     """``(fill index, fill price)`` for ``sig`` under ``variant``, or ``None`` when it never fills.
 
-    V1 is unconditional at ``open(y+1)``. V2-N rests the candidate's own level and fills on the FIRST
+    Next-open is unconditional at ``open(y+1)``. A limit variant rests the candidate's own level and fills on the FIRST
     session in ``y+1 .. y+N`` whose ``low <= level``, at ``min(open, level)`` — the open when the
     session gapped through the level, the level otherwise. See the module docstring for the two
     deliberate divergences from ``engine.paper.broker``'s tick fill model and which way each biases.
@@ -743,8 +743,8 @@ def signal_counts_by_cell(signals: Sequence[Signal]) -> dict[str, int]:
 
 
 def cohort_label(variant: str, kind: str) -> str:
-    """The labelled matched-cohort cell, e.g. ``V1_next_open_on_V2_limit_at_H20_N5_filled``."""
-    return f"{VARIANT_V1}_on_{variant}_{kind}"
+    """The labelled matched-cohort cell, e.g. ``next_open_on_limit_5_sessions_filled``."""
+    return f"{VARIANT_NEXT_OPEN}_on_{variant}_{kind}"
 
 
 def _trade_key(t: Trade) -> tuple[str, date]:
@@ -766,35 +766,35 @@ def matched_cohort_decomposition(
     signals_by_cell: dict[str, int],
     horizons: Sequence[int] = HORIZONS,
 ) -> dict[str, Any]:
-    """Separate the entry-PRICE effect from the SELECTION effect, per V2 variant, in labelled cells.
+    """Separate the entry-PRICE effect from the SELECTION effect, per limit variant, in labelled cells.
 
-    The three variants share a SIGNAL population but NOT a trade set: a V2 limit fills only when
+    The three variants share a SIGNAL population but NOT a trade set: a limit fills only when
     price returns to the broken level, so its trades are the pullback-SELECTED subset. The pooled
-    V1-vs-V2 gap therefore mixes two things this function pulls apart at every horizon:
+    next-open vs limit gap therefore mixes two things this function pulls apart at every horizon:
 
-    * **PRICE effect** = ``median_net(V2) - median_net(V1 restricted to the cohort V2 FILLED)``. Same
-      events; V2 paid the level instead of open(y+1) AND, for fills at delay >= 2 sessions, held a
+    * **PRICE effect** = ``median_net(limit) - median_net(next-open restricted to the cohort the limit variant FILLED)``. Same
+      events; the limit paid the level instead of open(y+1) AND, for fills at delay >= 2 sessions, held a
       window shifted later by the fill delay (exits anchor on the fill) — an entry price-and-timing
       effect, not a pure price effect. Roughly half the matched cohort fills at delay 1, where the
       two coincide; the delay histogram in the report bounds the rest.
-    * **SELECTION effect** = ``median_net(V1 on the FILLED cohort) - median_net(V1 on the UNFILLED
+    * **SELECTION effect** = ``median_net(next-open on the FILLED cohort) - median_net(next-open on the UNFILLED
       cohort)``. Same entry mechanism throughout; the only difference is which signals came back to
       the level — i.e. what the resting limit forfeits by never booking the runaways.
 
     DESCRIPTIVE, post-hoc and explicitly NOT a fourth trial: no new variant, no new parameter, no new
-    selection rule, and the registered decision rule is still evaluated on the pooled cells. V1 fills
-    100% of admitted signals by construction, so the filled and unfilled cohorts partition V1's trades
-    exactly; ``every_v2_fill_has_a_v1_leg`` reports that reconciliation rather than assuming it.
+    selection rule, and the registered decision rule is still evaluated on the pooled cells. next-open fills
+    100% of admitted signals by construction, so the filled and unfilled cohorts partition next-open's trades
+    exactly; ``every_limit_fill_has_a_next_open_leg`` reports that reconciliation rather than assuming it.
     """
-    v1_trades = list(trades_by_variant[VARIANT_V1])
-    v1_all = cell_stats(v1_trades, horizons)
+    next_open_trades = list(trades_by_variant[VARIANT_NEXT_OPEN])
+    next_open_all = cell_stats(next_open_trades, horizons)
     out: dict[str, Any] = {
         "definition": (
-            "V1 re-quoted on exactly the signals each V2 variant FILLED (the matched cohort) and on "
-            "exactly the ones it did NOT fill. PRICE effect = V2 - V1 on the filled cohort (same "
-            "events; V2 pays the level instead of open(y+1) and, for fills at delay >= 2, holds a "
+            "next-open re-quoted on exactly the signals each limit variant FILLED (the matched cohort) and on "
+            "exactly the ones it did NOT fill. PRICE effect = limit - next-open on the filled cohort (same "
+            "events; the limit pays the level instead of open(y+1) and, for fills at delay >= 2, holds a "
             "window shifted by the fill delay - an entry price-AND-timing effect, not a pure price "
-            "effect); SELECTION effect = V1 on filled - V1 on unfilled (same "
+            "effect); SELECTION effect = next-open on filled - next-open on unfilled (same "
             "entry price rule, different signals). DESCRIPTIVE decomposition of the registered "
             "result - no new variant, no new parameter, no new selection, not a fourth trial. "
             "MEDIANS DO NOT DECOMPOSE ADDITIVELY: the pooled gap, the price effect and the selection "
@@ -804,25 +804,25 @@ def matched_cohort_decomposition(
         "descriptive_post_hoc_not_a_registered_trial": True,
         "variants": {},
     }
-    for variant in (VARIANT_V2_N3, VARIANT_V2_N5):
-        v2_trades = list(trades_by_variant[variant])
-        filled_keys = {_trade_key(t) for t in v2_trades}
-        v1_filled = [t for t in v1_trades if _trade_key(t) in filled_keys]
-        v1_unfilled = [t for t in v1_trades if _trade_key(t) not in filled_keys]
+    for variant in (VARIANT_LIMIT_3, VARIANT_LIMIT_5):
+        limit_trades = list(trades_by_variant[variant])
+        filled_keys = {_trade_key(t) for t in limit_trades}
+        next_open_filled = [t for t in next_open_trades if _trade_key(t) in filled_keys]
+        next_open_unfilled = [t for t in next_open_trades if _trade_key(t) not in filled_keys]
         cells = {
-            cohort_label(variant, COHORT_FILLED): cell_stats(v1_filled, horizons),
-            cohort_label(variant, COHORT_UNFILLED): cell_stats(v1_unfilled, horizons),
-            f"{variant}_{COHORT_FILLED}": cell_stats(v2_trades, horizons),
+            cohort_label(variant, COHORT_FILLED): cell_stats(next_open_filled, horizons),
+            cohort_label(variant, COHORT_UNFILLED): cell_stats(next_open_unfilled, horizons),
+            f"{variant}_{COHORT_FILLED}": cell_stats(limit_trades, horizons),
         }
-        c_v1f = cells[cohort_label(variant, COHORT_FILLED)]
-        c_v1u = cells[cohort_label(variant, COHORT_UNFILLED)]
-        c_v2 = cells[f"{variant}_{COHORT_FILLED}"]
+        c_no_f = cells[cohort_label(variant, COHORT_FILLED)]
+        c_no_u = cells[cohort_label(variant, COHORT_UNFILLED)]
+        c_lim = cells[f"{variant}_{COHORT_FILLED}"]
 
         effects: dict[str, Any] = {}
         for k in horizons:
-            price = _delta(_med_net(c_v2, k), _med_net(c_v1f, k))
-            selection = _delta(_med_net(c_v1f, k), _med_net(c_v1u, k))
-            pooled = _delta(_med_net(c_v2, k), _med_net(v1_all, k))
+            price = _delta(_med_net(c_lim, k), _med_net(c_no_f, k))
+            selection = _delta(_med_net(c_no_f, k), _med_net(c_no_u, k))
+            pooled = _delta(_med_net(c_lim, k), _med_net(next_open_all, k))
             effects[str(k)] = {
                 "pooled_gap_median_net_pp": pooled,
                 "price_effect_median_net_pp": price,
@@ -833,20 +833,20 @@ def matched_cohort_decomposition(
         by_tercile: dict[str, Any] = {}
         beats: dict[str, Any] = {}
         for name in MARGIN_CELLS:
-            f_cell = cell_stats([t for t in v1_filled if t.tercile == name], horizons)
-            u_cell = cell_stats([t for t in v1_unfilled if t.tercile == name], horizons)
-            v2_cell = cell_stats([t for t in v2_trades if t.tercile == name], horizons)
+            f_cell = cell_stats([t for t in next_open_filled if t.tercile == name], horizons)
+            u_cell = cell_stats([t for t in next_open_unfilled if t.tercile == name], horizons)
+            limit_cell = cell_stats([t for t in limit_trades if t.tercile == name], horizons)
             n_sig = signals_by_cell.get(name, 0)
             by_tercile[name] = {
                 "n_signals": n_sig,
-                "n_v2_filled": v2_cell["n_trades"],
-                "n_v2_unfilled": n_sig - v2_cell["n_trades"],
-                "fill_rate": None if not n_sig else round(v2_cell["n_trades"] / n_sig, 4),
+                "n_limit_filled": limit_cell["n_trades"],
+                "n_limit_unfilled": n_sig - limit_cell["n_trades"],
+                "fill_rate": None if not n_sig else round(limit_cell["n_trades"] / n_sig, 4),
                 cohort_label(variant, COHORT_FILLED): f_cell,
                 cohort_label(variant, COHORT_UNFILLED): u_cell,
-                f"{variant}_{COHORT_FILLED}": v2_cell,
+                f"{variant}_{COHORT_FILLED}": limit_cell,
                 "price_effect_median_net_pp": {
-                    str(k): _delta(_med_net(v2_cell, k), _med_net(f_cell, k)) for k in horizons
+                    str(k): _delta(_med_net(limit_cell, k), _med_net(f_cell, k)) for k in horizons
                 },
             }
         for k in horizons:
@@ -857,37 +857,37 @@ def matched_cohort_decomposition(
             beats[str(k)] = None if any(v is None for v in verdicts) else all(v > 0 for v in verdicts)
 
         out["variants"][variant] = {
-            "n_v2_filled": len(v2_trades),
-            "n_v2_unfilled": len(v1_trades) - len(v1_filled),
-            "n_v1_on_filled_cohort": len(v1_filled),
-            "n_v1_on_unfilled_cohort": len(v1_unfilled),
-            "every_v2_fill_has_a_v1_leg": len(v1_filled) == len(filled_keys),
+            "n_limit_filled": len(limit_trades),
+            "n_limit_unfilled": len(next_open_trades) - len(next_open_filled),
+            "n_next_open_on_filled_cohort": len(next_open_filled),
+            "n_next_open_on_unfilled_cohort": len(next_open_unfilled),
+            "every_limit_fill_has_a_next_open_leg": len(next_open_filled) == len(filled_keys),
             "cells": cells,
             "effects": effects,
             "by_margin_tercile": by_tercile,
-            "v2_beats_matched_v1_in_every_margin_tercile": beats,
+            "limit_beats_matched_next_open_in_every_margin_tercile": beats,
         }
     return out
 
 
 def _carried_by(price: float | None, selection: float | None) -> str:
-    """Which effect carries V2's advantage at one horizon — stated plainly, never left to the reader.
+    """Which effect carries the limit's advantage at one horizon — stated plainly, never left to the reader.
 
     Signs, all on median NET: ``price > 0`` means the level really is the better PRICE on the same
-    events; ``selection < 0`` means the cohort the limit never catches is the BETTER one under V1,
+    events; ``selection < 0`` means the cohort the limit never catches is the BETTER one under next-open,
     i.e. the selection works AGAINST the limit and the pooled gap understates what it forfeits.
     """
     if price is None or selection is None:
         return "unknown (an n=0 cohort cell at this horizon)"
     if price > 0 and selection <= 0:
         return (
-            f"{EFFECT_PRICE.upper()} - the entry price carries V2's advantage ({price:+.4f} pp on the "
+            f"{EFFECT_PRICE.upper()} - the entry price carries the limit's advantage ({price:+.4f} pp on the "
             f"matched cohort), and the SELECTION runs AGAINST it ({selection:+.4f} pp: the signals "
-            "the limit never catches are the better ones under V1)"
+            "the limit never catches are the better ones under next-open)"
         )
     if price <= 0 and selection > 0:
         return (
-            f"{EFFECT_SELECTION.upper()} - V2's advantage is which signals it books, not the price "
+            f"{EFFECT_SELECTION.upper()} - the limit's advantage is which signals it books, not the price "
             f"({selection:+.4f} pp selection vs {price:+.4f} pp price on the matched cohort)"
         )
     if price > 0 and selection > 0:
@@ -895,7 +895,7 @@ def _carried_by(price: float | None, selection: float | None) -> str:
             f"BOTH - price {price:+.4f} pp on the matched cohort AND selection {selection:+.4f} pp"
         )
     return (
-        f"NEITHER - V2 has no advantage at this horizon on the matched cohort "
+        f"NEITHER - the limit has no advantage at this horizon on the matched cohort "
         f"(price {price:+.4f} pp, selection {selection:+.4f} pp)"
     )
 
@@ -1090,7 +1090,7 @@ def decision_outcome(
         },
         "outcome": outcome,
         "winner": winner,
-        "shipped_mechanism_unchanged": winner is None or winner != VARIANT_V1,
+        "shipped_mechanism_unchanged": winner is None or winner != VARIANT_NEXT_OPEN,
     }
 
 
@@ -1111,8 +1111,8 @@ def run_study(
     """Run all three entry variants end to end over ONE shared SIGNAL population.
 
     The signal population is shared; the TRADE sets are not, and nothing here pretends otherwise — a
-    V2 limit fills only when price returns to the broken level, so each V2 variant trades a
-    pullback-selected subset and :func:`matched_cohort_decomposition` re-quotes V1 on exactly those
+    limit fills only when price returns to the broken level, so each limit variant trades a
+    pullback-selected subset and :func:`matched_cohort_decomposition` re-quotes next-open on exactly those
     cohorts so the entry-PRICE effect and the SELECTION effect can be read apart.
 
     Returns ``(document, trades_by_variant)`` — the document is the JSON payload and the reports'
@@ -1197,28 +1197,28 @@ def run_study(
 
     all_dates = sorted({d for s in series_by_symbol.values() for d in s.dates})
     notes: list[str] = [
-        "SHARED SIGNAL POPULATION, DIFFERENT TRADE SETS - read every pooled V1-vs-V2 number in this "
-        "light. All three variants are offered the SAME admitted signals, but a V2 limit only fills "
+        "SHARED SIGNAL POPULATION, DIFFERENT TRADE SETS - read every pooled next-open vs limit number in this "
+        "light. All three variants are offered the SAME admitted signals, but a limit only fills "
         "when price RETURNS to the broken level, i.e. conditional on the breakout not running away, "
-        "so each V2 variant trades a pullback-SELECTED subset and the per-variant n differ. A pooled "
-        "V1-vs-V2 comparison is therefore a PER-FILLED-TRADE comparison across two different event "
+        "so each limit variant trades a pullback-SELECTED subset and the per-variant n differ. A pooled "
+        "next-open vs limit comparison is therefore a PER-FILLED-TRADE comparison across two different event "
         "sets, NOT a per-signal-originated one, and it does not price the signals the resting limit "
         "forfeits. STEP 3B (matched_cohorts) is the decomposition that separates the entry-PRICE "
         "effect from the SELECTION effect; read it before quoting any headline gap.",
         "PER-SIGNAL-ORIGINATED EXPECTANCY, if you need the deployment basis rather than the "
         "per-filled-trade one, is an arithmetic identity on the cells already printed: book an "
-        "unfilled signal at 0.0% and the per-signal MEAN is mean_net x fill_rate (V1's fill rate is "
+        "unfilled signal at 0.0% and the per-signal MEAN is mean_net x fill_rate (next-open's fill rate is "
         "1.0, so its pooled mean already is one). It is deliberately not printed as a headline "
         "because it is a MEAN statistic and the ORB lesson distrusts means: the per-signal MEDIAN is "
         "degenerate at these fill rates (~51-59% filled, so the median sits on the zero-return "
         "plateau of the unfilled signals and says nothing about either mechanism). The matched-cohort "
         "cells below are the robust read of the same question.",
         "MARGIN-TERCILE CELLS ARE PER COHORT, NOT PER TRADE SET: fill rate varies sharply by tercile, "
-        "so a V1 tercile row and a V2 tercile row cover different signals unless matched. Every cell "
+        "so a next-open tercile row and a limit tercile row cover different signals unless matched. Every cell "
         "now carries its own n_signals_in_cell and fill_rate_in_cell, and the per-tercile matched "
-        "comparison (V1 restricted to the cohort that variant filled) is in matched_cohorts."
+        "comparison (next-open restricted to the cohort that variant filled) is in matched_cohorts."
         "by_margin_tercile with n per cell. Any 'in every margin tercile' claim must be read off "
-        "v2_beats_matched_v1_in_every_margin_tercile, never off the unmatched pooled rows.",
+        "limit_beats_matched_next_open_in_every_margin_tercile, never off the unmatched pooled rows.",
         REPORTING_RULE_AMENDMENT,
         "POPULATION IS A SURVIVORSHIP-TAINTED PROXY: NIFTY 500 / eligible membership as of each "
         "signal date is not stored anywhere in this platform, so the CURRENT eligible set ("
@@ -1231,13 +1231,13 @@ def run_study(
         "MARGIN TERCILE CUTS ARE DESCRIPTIVE, NOT TRADEABLE: they are full-sample statistics of the "
         "measured signal population, unknowable at signal time. The split says where the two "
         "mechanisms differ; it is not a filter anyone could have run.",
-        "V2 FILL RATES ARE AN UPPER BOUND: a daily bar whose low EQUALS the level counts as a fill "
+        "limit FILL RATES ARE AN UPPER BOUND: a daily bar whose low EQUALS the level counts as a fill "
         "here, while engine.paper.broker's tick model requires a strict trade-through. The other "
         "divergence runs the same way: min(open, level) books the opening print when a session gaps "
         "through the level, where that model never fills better than the limit.",
         "HORIZONS ARE MEASURED FROM THE FILL, not from the signal - a deliberate divergence from the "
         "hi52/event_study convention, because the variants fill on different sessions and a signal "
-        "anchor would charge V2 for the days it spent waiting.",
+        "anchor would charge the limit variants for the days it spent waiting.",
         f"NO PARAMETER SWEEP was run: the live rule at its frozen defaults, three pre-registered "
         f"entry variants, trial count N={TRIAL_COUNT_N} (fold_pass_min = "
         f"{fold_pass_min(TRIAL_COUNT_N):.0%}).",
@@ -1433,10 +1433,10 @@ def render_text(doc: dict[str, Any]) -> str:
     add(f"admission       : ONE SHARED SIGNAL POPULATION - {m['admission_span_sessions']} forward "
         "sessions required per signal, so every variant is offered the same signals and no horizon "
         "is measured on a short window")
-    add("trade sets      : NOT SHARED. A V2 limit fills only when price RETURNS to the level, so each "
-        "V2 variant")
+    add("trade sets      : NOT SHARED. A limit fills only when price RETURNS to the level, so each "
+        "limit variant")
     add("                  trades a pullback-SELECTED subset (see the fill rates below). Pooled "
-        "V1-vs-V2 numbers are")
+        "next-open vs limit numbers are")
     add("                  PER FILLED TRADE across different event sets - STEP 3B decomposes them.")
     add(f"sizing          : {m['sizing']}")
     add(f"cost round trip : {m['cost_round_trip_pct']:.4f}% {m['product']} at Rs {m['reference_notional_inr']} "
@@ -1537,12 +1537,12 @@ def render_text(doc: dict[str, Any]) -> str:
         add("  not computed.")
         add("")
     else:
-        add("The three variants share a SIGNAL population but NOT a trade set, so a pooled V1-vs-V2 gap")
+        add("The three variants share a SIGNAL population but NOT a trade set, so a pooled next-open vs limit gap")
         add("mixes two effects. These cells pull them apart, on medians of NET returns:")
-        add("  PRICE effect     = V2  minus  V1 restricted to the signals V2 FILLED (same events;")
+        add("  PRICE effect     = limit  minus  next-open restricted to the signals the limit variant FILLED (same events;")
         add("                     the level instead of open(y+1), and for fills at delay >= 2 a holding")
         add("                     window shifted by the fill delay - price AND timing, not price alone).")
-        add("  SELECTION effect = V1 on the FILLED cohort  minus  V1 on the UNFILLED cohort (same")
+        add("  SELECTION effect = next-open on the FILLED cohort  minus  next-open on the UNFILLED cohort (same")
         add("                     entry rule, different signals - what the resting limit forfeits).")
         add("DESCRIPTIVE, post-hoc, NOT a fourth trial: no new variant, parameter or selection rule,")
         add("and the registered decision rule is still evaluated on the pooled cells.")
@@ -1550,10 +1550,10 @@ def render_text(doc: dict[str, Any]) -> str:
         add("effect are three comparisons over three different sets and are not expected to sum.")
         add("")
         for variant, blk in mc["variants"].items():
-            add(f"[{variant}]  V2 filled {blk['n_v2_filled']} of "
-                f"{blk['n_v1_on_filled_cohort'] + blk['n_v1_on_unfilled_cohort']} admitted signals "
-                f"({blk['n_v2_unfilled']} never filled)")
-            add(f"  every V2 fill has a V1 leg: {blk['every_v2_fill_has_a_v1_leg']}")
+            add(f"[{variant}]  limit filled {blk['n_limit_filled']} of "
+                f"{blk['n_next_open_on_filled_cohort'] + blk['n_next_open_on_unfilled_cohort']} admitted signals "
+                f"({blk['n_limit_unfilled']} never filled)")
+            add(f"  every limit fill has a next-open leg: {blk['every_limit_fill_has_a_next_open_leg']}")
             add("  cell                                        | hor |     n | hit% net | mean gross | med gross |  mean net |   med net")
             add("  --------------------------------------------+-----+-------+----------+------------+-----------+-----------+----------")
             for cell, stats in blk["cells"].items():
@@ -1564,7 +1564,7 @@ def render_text(doc: dict[str, Any]) -> str:
                         f"{_f(s['mean_gross'], 10)} | {_f(s['median_gross'], 9)} | "
                         f"{_f(s['mean_net'], 9)} | {_f(s['median_net'], 9)}")
             add("")
-            add("  horizon | pooled gap | price eff | selectn eff | which effect carries V2's advantage")
+            add("  horizon | pooled gap | price eff | selectn eff | which effect carries the limit's advantage")
             add("  --------+------------+-----------+-------------+------------------------------------")
             for k in sorted(blk["effects"], key=int):
                 e = blk["effects"][k]
@@ -1573,7 +1573,7 @@ def render_text(doc: dict[str, Any]) -> str:
                     f"{_f(e['selection_effect_median_net_pp'], 11)} | {e['carried_by']}")
             add("")
             add("  by margin tercile (n per cell, matched):")
-            add("    tercile                   | sig n | filled | fill% | hor | V1 matched med net | V2 med net | price eff")
+            add("    tercile                   | sig n | filled | fill% | hor | next-open matched med net | limit med net | price eff")
             add("    --------------------------+-------+--------+-------+-----+--------------------+------------+----------")
             for name in MARGIN_CELLS:
                 cell = blk["by_margin_tercile"][name]
@@ -1581,16 +1581,16 @@ def render_text(doc: dict[str, Any]) -> str:
                 v1c = cell[cohort_label(variant, COHORT_FILLED)]
                 v2c = cell[f"{variant}_{COHORT_FILLED}"]
                 for k in sorted(v2c["horizons"], key=int):
-                    add(f"    {name:<25} | {cell['n_signals']:>5} | {cell['n_v2_filled']:>6} | "
+                    add(f"    {name:<25} | {cell['n_signals']:>5} | {cell['n_limit_filled']:>6} | "
                         f"{frs:>5} | T+{k:<2} | {_f(v1c['horizons'][k]['median_net'], 18)} | "
                         f"{_f(v2c['horizons'][k]['median_net'], 10)} | "
                         f"{_f(cell['price_effect_median_net_pp'][k], 9)}")
             add("")
-            for k in sorted(blk["v2_beats_matched_v1_in_every_margin_tercile"], key=int):
-                held = blk["v2_beats_matched_v1_in_every_margin_tercile"][k]
+            for k in sorted(blk["limit_beats_matched_next_open_in_every_margin_tercile"], key=int):
+                held = blk["limit_beats_matched_next_open_in_every_margin_tercile"][k]
                 verdict = ("NOT TESTABLE (an empty cell)" if held is None
                            else ("HOLDS" if held else "DOES NOT HOLD"))
-                add(f"  T+{k}: 'beats V1 in EVERY margin tercile', ON THE MATCHED COHORT: {verdict}")
+                add(f"  T+{k}: 'beats next-open in EVERY margin tercile', ON THE MATCHED COHORT: {verdict}")
             add("")
 
     # ------------------------------------------------------------------ CPCV / deflation
@@ -1685,9 +1685,9 @@ def _matched_cohort_markdown(doc: dict[str, Any]) -> str:
     add(f"{mc['definition']}")
     add("")
     for variant, blk in mc["variants"].items():
-        n_sig = blk["n_v1_on_filled_cohort"] + blk["n_v1_on_unfilled_cohort"]
-        add(f"### `{variant}` — filled {blk['n_v2_filled']} of {n_sig} admitted signals "
-            f"({blk['n_v2_unfilled']} never filled)")
+        n_sig = blk["n_next_open_on_filled_cohort"] + blk["n_next_open_on_unfilled_cohort"]
+        add(f"### `{variant}` — filled {blk['n_limit_filled']} of {n_sig} admitted signals "
+            f"({blk['n_limit_unfilled']} never filled)")
         add("")
         add("| cell | horizon | n | hit% net | mean gross | median gross | mean net | median net |")
         add("|---|---|---|---|---|---|---|---|")
@@ -1698,7 +1698,7 @@ def _matched_cohort_markdown(doc: dict[str, Any]) -> str:
                     f"{_md_ret(s['mean_gross'])} | {_md_ret(s['median_gross'])} | "
                     f"{_md_ret(s['mean_net'])} | {_md_ret(s['median_net'])} |")
         add("")
-        add("| horizon | pooled gap | PRICE effect | SELECTION effect | which effect carries V2's "
+        add("| horizon | pooled gap | PRICE effect | SELECTION effect | which effect carries the limit's "
             "advantage |")
         add("|---|---|---|---|---|")
         for k in sorted(blk["effects"], key=int):
@@ -1709,25 +1709,25 @@ def _matched_cohort_markdown(doc: dict[str, Any]) -> str:
         add("")
         add("Per margin tercile, matched (n per cell, and the cell's own fill rate):")
         add("")
-        add("| margin tercile | signals | filled | fill rate | horizon | V1 median net on the matched "
-            "cohort | V2 median net | PRICE effect |")
+        add("| margin tercile | signals | filled | fill rate | horizon | next-open median net on the matched "
+            "cohort | limit median net | PRICE effect |")
         add("|---|---|---|---|---|---|---|---|")
         for name in MARGIN_CELLS:
             cell = blk["by_margin_tercile"][name]
             v1c = cell[cohort_label(variant, COHORT_FILLED)]
             v2c = cell[f"{variant}_{COHORT_FILLED}"]
             for k in sorted(v2c["horizons"], key=int):
-                add(f"| `{name}` | {cell['n_signals']} | {cell['n_v2_filled']} | "
+                add(f"| `{name}` | {cell['n_signals']} | {cell['n_limit_filled']} | "
                     f"{_md_pct(cell['fill_rate'])} | T+{k} | "
                     f"{_md_ret(v1c['horizons'][k]['median_net'])} | "
                     f"{_md_ret(v2c['horizons'][k]['median_net'])} | "
                     f"{_md_pp(cell['price_effect_median_net_pp'][k])} |")
         add("")
-        for k in sorted(blk["v2_beats_matched_v1_in_every_margin_tercile"], key=int):
-            held = blk["v2_beats_matched_v1_in_every_margin_tercile"][k]
+        for k in sorted(blk["limit_beats_matched_next_open_in_every_margin_tercile"], key=int):
+            held = blk["limit_beats_matched_next_open_in_every_margin_tercile"][k]
             verdict = ("**NOT TESTABLE** (an empty cell)" if held is None
                        else ("**HOLDS**" if held else "**DOES NOT HOLD**"))
-            add(f"- T+{k}: \"beats V1 in every margin tercile\", evaluated ON THE MATCHED COHORT: "
+            add(f"- T+{k}: \"beats next-open in every margin tercile\", evaluated ON THE MATCHED COHORT: "
                 f"{verdict}")
         add("")
     return "\n".join(out)
@@ -1751,10 +1751,10 @@ def render_markdown(doc: dict[str, Any]) -> str:
     add("")
     add("## Headline")
     add("")
-    add("**The three variants share a SIGNAL population but NOT a trade set.** A V2 limit fills only "
-        "when price RETURNS to the broken level, so each V2 variant trades a pullback-SELECTED "
+    add("**The three variants share a SIGNAL population but NOT a trade set.** A limit fills only "
+        "when price RETURNS to the broken level, so each limit variant trades a pullback-SELECTED "
         "subset of the admitted signals and the per-variant `n filled` below differ for that reason. "
-        "Every pooled V1-vs-V2 number in this report is therefore a comparison PER FILLED TRADE "
+        "Every pooled next-open vs limit number in this report is therefore a comparison PER FILLED TRADE "
         "across two different event sets — it is not a per-signal-originated comparison and it does "
         "not price the signals the resting limit forfeits. The matched-cohort decomposition below "
         "separates the entry-PRICE effect from the SELECTION effect; read it before quoting any gap.")

@@ -1690,7 +1690,7 @@ async def test_paper_risk_reads_the_same_live_base_as_the_paper_runtime(
 
 
 def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> None:
-    """5 sessions = `V2_limit_at_H20_N5`. The number IS the registered mechanism — N=1 (what shipped
+    """5 sessions = the five-session limit. The number IS the registered mechanism — N=1 (what shipped
     before the retest re-arm) and N=3 were both measured and both lost, every other N was never run — so it is an
     owner-only key and the code default must agree with the shipped settings, not shadow it."""
     assert load_settings().brk20.retest_sessions == DEFAULT_RETEST_SESSIONS == 5

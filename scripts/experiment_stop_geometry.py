@@ -4,7 +4,7 @@
     python scripts/experiment_stop_geometry.py --from 2025-07-10 --to 2026-08-13 \
         --symbols RELIANCE,TCS [--reports-dir data/reports]
 
-**C-CATEGORY: STOPS FOR OWNER REVIEW — no live wiring, promotion NOT sought.** This is a thin shell
+**RESEARCH ONLY: STOPS FOR OWNER REVIEW — no live wiring, promotion NOT sought.** This is a thin shell
 around :class:`engine.learning.stop_geometry.StopGeometryExperiment`; all the logic (and the whole
 pre-registration) lives in that module, which is where to read it. The CLI resolves the universe,
 opens the market store READ-ONLY, runs the diagnostic and writes ONE report pair
@@ -198,7 +198,7 @@ def _print_summary(report: sg.StopGeometryReport, artifacts) -> None:
     print(f"        {artifacts.json}")
     print("")
     print(
-        "C-category: STOPS HERE FOR OWNER REVIEW. Nothing was wired live; no param_sets row, no "
+        "Research only: STOPS HERE FOR OWNER REVIEW. Nothing was wired live; no param_sets row, no "
         "ValidationPipeline call, no promotion sought."
     )
 

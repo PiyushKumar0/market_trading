@@ -9,14 +9,14 @@ sessions, so index 21 is also the LAST index that can book a trade). Every symbo
 rested limit is exactly 100.00; every forward high is 130.00, which makes a second breakout
 arithmetically impossible and keeps the signal counts exact.
 
-* ``WINNER``     — trigger close 104.00, then opens 103.00 and dips to 99.00: V1 fills at 103.00,
-  V2 at the 100.00 level, and the two hand-computed return sets differ by the mechanism alone.
-* ``GAPPER``     — trigger close 102.00, then GAPS THROUGH the level (open 95.00): V2 must fill at
+* ``WINNER``     — trigger close 104.00, then opens 103.00 and dips to 99.00: next-open fills at 103.00,
+  a limit at the 100.00 level, and the two hand-computed return sets differ by the mechanism alone.
+* ``GAPPER``     — trigger close 102.00, then GAPS THROUGH the level (open 95.00): the limit must fill at
   the OPEN, not at the level, and the two mechanisms then get the same price.
 * ``LATEFILL``   — trigger close 106.00, then holds above the level for three sessions and only
-  touches it on y+4: unfilled under V2-3, filled under V2-5, and its V1 and V2-5 exits land on
+  touches it on y+4: unfilled under 3-session-limit, filled under 5-session-limit, and its next-open and 5-session-limit exits land on
   DIFFERENT sessions — the fill-anchored horizon's whole point.
-* ``NOFILL``     — trigger close 108.00, then never trades at or below the level: V1 fills, both V2
+* ``NOFILL``     — trigger close 108.00, then never trades at or below the level: next-open fills, both limit
   variants book nothing, and the fill rate's denominator stays the shared admitted population.
 * ``OUTSIDER``   — WINNER's bars, excluded ``not_in_index``: must never appear.
 * ``CAPPEDPLUS`` — WINNER's bars, excluded ``['watchlist_cap', 'surveillance_asm']``: the STRICT
@@ -97,7 +97,7 @@ def _trigger(sym: str, close: str) -> DailyBar:
 
 
 def winner_bars(sym: str = "WINNER") -> list[DailyBar]:
-    """Trigger 104.00; entry session opens 103.00 and dips to 99.00 (V2 fills the level, V1 the
+    """Trigger 104.00; entry session opens 103.00 and dips to 99.00 (a limit fills the level, next-open the
     open); closes 105 / 110 / 120 at T+5 / T+10 / T+20 counted FROM THE FILL at index 22."""
     bars = _prefix(sym) + [_trigger(sym, "104.00")]
     bars.append(_bar(sym, ENTRY_IDX, o="103.00", h="130.00", lo="99.00", c="100.00"))
@@ -125,9 +125,9 @@ def gapper_bars() -> list[DailyBar]:
 def latefill_bars() -> list[DailyBar]:
     """Trigger 106.00; lows hold at 101.00 for y+1..y+3 and only reach 99.00 on y+4 (index 25).
 
-    So V2-3's window (y+1..y+3) closes unfilled and V2-5 fills at index 25 — and the T+20 exits then
-    land on DIFFERENT sessions: index 42 for V1's index-22 fill (close 102.00) and index 45 for
-    V2-5's (close 115.00). A signal-anchored horizon would give both the same exit and hide the
+    So 3-session-limit's window (y+1..y+3) closes unfilled and 5-session-limit fills at index 25 — and the T+20 exits then
+    land on DIFFERENT sessions: index 42 for next-open's index-22 fill (close 102.00) and index 45 for
+    5-session-limit's (close 115.00). A signal-anchored horizon would give both the same exit and hide the
     difference the fill anchor exists to measure.
     """
     sym = "LATEFILL"
@@ -141,7 +141,7 @@ def latefill_bars() -> list[DailyBar]:
 
 def nofill_bars() -> list[DailyBar]:
     """Trigger 108.00, then the tape never returns to the level — the rested limit expires unfilled
-    under both V2 windows while V1 is filled at the next open (107.00)."""
+    under both limit windows while next-open is filled at the next open (107.00)."""
     sym = "NOFILL"
     bars = _prefix(sym) + [_trigger(sym, "108.00")]
     bars += [_flat(sym, i, "107.00", high="130.00") for i in range(ENTRY_IDX, N_SESSIONS)]
@@ -258,8 +258,8 @@ def test_three_pre_registered_variants_no_sweep():
     assert bt.PRE_REGISTERED_FLOOR_PARAMS == dict(brk20.FLOOR_PARAMS)
     assert bt.PRE_REGISTERED_PARAMS["lookback_days"] == 20
     assert bt.PRE_REGISTERED_PARAMS["vol_mult"] == 1.2
-    assert bt.VARIANTS == (bt.VARIANT_V1, bt.VARIANT_V2_N3, bt.VARIANT_V2_N5)
-    assert bt.FILL_WINDOW == {bt.VARIANT_V1: None, bt.VARIANT_V2_N3: 3, bt.VARIANT_V2_N5: 5}
+    assert bt.VARIANTS == (bt.VARIANT_NEXT_OPEN, bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5)
+    assert bt.FILL_WINDOW == {bt.VARIANT_NEXT_OPEN: None, bt.VARIANT_LIMIT_3: 3, bt.VARIANT_LIMIT_5: 5}
     assert bt.MAX_FILL_WINDOW == 5
     assert fold_pass_min(bt.TRIAL_COUNT_N) == 0.60
     # the CLI exposes no knob that could turn three trials into many
@@ -320,39 +320,39 @@ def test_signal_level_is_the_rules_own_tick_rounded_entry(study):
     doc, trades = study
     assert doc["meta"]["n_signals_after_vetoes"] == len(ELIGIBLE)
     assert doc["meta"]["n_signals_admitted"] == len(ELIGIBLE)
-    t = _by_symbol(trades, bt.VARIANT_V2_N5)["WINNER"]
+    t = _by_symbol(trades, bt.VARIANT_LIMIT_5)["WINNER"]
     assert t.margin == pytest.approx(0.04, abs=1e-9)        # close(y) 104.00 / H20 100.00 - 1
     assert t.fill_px == pytest.approx(LEVEL)                # the level is what the rule shipped
     # the margins the tercile split reads are the rule's own strength signal, one per fixture
-    margins = {s: _by_symbol(trades, bt.VARIANT_V1)[s].margin for s in ELIGIBLE}
+    margins = {s: _by_symbol(trades, bt.VARIANT_NEXT_OPEN)[s].margin for s in ELIGIBLE}
     assert margins == pytest.approx(
         {"GAPPER": 0.02, "WINNER": 0.04, "LATEFILL": 0.06, "NOFILL": 0.08}, abs=1e-9
     )
 
 
 # ============================================================ 2. hand-computed fills, net of costs
-def test_v1_and_v2_book_the_same_signal_at_different_prices(study):
-    """WINNER: V1 pays the next OPEN (103.00), V2 rests and gets the level (100.00). Same signal,
+def test_next_open_and_limit_book_the_same_signal_at_different_prices(study):
+    """WINNER: next-open pays the next OPEN (103.00), the limit rests and gets the level (100.00). Same signal,
     same exit sessions, and the only difference in the return is the mechanism."""
     _doc, trades = study
     cost = _cost_pct()
-    v1 = _by_symbol(trades, bt.VARIANT_V1)["WINNER"]
-    v2 = _by_symbol(trades, bt.VARIANT_V2_N5)["WINNER"]
+    next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["WINNER"]
+    limit = _by_symbol(trades, bt.VARIANT_LIMIT_5)["WINNER"]
 
-    assert v1.signal_date == v2.signal_date == SESSIONS[SIGNAL_IDX]
-    assert v1.fill_date == v2.fill_date == SESSIONS[ENTRY_IDX]
-    assert v1.fill_px == pytest.approx(103.00)          # the next session's OPEN
-    assert v1.fill_px != pytest.approx(104.00)          # NOT the signal close — no same-bar fill
-    assert v2.fill_px == pytest.approx(LEVEL)           # the rested limit, not the 103.00 open
-    assert v1.fill_delay_sessions == v2.fill_delay_sessions == 1
+    assert next_open.signal_date == limit.signal_date == SESSIONS[SIGNAL_IDX]
+    assert next_open.fill_date == limit.fill_date == SESSIONS[ENTRY_IDX]
+    assert next_open.fill_px == pytest.approx(103.00)          # the next session's OPEN
+    assert next_open.fill_px != pytest.approx(104.00)          # NOT the signal close — no same-bar fill
+    assert limit.fill_px == pytest.approx(LEVEL)           # the rested limit, not the 103.00 open
+    assert next_open.fill_delay_sessions == limit.fill_delay_sessions == 1
 
     for horizon, exit_px in ((5, 105.0), (10, 110.0), (20, 120.0)):
-        assert v2.gross[horizon] == pytest.approx((exit_px / 100.0 - 1.0) * 100.0, abs=1e-9)
-        assert v1.gross[horizon] == pytest.approx((exit_px / 103.0 - 1.0) * 100.0, abs=1e-9)
-        assert v2.net[horizon] == pytest.approx(v2.gross[horizon] - cost, abs=1e-9)
-        assert v1.net[horizon] == pytest.approx(v1.gross[horizon] - cost, abs=1e-9)
+        assert limit.gross[horizon] == pytest.approx((exit_px / 100.0 - 1.0) * 100.0, abs=1e-9)
+        assert next_open.gross[horizon] == pytest.approx((exit_px / 103.0 - 1.0) * 100.0, abs=1e-9)
+        assert limit.net[horizon] == pytest.approx(limit.gross[horizon] - cost, abs=1e-9)
+        assert next_open.net[horizon] == pytest.approx(next_open.gross[horizon] - cost, abs=1e-9)
     # exactly ONE round trip is deducted, at every horizon — never one per session held
-    assert v1.gross[20] - v1.net[20] == pytest.approx(v1.gross[5] - v1.net[5], abs=1e-12)
+    assert next_open.gross[20] - next_open.net[20] == pytest.approx(next_open.gross[5] - next_open.net[5], abs=1e-12)
 
 
 def test_a_gap_through_fills_at_the_open_not_at_the_level(study):
@@ -360,48 +360,48 @@ def test_a_gap_through_fills_at_the_open_not_at_the_level(study):
     marketable-on-open limit gets the opening print, and booking 100.00 would invent a fill the
     tape never offered."""
     _doc, trades = study
-    v2 = _by_symbol(trades, bt.VARIANT_V2_N3)["GAPPER"]
-    v1 = _by_symbol(trades, bt.VARIANT_V1)["GAPPER"]
-    assert v2.fill_px == pytest.approx(95.00)
-    assert v2.fill_px != pytest.approx(LEVEL)
-    assert v1.fill_px == pytest.approx(95.00)     # a gap-through gives both mechanisms one price
-    assert v1.gross == v2.gross
+    limit = _by_symbol(trades, bt.VARIANT_LIMIT_3)["GAPPER"]
+    next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["GAPPER"]
+    assert limit.fill_px == pytest.approx(95.00)
+    assert limit.fill_px != pytest.approx(LEVEL)
+    assert next_open.fill_px == pytest.approx(95.00)     # a gap-through gives both mechanisms one price
+    assert next_open.gross == limit.gross
 
 
 def test_the_limit_window_boundary_is_n_sessions_exactly(study):
-    """LATEFILL is touched on y+4: V2-3's window (y+1..y+3) expires unfilled, V2-5's fills."""
+    """LATEFILL is touched on y+4: 3-session-limit's window (y+1..y+3) expires unfilled, 5-session-limit's fills."""
     _doc, trades = study
-    assert "LATEFILL" not in _by_symbol(trades, bt.VARIANT_V2_N3)
-    late = _by_symbol(trades, bt.VARIANT_V2_N5)["LATEFILL"]
+    assert "LATEFILL" not in _by_symbol(trades, bt.VARIANT_LIMIT_3)
+    late = _by_symbol(trades, bt.VARIANT_LIMIT_5)["LATEFILL"]
     assert late.fill_delay_sessions == 4
     assert late.fill_date == SESSIONS[25]
     assert late.fill_px == pytest.approx(LEVEL)   # min(open 102.00, level 100.00)
 
 
 def test_horizons_are_anchored_on_the_fill_not_the_signal(study):
-    """LATEFILL's V1 and V2-5 legs fill 3 sessions apart, so their T+20 exits are 3 sessions apart
+    """LATEFILL's next-open and 5-session-limit legs fill 3 sessions apart, so their T+20 exits are 3 sessions apart
     too: index 42 (close 102.00) and index 45 (close 115.00). A signal anchor would give both the
-    same exit and silently charge V2 for the days it spent waiting."""
+    same exit and silently charge the limit variants for the days it spent waiting."""
     _doc, trades = study
-    v1 = _by_symbol(trades, bt.VARIANT_V1)["LATEFILL"]
-    v5 = _by_symbol(trades, bt.VARIANT_V2_N5)["LATEFILL"]
-    assert (v1.fill_idx, v5.fill_idx) == (22, 25)
-    assert v1.gross[20] == pytest.approx((102.0 / 105.0 - 1.0) * 100.0, abs=1e-9)
-    assert v5.gross[20] == pytest.approx((115.0 / 100.0 - 1.0) * 100.0, abs=1e-9)
+    next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["LATEFILL"]
+    limit5 = _by_symbol(trades, bt.VARIANT_LIMIT_5)["LATEFILL"]
+    assert (next_open.fill_idx, limit5.fill_idx) == (22, 25)
+    assert next_open.gross[20] == pytest.approx((102.0 / 105.0 - 1.0) * 100.0, abs=1e-9)
+    assert limit5.gross[20] == pytest.approx((115.0 / 100.0 - 1.0) * 100.0, abs=1e-9)
 
 
 def test_an_untouched_level_books_no_trade_and_the_fill_rate_says_so(study):
-    """NOFILL's limit is never reached: both V2 variants book nothing, V1 books the open, and the
+    """NOFILL's limit is never reached: both limit variants book nothing, next-open books the open, and the
     fill rate's denominator stays the SHARED admitted population — not each variant's own."""
     doc, trades = study
-    assert "NOFILL" in _by_symbol(trades, bt.VARIANT_V1)
-    for variant in (bt.VARIANT_V2_N3, bt.VARIANT_V2_N5):
+    assert "NOFILL" in _by_symbol(trades, bt.VARIANT_NEXT_OPEN)
+    for variant in (bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5):
         assert "NOFILL" not in _by_symbol(trades, variant)
     blocks = doc["variants"]
-    assert blocks[bt.VARIANT_V1]["fill_rate"] == 1.0
-    assert blocks[bt.VARIANT_V1]["n_filled"] == 4 and blocks[bt.VARIANT_V1]["n_unfilled"] == 0
-    assert blocks[bt.VARIANT_V2_N3]["n_filled"] == 2 and blocks[bt.VARIANT_V2_N3]["n_unfilled"] == 2
-    assert blocks[bt.VARIANT_V2_N5]["n_filled"] == 3 and blocks[bt.VARIANT_V2_N5]["n_unfilled"] == 1
+    assert blocks[bt.VARIANT_NEXT_OPEN]["fill_rate"] == 1.0
+    assert blocks[bt.VARIANT_NEXT_OPEN]["n_filled"] == 4 and blocks[bt.VARIANT_NEXT_OPEN]["n_unfilled"] == 0
+    assert blocks[bt.VARIANT_LIMIT_3]["n_filled"] == 2 and blocks[bt.VARIANT_LIMIT_3]["n_unfilled"] == 2
+    assert blocks[bt.VARIANT_LIMIT_5]["n_filled"] == 3 and blocks[bt.VARIANT_LIMIT_5]["n_unfilled"] == 1
     for variant in bt.VARIANTS:
         b = blocks[variant]
         # ONE shared SIGNAL population; the TRADE sets above are deliberately NOT shared
@@ -439,12 +439,12 @@ def test_margin_tercile_split_partitions_the_population(study):
     cuts = doc["margin_tercile_cuts"]
     assert cuts is not None and cuts["cut_1"] < cuts["cut_2"]
 
-    by_symbol = _by_symbol(trades, bt.VARIANT_V1)
+    by_symbol = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)
     assert by_symbol["GAPPER"].tercile == bt.CELL_MARGIN_LOW       # margin 0.02, the narrowest
     assert by_symbol["NOFILL"].tercile == bt.CELL_MARGIN_HIGH      # margin 0.08, the widest
     assert {by_symbol[s].tercile for s in ("WINNER", "LATEFILL")} == {bt.CELL_MARGIN_MID}
     # every variant sees the SAME tercile for the same symbol
-    for variant in (bt.VARIANT_V2_N3, bt.VARIANT_V2_N5):
+    for variant in (bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5):
         for sym, t in _by_symbol(trades, variant).items():
             assert t.tercile == by_symbol[sym].tercile
 
@@ -454,8 +454,8 @@ def test_margin_tercile_split_partitions_the_population(study):
         assert total == cells[bt.CELL_ALL]["n_trades"]             # a partition, never a double count
     # the widest-margin signal is exactly the one the rested limit never catches, which is the
     # mechanism cost the split exists to surface
-    assert doc["variants"][bt.VARIANT_V2_N5]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 0
-    assert doc["variants"][bt.VARIANT_V1]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 1
+    assert doc["variants"][bt.VARIANT_LIMIT_5]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 0
+    assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 1
     assert any("DESCRIPTIVE, NOT TRADEABLE" in n for n in doc["notes"])
 
 
@@ -475,9 +475,9 @@ def test_the_signal_population_is_shared_but_the_trade_sets_are_not(study):
     """The claim the 2026-09-12 audit struck must not come back: all three variants are offered the
     SAME admitted signals, and exactly two of them book a different set of TRADES."""
     doc, trades = study
-    admitted = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_V1]}
-    n3 = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_V2_N3]}
-    n5 = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_V2_N5]}
+    admitted = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_NEXT_OPEN]}
+    n3 = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_LIMIT_3]}
+    n5 = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_LIMIT_5]}
     assert n3 < admitted and n5 < admitted            # strict subsets: the limit forfeits signals
     assert n3 < n5                                    # and the windows nest
     assert len(admitted) == 4 and len(n3) == 2 and len(n5) == 3
@@ -491,47 +491,47 @@ def test_the_signal_population_is_shared_but_the_trade_sets_are_not(study):
     assert "share a SIGNAL population but NOT a trade set" in md
 
 
-def test_matched_cohorts_split_v1_by_whether_the_v2_limit_filled(study):
-    """V1 re-quoted on the cohort V2-5 FILLED and on the cohort it never filled, hand-checked.
+def test_matched_cohorts_split_next_open_by_whether_the_limit_filled(study):
+    """Next-open re-quoted on the cohort 5-session-limit FILLED and on the cohort it never filled, hand-checked.
 
-    V2-5 fills WINNER (level 100.00), GAPPER (gap-through 95.00) and LATEFILL (level 100.00 on y+4);
-    NOFILL's level is never touched. V1 books all four at the next open. At T+20 the V1 legs are
+    5-session-limit fills WINNER (level 100.00), GAPPER (gap-through 95.00) and LATEFILL (level 100.00 on y+4);
+    NOFILL's level is never touched. next-open books all four at the next open. At T+20 the next-open legs are
     WINNER 120/103 = +16.5049%, GAPPER 96/95 = +1.0526%, LATEFILL 102/105 = -2.8571%, NOFILL 0.0%.
     """
     doc, _trades = study
-    blk = doc["matched_cohorts"]["variants"][bt.VARIANT_V2_N5]
+    blk = doc["matched_cohorts"]["variants"][bt.VARIANT_LIMIT_5]
     assert doc["matched_cohorts"]["descriptive_post_hoc_not_a_registered_trial"] is True
-    assert blk["n_v2_filled"] == 3 and blk["n_v2_unfilled"] == 1
-    assert blk["every_v2_fill_has_a_v1_leg"] is True
+    assert blk["n_limit_filled"] == 3 and blk["n_limit_unfilled"] == 1
+    assert blk["every_limit_fill_has_a_next_open_leg"] is True
 
-    filled = blk["cells"][bt.cohort_label(bt.VARIANT_V2_N5, bt.COHORT_FILLED)]
-    unfilled = blk["cells"][bt.cohort_label(bt.VARIANT_V2_N5, bt.COHORT_UNFILLED)]
-    v2 = blk["cells"][f"{bt.VARIANT_V2_N5}_{bt.COHORT_FILLED}"]
-    # the two cohorts PARTITION V1's trades: nothing double-counted, nothing dropped
-    assert filled["n_trades"] == 3 and unfilled["n_trades"] == 1 and v2["n_trades"] == 3
-    assert filled["n_trades"] + unfilled["n_trades"] == doc["variants"][bt.VARIANT_V1]["n_filled"]
+    filled = blk["cells"][bt.cohort_label(bt.VARIANT_LIMIT_5, bt.COHORT_FILLED)]
+    unfilled = blk["cells"][bt.cohort_label(bt.VARIANT_LIMIT_5, bt.COHORT_UNFILLED)]
+    limit = blk["cells"][f"{bt.VARIANT_LIMIT_5}_{bt.COHORT_FILLED}"]
+    # the two cohorts PARTITION next-open's trades: nothing double-counted, nothing dropped
+    assert filled["n_trades"] == 3 and unfilled["n_trades"] == 1 and limit["n_trades"] == 3
+    assert filled["n_trades"] + unfilled["n_trades"] == doc["variants"][bt.VARIANT_NEXT_OPEN]["n_filled"]
 
     gapper20 = (96.0 / 95.0 - 1.0) * 100.0                       # the median of the filled cohort
     assert filled["horizons"]["20"]["median_gross"] == pytest.approx(gapper20, abs=1e-4)
     assert unfilled["horizons"]["20"]["median_gross"] == pytest.approx(0.0, abs=1e-9)   # NOFILL
-    assert v2["horizons"]["20"]["median_gross"] == pytest.approx(15.0, abs=1e-4)        # LATEFILL
+    assert limit["horizons"]["20"]["median_gross"] == pytest.approx(15.0, abs=1e-4)        # LATEFILL
     cost = _cost_pct()
     assert filled["horizons"]["20"]["median_net"] == pytest.approx(gapper20 - cost, abs=1e-4)
 
     e = blk["effects"]["20"]
-    # PRICE: V2 minus V1 on the SAME events. SELECTION: V1 filled minus V1 unfilled.
+    # PRICE: limit minus next-open on the SAME events. SELECTION: next-open filled minus next-open unfilled.
     assert e["price_effect_median_net_pp"] == pytest.approx(15.0 - gapper20, abs=1e-3)
     assert e["selection_effect_median_net_pp"] == pytest.approx(gapper20, abs=1e-3)
     assert e["pooled_gap_median_net_pp"] is not None
     assert "BOTH" in e["carried_by"]
 
-    # V2-3 is a different, smaller cohort: LATEFILL is only touched on y+4, outside its window
-    blk3 = doc["matched_cohorts"]["variants"][bt.VARIANT_V2_N3]
-    assert blk3["n_v2_filled"] == 2 and blk3["n_v2_unfilled"] == 2
-    f3 = blk3["cells"][bt.cohort_label(bt.VARIANT_V2_N3, bt.COHORT_FILLED)]["horizons"]["20"]
-    u3 = blk3["cells"][bt.cohort_label(bt.VARIANT_V2_N3, bt.COHORT_UNFILLED)]["horizons"]["20"]
+    # 3-session-limit is a different, smaller cohort: LATEFILL is only touched on y+4, outside its window
+    blk3 = doc["matched_cohorts"]["variants"][bt.VARIANT_LIMIT_3]
+    assert blk3["n_limit_filled"] == 2 and blk3["n_limit_unfilled"] == 2
+    f3 = blk3["cells"][bt.cohort_label(bt.VARIANT_LIMIT_3, bt.COHORT_FILLED)]["horizons"]["20"]
+    u3 = blk3["cells"][bt.cohort_label(bt.VARIANT_LIMIT_3, bt.COHORT_UNFILLED)]["horizons"]["20"]
     assert f3["n"] == 2 and u3["n"] == 2
-    # V1 on the UNFILLED cohort is LATEFILL (-2.8571%) and NOFILL (0.0%) -> median -1.4286%
+    # next-open on the UNFILLED cohort is LATEFILL (-2.8571%) and NOFILL (0.0%) -> median -1.4286%
     assert u3["median_gross"] == pytest.approx(-(100.0 * 3.0 / 105.0) / 2.0, abs=1e-4)
 
 
@@ -550,10 +550,10 @@ def test_every_cell_carries_its_own_fill_rate_and_the_tercile_claim_is_matched(s
     """The 'in every margin tercile' claim is only readable off MATCHED cells with n per cell.
 
     On the fixture the widest tercile is NOFILL alone — the one signal the rested limit never
-    catches — so V2 has no trade there at all and the claim is NOT TESTABLE, never 'true'.
+    catches — so the limit variant has no trade there at all and the claim is NOT TESTABLE, never 'true'.
     """
     doc, _trades = study
-    cells = doc["variants"][bt.VARIANT_V2_N5]["cells"]
+    cells = doc["variants"][bt.VARIANT_LIMIT_5]["cells"]
     assert cells[bt.CELL_ALL]["n_signals_in_cell"] == 4
     assert cells[bt.CELL_ALL]["fill_rate_in_cell"] == pytest.approx(0.75)
     assert cells[bt.CELL_MARGIN_HIGH]["n_signals_in_cell"] == 1          # NOFILL
@@ -561,19 +561,19 @@ def test_every_cell_carries_its_own_fill_rate_and_the_tercile_claim_is_matched(s
     assert cells[bt.CELL_MARGIN_HIGH]["fill_rate_in_cell"] == 0.0
     assert cells[bt.CELL_MARGIN_HIGH]["n_unfilled_in_cell"] == 1
     assert cells[bt.CELL_MARGIN_LOW]["fill_rate_in_cell"] == 1.0        # GAPPER, gapped through
-    # V1 fills everything, so its per-cell fill rate is 1.0 in every cell
+    # next-open fills everything, so its per-cell fill rate is 1.0 in every cell
     for name in (bt.CELL_ALL, *bt.MARGIN_CELLS):
-        assert doc["variants"][bt.VARIANT_V1]["cells"][name]["fill_rate_in_cell"] == 1.0
+        assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cells"][name]["fill_rate_in_cell"] == 1.0
 
-    ter = doc["matched_cohorts"]["variants"][bt.VARIANT_V2_N5]["by_margin_tercile"]
+    ter = doc["matched_cohorts"]["variants"][bt.VARIANT_LIMIT_5]["by_margin_tercile"]
     assert ter[bt.CELL_MARGIN_HIGH]["n_signals"] == 1
-    assert ter[bt.CELL_MARGIN_HIGH]["n_v2_filled"] == 0
-    assert ter[bt.CELL_MARGIN_HIGH]["n_v2_unfilled"] == 1
+    assert ter[bt.CELL_MARGIN_HIGH]["n_limit_filled"] == 0
+    assert ter[bt.CELL_MARGIN_HIGH]["n_limit_unfilled"] == 1
     assert ter[bt.CELL_MARGIN_HIGH]["fill_rate"] == 0.0
     assert ter[bt.CELL_MARGIN_HIGH]["price_effect_median_net_pp"]["20"] is None
     assert ter[bt.CELL_MARGIN_LOW]["fill_rate"] == 1.0
-    holds = doc["matched_cohorts"]["variants"][bt.VARIANT_V2_N5][
-        "v2_beats_matched_v1_in_every_margin_tercile"]
+    holds = doc["matched_cohorts"]["variants"][bt.VARIANT_LIMIT_5][
+        "limit_beats_matched_next_open_in_every_margin_tercile"]
     assert holds == {"5": None, "10": None, "20": None}                 # NOT TESTABLE, not True
     text = bt.render_text(doc)
     assert "NOT TESTABLE" in text
@@ -586,17 +586,17 @@ def test_geometry_is_the_median_gross_of_the_variants_own_fills(study):
     absent from it, not zero-filled, or a mechanism that never fills would look costless."""
     doc, _trades = study
     cost = _cost_pct()
-    v2 = doc["geometry"][bt.VARIANT_V2_N5]["horizons"]["20"]
-    assert doc["geometry"][bt.VARIANT_V2_N5]["cost_floor_pct"] == pytest.approx(cost, abs=1e-6)
-    # V2-5 books WINNER (+20%), GAPPER (96/95 - 1) and LATEFILL (+15%) -> median +15%.
-    assert v2["n"] == 3
-    assert v2["median_gross_pct"] == pytest.approx(15.0, abs=1e-4)
-    assert v2["verdict"] == "viable"
-    # V1 books all four: -2.857% (LATEFILL), 0.000% (NOFILL), +1.053% (GAPPER), +16.505% (WINNER).
-    v1 = doc["geometry"][bt.VARIANT_V1]["horizons"]["20"]
-    assert v1["n"] == 4
-    assert v1["median_gross_pct"] == pytest.approx(50.0 / 95.0, abs=1e-4)
-    assert v1["margin_pct"] == pytest.approx(50.0 / 95.0 - cost, abs=1e-4)
+    limit = doc["geometry"][bt.VARIANT_LIMIT_5]["horizons"]["20"]
+    assert doc["geometry"][bt.VARIANT_LIMIT_5]["cost_floor_pct"] == pytest.approx(cost, abs=1e-6)
+    # 5-session-limit books WINNER (+20%), GAPPER (96/95 - 1) and LATEFILL (+15%) -> median +15%.
+    assert limit["n"] == 3
+    assert limit["median_gross_pct"] == pytest.approx(15.0, abs=1e-4)
+    assert limit["verdict"] == "viable"
+    # next-open books all four: -2.857% (LATEFILL), 0.000% (NOFILL), +1.053% (GAPPER), +16.505% (WINNER).
+    next_open = doc["geometry"][bt.VARIANT_NEXT_OPEN]["horizons"]["20"]
+    assert next_open["n"] == 4
+    assert next_open["median_gross_pct"] == pytest.approx(50.0 / 95.0, abs=1e-4)
+    assert next_open["margin_pct"] == pytest.approx(50.0 / 95.0 - cost, abs=1e-4)
 
 
 def test_geometry_verdict_is_strict_against_the_cost_floor():
@@ -604,7 +604,7 @@ def test_geometry_verdict_is_strict_against_the_cost_floor():
     that exactly pays its costs earns nothing. Probed directly so the boundary is exercised."""
     def _t(gross: float) -> bt.Trade:
         return bt.Trade(
-            symbol="X", variant=bt.VARIANT_V1, signal_date=SESSIONS[0], fill_date=SESSIONS[1],
+            symbol="X", variant=bt.VARIANT_NEXT_OPEN, signal_date=SESSIONS[0], fill_date=SESSIONS[1],
             fill_idx=1, fill_px=100.0, fill_delay_sessions=1, margin=0.01, tercile=None,
             gross={20: gross}, net={20: gross - 0.3192},
         )
@@ -629,9 +629,9 @@ def test_cpcv_degrades_honestly_on_a_tiny_population(study):
         assert cpcv["promotable"] is False
         assert any("CPCV produced no folds" in r for r in cpcv["reasons"])
         assert cpcv["margin_floor_pct_per_day"] == pytest.approx(_cost_pct() / 20.0, abs=1e-9)
-    # the CPCV series is keyed on the FILL day: V1 fills everything on one day, V2-5 spans two
-    assert doc["variants"][bt.VARIANT_V1]["cpcv"]["20"]["n_obs_days"] == 1
-    assert doc["variants"][bt.VARIANT_V2_N5]["cpcv"]["20"]["n_obs_days"] == 2
+    # the CPCV series is keyed on the FILL day: next-open fills everything on one day, 5-session-limit spans two
+    assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cpcv"]["20"]["n_obs_days"] == 1
+    assert doc["variants"][bt.VARIANT_LIMIT_5]["cpcv"]["20"]["n_obs_days"] == 2
 
 
 def test_decision_rule_is_neither_when_nothing_is_promotable(study):
@@ -666,29 +666,29 @@ def _decision_doc(entries: dict[str, tuple]) -> dict:
 def test_decision_rule_picks_the_higher_median_among_promotable_variants_only():
     """A higher median that is NOT CPCV-promotable never wins — the proviso is the whole rule."""
     doc = _decision_doc({
-        bt.VARIANT_V1: (False, 9.0),       # best median, not promotable -> ineligible
-        bt.VARIANT_V2_N3: (True, 1.0),
-        bt.VARIANT_V2_N5: (True, 2.0),
+        bt.VARIANT_NEXT_OPEN: (False, 9.0),       # best median, not promotable -> ineligible
+        bt.VARIANT_LIMIT_3: (True, 1.0),
+        bt.VARIANT_LIMIT_5: (True, 2.0),
     })
     d = bt.decision_outcome(doc)
-    assert d["promotable_at_horizon"] == [bt.VARIANT_V2_N5, bt.VARIANT_V2_N3]
-    assert d["outcome"] == d["winner"] == bt.VARIANT_V2_N5
+    assert d["promotable_at_horizon"] == [bt.VARIANT_LIMIT_5, bt.VARIANT_LIMIT_3]
+    assert d["outcome"] == d["winner"] == bt.VARIANT_LIMIT_5
     assert d["shipped_mechanism_unchanged"] is True
 
-    won_by_v1 = bt.decision_outcome(_decision_doc({
-        bt.VARIANT_V1: (True, 3.0), bt.VARIANT_V2_N3: (True, 1.0), bt.VARIANT_V2_N5: (False, 9.0),
+    won_by_next_open = bt.decision_outcome(_decision_doc({
+        bt.VARIANT_NEXT_OPEN: (True, 3.0), bt.VARIANT_LIMIT_3: (True, 1.0), bt.VARIANT_LIMIT_5: (False, 9.0),
     }))
-    assert won_by_v1["winner"] == bt.VARIANT_V1
-    assert won_by_v1["shipped_mechanism_unchanged"] is False
+    assert won_by_next_open["winner"] == bt.VARIANT_NEXT_OPEN
+    assert won_by_next_open["shipped_mechanism_unchanged"] is False
 
     tie = bt.decision_outcome(_decision_doc({
-        bt.VARIANT_V1: (True, 2.0), bt.VARIANT_V2_N3: (True, 2.0), bt.VARIANT_V2_N5: (False, None),
+        bt.VARIANT_NEXT_OPEN: (True, 2.0), bt.VARIANT_LIMIT_3: (True, 2.0), bt.VARIANT_LIMIT_5: (False, None),
     }))
     assert tie["outcome"] == bt.DECISION_TIE and tie["winner"] is None
 
     # a promotable variant with no median (n=0 at the horizon) is not a winner by default
     none_med = bt.decision_outcome(_decision_doc({
-        bt.VARIANT_V1: (True, None), bt.VARIANT_V2_N3: (False, None), bt.VARIANT_V2_N5: (False, None),
+        bt.VARIANT_NEXT_OPEN: (True, None), bt.VARIANT_LIMIT_3: (False, None), bt.VARIANT_LIMIT_5: (False, None),
     }))
     assert none_med["outcome"] == bt.DECISION_NEITHER
 
@@ -698,7 +698,7 @@ def test_reported_promotable_requires_cpcv_AND_viable_geometry():
 
     The gates are built on different statistics — the CPCV series is a per-fill-day MEAN, the
     geometry verdict a MEDIAN — so a tail-driven cell can pass CPCV while its typical trade pays the
-    round trip for nothing (V1 at T+10 on the real run). Reported promotability is the AND.
+    round trip for nothing (next-open at T+10 on the real run). Reported promotability is the AND.
     """
     dead = bt.apply_reporting_rule(
         {"promotable": True, "reasons": []}, {"verdict": "dead"}, -0.3192
@@ -729,17 +729,17 @@ def test_the_tightened_gate_can_only_withhold_never_promote():
     """Same decision rule, tighter proviso: it can change the winner by REMOVING a candidate, and
     can never add one the registered CPCV gate refused."""
     doc = _decision_doc({
-        bt.VARIANT_V1: (True, 3.0, False),       # CPCV passes, geometry dead -> withheld
-        bt.VARIANT_V2_N3: (True, 1.0, True),
-        bt.VARIANT_V2_N5: (False, 9.0, False),   # CPCV refuses; the amendment cannot rescue it
+        bt.VARIANT_NEXT_OPEN: (True, 3.0, False),       # CPCV passes, geometry dead -> withheld
+        bt.VARIANT_LIMIT_3: (True, 1.0, True),
+        bt.VARIANT_LIMIT_5: (False, 9.0, False),   # CPCV refuses; the amendment cannot rescue it
     })
     registered = bt.decision_outcome(doc)
     tightened = bt.decision_outcome(doc, gate_key="reported_promotable")
     assert registered["promotability_gate"] == "promotable"
-    assert registered["winner"] == bt.VARIANT_V1                 # the registered rule, verbatim
+    assert registered["winner"] == bt.VARIANT_NEXT_OPEN                 # the registered rule, verbatim
     assert registered["shipped_mechanism_unchanged"] is False
     assert tightened["promotability_gate"] == "reported_promotable"
-    assert tightened["winner"] == bt.VARIANT_V2_N3               # V1's cell is not viable
+    assert tightened["winner"] == bt.VARIANT_LIMIT_3               # next-open's cell is not viable
     assert tightened["shipped_mechanism_unchanged"] is True
     assert set(tightened["promotable_at_horizon"]) <= set(registered["promotable_at_horizon"])
 
@@ -771,7 +771,7 @@ def test_a_structural_ex_date_vetoes_the_signal(db_with_action, kind, books_trad
     """A bonus 20 days before WINNER's cross holds its 20-session window in two units; a dividend
     rescales nothing and must not suppress anything."""
     doc, trades = _run(db_with_action(kind))
-    booked = {t.symbol for t in trades[bt.VARIANT_V1]}
+    booked = {t.symbol for t in trades[bt.VARIANT_NEXT_OPEN]}
     assert ("WINNER" in booked) is books_trade
     assert booked >= {"GAPPER", "LATEFILL", "NOFILL"}        # the veto is per symbol, never global
     assert doc["vetoes"][brk20.VETO_UNADJUSTED_HISTORY] == vetoes
@@ -818,9 +818,9 @@ def test_main_writes_json_and_md_and_orders_the_report(db_file, tmp_path, capsys
     assert "FILL" in doc["meta"]["horizon_anchor"]
 
     assert "matched_cohorts" in doc
-    assert set(doc["matched_cohorts"]["variants"]) == {bt.VARIANT_V2_N3, bt.VARIANT_V2_N5}
+    assert set(doc["matched_cohorts"]["variants"]) == {bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5}
     assert doc["decision_under_tightened_reporting_rule"]["outcome"] == bt.DECISION_NEITHER
-    assert doc["variants"][bt.VARIANT_V1]["cpcv"]["10"]["reported_promotable"] is False
+    assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cpcv"]["10"]["reported_promotable"] is False
 
     text = capsys.readouterr().out
     assert text.isascii()                                   # Windows console is cp1252
@@ -838,7 +838,7 @@ def test_main_writes_json_and_md_and_orders_the_report(db_file, tmp_path, capsys
     assert "Outcome under the registered rule: `neither`" in md
     assert "Outcome under the 2026-09-12 tightened reporting gate: `neither`" in md
     assert "## Matched-cohort decomposition" in md
-    assert f"`{bt.cohort_label(bt.VARIANT_V2_N5, bt.COHORT_UNFILLED)}`" in md
+    assert f"`{bt.cohort_label(bt.VARIANT_LIMIT_5, bt.COHORT_UNFILLED)}`" in md
     for variant in bt.VARIANTS:
         assert f"`{variant}`" in md
 

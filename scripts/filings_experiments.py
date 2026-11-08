@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Pre-registered filings x price-baseline experiments E1-E3 (2026-07-17).
+"""Pre-registered filings x price-baseline experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness) (2026-07-17).
 
 Single-pass, honest, offline analysis tools. Each experiment was PRE-REGISTERED (hypothesis +
 discriminator pinned before it ran) so there is no in-sample tuning here: the ORB
@@ -8,23 +8,23 @@ in-sample trap), the RSI2 config is the already-promoted champion, and the insid
 event_study.py's verbatim. The only outputs are gross AND net stats per cohort/slice, reported as
 found with honest n=0 sections when a cohort/slice is empty.
 
-    uv run python scripts/filings_experiments.py <e1|e2|e3> --from YYYY-MM-DD --to YYYY-MM-DD \
+    uv run python scripts/filings_experiments.py <catalyst_orb|rsi2_catalyst_veto|insider_robustness> --from YYYY-MM-DD --to YYYY-MM-DD \
         --symbols RELIANCE,TCS[,...]  [--reports-dir data/reports]
 
-E1  catalyst-conditioned ORB. H: ORB breakouts that carry a fresh exchange-verified event trend
+catalyst_orb  catalyst-conditioned ORB. H: ORB breakouts that carry a fresh exchange-verified event trend
     (insider-buy cluster <=5 sessions old, OR results T+1/T+2) hold, while the unconditioned ones
     fade at the pinned -0.02% GROSS/trade base. ORB-v2 signals at the envelope defaults,
     ONE vbt Portfolio.from_signals (mechanics identical to sweep._backtest, fees=0 so the per-trade
     return is pure GROSS); each trade flagged into cohort A (insider-buy cluster), B (results T+1/2),
     or C (unconditioned). net = gross - one MIS round trip (CostModel at Rs 20,000).
 
-E2  RSI2 catalyst-veto split. H: the losing tail of the 70%-win champion concentrates in adverse
+rsi2_catalyst_veto  RSI2 catalyst-veto split. H: the losing tail of the 70%-win champion concentrates in adverse
     filings context. RSI2 signals at the promoted config with the NIFTY 50 regime filter; each entry
     flagged ADVERSE (open-market insider SELL cluster <=5 sessions old, OR promoter pledge INCREASE
-    >=+5pp broadcast within 90 calendar days), FAVORABLE (insider-buy cluster, as E1), or NEUTRAL.
+    >=+5pp broadcast within 90 calendar days), FAVORABLE (insider-buy cluster, as catalyst_orb), or NEUTRAL.
     net = gross - one CNC round trip.
 
-E3  insider_net_buy robustness slices (stage-3 gate input). The event_study insider-buy leg VERBATIM
+insider_robustness  insider_net_buy robustness slices. The event_study insider-buy leg VERBATIM
     (same crossings, same T+10/T+20 gross/net/hit) sliced three ways: (a) calendar year of entry,
     (b) dominant person_category of the filings that made up the crossing value (by value share),
     (c) liquidity tercile by the symbol's 20d median close*volume at entry.
@@ -79,17 +79,17 @@ _spec.loader.exec_module(es)
 _log = get_logger("scripts.filings_experiments")
 
 # --------------------------------------------------------------------------- pinned experiment config
-#: E1 ORB signals: the ENVELOPE DEFAULTS ONLY (NOT the sweep-best -- pre-registration
+#: catalyst_orb ORB signals: the ENVELOPE DEFAULTS ONLY (NOT the sweep-best -- pre-registration
 #: avoids the in-sample trap). Mirrors config/envelope.yaml orb.* defaults.
-E1_ORB_PARAMS: dict[str, float] = {
+CATALYST_ORB_PARAMS: dict[str, float] = {
     "orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5,
 }
-#: E2 RSI2 signals: the already-PROMOTED champion config (2026-07-16: 102 trades / 70% win /
+#: rsi2_catalyst_veto RSI2 signals: the already-PROMOTED champion config (2026-07-16: 102 trades / 70% win /
 #: +0.58% net per trade) -- a pre-registered fixed config, not re-swept here.
-E2_RSI2_PARAMS: dict[str, float] = {
+RSI2_CATALYST_VETO_PARAMS: dict[str, float] = {
     "rsi_entry": 2.0, "rsi_exit": 65.0, "stop_pct": 6.0, "max_hold_days": 15.0,
 }
-#: Pre-registered unconditioned ORB fade base (worklog): -0.02% GROSS per trade.
+#: Pre-registered unconditioned ORB fade base (pinned before the run): -0.02% GROSS per trade.
 UNCONDITIONED_ORB_BASE_GROSS_PCT = -0.02
 #: Pre-registered RSI2 champion base win rate: 70%.
 RSI2_WIN_BASE = 0.70
@@ -105,14 +105,14 @@ CLUSTER_FORWARD_SESSIONS = 5
 RESULTS_OFFSETS = (1, 2)
 #: Adverse pledge-increase look-back window (calendar days before entry).
 PLEDGE_WINDOW_DAYS = 90
-#: E3 liquidity slice: trailing sessions for the median-traded-value liquidity proxy.
+#: insider_robustness liquidity slice: trailing sessions for the median-traded-value liquidity proxy.
 LIQUIDITY_MEDIAN_WINDOW = 20
 #: Daily-session context buffer before `start` so an event that crossed shortly before the window
-#: still flags the in-window entries it should. (E1/E2 cohort flagging only; E3 events are verbatim.)
+#: still flags the in-window entries it should. (catalyst_orb/rsi2_catalyst_veto cohort flagging only; insider_robustness events are verbatim.)
 SESSION_LOOKBACK_DAYS = 60
 
-# --------------------------------------------------------------------------- E3 person_category groups
-#: Pinned person_category -> group mapping (E3 slice b). Case-insensitive SUBSTRING match, checked in
+# --------------------------------------------------------------------------- insider_robustness person_category groups
+#: Pinned person_category -> group mapping (insider_robustness slice b). Case-insensitive SUBSTRING match, checked in
 #: order, first match wins; anything unmatched (employee / designated person / relative / blank) is
 #: 'employee_other'. NSE PIT personCategory strings vary ('Promoters', 'Promoter Group', 'Director',
 #: 'Key Managerial Personnel', 'Employees', ...); the substrings below cover the families.
@@ -210,7 +210,7 @@ def contributing_filings(
     """The open-market filings whose value made up the trailing-``window``-session crossing sum at
     ``event_index`` -- i.e. eligible filings whose point-in-time session lands in
     [event_index-window+1, event_index]. This is exactly the set summed by
-    :func:`event_study.insider_cluster_events` at the crossing session (E3 slice-b input)."""
+    :func:`event_study.insider_cluster_events` at the crossing session (insider_robustness slice-b input)."""
     predicate = predicate or es.is_open_market_buy
     lo = max(0, event_index - window + 1)
     out: list[dict] = []
@@ -241,7 +241,7 @@ def dominant_category(filings: list[dict]) -> str:
 
 def trailing_median_traded_value(rows, idx: int, window: int = LIQUIDITY_MEDIAN_WINDOW) -> float:
     """Median of ``close * volume`` over the ``window`` sessions ending at ``idx`` (inclusive) --
-    the E3 liquidity proxy at entry. ``rows`` are :class:`event_study._Row`."""
+    the insider_robustness liquidity proxy at entry. ``rows`` are :class:`event_study._Row`."""
     lo = max(0, idx - window + 1)
     vals = [r.close * r.volume for r in rows[lo:idx + 1]]
     return statistics.median(vals) if vals else float("nan")
@@ -351,12 +351,12 @@ def _data_span(frames) -> tuple[str | None, str | None]:
     return str(pd.Timestamp(idx[0]).date()), str(pd.Timestamp(idx[-1]).date())
 
 
-# =========================================================================== E1
-def run_e1(
+# =========================================================================== catalyst_orb
+def run_catalyst_orb(
     store: MarketStore, cost_model: CostModel, clock: Clock, symbols: list[str],
     start: date, end: date, *, insider_min_value_inr: int,
 ) -> dict:
-    """Catalyst-conditioned ORB. Returns the structured result dict (rendered by :func:`render_e1`)."""
+    """Catalyst-conditioned ORB. Returns the structured result dict (rendered by :func:`render_catalyst_orb`)."""
     round_trip_pct = float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, "MIS"))
     runner = SweepRunner(store, cost_model, clock, index_symbol=None)  # orb needs no regime index
     frames = runner._load_frames("orb", start, end, symbols)
@@ -381,7 +381,7 @@ def run_e1(
         ]
         b_dates[sym] = results_active_dates(sessions, res_bdts)
 
-    trades = [] if frames.empty else _run_and_extract("orb", frames, E1_ORB_PARAMS, fee)
+    trades = [] if frames.empty else _run_and_extract("orb", frames, CATALYST_ORB_PARAMS, fee)
     cohorts = {c: {"gross": [], "net": []} for c in ("A", "B", "C")}
     overlap = 0
     for sym, edate, gross in trades:
@@ -403,11 +403,11 @@ def run_e1(
     stats = {c: es._leg_stats(v["gross"], v["net"]) for c, v in cohorts.items()}
     d0, d1 = _data_span(frames)
     return {
-        "experiment": "e1",
+        "experiment": "catalyst_orb",
         "title": "Catalyst-conditioned ORB (envelope-default v2 signals)",
         "hypothesis": "ORB breakouts with a fresh exchange-verified event trend hold; unconditioned "
                       "ones fade at the pinned -0.02% GROSS/trade base.",
-        "params": E1_ORB_PARAMS,
+        "params": CATALYST_ORB_PARAMS,
         "product": "MIS",
         "round_trip_pct": round_trip_pct,
         "n_symbols": len(frames.symbols),
@@ -424,13 +424,13 @@ def run_e1(
     }
 
 
-# =========================================================================== E2
-def run_e2(
+# =========================================================================== rsi2_catalyst_veto
+def run_rsi2_catalyst_veto(
     store: MarketStore, cost_model: CostModel, clock: Clock, symbols: list[str],
     start: date, end: date, *, insider_min_value_inr: int, pledge_delta_min_pct: float,
     index_symbol: str | None = DEFAULT_INDEX_SYMBOL,
 ) -> dict:
-    """RSI2 catalyst-veto split. Returns the structured result dict (rendered by :func:`render_e2`)."""
+    """RSI2 catalyst-veto split. Returns the structured result dict (rendered by :func:`render_rsi2_catalyst_veto`)."""
     round_trip_pct = float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
     runner = SweepRunner(store, cost_model, clock, index_symbol=index_symbol)
     frames = runner._load_frames("rsi2", start, end, symbols)
@@ -460,7 +460,7 @@ def run_e2(
             "inc_events": inc_events,
         }
 
-    trades = [] if frames.empty else _run_and_extract("rsi2", frames, E2_RSI2_PARAMS, fee)
+    trades = [] if frames.empty else _run_and_extract("rsi2", frames, RSI2_CATALYST_VETO_PARAMS, fee)
     cohorts = {c: {"gross": [], "net": []} for c in ("ADVERSE", "FAVORABLE", "NEUTRAL")}
     overlap = 0
     for sym, edate, gross in trades:
@@ -489,11 +489,11 @@ def run_e2(
     stats = {c: es._leg_stats(v["gross"], v["net"]) for c, v in cohorts.items()}
     d0, d1 = _data_span(frames)
     return {
-        "experiment": "e2",
+        "experiment": "rsi2_catalyst_veto",
         "title": "RSI2 catalyst-veto split (promoted champion config)",
         "hypothesis": "The losing tail of the 70%-win RSI2 champion concentrates in adverse filings "
                       "context (insider selling / pledge increase).",
-        "params": E2_RSI2_PARAMS,
+        "params": RSI2_CATALYST_VETO_PARAMS,
         "product": "CNC",
         "regime_filter": index_symbol if regime_on else None,
         "regime_applied": regime_on,
@@ -512,17 +512,17 @@ def run_e2(
     }
 
 
-# =========================================================================== E3
-_E3_HORIZONS = (10, 20)
+# =========================================================================== insider_robustness
+_INSIDER_ROBUSTNESS_HORIZONS = (10, 20)
 
 
-def run_e3(
+def run_insider_robustness(
     store: MarketStore, cost_model: CostModel, clock: Clock, symbols: list[str],
     start: date, end: date, *, insider_min_value_inr: int,
 ) -> dict:
     """insider_net_buy robustness slices. The event_study insider-buy leg VERBATIM (bars over
     [start, end], same crossings, same measure_directional), sliced by year / dominant category /
-    liquidity tercile. Returns the structured result dict (rendered by :func:`render_e3`)."""
+    liquidity tercile. Returns the structured result dict (rendered by :func:`render_insider_robustness`)."""
     cost_pct = float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, "CNC"))
     events: list[dict] = []
     for sym in symbols:
@@ -556,7 +556,7 @@ def run_e3(
         for ev in events:
             buckets.setdefault(key_fn(ev), []).append(ev["obs"])
         return {
-            b: es._horizon_stats(obs_list, _E3_HORIZONS, "gross", "net")
+            b: es._horizon_stats(obs_list, _INSIDER_ROBUSTNESS_HORIZONS, "gross", "net")
             for b, obs_list in buckets.items()
         }
 
@@ -565,13 +565,13 @@ def run_e3(
     by_liquidity = _slice(lambda ev: ev["liq_label"])
 
     return {
-        "experiment": "e3",
-        "title": "insider_net_buy robustness slices (stage-3 gate input)",
+        "experiment": "insider_robustness",
+        "title": "insider_net_buy robustness slices",
         "hypothesis": "The stage-2 insider_net_buy edge (T+10 +0.75% / T+20 +1.61% net, n=110) is "
                       "broad-based, not concentrated in one year / person-category / liquidity tier.",
         "product": "CNC",
         "round_trip_pct": cost_pct,
-        "horizons": list(_E3_HORIZONS),
+        "horizons": list(_INSIDER_ROBUSTNESS_HORIZONS),
         "n_symbols": len(symbols),
         "n_events": len(events),
         "data_start": str(start),
@@ -615,9 +615,9 @@ def _meta_lines(res: dict) -> list[str]:
     return lines
 
 
-def render_e1(res: dict) -> str:
+def render_catalyst_orb(res: dict) -> str:
     L: list[str] = []
-    L.append("# Experiment E1 -- catalyst-conditioned ORB")
+    L.append("# Experiment catalyst_orb -- catalyst-conditioned ORB")
     L.append("")
     L.append(f"_H: {res['hypothesis']}_")
     L.append("")
@@ -658,9 +658,9 @@ def render_e1(res: dict) -> str:
     return "\n".join(L)
 
 
-def render_e2(res: dict) -> str:
+def render_rsi2_catalyst_veto(res: dict) -> str:
     L: list[str] = []
-    L.append("# Experiment E2 -- RSI2 catalyst-veto split")
+    L.append("# Experiment rsi2_catalyst_veto -- RSI2 catalyst-veto split")
     L.append("")
     L.append(f"_H: {res['hypothesis']}_")
     L.append("")
@@ -701,13 +701,13 @@ def render_e2(res: dict) -> str:
     return "\n".join(L)
 
 
-_E3_SLICE_HEADER = (
+_INSIDER_ROBUSTNESS_SLICE_HEADER = (
     "| slice | n | mean gross % | median gross % | mean net % | median net % | hit rate (net) |\n"
     "|:------|--:|-------------:|---------------:|-----------:|-------------:|---------------:|"
 )
 
 
-def _e3_bucket_order(family: str, buckets: dict) -> list[str]:
+def _insider_robustness_bucket_order(family: str, buckets: dict) -> list[str]:
     keys = list(buckets)
     if family == "by_year":
         return sorted(keys, key=_year_sort_key)
@@ -720,18 +720,18 @@ def _e3_bucket_order(family: str, buckets: dict) -> list[str]:
     return sorted(keys)
 
 
-def _render_e3_family(L: list[str], title: str, family: str, buckets: dict) -> None:
+def _render_insider_robustness_family(L: list[str], title: str, family: str, buckets: dict) -> None:
     L.append(f"## {title}")
     L.append("")
     if not buckets:
         L.append("> honest n=0 -- no insider_net_buy crossings measured in the window.")
         L.append("")
         return
-    order = _e3_bucket_order(family, buckets)
-    for h in _E3_HORIZONS:
+    order = _insider_robustness_bucket_order(family, buckets)
+    for h in _INSIDER_ROBUSTNESS_HORIZONS:
         L.append(f"### T+{h}")
         L.append("")
-        L.append(_E3_SLICE_HEADER)
+        L.append(_INSIDER_ROBUSTNESS_SLICE_HEADER)
         for b in order:
             s = buckets[b][h]
             L.append(
@@ -741,9 +741,9 @@ def _render_e3_family(L: list[str], title: str, family: str, buckets: dict) -> N
         L.append("")
 
 
-def render_e3(res: dict) -> str:
+def render_insider_robustness(res: dict) -> str:
     L: list[str] = []
-    L.append("# Experiment E3 -- insider_net_buy robustness slices")
+    L.append("# Experiment insider_robustness -- insider_net_buy robustness slices")
     L.append("")
     L.append(f"_H: {res['hypothesis']}_")
     L.append("")
@@ -762,24 +762,24 @@ def render_e3(res: dict) -> str:
         L.append("> NO insider_net_buy crossings for the requested symbols/window -- no evidence "
                  "either way. Reported honestly; backfill more history or widen the window.")
         L.append("")
-    _render_e3_family(L, "Slice (a) -- by calendar year of entry", "by_year", res["slices"]["by_year"])
-    _render_e3_family(L, "Slice (b) -- by dominant person_category (value share)", "by_category",
+    _render_insider_robustness_family(L, "Slice (a) -- by calendar year of entry", "by_year", res["slices"]["by_year"])
+    _render_insider_robustness_family(L, "Slice (b) -- by dominant person_category (value share)", "by_category",
                       res["slices"]["by_category"])
-    _render_e3_family(L, "Slice (c) -- by 20d median-traded-value liquidity tercile", "by_liquidity",
+    _render_insider_robustness_family(L, "Slice (c) -- by 20d median-traded-value liquidity tercile", "by_liquidity",
                       res["slices"]["by_liquidity"])
     L.append("## Discriminator")
     L.append("")
-    L += _e3_discriminator_lines(res)
+    L += _insider_robustness_discriminator_lines(res)
     L.append("")
     return "\n".join(L)
 
 
-def _e3_discriminator_lines(res: dict) -> list[str]:
+def _insider_robustness_discriminator_lines(res: dict) -> list[str]:
     def _t20_net(buckets: dict, order_family: str) -> list[str]:
         if not buckets:
             return ["  (none)"]
         out = []
-        for b in _e3_bucket_order(order_family, buckets):
+        for b in _insider_robustness_bucket_order(order_family, buckets):
             s = buckets[b][20]
             out.append(f"  {b}: n={s['n']} T+20 net mean={_fmt_pct(s['mean_net'])}%")
         return out
@@ -795,7 +795,7 @@ def _e3_discriminator_lines(res: dict) -> list[str]:
     return lines
 
 
-_RENDERERS = {"e1": render_e1, "e2": render_e2, "e3": render_e3}
+_RENDERERS = {"catalyst_orb": render_catalyst_orb, "rsi2_catalyst_veto": render_rsi2_catalyst_veto, "insider_robustness": render_insider_robustness}
 
 
 # =========================================================================== driver
@@ -823,8 +823,8 @@ def _parse_date(s: str) -> date:
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
-    parser = argparse.ArgumentParser(description="Pre-registered filings experiments E1-E3.")
-    parser.add_argument("experiment", choices=("e1", "e2", "e3"))
+    parser = argparse.ArgumentParser(description="Pre-registered filings experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness).")
+    parser.add_argument("experiment", choices=("catalyst_orb", "rsi2_catalyst_veto", "insider_robustness"))
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--symbols", default=None, help="comma-separated symbols (else the latest universe_daily)")
@@ -856,15 +856,15 @@ def main(argv: list[str] | None = None) -> int:
 
         cost_model = CostModel.from_config()
         f = settings.filings
-        if args.experiment == "e1":
-            res = run_e1(store, cost_model, clock, symbols, args.start, args.end,
+        if args.experiment == "catalyst_orb":
+            res = run_catalyst_orb(store, cost_model, clock, symbols, args.start, args.end,
                          insider_min_value_inr=f.insider_min_value_inr)
-        elif args.experiment == "e2":
-            res = run_e2(store, cost_model, clock, symbols, args.start, args.end,
+        elif args.experiment == "rsi2_catalyst_veto":
+            res = run_rsi2_catalyst_veto(store, cost_model, clock, symbols, args.start, args.end,
                          insider_min_value_inr=f.insider_min_value_inr,
                          pledge_delta_min_pct=f.pledge_delta_min_pct)
         else:
-            res = run_e3(store, cost_model, clock, symbols, args.start, args.end,
+            res = run_insider_robustness(store, cost_model, clock, symbols, args.start, args.end,
                          insider_min_value_inr=f.insider_min_value_inr)
 
         md = _RENDERERS[args.experiment](res)

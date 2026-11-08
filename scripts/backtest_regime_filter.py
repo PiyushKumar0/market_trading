@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Regime-filter study (pre-registered 2026-10-07).
 
-Per strategy (brk20 V2-N5 fills, hi52 v2, ins), the arm (ii) construct (registered entry, T+20 time
+Per strategy (brk20 5-session-limit fills, hi52 v2, ins), the time-only-arm construct (registered entry, T+20 time
 exit, no stop) over the admitted events, split by the rsi2 NIFTY 50 regime at the signal session: ON
 is the trial, the full population the REFERENCE; OFF and the September 2026 down-leg are diagnostics.
 Family N = 1 per strategy. Evidence only; wires nothing. Exit codes: 0 ran, 2 refused.
@@ -72,7 +72,7 @@ def build_population(name: str, conn, db: Path, end: date, symbols, max_symbols)
 
 
 def measure(pop: rc.Population, cost: Decimal) -> list[Pair]:
-    """Arm (ii) once per admitted event; every cohort is a subset of this list."""
+    """The time-only arm once per admitted event; every cohort is a subset of this list."""
     pairs: list[Pair] = []
     for ev in pop.events:
         o = rc.walk(ev, stop=None, target=None, horizon=T20, cost_pct=cost,
@@ -115,7 +115,7 @@ def meta(script: str, registration: str, db: Path, end: date, symbols, max_symbo
         "population_override": {"symbols": symbols, "max_symbols": max_symbols},
         "registered_population": not symbols and not max_symbols,
         "population_is_survivorship_tainted_proxy": True,
-        "construct": "arm (ii): registered entry, T+20 time exit, no stop",
+        "construct": "time-only arm: registered entry, T+20 time exit, no stop",
         "horizon_sessions_after_fill": T20,
         "family_n": family_n, "fold_pass_min": fold_pass_min(family_n), "min_n": MIN_N,
         "purge": rc.PURGE, "embargo": rc.EMBARGO,

@@ -639,22 +639,22 @@ with the full row prefix and aborts on any disagreement with the bounded scan wi
 it. The population is the CURRENT eligible universe read from `universe_daily` and applied backwards
 (survivorship-tainted proxy); an empty `universe_daily` is a refusal, not a degraded run. `--symbols`
 OVERRIDES that population and stamps the document as a smoke run — never quote a `--symbols` run as
-the registered study. Trial count is fixed at N=3 (V1 next-open, V2 limit-at-H20 within 3 and within
-5 sessions); there is deliberately no fill-window or rule-parameter flag, because one would turn N=3
+the registered study. Trial count is fixed at N=3 (next-open, and a limit at the 20-session high within 3
+and within 5 sessions); there is deliberately no fill-window or rule-parameter flag, because one would turn N=3
 into N=k silently.
 
 How to read the artifacts:
 
 - **The three variants share a SIGNAL population but NOT a trade set** (8,292 / 4,230 / 4,898 trades):
-  a V2 limit fills only when price returns to the level. Every pooled V1-vs-V2 number is therefore a
+  a limit fills only when price returns to the level. Every pooled next-open vs limit number is therefore a
   comparison PER FILLED TRADE across two different event sets. The old "one shared population … same
   event set" line is gone from the report; do not reintroduce it.
-- **STEP 3B / `matched_cohorts`** is the decomposition that makes the mechanisms comparable: V1
-  re-quoted on exactly the cohort each V2 variant filled (the entry **PRICE** effect) and on the
+- **STEP 3B / `matched_cohorts`** is the decomposition that makes the mechanisms comparable: next-open
+  re-quoted on exactly the cohort each limit variant filled (the entry **PRICE** effect) and on the
   cohort it never filled (the **SELECTION** effect), with n, median/mean gross and net and hit rate
   per horizon per cell, plus the same split per margin tercile. Descriptive, not a fourth trial.
 - **Every cell prints its own fill rate** (`n_signals_in_cell` / `fill_rate_in_cell`). An "in every
-  margin tercile" claim is only readable off `v2_beats_matched_v1_in_every_margin_tercile`, never off
+  margin tercile" claim is only readable off `limit_beats_matched_next_open_in_every_margin_tercile`, never off
   the unmatched pooled rows.
 - **Reported promotability is CPCV AND geometry** (2026-09-12): a cell that passes the
   mean-based CPCV gate while its MEDIAN net is ≤ 0 prints `GATES DISAGREE` and reads NOT promotable.

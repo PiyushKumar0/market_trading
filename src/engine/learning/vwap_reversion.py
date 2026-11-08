@@ -1,6 +1,6 @@
 """PRE-REGISTERED experiment: intraday VWAP-deviation reversion at the 15–60-min horizon.
 
-**C-alpha-experiment. STOPS FOR OWNER REVIEW. No live wiring of any kind** (the pre-registration's own words). This
+**Research-only experiment. STOPS FOR OWNER REVIEW. No live wiring of any kind** (the pre-registration's own words). This
 module is research machinery only: nothing here is imported by a scanner, the gate, the OMS or any
 scheduled job, and the experiment deliberately writes NO ``param_sets`` row (see "Persistence" below)
 so no downstream promotion path can ever pick its output up.
@@ -195,7 +195,7 @@ _log = get_logger("engine.learning.vwap_reversion")
 EXPERIMENT_ID = "vwap_reversion"
 
 #: The banner every report leads with (design requirement 5).
-BANNER = "C-CATEGORY: STOPS FOR OWNER REVIEW - no live wiring"
+BANNER = "RESEARCH ONLY: STOPS FOR OWNER REVIEW - no live wiring"
 
 #: Costs: MIS, ₹20,000 per trade, the corrected cost surface INCLUDING spread.
 PRODUCT = "MIS"
@@ -928,8 +928,8 @@ class VwapReversionReport(BaseModel):
     #: Morning-window mode. ``False`` = the unseeded run as shipped (unseeded ATR, effective window 11:36–14:00);
     #: ``True`` = prior-session-seeded ATR (effective window 10:00–14:00 from day 2 of each symbol).
     seed_atr_prior_session: bool = False
-    #: ``"WO-10"`` | ``"WO-10b"`` — which pre-registration this report answers.
-    experiment_variant: str = "WO-10"
+    #: ``"unseeded"`` | ``"prior_session_seeded"`` — which pre-registration this report answers.
+    experiment_variant: str = "unseeded"
     trial_count_n: int
     stage1: Stage1Result | None
     stage2_ran: bool
@@ -946,7 +946,7 @@ def modelling_notes(
     seed_atr_prior_session: bool = False,
 ) -> list[str]:
     """Every pre-registered choice, in the report (design requirement 5). Pure; no I/O."""
-    variant = "WO-10b" if seed_atr_prior_session else "WO-10"
+    variant = "prior_session_seeded" if seed_atr_prior_session else "unseeded"
     notes = [
         f"VARIANT: {variant}. "
         + (
@@ -1012,18 +1012,18 @@ def modelling_notes(
         "LONG-ONLY ('long side only'; the shorts gate is shut). Per-symbol equal weight; "
         "no portfolio limits, position caps or sizing are modelled — those are the gate/paper "
         "layer's job, deliberately outside a raw-edge experiment.",
-        "SCOPE: this is a C-category experiment. It has NO live wiring, writes NO param_sets row, and "
+        "SCOPE: this is a research-only experiment. It has NO live wiring, writes NO param_sets row, and "
         "STOPS FOR OWNER REVIEW. A negative or aborted result is a valid deliverable and is "
         "reported as measured, never massaged.",
     ]
     if seed_atr_prior_session:
         notes.insert(
             2,
-            "PRIOR-SESSION ATR SEEDING (WO-10b, pre-registered verbatim): 'the Wilder ATR(14) "
+            "PRIOR-SESSION ATR SEEDING (pre-registered verbatim): 'the Wilder ATR(14) "
             "recursion continues from the previous session's final 10m-ATR value, with the current "
             "session's FIRST bucket's true range computed high-low only (no prev-close term: the "
             "overnight gap must never enter the stop unit); a symbol with no prior-session ATR "
-            "produces no trades until its own warm-up completes (fail-closed, same rule as WO-10).' "
+            "produces no trades until its own warm-up completes (fail-closed, same rule as the unseeded run).' "
             "Implementation: a per-SYMBOL chain walked in DATE ORDER — session k's final 10m-bucket "
             "ATR seeds session k+1, so the availability lag costs one bucket (ATR from 09:25) instead "
             f"of {ATR_WARMUP_MINUTES} minutes, and the entry window is the registered "
@@ -1311,7 +1311,7 @@ class VwapReversionExperiment:
             n_sessions=len(symbols_by_date),
             cost_floor_pct=round(self._cost_floor_pct, 6),
             seed_atr_prior_session=self._seed_atr,
-            experiment_variant="WO-10b" if self._seed_atr else "WO-10",
+            experiment_variant="prior_session_seeded" if self._seed_atr else "unseeded",
             trial_count_n=len(STRETCH_GRID),
             stage1=stage1,
             stage2_ran=stage2_ran,
@@ -1384,7 +1384,7 @@ def render_markdown(report: VwapReversionReport) -> str:
     if r.seed_atr_prior_session:
         lines.append(
             f"- Stop unit: {STOP_ATR_MULT:g} x Wilder ATR({ATR_PERIOD}) on session-local "
-            f"{ATR_RESAMPLE_MINUTES}-minute bars, **PRIOR-SESSION SEEDED (WO-10b)** — each symbol's "
+            f"{ATR_RESAMPLE_MINUTES}-minute bars, **PRIOR-SESSION SEEDED** — each symbol's "
             "ATR recursion continues from the previous session's final value, with the first bucket's "
             "TR taken high−low only so the overnight gap never enters the stop. Effective entry "
             f"window: the registered **{ENTRY_WINDOW_START:%H:%M}–{ENTRY_WINDOW_END:%H:%M}** from day "
@@ -1429,7 +1429,7 @@ def render_markdown(report: VwapReversionReport) -> str:
             lines.append("- Exit reasons: " + ", ".join(f"`{k}` {v}" for k, v in s.exit_reasons.items()))
         lines.append("")
         if s.window_splits:
-            lines.append("### Entry-window splits (WO-10b) — REPORTING ONLY, never a gate")
+            lines.append("### Entry-window splits (prior-session-seeded run) — REPORTING ONLY, never a gate")
             lines.append("")
             lines.append(
                 "The abort criterion above is the OVERALL number, exactly as pre-registered. This cut "
@@ -1441,7 +1441,7 @@ def render_markdown(report: VwapReversionReport) -> str:
             lines.append("|:-------------|-------:|-----:|---------------------:|------------:|")
             for sp in s.window_splits:
                 win = "—" if sp.win_rate is None else f"{sp.win_rate:.1%}"
-                note = " _(unreachable under WO-10)_" if sp.split == SPLIT_MORNING else " _(= the unseeded run's window)_"
+                note = " _(unreachable in the unseeded run)_" if sp.split == SPLIT_MORNING else " _(= the unseeded run's window)_"
                 lines.append(
                     f"| {sp.label}{note} | {sp.n_trades} | {win} | "
                     f"{_pct(sp.net_expectancy_pct, 5)} | {_pct(sp.gross_expectancy_pct, 5)} |"

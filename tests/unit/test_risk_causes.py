@@ -191,7 +191,7 @@ async def test_state_changes_are_published_and_audited(conn, clock, bus):
 
 
 async def test_clear_inactive_cause_never_relaxes_an_out_of_ledger_state(conn, clock):
-    """2026-07-28 review F1: /resume_entries (clear of causes that are NOT active) must not re-arm
+    """2026-07-28 review: /resume_entries (clear of causes that are NOT active) must not re-arm
     NORMAL over a freeze some latch-less path wrote directly (e.g. token-rejected)."""
     from engine.core.calendar import NSECalendar
     from engine.core.config import config_dir

@@ -2,21 +2,21 @@
 
 The synthetic tape is a temp :class:`MarketStore` holding 30 sessions of one-minute bars over an
 engineered cast. The last session (``SIGNAL_DAY``) is the one under test; the 29 before it give
-``rel_volume_tod`` its 20 prior sessions at a known constant volume. Every F1 name shares one morning
+``rel_volume_tod`` its 20 prior sessions at a known constant volume. Every failed_breakout name shares one morning
 skeleton - the 09:15 open at 100.00, one 100.50 print at 09:20 so the OPENING RANGE HIGH IS 100.50,
 and a 101.00 stretch that is above it - so the cast differs only in the clause it exercises.
 
-The F1 cast on ``SIGNAL_DAY`` (decision bar 11:00, entry 11:01):
+The failed_breakout cast on ``SIGNAL_DAY`` (decision bar 11:00, entry 11:01):
 
 * ``FADER``     - the fade that triggers, held to the 15:15 squareoff at 98.00, a +2.00% gross SHORT.
 * ``FAILFADE``  - same signal, then the fade FAILS: the 11:05 bar closes at 101.00 and the 11:06
   bar opens at 104.00, the fill: -4.00% gross.
 * ``STOPPOKE``  - same signal; the 11:03 bar's HIGH pokes to 103.00 while its close stays at 100.00,
   so under the registered CLOSE trigger it squares off at 99.00: +1.00% gross.
-* ``NOBREAK``, ``STILLUP``, ``THINVOL``, ``LATEBREAK``, ``EXDATED`` - each fails one F1 clause.
+* ``NOBREAK``, ``STILLUP``, ``THINVOL``, ``LATEBREAK``, ``EXDATED`` - each fails one failed_breakout clause.
 * ``OUTSIDER``  - FADER's exact path but ``exclusion_reasons == ['not_in_index']``: never scanned.
 
-The F2 cast (decision bar 10:00, entry 10:01; prior daily close 100.00 for all of them):
+The gap_fade cast (decision bar 10:00, entry 10:01; prior daily close 100.00 for all of them):
 ``GAPPER`` and ``GAPFAIL`` trigger; ``SMALLGAP`` and ``GAPHOLD`` do not.
 
 ``NIFTY 50`` is -0.30% from its open at 10:00 and +0.50% at 11:00.
@@ -49,7 +49,7 @@ OPEN_T = time(9, 15)
 CLOSE_T = time(15, 29)                   # ts_minute is the bar's minute START -> 375 bars/session
 BASE_VOL = 1000
 INDEX = "NIFTY 50"
-OR_HIGH = 100.5                          # the 09:20 print; every F1 name shares it
+OR_HIGH = 100.5                          # the 09:20 print; every failed_breakout name shares it
 PRIOR_CLOSE = 100.0
 
 
@@ -122,7 +122,7 @@ def _flat(px: float):
     return lambda _t: px
 
 
-# --------------------------------------------------------------------------- the F1 morning shapes
+# --------------------------------------------------------------------------- the failed_breakout morning shapes
 def _f1_price(morning: float, late: float, afternoon: float, squareoff_px: float):
     """09:15-09:29 the shared opening range (OR high 100.50), then ``morning`` until 10:30, ``late``
     until 11:00, ``afternoon`` until 15:14, ``squareoff_px`` at 15:15 and 90.00 after it (a price the
@@ -175,7 +175,7 @@ def _latebreak_price(t: time) -> float:
     return 98.0 if t == time(15, 15) else (100.0 if t < time(15, 15) else 90.0)
 
 
-# --------------------------------------------------------------------------- the F2 shapes
+# --------------------------------------------------------------------------- the gap_fade shapes
 #: GAPPER/GAPFAIL/GAPHOLD open at 103.00 against a 100.00 prior close (+3.0%). The 09:15 bar's HIGH
 #: is 103.50, which is the session high at 10:00 and therefore the stop; the 10:00 bar's HIGH is
 #: 102.50, which is the fade-failure level.
@@ -236,9 +236,9 @@ def _index_price(t: time) -> float:
 
 
 # --------------------------------------------------------------------------- the tape
-F1_CAST = ("FADER", "FAILFADE", "STOPPOKE", "NOBREAK", "STILLUP", "THINVOL", "LATEBREAK",
+FAILED_BREAKOUT_CAST = ("FADER", "FAILFADE", "STOPPOKE", "NOBREAK", "STILLUP", "THINVOL", "LATEBREAK",
            "EXDATED", "OUTSIDER")
-F2_CAST = ("GAPPER", "GAPFAIL", "SMALLGAP", "GAPHOLD")
+GAP_FADE_CAST = ("GAPPER", "GAPFAIL", "SMALLGAP", "GAPHOLD")
 
 #: ``(high, low)`` of every daily bar, so ATR(14,1d) is exactly ``high - low``.
 DAILY_RANGE: dict[str, float] = {
@@ -253,10 +253,10 @@ UNIVERSE_EXCLUSIONS: dict[str, list[str]] = {
 
 def _tape() -> list[Bar]:
     bars: list[Bar] = []
-    for sym in F1_CAST:
+    for sym in FAILED_BREAKOUT_CAST:
         for d in SESSIONS[:-1]:
             bars += _session(sym, d, _flat(100.0), BASE_VOL)
-    for sym in F2_CAST:
+    for sym in GAP_FADE_CAST:
         bars += _session(sym, PRIOR_DAY, _flat(100.0), BASE_VOL)
     for d in SESSIONS[:-1]:
         bars += _session(INDEX, d, _flat(20000.0), 0)
@@ -283,7 +283,7 @@ def _tape() -> list[Bar]:
 
 def _daily() -> list[DailyBar]:
     out: list[DailyBar] = []
-    for sym in (*F1_CAST, *F2_CAST):
+    for sym in (*FAILED_BREAKOUT_CAST, *GAP_FADE_CAST):
         rng = DAILY_RANGE.get(sym, 1.0)
         for d in SESSIONS:
             out.append(DailyBar(
@@ -301,7 +301,7 @@ def _universe_rows() -> list[dict]:
         {"d": SIGNAL_DAY, "symbol": sym, "included": not UNIVERSE_EXCLUSIONS.get(sym),
          "exclusion_reasons": UNIVERSE_EXCLUSIONS.get(sym),
          "median_traded_value": Decimal("50000000.00")}
-        for sym in (*F1_CAST, *F2_CAST)
+        for sym in (*FAILED_BREAKOUT_CAST, *GAP_FADE_CAST)
     ]
 
 
@@ -339,15 +339,15 @@ def test_main_writes_json_and_markdown_and_prints_an_ascii_table(db_file, tmp_pa
     assert rc == 0
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert doc["meta"]["product"] == "MIS"
-    assert doc["meta"]["research_id"] == "R4"
+    assert doc["meta"]["research_id"] == "fade_short_side"
     assert "SHORT at the OPEN of the bar immediately after T" in doc["meta"]["entry_convention"]
     assert "FOLLOWING bar OPEN" in doc["meta"]["exit_convention"]
     assert doc["coverage"]["bars_1m_by_year"]
-    # F1 books FADER +2.00%, FAILFADE -4.00% and STOPPOKE +1.00% gross; F2 books GAPPER and GAPFAIL.
-    f1 = doc["results"]["F1"]["splits"][bt.SPLIT_ALL]
-    assert f1["n"] == 3
-    assert f1["median_gross_pct"] == pytest.approx(1.0, abs=1e-3)
-    assert doc["results"]["F2"]["splits"][bt.SPLIT_ALL]["n"] == 2
+    # failed_breakout books FADER +2.00%, FAILFADE -4.00% and STOPPOKE +1.00% gross; gap_fade books GAPPER and GAPFAIL.
+    failed_breakout = doc["results"]["failed_breakout"]["splits"][bt.SPLIT_ALL]
+    assert failed_breakout["n"] == 3
+    assert failed_breakout["median_gross_pct"] == pytest.approx(1.0, abs=1e-3)
+    assert doc["results"]["gap_fade"]["splits"][bt.SPLIT_ALL]["n"] == 2
 
     md = out.with_suffix(".md").read_text(encoding="utf-8")
     assert "Outcome: **REFUTED**" in md

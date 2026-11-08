@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """``tdc`` PRE-REGISTERED backtest harness (pre-registered 2026-09-04).
 
-Trend-day continuation, intraday. This is the owner-promotion-gate input for hypothesis **H1**:
+Trend-day continuation, intraday. This is the owner-promotion-gate input for the hypothesis (``trend_day``):
 
     on a session where a NIFTY200 stock shows ACCEPTANCE above its opening range with sustained
     PARTICIPATION and RELATIVE STRENGTH by late morning, the move continues into the close net of
@@ -14,7 +14,7 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 :data:`PARAMS` dict and one :data:`VARIANTS` dict, both fixed at import time and both transcribed
 from the pre-registration. Every variant in :data:`VARIANTS` is REPORTED; none is SELECTED, ranked,
 or promoted over another. The pre-registered robustness list (``T`` in {10:30, 12:00}; ``rvol_min`` in
-{1.2, 2.0}; ``stop`` in {0.5%}) exists precisely so the reader can see whether H1's number is a
+{1.2, 2.0}; ``stop`` in {0.5%}) exists precisely so the reader can see whether the hypothesis's number is a
 knife edge - it is not a menu. The CLI exposes no flag that changes a signal parameter; adding one
 would silently convert this study from "one pre-registered rule plus its stated robustness checks"
 into a grid search, and would invalidate every number printed here.
@@ -60,7 +60,7 @@ Passers are ranked by ``ret_from_open - index_ret_from_open`` (descending; ties 
 ascending, for determinism) and the TOP 5 per session are taken. Entry is the OPEN of the bar
 immediately after T (the 11:01 bar when T = 11:00). Exit is the first 1m CLOSE below
 ``VWAP(T) * (1 - stop_pct/100)``, filled at the FOLLOWING bar's OPEN; if that never happens, the
-15:15 bar's close (or the last bar at or before 15:15). No target. Variant B removes the stop.
+15:15 bar's close (or the last bar at or before 15:15). No target. The ``no_stop`` variant removes the stop.
 
 ===============================================================================================
 LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here a fiction)
@@ -218,24 +218,25 @@ PARAMS: dict[str, Any] = {
 
 # ================================================================================================
 # EVERY VARIANT IS REPORTED. NONE IS SELECTED. Each value is an override applied on top of PARAMS.
-# H1 is the hypothesis; B is the owner's observed pattern; the rest are the pre-registration's stated robustness
-# checks; C is the manager-added sector-confirmation leg (computable because `sector_map` exists).
+# trend_day is the hypothesis; no_stop is the owner's observed pattern; the rest are the pre-registration's
+# stated robustness checks; sector_confirm is the manager-added sector-confirmation leg (computable because
+# `sector_map` exists).
 # ================================================================================================
 VARIANTS: dict[str, dict[str, Any]] = {
-    "H1":            {},                                   # the pre-registered hypothesis
-    "B":             {"stop_vwap_pct": None},              # hold to 15:15, no stop
+    "trend_day":     {},                                   # the pre-registered hypothesis
+    "no_stop":       {"stop_vwap_pct": None},              # hold to 15:15, no stop
     "T_1030":        {"decision_time": "10:30"},           # robustness: earlier decision bar
     "T_1200":        {"decision_time": "12:00"},           # robustness: later decision bar
     "RVOL_1.2":      {"rvol_min": 1.2},                    # robustness: looser participation
     "RVOL_2.0":      {"rvol_min": 2.0},                    # robustness: tighter participation
     "STOP_0.5":      {"stop_vwap_pct": 0.5},               # robustness: wider VWAP-loss stop
-    "C_sector":      {"sector_confirm": True},             # H1 + >=2 OTHER same-sector passers at T
+    "sector_confirm": {"sector_confirm": True},            # trend_day + >=2 OTHER same-sector passers at T
 }
 
-#: Trial count cited to the reader. ONE pre-registered rule (H1); every other entry in
+#: Trial count cited to the reader. ONE pre-registered rule (trend_day); every other entry in
 #: :data:`VARIANTS` is a reported robustness cell or a separately-stated construct, never a
-#: competitor H1 is picked from.
-PRE_REGISTERED_HYPOTHESIS = "H1"
+#: competitor the hypothesis is picked from.
+PRE_REGISTERED_HYPOTHESIS = "trend_day"
 
 SPLIT_ALL = "all"
 SPLIT_INDEX_UP = "index_up_at_T"

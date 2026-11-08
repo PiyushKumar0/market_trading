@@ -170,7 +170,7 @@ def _daily(sym: str, rows: list[tuple]) -> list[DailyBar]:
 def _brk20_rows() -> list[tuple]:
     rows = [(100, 100, 99, 100, 1000)] * len(DATES)
     rows[100] = (100, 104, 100, 104, 2000)                    # fresh 20-day breakout on 2x volume
-    rows[101] = (103, 105, 99, 101, 1000)                     # touches the 100.00 level: V2-5 fill
+    rows[101] = (103, 105, 99, 101, 1000)                     # touches the 100.00 level: 5-session-limit fill
     return rows
 
 

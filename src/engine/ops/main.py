@@ -1155,7 +1155,7 @@ async def compose(
     bus.subscribe("bar.1m", prescreen.handle_bar)
 
     # --- `brk20` RETEST re-arm (2026-09-12). The 09-12 pre-registered entry-mechanism backtest
-    #     selected `V2_limit_at_H20_N5` — a limit resting at the broken level for up to five sessions
+    #     selected `limit_5_sessions` — a limit resting at the broken level for up to five sessions
     #     — while the live rule publishes that level exactly ONCE (the unregistered, unmeasured N=1).
     #     This book is the durable half (migration 0014, so a mid-session reboot cannot silently turn
     #     the multi-session mechanism back into a single-session one); `forward_drain_tick` below is
@@ -2382,7 +2382,7 @@ async def compose(
         )
         # 2026-09-12: every ADMITTED brk20 level starts RESTING here, so the next
         # `retest_sessions` − 1 sessions can re-offer it when the price comes back to it — the
-        # `V2_limit_at_H20_N5` mechanism the pre-registered entry backtest selected. ADMITTED, never
+        # `limit_5_sessions` mechanism the pre-registered entry backtest selected. ADMITTED, never
         # raw: the pre-screen has already decided which levels are worth judgement, and resting a
         # capped-out fire would re-offer tomorrow what the caps refused today (`accepted` is the
         # bar-driven candidates plus the post-admit `batch`, and no bar-driven rule is brk20).
@@ -4634,7 +4634,7 @@ def _retest_republish(
 
     The `brk20` levels admitted over the last ``retest_sessions`` sessions rest in
     ``brk20_resting_levels`` (migration 0014); this is the pulse that re-offers one the moment its
-    price returns to it — the ``V2_limit_at_H20_N5`` mechanism the 2026-09-12 pre-registered
+    price returns to it — the ``limit_5_sessions`` mechanism the 2026-09-12 pre-registered
     entry-mechanism backtest selected over both market-on-confirmation and the shipped single-session
     publication (see ``engine.strategy.retest``).
 

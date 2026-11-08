@@ -116,7 +116,7 @@ def _bars(sym: str, rows: list[tuple]) -> list[DailyBar]:
 def _brk20_rows() -> list[tuple]:
     rows = [(100, 100, 99, 100, 1000)] * len(DATES)
     rows[100] = (100, 104, 100, 104, 2000)                    # fresh 20-day breakout on 2x volume
-    rows[101] = (103, 105, 99, 101, 1000)                     # touches the 100.00 level: V2-5 fill
+    rows[101] = (103, 105, 99, 101, 1000)                     # touches the 100.00 level: 5-session-limit fill
     return rows
 
 
@@ -183,7 +183,7 @@ _REGISTERED = _ROOT / "data" / "reports" / "backtest_brk20_2026-09-12.json"
 
 @pytest.mark.skipif(not (_SNAPSHOTS and _REGISTERED.exists()), reason="no research snapshot or registered report")
 def test_brk20_reference_arm_reproduces_the_registered_baseline():
-    """Arm (ii) at close(fill+20) re-measures V2_limit_at_H20_N5 at horizon 20 (2026-09-12 report).
+    """The time-only arm at close(fill+20) re-measures limit_5_sessions at horizon 20 (2026-09-12 report).
 
     The sets differ only at the edges: --end 2026-08-31 drops roughly the last 8 sessions of
     admissible fills (~1% of n), and the exit-geometry study excludes exit_sim void_ca trades the registered run kept
@@ -192,6 +192,7 @@ def test_brk20_reference_arm_reproduces_the_registered_baseline():
     gap means the population or the walk drifted from the registered construct.
     """
     reg = json.loads(_REGISTERED.read_text(encoding="utf-8"))
+    # the registered report is kept as written, under its own key for the five-session limit
     cell = reg["variants"]["V2_limit_at_H20_N5"]["cells"]["all"]["horizons"]["20"]
     conn = rc.open_snapshot(_SNAPSHOTS[-1])
     try:

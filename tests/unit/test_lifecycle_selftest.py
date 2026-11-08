@@ -286,7 +286,7 @@ def test_catch_up_watermarks(conn, clock):
 
 @pytest.mark.asyncio
 async def test_warmup_lift_preserves_standing_owner_pause(conn, clock, temp_config, monkeypatch):
-    """2026-07-28 review F0: the post-login warm-up lift must clear ONLY its own causes — a standing
+    """2026-07-28 review: the post-login warm-up lift must clear ONLY its own causes — a standing
     /pause_entries (owner_pause, FROZEN) survives the lift instead of being erased to NORMAL."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
 

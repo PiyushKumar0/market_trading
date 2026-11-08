@@ -12,12 +12,12 @@ PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
 **NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
 :data:`PARAMS` dict, one :data:`RULES` dict and one :data:`EXITS` dict, all three fixed at import
-time and all three transcribed from the brief. Every rule x exit cell is REPORTED; none is SELECTED,
+time and all three transcribed from the pre-registration. Every rule x exit cell is REPORTED; none is SELECTED,
 ranked or promoted over another. The CLI exposes no flag that changes a signal parameter, a
 threshold or an exit; adding one would convert this study from "five pre-registered rules" into a
 grid search and would invalidate every number printed here.
 
-``promotable`` is the brief's own boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
+``promotable`` is the pre-registration's own boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
 ``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a refutation, and this
 script says so in exactly those terms; no other language about deployment appears anywhere in it.
 
@@ -41,19 +41,19 @@ THE BARS
   signal bar therefore always has >= 8 prior valid bars, every rule's 6-bar and 4-bar lag windows
   are guaranteed to be fully populated - no rule can fire on a partial window.
 
-PINNED INTERPRETATIONS (documented resolutions of ambiguity in the brief, NOT tuned parameters -
+PINNED INTERPRETATIONS (documented resolutions of ambiguity in the pre-registration, NOT tuned parameters -
 the alternatives were not computed, so no selection between them took place):
 
 1. **"close minute"** of a 5m bar = the START minute of its LAST constituent 1m bar (the repo's
    ``ts_minute`` convention). The signal window "close minute in [09:45, 14:00]" is therefore
    ``last_mfo BETWEEN 30 AND 285``, i.e. bucket starts 09:45 .. 13:55.
-2. **"three consecutive bullish bars, each close > the prior bar's HIGH"** (R2): each of the three
+2. **"three consecutive bullish bars, each close > the prior bar's HIGH"** (three_soldiers): each of the three
    closes is compared with ITS OWN prior bar's high - ``c[i] > h[i-1]``, ``c[i-1] > h[i-2]``,
    ``c[i-2] > h[i-3]``.
-3. **"the session high was set >= 3 bars ago"** (R3): the running max high over bars ``<= i-3``
+3. **"the session high was set >= 3 bars ago"** (engulf_pullback): the running max high over bars ``<= i-3``
    equals the running max high over bars ``<= i``. The running max is taken over the session's VALID
    5m bars.
-4. **"the 3 bars before the current one ... all stayed above VWAP"** (R3): each of bars ``i-1``,
+4. **"the 3 bars before the current one ... all stayed above VWAP"** (engulf_pullback): each of bars ``i-1``,
    ``i-2``, ``i-3`` closed above the running VWAP AT ITS OWN minute - the causal reading, the same
    one ``backtest_tdc.py`` pinned for its acceptance window.
 5. **breadth "at 11:00"**: the share of the eligible universe whose last COMPLETED 5m bar before
@@ -72,15 +72,15 @@ LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here 
 * ENTRY is the OPEN of the 1m bar at ``signal.last_mfo + 1``. The signal bar's own close is never a
   fill price. If that exact minute has no bar the trade is SKIPPED and counted - never filled at
   some other price.
-* E1 stop/target fills are scanned on 1m bars STRICTLY AFTER the entry bar. Within a bar the STOP
+* fixed_exit stop/target fills are scanned on 1m bars STRICTLY AFTER the entry bar. Within a bar the STOP
   wins ties (both levels touched in one minute -> stop), which is the pessimistic assumption.
-* E2's trail trigger is a COMPLETED 5m bar closing below the PRIOR 5m bar's low, filled at the next
+* trail_exit's trail trigger is a COMPLETED 5m bar closing below the PRIOR 5m bar's low, filled at the next
   1m OPEN after that bar - never at the close that triggered it.
 * The 15:15 exit uses the last 1m close at or before 15:15.
 * The breadth and index-regime splits are snapshots at 11:00 and at the signal minute respectively,
   not functions of the outcome.
 
-ONE HONEST EXCEPTION, disclosed rather than hidden: the brief's "at most 5 trades per rule per day,
+ONE HONEST EXCEPTION, disclosed rather than hidden: the pre-registration's "at most 5 trades per rule per day,
 ranked by volume ratio descending" ranks the day's FIRST-triggers against each other, and a trigger
 at 13:30 is in that ranking when the 09:55 trigger is chosen. That is a look-ahead in the DAILY CAP
 (never in a fill price). It is pre-registered, so it is applied as written and reported here, and
@@ -177,8 +177,7 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.indicators import wilder_atr  # noqa: E402
 
 # ================================================================================================
-# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from
-# runbooks/briefs/candles_backtest_brief_2026-09-04.md. Not a knob, not a grid, not reachable from
+# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from the candles pre-registration. Not a knob, not a grid, not reachable from
 # the CLI.
 # ================================================================================================
 PARAMS: dict[str, Any] = {
@@ -190,21 +189,21 @@ PARAMS: dict[str, Any] = {
     "signal_window_end": "14:00",         # inclusive
     "medvol_lookback_bars": 20,           # prior VALID 5m bars, same session
     "medvol_min_bars": 8,                 # fewer -> the bar cannot be a signal
-    # --- rule thresholds (each transcribed from the brief's RULES paragraph)
-    "r1_breakout_lookback_bars": 6,
-    "r1_vol_mult": 2.0,
-    "r1_close_in_range_frac": 0.75,
-    "r2_vol_mult": 1.5,
-    "r3_session_high_min_bars_ago": 3,
-    "r3_pullback_bars": 3,
-    "r3_vol_mult": 1.2,
-    "r4_prior_bars_above_vwap": 6,
-    "r4_vwap_touch_mult": 1.0015,
-    "r5_prior_bars_below_vwap": 6,
-    "r5_vol_mult": 1.5,
+    # --- rule thresholds (each transcribed from the pre-registration's RULES paragraph)
+    "momentum_burst_breakout_lookback_bars": 6,
+    "momentum_burst_vol_mult": 2.0,
+    "momentum_burst_close_in_range_frac": 0.75,
+    "three_soldiers_vol_mult": 1.5,
+    "engulf_pullback_session_high_min_bars_ago": 3,
+    "engulf_pullback_prior_bars": 3,
+    "engulf_pullback_vol_mult": 1.2,
+    "vwap_hold_buy_prior_bars_above_vwap": 6,
+    "vwap_hold_buy_vwap_touch_mult": 1.0015,
+    "vwap_reclaim_prior_bars_below_vwap": 6,
+    "vwap_reclaim_vol_mult": 1.5,
     # --- selection / execution
     "max_trades_per_rule_per_day": 5,
-    "e1_target_r_multiple": 2.0,
+    "fixed_exit_target_r_multiple": 2.0,
     "squareoff_time": "15:15",
     # --- universe / context
     "index_symbol": "NIFTY 50",
@@ -220,7 +219,7 @@ PARAMS: dict[str, Any] = {
     "reference_notional_inr": "20000",
     "slippage_ticks_per_side": 1,
     "tick_size_inr": str(DEFAULT_TICK_SIZE),
-    # --- the brief's promotion rule (a boolean, not a recommendation)
+    # --- the pre-registration's promotion rule (a boolean, not a recommendation)
     "promote_min_n": 200,
     "promote_min_t": 2.0,
     "promote_min_cpcv_positive_share": 0.60,
@@ -240,10 +239,10 @@ PARAMS: dict[str, Any] = {
 #   c1..c4 o1 o2     lagged closes / opens        h1 h2 h3  lagged highs   w1 w2 w3  lagged VWAPs
 #   run_max_h        running max high <= i        max_h_upto_i3   running max high <= i-3
 #
-# EVERY rule also carries the brief's global clause "close > VWAP" (R5 satisfies it by construction).
+# EVERY rule also carries the pre-registration's global clause "close > VWAP" (vwap_reclaim satisfies it by construction).
 # ================================================================================================
 RULES: dict[str, dict[str, str]] = {
-    "R1": {
+    "momentum_burst": {
         "name": "momentum_burst",
         "text": (
             "close > max(high) of the prior 6 five-min bars; volume >= 2.0 x medvol20; "
@@ -251,12 +250,12 @@ RULES: dict[str, dict[str, str]] = {
         ),
         "sql": (
             "c5 > vwap5 "
-            "AND n6 = {r1_breakout_lookback_bars} AND c5 > mx6h "
-            "AND v5 >= {r1_vol_mult} * medvol20 "
-            "AND c5 >= l5 + {r1_close_in_range_frac} * (h5 - l5)"
+            "AND n6 = {momentum_burst_breakout_lookback_bars} AND c5 > mx6h "
+            "AND v5 >= {momentum_burst_vol_mult} * medvol20 "
+            "AND c5 >= l5 + {momentum_burst_close_in_range_frac} * (h5 - l5)"
         ),
     },
-    "R2": {
+    "three_soldiers": {
         "name": "three_soldiers",
         "text": (
             "three consecutive bullish bars (close > open), each close > the prior bar's HIGH; "
@@ -266,10 +265,10 @@ RULES: dict[str, dict[str, str]] = {
             "c5 > vwap5 "
             "AND c5 > o5 AND c1 > o1 AND c2 > o2 "
             "AND c5 > h1 AND c1 > h2 AND c2 > h3 "
-            "AND v5 >= {r2_vol_mult} * medvol20"
+            "AND v5 >= {three_soldiers_vol_mult} * medvol20"
         ),
     },
-    "R3": {
+    "engulf_pullback": {
         "name": "engulf_pullback",
         "text": (
             "session high set >= 3 bars ago; the 3 bars before this one each closed below the prior "
@@ -282,50 +281,50 @@ RULES: dict[str, dict[str, str]] = {
             "AND c1 < c2 AND c2 < c3 AND c3 < c4 "
             "AND c1 > w1 AND c2 > w2 AND c3 > w3 "
             "AND c5 > o5 AND o5 <= c1 AND c5 >= o1 "
-            "AND v5 >= {r3_vol_mult} * medvol20"
+            "AND v5 >= {engulf_pullback_vol_mult} * medvol20"
         ),
     },
-    "R4": {
+    "vwap_hold_buy": {
         "name": "vwap_hold_buy",
         "text": (
             "the prior 6 bars all closed above VWAP; this bar's low <= VWAP x 1.0015 (a touch) and "
             "it closes above VWAP with close > open"
         ),
         "sql": (
-            "n6 = {r4_prior_bars_above_vwap} AND n6_above = {r4_prior_bars_above_vwap} "
-            "AND l5 <= vwap5 * {r4_vwap_touch_mult} "
+            "n6 = {vwap_hold_buy_prior_bars_above_vwap} AND n6_above = {vwap_hold_buy_prior_bars_above_vwap} "
+            "AND l5 <= vwap5 * {vwap_hold_buy_vwap_touch_mult} "
             "AND c5 > vwap5 AND c5 > o5"
         ),
     },
-    "R5": {
+    "vwap_reclaim": {
         "name": "vwap_reclaim",
         "text": (
             "the prior 6 bars all closed BELOW VWAP; this bar closes above VWAP; "
             "volume >= 1.5 x medvol20"
         ),
         "sql": (
-            "n6 = {r5_prior_bars_below_vwap} AND n6_below = {r5_prior_bars_below_vwap} "
+            "n6 = {vwap_reclaim_prior_bars_below_vwap} AND n6_below = {vwap_reclaim_prior_bars_below_vwap} "
             "AND c5 > vwap5 "
-            "AND v5 >= {r5_vol_mult} * medvol20"
+            "AND v5 >= {vwap_reclaim_vol_mult} * medvol20"
         ),
     },
 }
 
 # ================================================================================================
-# THE TWO PRE-REGISTERED EXITS. Both are implemented in :func:`simulate_e1` / :func:`simulate_e2`.
+# THE TWO PRE-REGISTERED EXITS. Both are implemented in :func:`simulate_fixed_exit` / :func:`simulate_trail_exit`.
 # ================================================================================================
 EXITS: dict[str, dict[str, str]] = {
-    "E1": {
-        "name": "fixed",
+    "fixed_exit": {
+        "name": "fixed_exit",
         "text": (
-            "stop = the signal bar's LOW (R5: stop = VWAP at the signal bar); "
+            "stop = the signal bar's LOW (vwap_reclaim: stop = VWAP at the signal bar); "
             "target = entry + 2 x (entry - stop); checked on 1m bars STRICTLY AFTER the entry bar "
             "(low <= stop -> fill at stop; high >= target -> fill at target; both in one bar -> the "
             "STOP wins); else the 15:15 close"
         ),
     },
-    "E2": {
-        "name": "trail",
+    "trail_exit": {
+        "name": "trail_exit",
         "text": (
             "exit at the next 1m OPEN after the first completed 5m bar that closes below the PRIOR "
             "5m bar's low; else the 15:15 close. No target."
@@ -333,8 +332,8 @@ EXITS: dict[str, dict[str, str]] = {
     },
 }
 
-#: The rule whose E1 stop is the signal bar's VWAP rather than its low (the brief's parenthesis).
-E1_STOP_IS_VWAP_RULES = frozenset({"R5"})
+#: The rule whose fixed_exit stop is the signal bar's VWAP rather than its low (the pre-registration's parenthesis).
+FIXED_EXIT_STOP_IS_VWAP_RULES = frozenset({"vwap_reclaim"})
 
 SPLIT_ALL = "all"
 SPLIT_INDEX_UP = "index_up_at_signal"
@@ -584,7 +583,7 @@ def eligible_universe(
 ) -> tuple[dict[date, list[str]], set[date], set[date]]:
     """``(d -> eligible symbols, fallback dates, dropped thin dates)``.
 
-    A SESSION is a ``bars_1m`` date carrying MORE than ``session_min_symbols`` symbols (the brief's
+    A SESSION is a ``bars_1m`` date carrying MORE than ``session_min_symbols`` symbols (the pre-registration's
     definition); thinner dates are dropped whole and reported. Within a session the eligible set is
     ``universe_daily`` included INTERSECT the symbols actually present, falling back to the present
     set when ``universe_daily`` has no included row for that date (or the intersection is empty).
@@ -695,16 +694,16 @@ def signal_frame_sql(*, params: dict[str, Any], mfo_hi: int) -> str:
     """The full signal SQL: 5m bars -> per-bar features -> the five RULES -> the FIRST trigger.
 
     Every feature window is ``ROWS BETWEEN n PRECEDING AND 1 PRECEDING`` (or ``... AND 3 PRECEDING``
-    for R3's session-high clause), so the current bar is never in its own denominator and no later
+    for engulf_pullback's session-high clause), so the current bar is never in its own denominator and no later
     bar is in anything. Returns one row per ``(symbol, d, rule)`` - the day's FIRST trigger of that
     rule for that symbol.
     """
     p = dict(params)
     lo, hi = signal_bucket_bounds(p)
     join = "JOIN cnd_elig e ON e.symbol = m.symbol AND e.d = m.d"
-    look6 = int(p["r1_breakout_lookback_bars"])
+    look6 = int(p["momentum_burst_breakout_lookback_bars"])
     back = int(p["medvol_lookback_bars"])
-    ago = int(p["r3_session_high_min_bars_ago"])
+    ago = int(p["engulf_pullback_session_high_min_bars_ago"])
     rule_names = ", ".join("'" + k + "'" for k in RULES)
     rule_flags = ", ".join("(" + v["sql"].format(**p) + ")" for v in RULES.values())
     return (
@@ -775,7 +774,7 @@ def load_signals(
 
 
 def rank_and_cap(signals: pd.DataFrame, *, params: dict[str, Any] | None = None) -> pd.DataFrame:
-    """The brief's daily cap: at most N trades per RULE per DAY, ranked by ``vol_ratio`` DESC then
+    """the pre-registration's daily cap: at most N trades per RULE per DAY, ranked by ``vol_ratio`` DESC then
     symbol ASC. Applied in Python so it is directly testable; see the module docstring's disclosed
     exception - this ranking compares first-triggers from different minutes of the same day."""
     p = dict(params or PARAMS)
@@ -797,11 +796,11 @@ def load_trail_bars(
     *,
     params: dict[str, Any],
 ) -> dict[tuple[str, date], list[tuple[int, int, float, float]]]:
-    """``(symbol, d) -> [(bk, last_mfo, close, PRIOR bar's low), ...]`` for E2's trail check.
+    """``(symbol, d) -> [(bk, last_mfo, close, PRIOR bar's low), ...]`` for trail_exit's trail check.
 
     Only the SELECTED symbol-days are aggregated. The lag runs over the session's full valid 5m
     sequence, so the first candidate bar's "prior bar" is the signal bar itself, exactly as the
-    brief's E2 reads.
+    pre-registration's trail_exit reads.
     """
     if pairs.empty:
         return {}
@@ -910,7 +909,7 @@ def _entry_index(mfos: Sequence[int], entry_mfo: int) -> int | None:
         return None
 
 
-def simulate_e1(
+def simulate_fixed_exit(
     bars: tuple[list[int], list[float], list[float], list[float], list[float]],
     *,
     entry_mfo: int,
@@ -918,7 +917,7 @@ def simulate_e1(
     target_r_multiple: float,
     squareoff_mfo: int,
 ) -> Fill | None:
-    """E1 fixed: entry at the ``entry_mfo`` OPEN, then stop/target on bars STRICTLY AFTER it.
+    """fixed_exit fixed: entry at the ``entry_mfo`` OPEN, then stop/target on bars STRICTLY AFTER it.
 
     ``target = entry + R * (entry - stop)``. Scanning forward from the bar after the entry bar to the
     squareoff bar (the last bar at or before 15:15): ``low <= stop`` fills at ``stop``; ``high >=
@@ -953,7 +952,7 @@ def simulate_e1(
     return Fill(entry_px, float(closes[last]), int(mfos[last]), "squareoff_1515", stop_px, target_px)
 
 
-def simulate_e2(
+def simulate_trail_exit(
     bars: tuple[list[int], list[float], list[float], list[float], list[float]],
     trail: Sequence[tuple[int, int, float, float]],
     *,
@@ -961,7 +960,7 @@ def simulate_e2(
     signal_bk: int,
     squareoff_mfo: int,
 ) -> Fill | None:
-    """E2 trail: exit at the next 1m OPEN after the first completed 5m bar closing below the PRIOR
+    """trail_exit trail: exit at the next 1m OPEN after the first completed 5m bar closing below the PRIOR
     5m bar's low; else the squareoff CLOSE. No target, no stop.
 
     Only 5m bars AFTER the signal bar are candidates, and the fill is the first 1m bar strictly after
@@ -1461,19 +1460,19 @@ def run_study(
         ireal = (d, bk) in real_ret
         iret = real_ret[(d, bk)] if ireal else proxy_ret.get((d, bk), 0.0)
         breadth = breadth_by_day.get(d, 0.0)
-        stop_px = float(row.vwap5) if rule in E1_STOP_IS_VWAP_RULES else float(row.l5)
+        stop_px = float(row.vwap5) if rule in FIXED_EXIT_STOP_IS_VWAP_RULES else float(row.l5)
         for style in EXITS:
             cell = f"{rule}|{style}"
             if bars is None:
                 drops[cell]["no_post_signal_tape"] += 1
                 continue
-            if style == "E1":
-                fill = simulate_e1(
+            if style == "fixed_exit":
+                fill = simulate_fixed_exit(
                     bars, entry_mfo=entry_mfo, stop_px=stop_px,
-                    target_r_multiple=float(p["e1_target_r_multiple"]), squareoff_mfo=sq_mfo,
+                    target_r_multiple=float(p["fixed_exit_target_r_multiple"]), squareoff_mfo=sq_mfo,
                 )
             else:
-                fill = simulate_e2(
+                fill = simulate_trail_exit(
                     bars, trail_by_pair.get(key, ()), entry_mfo=entry_mfo, signal_bk=bk,
                     squareoff_mfo=sq_mfo,
                 )
@@ -1481,7 +1480,7 @@ def run_study(
                 i0 = _entry_index(bars[0], entry_mfo)
                 if i0 is None:
                     drops[cell]["no_entry_bar"] += 1
-                elif style == "E1" and stop_px >= float(bars[1][i0]):
+                elif style == "fixed_exit" and stop_px >= float(bars[1][i0]):
                     drops[cell]["stop_at_or_above_entry"] += 1
                 else:
                     drops[cell]["other"] += 1
@@ -1522,8 +1521,8 @@ def run_study(
     notes.append(
         "NO PARAMETER SWEEP was run and no cell was selected: PARAMS is one dict, RULES is five "
         "pre-registered rules and EXITS two pre-registered exits, all transcribed from "
-        "runbooks/briefs/candles_backtest_brief_2026-09-04.md. Every rule x exit cell is REPORTED. "
-        "'promotable' is the brief's boolean (mean net > 0, t > 2, n >= 200, CPCV positive share "
+        "the pre-registration. Every rule x exit cell is REPORTED. "
+        "'promotable' is the pre-registration's boolean (mean net > 0, t > 2, n >= 200, CPCV positive share "
         ">= 0.60) and carries no other meaning."
     )
     notes.append(
@@ -1537,10 +1536,10 @@ def run_study(
         "PINNED READINGS (ambiguity resolutions, not tuned parameters; the alternatives were not "
         "computed): (1) a 5m bar's 'close minute' is the START minute of its last 1m bar, so the "
         f"signal window is last_mfo in [{_lo_mfo}, {hi_mfo}] = "
-        f"{from_mfo(_lo_mfo)}..{from_mfo(hi_mfo)} (bucket starts 09:45..13:55); (2) R2's 'each close "
+        f"{from_mfo(_lo_mfo)}..{from_mfo(hi_mfo)} (bucket starts 09:45..13:55); (2) three_soldiers's 'each close "
         "> the prior bar's HIGH' compares each of the three closes with ITS OWN prior bar's high; "
-        "(3) R3's 'session high set >= 3 bars ago' compares the running max high over bars <= i-3 "
-        "with the running max over bars <= i; (4) R3's 'stayed above VWAP' compares each pullback "
+        "(3) engulf_pullback's 'session high set >= 3 bars ago' compares the running max high over bars <= i-3 "
+        "with the running max over bars <= i; (4) engulf_pullback's 'stayed above VWAP' compares each pullback "
         "bar's close with the running VWAP AT ITS OWN minute; (5) breadth 'at 11:00' is the last "
         "COMPLETED 5m bar before 11:00, i.e. the [10:55,11:00) bucket."
     )
@@ -1597,15 +1596,15 @@ def run_study(
         "not in the population at all."
     )
     notes.append(
-        "E1 STOP FILLS ARE OPTIMISTIC WHERE A BAR GAPS THROUGH: the brief says 'low <= stop -> fill "
+        "fixed_exit STOP FILLS ARE OPTIMISTIC WHERE A BAR GAPS THROUGH: the pre-registration says 'low <= stop -> fill "
         "at stop', so a minute that opens BELOW the stop still books the stop price. The count of "
         "such fills is reported per cell as n_stop_gap_through; a live stop would have filled worse."
     )
     notes.append(
-        "E1 SKIPS A TRADE WHOSE STOP IS AT OR ABOVE THE ENTRY (the next 1m open gapped below the "
-        "signal bar's low, or below VWAP for R5). Booking it at 'stop' would print a fictitious "
-        "gain, so it is dropped and counted as stop_at_or_above_entry. E2 has no stop and keeps "
-        "those symbol-days, so E1 and E2 populations differ by exactly that count."
+        "fixed_exit SKIPS A TRADE WHOSE STOP IS AT OR ABOVE THE ENTRY (the next 1m open gapped below the "
+        "signal bar's low, or below VWAP for vwap_reclaim). Booking it at 'stop' would print a fictitious "
+        "gain, so it is dropped and counted as stop_at_or_above_entry. trail_exit has no stop and keeps "
+        "those symbol-days, so fixed_exit and trail_exit populations differ by exactly that count."
     )
     notes.append(
         "T-STAT OVERSTATES INDEPENDENCE: up to 5 picks share each session and each regime, so the "
@@ -1643,7 +1642,6 @@ def run_study(
         "meta": {
             "script": "scripts/backtest_candles.py",
             "study_id": "candles",
-            "brief": "runbooks/briefs/candles_backtest_brief_2026-09-04.md",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "window": {"start": str(start), "end": str(end)},
             "n_sessions": len(sessions),
@@ -1752,7 +1750,6 @@ def render_text(doc: dict[str, Any]) -> str:
     add = out.append
     add("=" * 132)
     add("candles PRE-REGISTERED BACKTEST - five 5-minute price-action rules x two exits (10 cells)")
-    add(f"({m['brief']})")
     add("=" * 132)
     add(f"generated        : {m['generated_at']}")
     add(f"window           : {m['window']['start']} -> {m['window']['end']}  "
@@ -1847,7 +1844,7 @@ def render_text(doc: dict[str, Any]) -> str:
     add("")
 
     add("-" * 132)
-    add("STEP 3 - PROMOTABLE CELLS (the brief's boolean, verbatim; no other claim is made)")
+    add("STEP 3 - PROMOTABLE CELLS (the pre-registration's boolean, verbatim; no other claim is made)")
     add("-" * 132)
     hits = [
         (c, n) for c, b in doc["results"].items() for n, s in b["splits"].items() if s["promotable"]

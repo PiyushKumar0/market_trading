@@ -181,10 +181,10 @@ def px(x: float) -> Decimal:
 
 
 def brk20_population(conn, end: date, *, symbols=None, max_symbols=None, fill=None) -> Population:
-    """brk20 V2-N5 fills: ``backtest_brk20.signals_for`` + ``fill_for`` (touch, 5 sessions).
+    """brk20 5-session-limit fills: ``backtest_brk20.signals_for`` + ``fill_for`` (touch, 5 sessions).
 
-    ``fill``: ``(series, signal) -> (fill_idx, fill_px) | None`` replacing the V2-N5 fill on the same admitted
-    signals; ``None`` is V2-N5."""
+    ``fill``: ``(series, signal) -> (fill_idx, fill_px) | None`` replacing the 5-session-limit fill on the same
+    admitted signals; ``None`` is the 5-session limit."""
     eligible = store_reader(conn).get_universe_eligible_symbols(BRK20_UNIVERSE_AS_OF)
     if not eligible:
         raise Refusal(f"universe_daily has no rows on {BRK20_UNIVERSE_AS_OF} (the brk20 registration's day)")
@@ -201,7 +201,7 @@ def brk20_population(conn, end: date, *, symbols=None, max_symbols=None, fill=No
             brk20._bump(counts, "signals")
             if not _admitted(s, sig.idx, SPAN["brk20"], atr, counts):
                 continue
-            got = bb.fill_for(s, sig, bb.VARIANT_V2_N5) if fill is None else fill(s, sig)
+            got = bb.fill_for(s, sig, bb.VARIANT_LIMIT_5) if fill is None else fill(s, sig)
             if got is None:
                 brk20._bump(counts, "unfilled")
                 continue

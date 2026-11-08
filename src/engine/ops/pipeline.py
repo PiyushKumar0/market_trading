@@ -3572,7 +3572,7 @@ class RecommendationPipeline:
         """The one structured line that makes the hot-path carry's before/after quantifiable in the live log."""
         _log.info("hot_path_read_hygiene", reason=reason, **self.hot_path_stats())
 
-    # ------------------------------------------------------------------ context lines (D7: never raise)
+    # ------------------------------------------------------------------ context lines (never raise)
     def _headroom_lines(self, d: date) -> list[str]:
         table = self._limits.load()
         lim = table.limits
@@ -3729,7 +3729,7 @@ class RecommendationPipeline:
             title="Intraday analyst unavailable",
             body=(
                 f"{trigger}: the analyst call failed ({getattr(result, 'reason', 'unknown')}). "
-                "No proposal was produced and nothing was recommended (D7). Deterministic exits, "
+                "No proposal was produced and nothing was recommended. Deterministic exits, "
                 "stops and square-offs are unaffected."
             ),
             severity="warning",

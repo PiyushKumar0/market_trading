@@ -1,13 +1,13 @@
-"""Tier-1 ↔ code schemas (R1): the action-object union (§3.3), GateVerdict (§3.4), Recommendation (§3.6).
+"""Tier-1 ↔ code schemas (the three-tier rule): the action-object union, GateVerdict, Recommendation.
 
-The models themselves now live in :mod:`engine.core.contracts` (R1 import-graph guard, §9.1) — this
+The models themselves now live in :mod:`engine.core.contracts` (the import-graph guard) — this
 module RE-EXPORTS them unchanged and keeps the SDK-facing helpers that only Tier-1 needs.
 
 These are the ONLY shape in which Tier-1 (Claude) output crosses into the deterministic tiers. The SDK
-call uses :data:`ActionProposal` as its structured-output schema (D5/D7); anything that fails validation
-after retries is dropped with an alert — NEVER parsed from prose (D7).
+call uses :data:`ActionProposal` as its structured-output schema; anything that fails validation
+after retries is dropped with an alert — NEVER parsed from prose (the LLM-failure rule).
 
-Three locked conventions (Phase-0 deliverables, §8.1):
+Three locked conventions:
 
 1. **Decimal prices round-trip as STRINGS.** JSON Schema has no decimal type; serialising prices/ticks
    as floats corrupts them. :data:`DecimalStr` validates from str|int|float (via ``str()`` for floats,
@@ -16,18 +16,18 @@ Three locked conventions (Phase-0 deliverables, §8.1):
 2. **Temporal + identity fields are PLATFORM-STAMPED, never LLM-emitted.** ``proposal_id``, ``agent_id``,
    ``valid_until``, ``inputs_digest`` are overwritten post-parse by :func:`parse_and_stamp` using
    ``Clock``-derived values — any value the model supplies is DISCARDED. The LLM never produces a
-   date/time (§3.2 convention).
+   date/time.
 3. **Constraints the SDK structured-output layer may reject** (``Field(gt=0)`` / ``min_length`` /
    mandatory ``additionalProperties:false`` / no recursive schemas) are enforced CLIENT-SIDE by
    re-validating the model after parse — which is exactly what :func:`parse_and_stamp` does. See
    :data:`STRUCTURED_OUTPUT_NOTES`.
 
-   Corollary (WO-21, 2026-08-20): the intraday wire schema is the FLAT merge
+   Corollary (2026-08-20): the intraday wire schema is the FLAT merge
    :func:`intraday_guidance_json_schema`, which advertises EVERY action's fields for EVERY action,
    while the authoritative union forbids extras on each variant. The two disagree by construction,
    so :func:`parse_intraday` runs :func:`_sanitize_guidance_extras` first — it drops the
    ADVERTISED-but-wrong-for-this-action keys and nothing else. Genuinely foreign keys (never
-   advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its R1 teeth.
+   advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its teeth.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ EXIT_REASON_CODES: tuple[str, ...] = get_args(ExitAction.model_fields["reason"].
 
 # --------------------------------------------------------------------------- helpers
 def action_proposal_json_schema() -> dict[str, Any]:
-    """JSON Schema for the action union — the SDK structured-output schema (D5/D7)."""
+    """JSON Schema for the action union — the SDK structured-output schema."""
     return ActionProposalAdapter.json_schema()
 
 
@@ -133,7 +133,7 @@ def parse_and_stamp(
 
     Any ``proposal_id`` / ``agent_id`` / ``valid_until`` / ``inputs_digest`` the model emitted is
     DISCARDED and replaced with the platform-supplied values (Clock-derived for ``valid_until``). This
-    is also where the client-side constraint re-validation happens (§8.1) — a malformed quantity /
+    is also where the client-side constraint re-validation happens — a malformed quantity /
     confidence / thesis raises here, never reaching the gate.
     """
     model = ActionProposalAdapter.validate_json(raw) if isinstance(raw, str) else ActionProposalAdapter.validate_python(raw)
@@ -193,21 +193,21 @@ IntradayOutputAdapter: TypeAdapter[Any] = TypeAdapter(IntradayOutput)
 
 
 def intraday_output_json_schema() -> dict[str, Any]:
-    """JSON Schema for the §5.2 output union — the Intraday Analyst's structured-output schema."""
+    """JSON Schema for the Intraday Analyst's output union — its structured-output schema."""
     return IntradayOutputAdapter.json_schema()
 
 
 def intraday_guidance_json_schema() -> dict[str, Any]:
-    """FLAT single-object schema for the runtime's structured-output knob (§8.1).
+    """FLAT single-object schema for the runtime's structured-output knob.
 
     The CLI's ``output_format`` silently falls back to plain TEXT mode for any schema containing a
     ``oneOf``/``anyOf`` union — root-level, wrapped, or de-discriminated (pinned live 2026-07-29:
     every intraday call answered in fenced prose and died schema_invalid while the flat news/plan
-    schemas engaged the StructuredOutput tool). So the knob gets this flattened merge of the §5.2
+    schemas engaged the StructuredOutput tool). So the knob gets this flattened merge of the output
     union — every variant's model-emitted field, ``action`` as the closed enum, only ``action``
     required — and the DISCRIMINATED union in :func:`parse_intraday` remains the authoritative
-    contract exactly as §8.1 locks it. A payload this schema admits but the union rejects still
-    fails client-side and retries under D7. Platform-stamped fields (proposal_id, valid_until,
+    contract. A payload this schema admits but the union rejects still fails client-side and retries
+    under the LLM-failure rule. Platform-stamped fields (proposal_id, valid_until,
     agent_id, inputs_digest) are deliberately absent: the model has no business emitting them, and
     the runtime's own schema coaching steers it off any it invents (additionalProperties: false).
     """
@@ -273,7 +273,7 @@ def _field_max_len(field_info: Any) -> int | None:
 
 
 def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str:
-    """Drop the guidance-advertised fields THIS action forbids, before the union validates (WO-21).
+    """Drop the guidance-advertised fields THIS action forbids, before the union validates.
 
     The wire schema (:func:`intraday_guidance_json_schema`) is a FLAT merge — it must be, or the CLI
     degrades to text mode (pinned 2026-07-29) — so it advertises every action's fields for every
@@ -286,7 +286,7 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     What is dropped is EXACTLY ``raw ∩ (advertised − target-model fields)``:
 
     * a key the guidance never advertised (a confabulated ``frobnicate``) is untouched and still
-      dies ``schema_invalid`` — R1 structural coherence is preserved, the union stays authoritative;
+      dies ``schema_invalid`` — structural coherence is preserved, the union stays authoritative;
     * platform-stamped fields (``proposal_id``/``agent_id``/``valid_until``/``inputs_digest``) are
       deliberately NOT advertised, so they pass through here and are overwritten by
       :func:`parse_and_stamp` exactly as before;
@@ -297,11 +297,11 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     mismatch exists for VALUES — ``thesis``'s 600-char cap lived only in the client-side prose note,
     so a verbose-but-valid EXIT died ``string_too_long`` on all 3 attempts, twice, losing both
     refreshed exit recommendations for open positions (retries re-invite the same verbosity, so
-    retrying cannot converge — the WO-21 argument exactly). An ADVERTISED ``str`` field overflowing
+    retrying cannot converge — the same argument exactly). An ADVERTISED ``str`` field overflowing
     the MATCHED model's own declared ``max_length`` is therefore clamped to that cap (logged
     ``guidance_prose_clamped``). Truncation is the ONLY reshaping: ``min_length``, enum, numeric and
     every other constraint still fail exactly as before (too-short prose is deficient content, and
-    silently altering a number or id would corrupt semantics, R1); a field the guidance never
+    silently altering a number or id would corrupt semantics); a field the guidance never
     advertised, or whose target declares no cap, is untouched.
 
     **Exit reasons (2026-09-11):** ``reason`` on the wire is ``no_action``'s free prose, but
@@ -312,7 +312,7 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     ``exit`` a valid code is MOVED onto ``reason`` (``guidance_exit_reason_mapped``) and the displaced
     prose becomes the ``thesis`` only when there is none to lose. That is a RENAME of an in-enum
     value, never an interpretation: an absent or out-of-enum ``exit_reason`` leaves ``reason``
-    untouched and the payload fails exactly as it does today — prose is never guessed into a code (R1).
+    untouched and the payload fails exactly as it does today — prose is never guessed into a code.
 
     A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
     scalar) is returned verbatim so the caller's original validation path produces the original error.
@@ -380,9 +380,9 @@ def parse_intraday(
     Actions go through :func:`parse_and_stamp` so the platform-stamped identity/temporal fields are
     overwritten exactly as they are on every other action path; ``no_action`` is plain-validated —
     stamping it would imply it can be acted on. A schema-invalid payload raises ``ValidationError``
-    here and resolves to no-proposal + alert upstream (D7) — never re-parsed from prose.
+    here and resolves to no-proposal + alert upstream — never re-parsed from prose.
 
-    WO-21: :func:`_sanitize_guidance_extras` runs FIRST, reconciling the flat wire schema with the
+    :func:`_sanitize_guidance_extras` runs FIRST, reconciling the flat wire schema with the
     discriminated union. It only ever removes keys the wire schema itself advertised; required-field
     and value-constraint enforcement below is untouched.
     """
@@ -416,11 +416,11 @@ class DayPlanFocus(BaseModel):
 
 
 class DayPlanCatalystFocus(BaseModel):
-    """Advisory commentary on ONE catalyst-watchlist entry (§5.3).
+    """Advisory commentary on ONE catalyst-watchlist entry.
 
     The planner may highlight or deprioritize a watchlist symbol; it can neither add a symbol to the
     watchlist nor upgrade a ``context`` entry to ``originating``, and ``advisory_levels`` is prose —
-    the binding origination levels stay the scanner's deterministic ones (§2.7 step 6).
+    the binding origination levels stay the scanner's deterministic ones.
     ``event_type`` is a free string (it echoes the watchlist entry): one odd advisory value must not
     void the whole day plan, unlike the cluster taxonomy below which is per-item droppable.
     """
@@ -435,8 +435,8 @@ class DayPlanCatalystFocus(BaseModel):
 
 
 class DayPlan(BaseModel):
-    """The 08:50 day plan (§5.3) — one JSON row per trading day in ``day_plans``, fed into every
-    intraday context's STABLE block (D8)."""
+    """The 08:50 day plan — one JSON row per trading day in ``day_plans``, fed into every
+    intraday context's STABLE block."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -521,10 +521,10 @@ class ClusterScoreBatch(BaseModel):
 def parse_cluster_scores(raw: dict[str, Any] | list[Any] | str) -> tuple[list[ClusterScore], list[str]]:
     """Validate a score batch PER ITEM: returns ``(valid_scores, dropped_cluster_ids)``.
 
-    D7/§5.4: an out-of-enum ``event_type`` (or any other invalid field) drops THAT cluster and is
+    An out-of-enum ``event_type`` (or any other invalid field) drops THAT cluster and is
     logged — it never voids the batch, because one confabulated event type must not cost 29 good
-    scores. A dropped cluster simply stays unscored, which excludes it from origination (§2.7
-    fail-safe ladder). A cluster whose ``cluster_id`` is itself unusable is reported positionally.
+    scores. A dropped cluster simply stays unscored, which excludes it from origination.
+    A cluster whose ``cluster_id`` is itself unusable is reported positionally.
     """
     payload: Any = json.loads(raw) if isinstance(raw, str) else raw
     if isinstance(payload, dict):
@@ -547,14 +547,14 @@ def parse_cluster_scores(raw: dict[str, Any] | list[Any] | str) -> tuple[list[Cl
 
 # =========================================================================== Nightly Reviewer
 class ParamSuggestion(BaseModel):
-    """ONE suggested envelope-parameter value (§5.5 output contract).
+    """ONE suggested envelope-parameter value.
 
-    A SUGGESTION, never a setting: the §6.4 validation pipeline and the owner decide (R4). The job
+    A SUGGESTION, never a setting: the owner decides. The job
     that persists a review DROPS any suggestion whose ``parameter`` is not an ``envelope.yaml`` name
     or whose ``proposed_value`` falls outside that parameter's bounds — the model's suggestible set
     is the list it was shown in the context, and no downstream reader re-derives it.
 
-    ``proposed_value`` is a float because every envelope parameter is a plain numeric knob (§6.3):
+    ``proposed_value`` is a float because every envelope parameter is a plain numeric knob:
     no price, no money, so the decimal-as-string convention deliberately does not apply here.
     """
 
@@ -566,7 +566,7 @@ class ParamSuggestion(BaseModel):
 
 
 class TradeAttribution(BaseModel):
-    """Attribution of ONE closed learning-ledger row (§5.5).
+    """Attribution of ONE closed learning-ledger row.
 
     ``thesis_wrong`` and ``process_error`` are different failures: the first is the market
     disagreeing with a correctly-executed idea, the second is the platform or the owner mishandling
@@ -582,7 +582,7 @@ class TradeAttribution(BaseModel):
 
 
 class NightlyReview(BaseModel):
-    """The Nightly Post-Trade Reviewer's output (§5.5) — one JSON row per trading day in
+    """The Nightly Post-Trade Reviewer's output — one JSON row per trading day in
     ``nightly_reviews``, read by ``GET /config/params`` and the daily owner summary."""
 
     model_config = ConfigDict(extra="forbid")

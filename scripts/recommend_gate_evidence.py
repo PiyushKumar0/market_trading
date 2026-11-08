@@ -198,7 +198,7 @@ class WindowHistory:
 
 # --------------------------------------------------------------------------- criteria
 def criterion_digest(conn, sessions, wh: WindowHistory) -> dict[str, Any]:
-    """C1: catalyst digest produced BEFORE that day's trade-window open, per session."""
+    """digest_before_open: catalyst digest produced BEFORE that day's trade-window open, per session."""
     digests: dict[date, tuple[datetime | None, str | None]] = {}
     for run_for, last_ok, status in conn.execute(
         "SELECT run_for_date, last_success_at, status FROM job_runs WHERE job_id='catalyst_digest'"
@@ -234,7 +234,7 @@ def criterion_digest(conn, sessions, wh: WindowHistory) -> dict[str, Any]:
 
 
 def criterion_schema(conn, d_from: date, d_to: date) -> dict[str, Any]:
-    """C2: analyst schema-validity, split intraday-analyst vs news-analyst."""
+    """analyst_schema_validity: analyst schema-validity, split intraday-analyst vs news-analyst."""
     lo, hi = d_from.isoformat(), d_to.isoformat() + "T99"   # ASCII upper bound on ISO stamps
     out: dict[str, Any] = {"agents": {}}
     for agent in ("intraday_analyst", "news_analyst"):
@@ -267,7 +267,7 @@ def criterion_schema(conn, d_from: date, d_to: date) -> dict[str, Any]:
 
 
 def criterion_recs(conn, d_from: date, d_to: date) -> dict[str, Any]:
-    """C3/C4: delivery timeliness + owner-executed outcomes."""
+    """delivery_timeliness + owner_outcomes (+ duration_sessions): delivery timeliness, owner-executed outcomes."""
     lo, hi = d_from.isoformat(), d_to.isoformat() + "T99"   # ASCII upper bound on ISO stamps
     delivered = in_time = late = unknown = 0
     session_days: set[str] = set()
@@ -378,7 +378,7 @@ def quota_window(at: datetime, weekday: str, hhmm: str) -> tuple[str, datetime, 
 
 
 def criterion_budget(conn, at: datetime) -> dict[str, Any]:
-    """C5: ledger spend per agent for the QUOTA WEEK containing ``at``, vs the weekly allocation.
+    """budget: ledger spend per agent for the QUOTA WEEK containing ``at``, vs the weekly allocation.
 
     Window-keyed since 2026-09-12, not month-keyed: ``budget_allocations_usd`` became one week's
     dollars with the governor, and dividing a month-to-date numerator by a one-week denominator
@@ -446,51 +446,51 @@ def render(res: dict[str, Any]) -> str:
     news = sc["agents"]["news_analyst"]
     intra = sc["agents"]["intraday_analyst"]
     rows = [
-        ["1", "Catalyst digest before window-open",
+        ["digest_before_open", "Catalyst digest before window-open",
          f"{dg['before_open']}/{dg['sessions']} sessions = {fmt_pct(dg['pct'])}",
          ">= 90% of sessions", verdict_pct(dg["pct"], BAR_DIGEST_PCT)],
-        ["2a", "News Analyst schema-valid",
+        ["analyst_schema_validity.news", "News Analyst schema-valid",
          f"{news['calls'] - news['schema_invalid']}/{news['calls']} calls = "
          f"{fmt_pct(news['valid_pct_all_calls'])}",
          ">= 95% of calls", verdict_pct(news["valid_pct_all_calls"], BAR_NEWS_SCHEMA_PCT)],
-        ["2b", "Intraday Analyst schema-valid",
+        ["analyst_schema_validity.intraday", "Intraday Analyst schema-valid",
          f"{intra['calls'] - intra['schema_invalid']}/{intra['calls']} calls = "
          f"{fmt_pct(intra['valid_pct_all_calls'])}",
-         "(no 8.3 bar - context)", NA],
-        ["3", "Recs delivered before validity closes",
+         "(no bar - context)", NA],
+        ["delivery_timeliness", "Recs delivered before validity closes",
          f"{rec['delivered_before_validity_closes']}/{rec['delivered_in_range']} = "
          f"{fmt_pct(rec['pct_in_time'])}",
          ">= 90% delivered in time", verdict_pct(rec["pct_in_time"], BAR_DELIVERY_PCT)],
-        ["4", "Owner-executed recommendations",
+        ["owner_outcomes", "Owner-executed recommendations",
          f"taken={rec['human_actions_all_time'].get('taken', 0)} "
          f"closed={rec['human_actions_all_time'].get('closed', 0)}",
          ">= 5 taken manually",
          MET if rec["human_actions_all_time"].get("taken", 0) >= BAR_TAKEN_MIN else NOT_MET],
-        ["5", "Duration: sessions with >=1 recommendation",
+        ["duration_sessions", "Duration: sessions with >=1 recommendation",
          f"{rec['sessions_with_a_recommendation']}/{dg['sessions']} sessions",
          ">= 20 sessions (4 weeks)",
          MET if rec["sessions_with_a_recommendation"] >= BAR_SESSIONS_MIN else NOT_MET],
-        ["6", "Zero API orders (platform side)",
+        ["zero_api_orders", "Zero API orders (platform side)",
          f"orders={orders['order_rows']} live={orders['live_order_rows']} "
          f"events={orders['order_events']}",
          "0 rows; broker book owner-audited",
          MET if orders["live_order_rows"] == 0 else NOT_MET],
-        ["7", f"Budget: quota week from {bud['window']} (weekly 2026-09-12)",
+        ["budget", f"Budget: quota week from {bud['window']} (weekly 2026-09-12)",
          f"total ${bud['total_usd']:.2f} vs weekly alloc ${bud['alloc_sum_usd'] or 0:.0f}",
          "ledger arithmetic + within self-imposed alloc",
          MET if bud["alloc_sum_usd"] and bud["total_usd"] <= bud["alloc_sum_usd"] else NA],
-        ["8", "Watchlist-precision reviews (2 weekly)", "[owner-manual]",
+        ["watchlist_precision", "Watchlist-precision reviews (2 weekly)", "[owner-manual]",
          "2 weekly samples reviewed", NA],
-        ["9", "Payload completeness (gate/cost/checklist)",
+        ["payload_completeness", "Payload completeness (gate/cost/checklist)",
          "[owner-manual] - no rec payloads to sample" if rec["total_rows_all_time"] == 0
          else f"[owner-manual] - sample from {rec['total_rows_all_time']} rows",
          "every payload", NA],
     ]
-    L.append(table(["#", "RECOMMEND GATE CRITERION", "MEASURED", "BAR", "VERDICT"], rows))
+    L.append(table(["KEY", "RECOMMEND GATE CRITERION", "MEASURED", "BAR", "VERDICT"], rows))
     L.append("")
 
     L.append("-" * 100)
-    L.append("C1 detail - catalyst digest vs trade-window open, per session")
+    L.append("digest_before_open detail - catalyst digest vs trade-window open, per session")
     L.append("-" * 100)
     drows = [[
         r["date"],
@@ -505,7 +505,7 @@ def render(res: dict[str, Any]) -> str:
     L.append("")
 
     L.append("-" * 100)
-    L.append(f"C5/C7 detail - budget ledger, QUOTA WEEK {bud['window_start'][:16]} .. "
+    L.append(f"budget detail - budget ledger, QUOTA WEEK {bud['window_start'][:16]} .. "
              f"{bud['window_end'][:16]} IST (window key {bud['window']})")
     L.append("-" * 100)
     brows = []
@@ -536,13 +536,13 @@ def render(res: dict[str, Any]) -> str:
     L.append("-" * 100)
     L.append("SOURCES + COVERAGE CAVEATS (read before quoting any number above)")
     L.append("-" * 100)
-    L.append("C1 digest time  : job_runs(job_id='catalyst_digest').last_success_at - a DB record, so")
+    L.append("digest_before_open (digest time): job_runs(job_id='catalyst_digest').last_success_at - a DB record, so")
     L.append("                  engine logs were NOT parsed. Caveat: job_runs is upserted per")
     L.append("                  (job_id, run_for_date), so this is the LAST success for that date, not")
     L.append("                  necessarily the first; a same-day re-run overwrites an earlier time.")
     L.append("                  Log fallback if a row is ever missing: event 'catalyst_digest' in")
     L.append("                  data/logs/engine.log[.YYYY-MM-DD] (fields d/clusters/n_originating).")
-    L.append("C1 window open  : config_audit(name='trade_window_state').diff JSON 'start', taking the")
+    L.append("digest_before_open (window open): config_audit(name='trade_window_state').diff JSON 'start', taking the")
     L.append("                  value IN FORCE AT THE DIGEST INSTANT (the WINDOW SRC column names the")
     L.append("                  exact audit row id used). The owner re-set the window mid-session on")
     L.append("                  many days - rows flagged in the last column had a LATER same-day reset,")
@@ -552,7 +552,7 @@ def render(res: dict[str, Any]) -> str:
     L.append("                  nowhere), so the earliest known start was used.")
     L.append(f"                  Current sticky window: start={_hhmm(res['window']['current_start'])} "
              f"(set {res['window']['current_changed_at']}).")
-    L.append("C2 schema rate  : agent_calls - ONE ROW PER SDK CALL, RETRIES INCLUDED (harness.py")
+    L.append("analyst_schema_validity: agent_calls - ONE ROW PER SDK CALL, RETRIES INCLUDED (harness.py")
     L.append("                  _persist docstring), so a schema_invalid attempt that succeeded on")
     L.append("                  retry still counts against the rate. This is the conservative reading.")
     L.append(f"                  Coverage: {sc['coverage']['rows_total']} rows, "
@@ -565,7 +565,7 @@ def render(res: dict[str, Any]) -> str:
     L.append(f"                  Excluding timeouts/sdk_errors from the denominator instead: "
              f"news={fmt_pct(news['valid_pct_of_returned'])}, "
              f"intraday={fmt_pct(intra['valid_pct_of_returned'])}.")
-    L.append("C3/C4 recs      : recommendations(delivered_at, payload, human_action). The payload has")
+    L.append("delivery_timeliness, owner_outcomes: recommendations(delivered_at, payload, human_action). The payload has")
     L.append("                  created_at + valid_until and NO valid_from (core/contracts.py Recommendation), so")
     L.append("                  'delivered before the validity window opens' is measured as delivered")
     L.append("                  strictly before valid_until - the window opens at created_at, which is")
@@ -575,10 +575,10 @@ def render(res: dict[str, Any]) -> str:
              f"{rec['timestamps_unusable']} with unusable timestamps.")
     L.append(f"                  human_action tally (all time): "
              f"{json.dumps(rec['human_actions_all_time'], sort_keys=True)}.")
-    L.append("C6 orders       : orders / order_events tables. This proves the PLATFORM placed nothing;")
-    L.append("                  the 'broker order book empty' half of 8.3 is an owner-manual Kite")
+    L.append("zero_api_orders: orders / order_events tables. This proves the PLATFORM placed nothing;")
+    L.append("                  the 'broker order book empty' half of the gate is an owner-manual Kite")
     L.append("                  Console audit - the engine cannot evidence its own absence there.")
-    L.append("C5/C7 budget    : budget_ledger(at) over ONE quota window vs config/agents.yaml")
+    L.append("budget: budget_ledger(at) over ONE quota window vs config/agents.yaml")
     L.append("                  budget_allocations_usd, which are WEEKLY dollars since 2026-09-12.")
     L.append("                  Allocations include a 'reserve' line that no agent spends against.")
     L.append("                  Re-scoped 2026-08-13: SDK usage bills against subscription weekly")

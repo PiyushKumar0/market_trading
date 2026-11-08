@@ -102,8 +102,8 @@ def is_open_market_buy(txn_type: object, acq_mode: object) -> bool:
 
 
 def is_open_market_sell(txn_type: object, acq_mode: object) -> bool:
-    """Mirror of :func:`is_open_market_buy` for the SELL side (the filings_experiments E2 adverse-context
-    leg). True iff ``txn_type`` == 'Sell' AND ``acq_mode`` is not one of the non-market modes
+    """Mirror of :func:`is_open_market_buy` for the SELL side (the filings experiments'
+    RSI2 catalyst-veto adverse context leg). True iff ``txn_type`` == 'Sell' AND ``acq_mode`` is not one of the non-market modes
     (:data:`INSIDER_ACQ_MODE_EXCLUSIONS`). The SAME exclusion taxonomy applies, so an
     ESOP-exercise SELL (acq_mode contains 'esop') is deliberately NOT counted as an open-market sell —
     an insider disposing of just-exercised ESOP stock is not the bearish open-market signal the adverse
@@ -122,7 +122,7 @@ def insider_cluster_events(
     matching ``predicate`` first crosses ≥ ``threshold``, re-arming only after the trailing sum falls
     back below (one event per crossing). Generalizes the transaction SIDE via ``predicate``:
     :func:`is_open_market_buy` for the BUY cluster (the ``insider_net_buy`` proxy),
-    :func:`is_open_market_sell` for the SELL cluster (E2 adverse context).
+    :func:`is_open_market_sell` for the SELL cluster (RSI2 catalyst-veto adverse context).
 
     Pure. ``sessions`` = ascending session dates; ``filings`` = plain row dicts (``txn_type``,
     ``acq_mode``, ``value``, ``broadcast_dt``). Each eligible filing's value lands on its point-in-time

@@ -9,20 +9,21 @@ WHY THIS FILE EXISTS (the funnel autopsy, 08-13 -> 08-19). 63/63 analyst evaluat
 declines decomposed into two inputs that lie and one rubric that structurally cannot pass the shapes
 the platform validated:
 
-* **E1** — ``features.rel_volume`` is cumulative session volume over the 20d median FULL-DAY volume
-  with no time-of-day adjustment, and was read as time-adjusted participation ("roughly 3% of normal
-  participation for this time of day"); phantom thinness was cited in 44/63 declines.
-* **E2** — ``sentiment_agg`` is a CLIPPED decay-weighted SUM that saturates at ±1.0 once a handful of
-  same-direction headlines land, and was read as an extreme regime reading (46/63 declines).
-* **E3** — ``rsi2`` (indicator exit) and ``ins`` (time exit) carry ``target=None`` BY DESIGN and were
-  declined for "no target ⇒ reward cannot be framed"; 52/63 declines were exactly those two legs,
-  one layer above the gate seam (``strategy_expected_edge_pct``) that already handles the case.
-* **E4** — swing candidates were judged on intraday microstructure (five 1m bars, VWAP position,
-  opening-range completeness at 09:20) — a category error for a 5-20 session hold, and on the one
-  validated leg (``ins``) it re-imposed the exact discretionary filter the validation removed.
+* **The rel_volume misread** — ``features.rel_volume`` is cumulative session volume over the 20d
+  median FULL-DAY volume with no time-of-day adjustment, and was read as time-adjusted participation
+  ("roughly 3% of normal participation for this time of day"); phantom thinness was cited in 44/63 declines.
+* **The sentiment misread** — ``sentiment_agg`` is a CLIPPED decay-weighted SUM that saturates at ±1.0
+  once a handful of same-direction headlines land, and was read as an extreme regime reading (46/63 declines).
+* **The no-target declines** — ``rsi2`` (indicator exit) and ``ins`` (time exit) carry ``target=None``
+  BY DESIGN and were declined for "no target ⇒ reward cannot be framed"; 52/63 declines were exactly
+  those two legs, one layer above the gate seam (``strategy_expected_edge_pct``) that already handles the case.
+* **The wrong frame** — swing candidates were judged on intraday microstructure (five 1m bars, VWAP
+  position, opening-range completeness at 09:20) — a category error for a 5-20 session hold, and on the
+  one validated leg (``ins``) it re-imposed the exact discretionary filter the validation removed.
 
-E1/E2 are fixed at render time in :mod:`engine.intelligence.context`; E3/E4 are fixed here plus in
-``intraday.SYSTEM_PROMPT`` rule 12/13. Evidence status is stated HONESTLY per leg — one validated (ins),
+The two misreads are fixed at render time in :mod:`engine.intelligence.context`; the no-target declines
+and the wrong frame are fixed here plus in ``intraday.SYSTEM_PROMPT`` rules 12 and 13. Evidence status is
+stated HONESTLY per leg — one validated (ins),
 one forward test (hi52), the rest exploratory (cat/cat_reversal as SHADOW) — which is why the claim cannot live in the shared prompt any more.
 
 PLAIN DATA. No imports beyond the stdlib-free module body itself: this is read by the context

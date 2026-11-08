@@ -54,9 +54,9 @@ SYMBOL = "SYNA"
 #: runs only at a yield, so one print per yield keeps it a loop turn behind the broker, as live; at the
 #: shipped 2,000 the OMS would lag by hours of stream and every prep would look like a fresh gap.
 SLICE = 1
-#: R3: prints within which a protection lapse must heal. The OMS applies a postback two loop turns
+#: Prints within which a protection lapse must heal. The OMS applies a postback two loop turns
 #: after the broker publishes it (the bus task, then the consumer).
-R3_TICKS = 3
+HEAL_TICKS = 3
 PROPOSE_AT = time(10, 0)
 QTY = 100
 #: Read off the fixture's SYNA walk (98.71 at 10:00:01): neither level is touched while the entry fills
@@ -191,11 +191,11 @@ _R3_SQL = (
 )
 
 
-class R3:
+class ProtectionWatch:
     """The property, judged on every forwarded print from a paper entry's first broker fill until
     its position closes: the position has an ACTIVE GTT for its qty, or is PENDING_EXIT with a working
     exit, or is PROTECTION_FAILED with its PAPER_ALERT sent, or (paper no-stop test) is a time-only position with its
-    exit session set. A lapse must heal within R3_TICKS prints."""
+    exit session set. A lapse must heal within HEAL_TICKS prints."""
 
     def __init__(self, conn: Any, alerts: Notes) -> None:
         self._conn = conn
@@ -229,7 +229,7 @@ class R3:
             if broker_id not in self.lapsed_at:
                 self.lapsed_at[broker_id] = self.prints
                 self.lapses += 1
-            if self.prints - self.lapsed_at[broker_id] >= R3_TICKS:
+            if self.prints - self.lapsed_at[broker_id] >= HEAL_TICKS:
                 self.violations.append((self.prints, broker_id, None if row is None else dict(row)))
 
     def _alerted(self, row: Any) -> bool:
@@ -240,17 +240,17 @@ class R3:
 class Bridge:
     """The harness's broker seam: each print reaches the real feed first, then the paper bridge, then the protection and exit managers."""
 
-    def __init__(self, feed: Feed, runtime: PaperRuntime | None, r3: R3) -> None:
+    def __init__(self, feed: Feed, runtime: PaperRuntime | None, watch: ProtectionWatch) -> None:
         self._feed = feed
         self._runtime = runtime
-        self._r3 = r3
+        self._watch = watch
         self.topic = runtime.broker.topic if runtime is not None else ORDER_UPDATE_TOPIC
 
     def on_tick(self, tick: Tick) -> None:
         self._feed.on_tick(tick)
         if self._runtime is not None:
             self._runtime.on_tick(tick)
-            self._r3.check()
+            self._watch.check()
 
     def on_bar(self, bar: Bar) -> None:
         self._feed.on_bar(bar)
@@ -290,7 +290,7 @@ class Outcome:
     paper_messages: list[CatalogMessage]
     kite_calls: list[str]
     writes: list[str]
-    r3: R3
+    watch: ProtectionWatch
     subscribers: dict[str, int]
     topics: set[str]
 
@@ -325,8 +325,8 @@ async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool, no_stop: t
         table = limits.load()
         calendar = NSECalendar(config_dir() / "calendar", clock, strict=False, sqlite_conn=conn)
         paper_notes, real_notes = Notes(), Notes()
-        r3 = R3(conn, paper_notes)
-        bus = TapBus(harness.publish, r3.on_publish)
+        watch = ProtectionWatch(conn, paper_notes)
+        bus = TapBus(harness.publish, watch.on_publish)
         mode, kill, market = ModeDouble(), SimpleNamespace(is_killed=lambda: False), Market()
         kite, feed = KiteDouble(), Feed(clock)
         cost_model = CostModel.from_config()
@@ -389,7 +389,7 @@ async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool, no_stop: t
             assert await pipeline.drain_forward_queue()
 
         subscribers = {t: len(bus._subscribers.get(t, [])) for t in ("tick", "bar.1m", PAPER_ORDER_UPDATE_TOPIC)}
-        harness.attach_broker(Bridge(feed, paper.runtime if paper is not None else None, r3))
+        harness.attach_broker(Bridge(feed, paper.runtime if paper is not None else None, watch))
         harness.at_tick(_propose_ordinal(day), propose)
         if paper is not None:
             at = datetime.combine(day.day, time(9, 15), tzinfo=IST)
@@ -417,7 +417,7 @@ async def _replay(day: SyntheticDay, scratch: Path, *, enabled: bool, no_stop: t
             real=mask_ulids(json.dumps(real, sort_keys=True, default=str)),
             rows={t: _rows(conn, f"SELECT * FROM {t}") for t in (*PAPER_TABLES, "verdicts", "learning_ledger")},
             real_rows=[r[0] for r in conn.execute("SELECT tbl FROM real_rows")],
-            paper_messages=paper_notes.messages, kite_calls=kite.calls, writes=writes, r3=r3,
+            paper_messages=paper_notes.messages, kite_calls=kite.calls, writes=writes, watch=watch,
             subscribers=subscribers, topics=bus.topics,
         )
     finally:
@@ -465,9 +465,9 @@ def test_a_proposal_is_traded_end_to_end_on_paper(runs: dict[str, Outcome]) -> N
 
 
 def test_r3_holds_on_every_print_after_a_fill(runs: dict[str, Outcome]) -> None:
-    r3 = runs["on"].r3
-    assert r3.violations == []
-    assert r3.judged.get("OPEN", 0) > 0                           # not vacuous: judged while armed
+    watch = runs["on"].watch
+    assert watch.violations == []
+    assert watch.judged.get("OPEN", 0) > 0                           # not vacuous: judged while armed
 
 
 def test_no_real_order_and_no_real_state_write(runs: dict[str, Outcome]) -> None:
@@ -501,7 +501,7 @@ def test_a_listed_strategy_is_held_without_a_stop_through_the_day(
     assert position["state"] == "OPEN" and rows["gtts"] == []
     assert position["exit_session"] == calendar.add_sessions(synthetic_day.day, 19).isoformat()
     assert [(m.kind, m.data["is_paper"]) for m in ns.paper_messages] == [(MessageKind.FILL, True)]
-    assert ns.r3.violations == [] and ns.r3.judged.get("OPEN", 0) > 0
+    assert ns.watch.violations == [] and ns.watch.judged.get("OPEN", 0) > 0
     assert ns.kite_calls == [] and ns.real_rows == []
     assert ns.real == runs["on"].real                                 # the real rec ignores the paper policy
 

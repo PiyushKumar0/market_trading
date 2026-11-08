@@ -830,8 +830,8 @@ def test_report_carries_every_required_block(tmp_path) -> None:
     assert payload["banner"] == BANNER
     assert payload["stage1"]["base_rate_pct"] == pytest.approx(-_COST)
     assert payload["status"] == "ABORTED_STAGE1"
-    # Default mode is WO-10; the report says so, and carries no (empty) split table.
-    assert payload["experiment_variant"] == "WO-10"
+    # Default mode is the unseeded run; the report says so, and carries no (empty) split table.
+    assert payload["experiment_variant"] == "unseeded"
     assert payload["seed_atr_prior_session"] is False
     assert payload["stage1"]["window_splits"] == []
 
@@ -974,7 +974,7 @@ def test_default_off_is_byte_identical_to_the_unseeded_run() -> None:
     assert sessions_a == sessions_b
     assert off_a[_CFG_1PCT]                                   # …and it is not a vacuous pass
 
-    # The same via the experiment surface: identical stage-1 numbers, and the report says WO-10.
+    # The same via the experiment surface: identical stage-1 numbers, and the report says unseeded.
     loader, _ = _multi_session_loader(closes, volumes, n_sessions=12)
     default = VwapReversionExperiment(
         loader=loader, cost_floor_pct=_COST, clock=_clock(), splitter=_splitter
@@ -985,7 +985,7 @@ def test_default_off_is_byte_identical_to_the_unseeded_run() -> None:
         seed_atr_prior_session=False,
     ).run([_SYM], start=date(2026, 1, 5), end=date(2026, 1, 20))
 
-    assert default.experiment_variant == explicit_off.experiment_variant == "WO-10"
+    assert default.experiment_variant == explicit_off.experiment_variant == "unseeded"
     assert default.stage1.model_dump() == explicit_off.stage1.model_dump()
     assert default.status == explicit_off.status
 
@@ -1061,7 +1061,7 @@ def test_seeded_report_carries_the_split_table_and_the_abort_stays_on_the_overal
         seed_atr_prior_session=True,
     ).run([_SYM], start=date(2026, 1, 5), end=date(2026, 1, 24))
 
-    assert report.experiment_variant == "WO-10b"
+    assert report.experiment_variant == "prior_session_seeded"
     assert report.seed_atr_prior_session is True
     s = report.stage1
     assert s is not None
@@ -1074,11 +1074,11 @@ def test_seeded_report_carries_the_split_table_and_the_abort_stays_on_the_overal
 
     artifacts = write_report(report, tmp_path)
     md = artifacts.markdown.read_text(encoding="utf-8")
-    assert "WO-10b experiment" in md
-    assert "PRIOR-SESSION SEEDED (WO-10b)" in md
-    assert "Entry-window splits (WO-10b) — REPORTING ONLY, never a gate" in md
-    assert "unreachable under WO-10" in md
+    assert "prior_session_seeded experiment" in md
+    assert "PRIOR-SESSION SEEDED" in md
+    assert "Entry-window splits (prior-session-seeded run) — REPORTING ONLY, never a gate" in md
+    assert "unreachable in the unseeded run" in md
     joined = " ".join(report.modelling_notes)
-    assert "PRIOR-SESSION ATR SEEDING (WO-10b, pre-registered verbatim)" in joined
+    assert "PRIOR-SESSION ATR SEEDING (pre-registered verbatim)" in joined
     assert "the overnight gap must never enter the stop unit" in joined
     assert "THE ABORT CRITERION IS THE OVERALL NUMBER" in joined

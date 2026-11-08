@@ -121,7 +121,7 @@ _SOLD_OUTSIDE_HEADING = (
 )
 
 _GAP_SCAN_LINE = (
-    "not computed: no trustworthy pre-open price source (A14 - indicative pre-open prices are "
+    "not computed: no trustworthy pre-open price source (indicative pre-open prices are "
     "auction artifacts, not traded prices); the auction grounding lives in the system prompt"
 )
 

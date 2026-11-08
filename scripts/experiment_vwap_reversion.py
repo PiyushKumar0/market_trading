@@ -4,7 +4,7 @@
     python scripts/experiment_vwap_reversion.py --from 2025-07-10 --to 2026-08-12 \
         --symbols RELIANCE,TCS [--reports-dir data/reports]
 
-**C-CATEGORY: STOPS FOR OWNER REVIEW — no live wiring.** This is a thin shell around
+**RESEARCH ONLY: STOPS FOR OWNER REVIEW — no live wiring.** This is a thin shell around
 :class:`engine.learning.vwap_reversion.VwapReversionExperiment`; all the logic (and the whole
 pre-registration) lives in that module, which is where to read it. The CLI resolves the universe,
 opens the market store READ-ONLY, runs the two-stage experiment and writes ONE report pair
@@ -52,7 +52,7 @@ def _parse_date(s: str) -> date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="WO-10 pre-registered VWAP-reversion experiment (C-category; owner review only)."
+        description="Pre-registered VWAP-reversion experiment (research only; owner review only)."
     )
     parser.add_argument("--from", dest="start", required=True, type=_parse_date, help="YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, type=_parse_date, help="YYYY-MM-DD")
@@ -70,10 +70,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--seed-atr-prior-session",
         action="store_true",
         help=(
-            "WO-10b mode: seed each session's 10m-ATR from the PRIOR session's final value (first "
+            "Prior-session-seeded mode: seed each session's 10m-ATR from the PRIOR session's final value (first "
             "bucket's TR = high-low only, so the overnight gap never enters the stop). Makes the "
-            "10:00-11:35 morning window measurable — WO-10's unseeded warm-up could only reach "
-            "11:36-14:00. Default OFF = WO-10 behavior, byte-identical. The report states which "
+            "10:00-11:35 morning window measurable — the unseeded run's warm-up could only reach "
+            "11:36-14:00. Default OFF = the unseeded run, byte-identical. The report states which "
             "mode ran and, seeded, splits the stage-1 base rate 10:00-11:35 vs 11:36-14:00."
         ),
     )
@@ -155,9 +155,9 @@ def _print_summary(report: vr.VwapReversionReport, artifacts) -> None:
         f"{report.fill_mechanics}"
     )
     mode = (
-        "WO-10b: prior-session-seeded ATR, effective entry window 10:00-14:00 from day 2"
+        "Prior-session-seeded run: prior-session ATR seeding, effective entry window 10:00-14:00 from day 2"
         if report.seed_atr_prior_session
-        else "WO-10: unseeded ATR (140-min warm-up), effective entry window 11:36-14:00"
+        else "Unseeded run: unseeded ATR (140-min warm-up), effective entry window 11:36-14:00"
     )
     print(f"variant: {report.experiment_variant} | {mode}")
 
@@ -201,7 +201,7 @@ def _print_summary(report: vr.VwapReversionReport, artifacts) -> None:
     print(f"report: {artifacts.markdown}")
     print(f"        {artifacts.json}")
     print("")
-    print("C-category: STOPS HERE FOR OWNER REVIEW. Nothing was wired live; no param_sets row written.")
+    print("Research only: STOPS HERE FOR OWNER REVIEW. Nothing was wired live; no param_sets row written.")
 
 
 if __name__ == "__main__":

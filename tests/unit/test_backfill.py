@@ -530,7 +530,7 @@ async def test_confirmed_minutes_are_not_refetched(store, clock, conn):
 
 class _LateTokenKite(_TokenKite):
     """Answers the FIRST symbol (leaving it a real confirmation candidate), then dies like its
-    parent — the shape that proves the abort discards work already staged in phase 1."""
+    parent — the shape that proves the abort discards work already staged in the collect pass."""
 
     def __init__(self, candles_fn) -> None:
         super().__init__()
@@ -545,7 +545,7 @@ class _LateTokenKite(_TokenKite):
 
 async def test_warmup_gap_token_abort_discards_pending_confirmations(store, clock, conn):
     """A token rejection aborts the sweep mid-way, so ``answered`` is not the denominator guard D was
-    calibrated on. PTCIL was processed first and HAD a candidate — phase 2 still confirms nothing."""
+    calibrated on. PTCIL was processed first and HAD a candidate — the write pass still confirms nothing."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     quiet = base + dt.timedelta(minutes=2)
