@@ -2,6 +2,25 @@
 
 Newest first. About two weeks of entries are kept; older ones are in git history.
 
+## 2026-11-09 01:35 — Cleanup finished: study labels named, analyst prompts and protected configs cleaned (owner: "Apply now", "Clean both now"); engine restarted 01:31
+
+- **Commits:** `97bf032` study labels and the remaining citations (four Sonnet agents renamed the research labels, the
+  rest inline; JSON keys, CLI choices and report text follow, while stored reports keep their keys); `4f62873` this
+  log's labels; `2b1d50e` analyst prompts and the re-registration; `3cf3c21` protected configs.
+- **Prompts:** the intraday strategy contracts (template `2026-11-09.1`), the news schema descriptions and the pre-open
+  and nightly schema wording lost their citations; no instruction, field or enum changed. The analyst-value verdict is
+  re-registered from 2026-11-09 (`forward_verdicts.ANALYST_REGISTERED_FROM`); the kill rules keep 2026-11-02. The cat v2
+  and cat_reversal plan entries record the wording-only news change inside their windows.
+- **Ledger:** `config/research_trials.yaml` names studies; three memory pointers broken by the memory renames fixed;
+  the registered rules point at `scripts/forward_verdicts.py`.
+- **Deploy:** nothing in flight; stopped 01:30:30 (`exit_clean`); patch applied and reseeded (parsed data identical,
+  signatures match the files); started 01:31:25. Selftest all PASS, both `protected_store` checks included; frozen [];
+  ticker 303 tokens; `engine_ready` 01:32:02; `boot_contract_ok` 37.1 s; no ERROR lines.
+- **Verified:** unit gate 4261 passed / 19 skipped plus one failure that passes alone (the replay heartbeat test's 1 s
+  wall-clock bound under 8 workers); offline tier 521 passed; ruff findings are the ones at HEAD.
+- **Kept, live names:** `phase4_start_x`, migration `0003_phase2.sql`, the `DG0`–`DG4` tiers, the `phase3` branch; the
+  2026-09-12 brk20 report keeps its own keys (`config/strategy_evidence.yaml` reads them).
+
 ## 2026-11-09 00:10 — Repo-wide cleanup of retired plan citations; memory, docs and this log pruned (owner: "clean up redundant memory, comments, text and work history")
 
 - **Commits:** `50ca381` comments and docstrings (4,581 blocks in 415 files, comment-only: same Python AST with
@@ -12,12 +31,8 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   19 skipped; offline + chaos 591 / 19; dashboard tsc + 95 node tests; ruff findings unchanged (13, pre-existing).
 - **Renamed scripts:** `kite_candle_adjustment_check.py`, `entity_resolution_sample.py`,
   `recommend_gate_evidence.py`, `kite_candle_latency_probe.py` (were named after plan IDs).
-- **Left on purpose:** strategy contract text and `schemas.py` docstrings (they feed the analyst's `prompt_version`;
-  changing them stops the registered analyst-value population), the pre-open gap-scan line, the `WO-10`/`WO-10b`
-  variant values, research arm labels the scripts define, the `phase4_start_x` key, migration `0003_phase2.sql`.
-- **Owner action:** a comment-only patch for `limits.yaml` / `envelope.yaml` is at
-  `..\mt_build_notes\protected-config-comment-cleanup-2026-11-08.patch` (parsed data identical, `git apply --check`
-  clean); apply and reseed per COMMANDS "Protected config" when convenient.
+- **Left for the owner, finished in the entry above:** the analyst prompt text, the protected-config comments and the
+  research study labels.
 - **Memory:** 66 files → 60 (merged, renamed, condensed; backup `~/.claude/backups/memory-before-cleanup-2026-11-08.zip`);
   index 12.9 KB → 8.3 KB. **This log:** entries before 2026-10-26 dropped; the one still-open item (ranking the tick cap
   over the NIFTY 500 core) moved to IMPLEMENTATION_PLAN's open questions. **graphify:** the stale 10-28 graph moved to
