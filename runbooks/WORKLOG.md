@@ -4,6 +4,17 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 01:34 — Scheduled task `MT-NewsContentCapture` (macro mood study content capture)
+
+- **What it runs:** `scripts\news_content_capture.py` through `.venv\Scripts\pythonw.exe` (no console window), every
+  15 minutes, starting 01:36 on 11-10. It writes `data\research\news_content.sqlite`.
+- **Settings:** IgnoreNew multiple-instances, a 40-minute limit, runs on battery. Principal piyush.kumar_atari,
+  Interactive, so it runs only while that user is logged on (a locked screen counts). A reboot without a login stops
+  capture until the next login.
+- **Why now:** the content forward tests start only after the capture's first complete 09:00→09:00 day, so every day
+  it runs earlier counts.
+- **Removal:** `Unregister-ScheduledTask -TaskName MT-NewsContentCapture -Confirm:$false`.
+
 ## 2026-11-10 00:57 — Engine stop/start around the macro mood-signal study
 
 - **Downtime 11-09 ~22:20 → 11-10 00:56 (holiday):** the owner stopped `mt-engine` so the study could read
