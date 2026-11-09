@@ -5,25 +5,21 @@ secrets present, ``ANTHROPIC_API_KEY`` absent, protected-store hashes verified, 
 honored, clock skew < 2 s, trade window present + valid, and (when a session manager is
 wired) the daily token's validity.
 
-Addition — the **data-freshness gate before entries**: today-dated
-instruments/surveillance/earnings (the safety/deadline-critical startup jobs) must be recorded
-fresh in ``job_runs``; if stale, the catch-up job is triggered (idempotent watermarks); if still
-unsatisfiable ⇒ refuse to open entries (FROZEN-for-entries, applied by the lifecycle) + alert. The
-warm-up sufficiency check (``warmup_ready``) rides the same surface via the injected
-:class:`~engine.ops.warmup.WarmupGate`. ``SessionLifecycle.startup`` runs this self-test with
-``include_freshness=False`` because at the start of startup the backfill/catch-up have not run yet — the
-lifecycle enforces freshness after the catch-up and warm-up at the startup warm-up gate; a standalone/pre-entries re-run
-(``run()`` default) includes them.
+The **data-freshness gate before entries**: today-dated instruments/surveillance/earnings must be
+recorded fresh in ``job_runs``; if stale, the catch-up job is triggered (idempotent watermarks); if
+still unsatisfiable ⇒ FROZEN-for-entries (applied by the lifecycle) + alert. The warm-up check
+(``warmup_ready``) rides the same surface via the injected :class:`~engine.ops.warmup.WarmupGate`.
+``SessionLifecycle.startup`` runs this self-test with ``include_freshness=False`` because the
+backfill/catch-up have not run yet at that point; the lifecycle enforces freshness afterwards. A
+standalone/pre-entries re-run (``run()`` default) includes them.
 
-Further additions: the day-scoped risk-counter rebuild, the startup re-evaluation
-and application of the equity halt ladder plus daily-loss rungs, and the one cheap SDK smoke call
-(non-trading-day starts skipped, deduped per trading day via ``job_runs``). risk_counters_rebuild and
+Also: the day-scoped risk-counter rebuild, the startup re-evaluation and application of the equity
+halt ladder plus daily-loss rungs, and one cheap SDK smoke call. risk_counters_rebuild and
 equity_halt_ladder SKIP only when ExposureTracker/LimitsEngine is unwired; sdk_smoke SKIPs when its
-callable is unwired, on a non-trading-day start, or once already verified that trading day.
-``claude_login`` reads the CLI's stored claude.ai login on every start (WARN only, never FROZEN).
+callable is unwired, on a non-trading-day start, or once already verified that trading day (deduped
+via ``job_runs``). ``claude_login`` reads the CLI's stored claude.ai login on every start (WARN only).
 
-This module REPORTS; the lifecycle applies the consequences (the integrity rule: FROZEN-with-flat-book
-vs kill, etc.). A failed self-test never trades on thin/unsafe preconditions.
+This module REPORTS; the lifecycle applies the consequences (FROZEN-with-flat-book vs kill, etc.).
 """
 
 from __future__ import annotations
@@ -219,8 +215,7 @@ class SelfTest:
         # is WARN, never FROZEN — LLM availability is not a safety input.
         self._sdk_smoke = sdk_smoke
         self._calendar = calendar
-        # Roster health (2026-08-03: a quarantined/unloadable roster used to surface only as an
-        # innocuous-looking sdk_smoke SKIP while every LLM job silently no-op'd).
+        # Roster health: a quarantined/unloadable roster must not hide behind an sdk_smoke SKIP.
         self._roster_quarantined = dict(roster_quarantined or {})
         self._roster_loaded = roster_loaded
         # The CLI's stored claude.ai login file (claude_credentials_path() in composition); unwired
@@ -389,16 +384,13 @@ class SelfTest:
                              detail="safety-critical jobs fresh (instruments/surveillance/earnings)")
 
     async def _check_warmup_ready(self) -> SelfTestCheck:
-        """``warmup_ready`` as a self-test line — split per coverage class on 2026-09-17.
+        """``warmup_ready`` as a self-test line, per coverage class.
 
-        A raise still FAILs implying FROZEN (coverage that cannot be verified is missing), and a
-        fully-ready gate still PASSes. In between, the check now follows the same rule as the
-        lifecycle: only a REGIME shortfall (or an unattributable blocker, which ``ready_for`` folds
-        into every class) is a GLOBAL condition and implies FROZEN; an INTRADAY or DAILY shortfall is
-        per-symbol and refused at the gate, so it is a WARN that implies nothing — a self-test that
-        re-imposed the global freeze here would undo that split the moment a standalone ``run()``
-        or a dashboard/CLI ``selftest`` endpoint was wired. A status with no ``ready_for`` keeps
-        today's FAIL+FROZEN (the flat fallback is never looser than the per-class answer)."""
+        A raise FAILs implying FROZEN (unverifiable coverage is missing); a fully-ready gate PASSes.
+        Otherwise the lifecycle's rule: only a REGIME shortfall (or an unattributable blocker, which
+        ``ready_for`` folds into every class) is GLOBAL and implies FROZEN; an INTRADAY or DAILY
+        shortfall is per-symbol and refused at the gate, so it is a WARN implying nothing. A status
+        with no ``ready_for`` keeps FAIL+FROZEN (never looser than the per-class answer)."""
         if self._warmup_gate is None:
             return self._stub(
                 "warmup_ready", "no WarmupGate wired — integrator passes engine.ops.warmup.WarmupGate"
@@ -507,7 +499,7 @@ class SelfTest:
     def _check_agent_roster(self) -> SelfTestCheck:
         """Tier-1 roster health: WARN — never FROZEN, the LLM is not load-bearing — when any
         agent definition was quarantined or the roster is empty, so a config typo shows up as a
-        named check instead of a day of silent no-op LLM jobs (2026-08-03 sonnet-5 incident)."""
+        named check instead of a day of silent no-op LLM jobs."""
         if self._roster_loaded is None and not self._roster_quarantined:
             return self._stub("agent_roster", "roster not wired")
         if self._roster_quarantined:

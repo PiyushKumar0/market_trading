@@ -2,23 +2,20 @@
 
 While the engine runs, ``engine_lifecycle.last_alive_at`` is refreshed every
 ``lifecycle.heartbeat_write_s`` (default 20 s) by a **dedicated OS thread doing a direct ``sqlite3``
-UPDATE — NOT the asyncio loop**. A legitimately busy loop (multi-day catch-up backfill, a long
-DuckDB scan) therefore cannot starve the heartbeat and self-alarm the out-of-band watchdog. The thread
-owns its **own** sqlite3 connection (opened inside the thread; never shared with the loop's
-connection), started at boot right after the atomic RUNNING commit and stopped with a
-clean ``join`` after the STOPPED commit at shutdown.
+UPDATE — NOT the asyncio loop**, so a busy loop (catch-up backfill, a long DuckDB scan) cannot starve
+it and self-alarm the out-of-band watchdog. The thread owns its **own** sqlite3 connection (opened
+inside the thread, never the loop's), started right after the atomic RUNNING commit and joined after
+the STOPPED commit at shutdown.
 
-A missed write is logged and retried on the next interval — the heartbeat must never crash the
-engine; the watchdog's ``down_stale_s`` (~3× the write interval) absorbs transient failures.
+A missed write is logged and retried next interval; it must never crash the engine (the watchdog's
+``down_stale_s``, ~3× the interval, absorbs transient failures).
 
-Also home to :func:`pid_alive` — the OS process-liveness probe used by the boot-time
-single-instance guard (prior ``state ∈ {RUNNING, STOPPING}`` + prior pid ALIVE ⇒ refuse to start).
-On Windows this uses ``ctypes`` ``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` +
-``GetExitCodeProcess`` (a pid whose process has exited — or was never ours — probes dead); the POSIX
-fallback is ``os.kill(pid, 0)``. Documented caveats: pid reuse can rarely alias a dead engine to an
-unrelated live process (the guard then refuses a start that manual inspection must clear), and
-``STILL_ACTIVE`` (259) is Windows' sentinel exit code. ``scripts/watchdog.py`` carries its own copy of
-this probe — it may import only ``core.secrets``/``core.config``/httpx/stdlib, never
+Also home to :func:`pid_alive` — the OS process-liveness probe for the boot-time single-instance guard
+(prior ``state ∈ {RUNNING, STOPPING}`` + prior pid ALIVE ⇒ refuse to start). Windows uses ``ctypes``
+``OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`` + ``GetExitCodeProcess``; POSIX uses
+``os.kill(pid, 0)``. Caveat: pid reuse can rarely alias a dead engine to an unrelated live process (the
+guard then refuses a start that manual inspection must clear). ``scripts/watchdog.py`` carries its own
+copy of this probe — it may import only ``core.secrets``/``core.config``/httpx/stdlib, never
 ``engine.ops``.
 """
 
@@ -89,8 +86,7 @@ class HeartbeatWriter:
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
-        """Start the heartbeat thread (idempotent). Called at boot, right after the atomic
-        RUNNING commit — the boot commit itself wrote the first fresh ``last_alive_at``."""
+        """Start the heartbeat thread (idempotent), right after the atomic RUNNING commit."""
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
@@ -99,9 +95,8 @@ class HeartbeatWriter:
         _log.info("heartbeat_started", interval_s=self._interval_s, db=self._db_path)
 
     def stop(self, timeout_s: float = 10.0) -> None:
-        """Signal the thread and join it cleanly (idempotent). Called after the STOPPED commit —
-        keeping the heartbeat alive through STOPPING means a long shutdown guard is never mistaken
-        for a wedge by the watchdog."""
+        """Signal the thread and join it (idempotent). Called after the STOPPED commit, so a long
+        shutdown is never mistaken for a wedge by the watchdog."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout_s)
@@ -118,9 +113,7 @@ class HeartbeatWriter:
     def _run(self) -> None:
         conn: sqlite3.Connection | None = None
         try:
-            # Own connection, opened inside the thread — never the loop's. isolation_level=None
-            # = autocommit: each one-row UPDATE commits on its own, so no implicit transaction is
-            # ever left open across beats.
+            # isolation_level=None = autocommit: no implicit transaction is left open across beats.
             conn = sqlite3.connect(self._db_path, timeout=5.0, isolation_level=None)
             conn.execute("PRAGMA busy_timeout=5000")
             while True:

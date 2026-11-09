@@ -59,7 +59,7 @@ SCALED_PATHS: tuple[Path, ...] = (
 )
 COMMIT_HINT = "commit config/limits.yaml"
 
-#: The figure table the dashboard dialog (Task 6) prints, in its order. Every value is a string or None.
+#: The figure table the dashboard dialog prints, in its order. Every value is a string or None.
 FIGURE_KEYS: tuple[str, ...] = (
     "capital_inr",
     "max_deployed_capital_inr",
@@ -79,9 +79,8 @@ FIGURE_KEYS: tuple[str, ...] = (
 #: (``paper_runtime.store_last_mark_fn``; the same shape as its ``LastMarkFn``).
 LastMark = Callable[[str, datetime], Awaitable[tuple[Decimal, datetime] | None]]
 
-#: Bounds the stored-price prefetch as a whole (paper's restart seeding allows 30 s). Kept short: a GET
-#: stays inside the dashboard's 8 s read abort, and a POST's prefetch plus the notify wait inside its
-#: 15 s write abort, so the owner sees the engine's own answer (dashboard/src/api.ts).
+#: Bounds the stored-price prefetch as a whole. Short so a GET stays inside the dashboard's 8 s read
+#: abort and a POST's prefetch plus notify wait inside its 15 s write abort (dashboard/src/api.ts).
 PREFETCH_S = 5.0
 #: How long ``apply`` waits on the Telegram send before answering; the send itself keeps running.
 NOTIFY_WAIT_S = 5.0
@@ -407,8 +406,7 @@ class CapitalChanger:
         return self._limits.load().capital_base_inr
 
     def _paper_live(self) -> ExposureTracker:
-        """The paper book on its runtime's marks. Built without them too (paper not composed at
-        boot): its epoch's rows still meet the new base at the next boot that composes it."""
+        """The paper book on its runtime's marks (built without them when paper is not composed)."""
         return ExposureTracker(self._conn, self._clock, self._live_base, mark_price=self._paper_mark,
                                scope="paper")
 

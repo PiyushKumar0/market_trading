@@ -1,5 +1,5 @@
-"""The engine's stop path (2026-07-21 13:34 IST zombie): the counted signal handler and the ``os._exit``
-backstop. Stdlib + ``engine.core.log`` only, so a process can import it without the composition root."""
+"""The engine's stop path: the counted signal handler and the ``os._exit`` backstop. Stdlib +
+``engine.core.log`` only, so a process can import it without the composition root."""
 
 from __future__ import annotations
 
@@ -23,24 +23,22 @@ def make_stop_handler(
     loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event, force_exit: Callable[[int], object],
     *, monotonic: Callable[[], float] = time.monotonic,
 ) -> Callable[..., None]:
-    """Build the COUNTED stop handler shared across every registered signal (extracted so the two-press
-    semantics are unit-testable WITHOUT raising real signals — the returned handler is called directly).
+    """Build the COUNTED stop handler shared across every registered signal (the returned handler is
+    callable directly, so the two-press semantics are testable without raising real signals).
 
-    The same handler object is registered for SIGINT/SIGTERM/SIGBREAK, so its counter is shared across
-    them (a SIGINT then a SIGTERM is still "second signal"). It accepts ``*_args`` so it serves BOTH the
-    zero-arg :meth:`loop.add_signal_handler` callback and the ``(signum, frame)`` :func:`signal.signal`
-    fallback. It never raises — a signal handler that raised would surface at an arbitrary ``await``.
+    One handler object serves SIGINT/SIGTERM/SIGBREAK, so its counter is shared (a SIGINT then a
+    SIGTERM is still "second signal"). It accepts ``*_args`` to serve BOTH the zero-arg
+    :meth:`loop.add_signal_handler` callback and the ``(signum, frame)`` :func:`signal.signal`
+    fallback. It never raises — a raise would surface at an arbitrary ``await``.
 
     * FIRST signal: graceful — wake the idle ``await stop_event.wait()`` via
       :meth:`loop.call_soon_threadsafe` (the ``signal.signal`` fallback runs in the main thread OUTSIDE
-      the loop callback context on Windows, so the threadsafe hand-off is the correct wake-up; the loop
-      is captured at install time). Honoured at the next safe point.
+      the loop on Windows; the loop is captured at install time).
     * REPEATS within ``REPEAT_SIGNAL_GRACE_S`` of the first: logged and ignored. A single ``nssm stop``
-      delivers the console Ctrl-C more than once (2026-09-02..23: every stop logged ``stop_forced``
-      0.85-1.4 s after ``stop_requested``, mid shutdown-backup, so the clean stop was never committed).
+      delivers the console Ctrl-C more than once.
     * A signal AFTER the grace window: hard exit (the owner's deliberate second Ctrl-C for a wedged
-      stop). State stays RUNNING (never committed STOPPED) so the next boot runs crash recovery — that is
-      BY DESIGN; protection is broker-resident, not process-local.
+      stop). State stays RUNNING (never committed STOPPED) so the next boot runs crash recovery — BY
+      DESIGN; protection is broker-resident, not process-local.
     """
     state: dict[str, float | int] = {"count": 0, "first_at": 0.0}
 
@@ -58,9 +56,8 @@ def make_stop_handler(
             try:
                 loop.call_soon_threadsafe(stop_event.set)
             except RuntimeError:
-                # Loop already closed (signal.signal fallback handlers are process-global and outlive
-                # asyncio.run on Windows): a stray signal in the post-run teardown window has nothing to
-                # wake — swallow so the "never raises" contract holds; hard_exit is already imminent.
+                # Loop already closed (signal.signal handlers outlive asyncio.run on Windows): nothing
+                # to wake; swallow to keep the "never raises" contract.
                 pass
             return
         since_first = monotonic() - state["first_at"]
@@ -87,12 +84,10 @@ def make_stop_handler(
 
 def install_signal_handlers(stop_event: asyncio.Event, *, force_exit: Callable[[int], object] = os._exit) -> None:
     """Install the graceful-stop signal handlers EARLY — before ``connect()``, so the WHOLE boot is
-    covered (2026-07-21 13:34 IST: Ctrl-C during a wedged ``lifecycle.startup`` hit Python's default
-    SIGINT handler → a raw ``KeyboardInterrupt`` at an arbitrary ``await`` with no ``lifecycle.shutdown``;
-    the process then lingered holding ``data/engine.lock`` — a zombie that blocks every future start).
+    covered (Python's default SIGINT handler would raise ``KeyboardInterrupt`` at an arbitrary ``await``
+    with no ``lifecycle.shutdown``, leaving a zombie holding ``data/engine.lock``).
 
-    ``force_exit`` is injectable so the second-press hard exit is unit-testable without killing the
-    interpreter (default :func:`os._exit`). The counted handler is SHARED across all registered signals.
+    ``force_exit`` is injectable so the hard exit is testable (default :func:`os._exit`).
     """
     loop = asyncio.get_running_loop()
     handler = make_stop_handler(loop, stop_event, force_exit)
@@ -113,15 +108,12 @@ def install_signal_handlers(stop_event: asyncio.Event, *, force_exit: Callable[[
 
 
 def hard_exit(code: int) -> NoReturn:
-    """Force process exit that the interpreter's own shutdown CANNOT (2026-07-21 13:34 IST zombie).
+    """Force process exit that the interpreter's own shutdown CANNOT.
 
     After ``main()`` returns, interpreter shutdown joins non-daemon threads and ``concurrent.futures``'
-    atexit hook joins executor workers WITHOUT a timeout. A single wedged worker (blocked DuckDB op, a
-    long feature snapshot, a hung HTTP call) then hangs the process forever — still holding the
-    instance lock and heartbeat, a zombie that blocks every future start until it is killed by hand
-    (exactly what happened at 13:34). ``os._exit`` skips those joins entirely, so a wedged worker can
-    never zombify the process. Runs ONLY from ``engine.ops.main.main()`` (never at import), so tests
-    import this module freely without risk of exiting the test runner.
+    atexit hook joins executor workers WITHOUT a timeout, so one wedged worker (blocked DuckDB op, hung
+    HTTP call) leaves a zombie holding the instance lock and heartbeat. ``os._exit`` skips those joins.
+    Runs ONLY from ``engine.ops.main.main()`` (never at import), so tests can import this module safely.
     """
     main_thread = threading.main_thread()
     stragglers = [t.name for t in threading.enumerate() if not t.daemon and t is not main_thread]

@@ -1,31 +1,25 @@
-"""In-session OS keep-awake (2026-07-23 13:41 sleep/resume wedge).
+"""In-session OS keep-awake.
 
 While the NSE calendar reports a trading session open, this asserts the Windows
 ``SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`` flags so the OS does not *auto*-sleep
-mid-session and freeze the tick feed — the 2026-07-23 13:41 feed wedge began with the PC sleeping while
-the market was open. It is engaged on the session-open transition and released (``ES_CONTINUOUS`` alone,
-which clears the system-required lock) on session close, driven by the periodic health loop.
+mid-session and freeze the tick feed. Engaged on the session-open transition, released
+(``ES_CONTINUOUS`` alone clears the system-required lock) on session close, driven by the periodic
+health loop.
 
-Lapse check (2026-11-05): an engaged request has not always stayed in force. On 10-26, 10-28, 10-30, 11-02
-and 11-05 the PC idle-slept on AC with the lid open while engaged, each time after an earlier in-session
-sleep, while idle spans of up to 99 min held before any such sleep. So every pulse while engaged reads this
-thread's flags (``SetThreadExecutionState(0)``, a pure query) and the system-wide execution state
-(``CallNtPowerInformation(SystemExecutionState)``, no elevation needed). When either lacks
-``ES_SYSTEM_REQUIRED`` it re-asserts the request and logs ``keep_awake_lapsed`` with what it saw; a
-``keep_awake_state`` line every few pulses records both while they hold, so a sleep with the request in
-force (Windows ignoring it rather than dropping it) is visible in the log too. One lapse stays invisible:
-the system losing this request while its thread flags are intact and another process holds the bit —
-telling those apart needs ``powercfg /requests``, which needs elevation.
+Lapse check: an engaged request has not always stayed in force on this host (the PC idle-slept with it
+engaged). So every pulse while engaged reads this thread's flags (``SetThreadExecutionState(0)``, a
+pure query) and the system-wide execution state (``CallNtPowerInformation(SystemExecutionState)``, no
+elevation needed). When either lacks ``ES_SYSTEM_REQUIRED`` it re-asserts the request and logs
+``keep_awake_lapsed``; a ``keep_awake_state`` line every few pulses records both while they hold. One
+lapse stays invisible: the system losing this request while its thread flags are intact and another
+process holds the bit (telling those apart needs ``powercfg /requests``, which needs elevation).
 
-Deliberate non-goals (documented so the boundary is not mistaken for a bug):
+Deliberate non-goals:
 
-* **Display sleep is allowed** — we assert ``ES_SYSTEM_REQUIRED`` but NOT ``ES_DISPLAY_REQUIRED``, so
-  the screen may still blank; only the *system* is kept awake.
-* **Owner-initiated sleep is NOT fought** — ``SetThreadExecutionState`` cannot and must not block an
-  explicit "Sleep" from the Start menu / lid-close / power button; it only prevents the idle-timeout
-  auto-sleep. If the owner force-sleeps mid-session, the OS still sleeps; the WARMING-timeout respawn in
-  :class:`~engine.broker.ticker_supervisor.TickerSupervisor` is the recovery for that (it fires on
-  resume and re-spawns the wedged child).
+* **Display sleep is allowed** — ``ES_DISPLAY_REQUIRED`` is NOT asserted; only the *system* is kept awake.
+* **Owner-initiated sleep is NOT fought** — Sleep / lid-close / power button still sleep; only the
+  idle-timeout auto-sleep is prevented. The WARMING-timeout respawn in
+  :class:`~engine.broker.ticker_supervisor.TickerSupervisor` recovers the wedged child on resume.
 
 Non-Windows platforms: every method is a guarded no-op. The ctypes calls are injectable so tests can
 record them without touching the real Win32 API.
@@ -40,10 +34,9 @@ from engine.core.log import get_logger
 
 _log = get_logger("engine.ops.keep_awake")
 
-#: Win32 EXECUTION_STATE flags (winbase.h). ES_CONTINUOUS makes the state persist until the next
-#: ES_CONTINUOUS call — in principle across suspend/resume too, which this host has not always honoured
-#: (see the lapse check). ES_SYSTEM_REQUIRED forces the system awake. ES_DISPLAY_REQUIRED is
-#: intentionally NOT used — the screen is allowed to sleep.
+#: Win32 EXECUTION_STATE flags (winbase.h). ES_CONTINUOUS persists the state until the next
+#: ES_CONTINUOUS call (this host has not always honoured that across suspend/resume). ES_SYSTEM_REQUIRED
+#: forces the system awake.
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 #: ``POWER_INFORMATION_LEVEL.SystemExecutionState`` (powerbase.h): ``CallNtPowerInformation`` returns the
@@ -206,8 +199,8 @@ class KeepAwake:
             return None
         if previous == 0:
             # NULL is the documented failure return; a success always carries ES_CONTINUOUS here, a fresh
-            # thread included (0x80000000, measured 2026-11-05). A failed query only loses the thread view,
-            # so it stays at DEBUG — it would otherwise warn on every pulse.
+            # thread included (0x80000000). A failed query only loses the thread view: DEBUG, not a
+            # warning on every pulse.
             log = _log.debug if flags == 0 else _log.warning
             log("keep_awake_set_state_rejected", flags=hex(flags))
             return None

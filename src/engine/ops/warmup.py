@@ -1,43 +1,33 @@
 """Cold-start warm-up gate (``warmup_ready`` + ``regime_data_ready``).
 
 Entries stay FROZEN until enough **contiguous** bars (live or startup-backfilled from official
-candles) cover each strategy's feature lookbacks — never trade on thin data. This is distinct from
-the feed-staleness guard (a live feed that died) and from a feed failure: it is about coverage.
+candles) cover each strategy's feature lookbacks. This is about coverage, distinct from the
+feed-staleness guard and from a feed failure.
 
 Per-strategy lookback requirements:
 
-- ``orb`` (intraday): today's 1m bars from the session open (09:15, shortened-session aware) through
-  "now", contiguous per watch symbol — the opening range + ATR(14,1m) + last-30-bar features all
-  live inside this span, so contiguity from the open covers them. (The ``cat`` scanner's fixed
-  09:15–09:45 range is likewise inside this span.)
-- ``rsi2``/``trend``/``mom`` (daily): 200 completed sessions of ``bars_1d`` per symbol (200-DMA is
-  the deepest lookback; trend's EMA/ADX and mom's 4-week rank sit inside it). A YOUNG LISTING — one
-  that listed fewer than 200 sessions ago and has a bar for every session since (full coverage, no
-  gaps) — can never satisfy this gate, so gating on it would freeze entries forever; such symbols are
-  EXCLUDED from the blockers and reported separately (``young_excluded``) instead. A shortfall with
-  any gap is NOT a young listing and still blocks.
-- **regime** (``regime_data_ready``): NIFTY 50 index + India VIX daily history present for the
-  market-context/regime lookbacks. Missing regime data on a cold/late start freezes regime-dependent
-  strategies; the lifecycle applies the coarser FROZEN-for-entries (splitting the freeze per
-  strategy is the risk gate's job; the coarse freeze is a documented interim deviation, not the design).
+- ``orb`` (intraday): today's 1m bars from the session open (shortened-session aware) through "now",
+  contiguous per watch symbol (the opening range, ATR(14,1m) and ``cat``'s 09:15–09:45 range all
+  live inside this span).
+- ``rsi2``/``trend``/``mom`` (daily): 200 completed sessions of ``bars_1d`` per symbol (the 200-DMA is
+  the deepest lookback). A YOUNG LISTING — listed fewer than 200 sessions ago with a bar for every
+  session since — can never satisfy this gate, so it is EXCLUDED from the blockers and reported as
+  ``young_excluded``. A shortfall with any gap is NOT a young listing and still blocks.
+- **regime** (``regime_data_ready``): NIFTY 50 + India VIX daily history for the market-context
+  lookbacks.
 
 The gate only ANSWERS (``ready()`` / ``missing()``); the **lifecycle** applies consequences (risk
-FROZEN via the injected setter + a ``WARMUP_FROZEN`` alert). If a start is too close to
-the window to warm up (backfill already attempted earlier in startup and coverage still short), the gate
-simply keeps answering not-ready — entries stay FROZEN and the owner is alerted; they reopen only
-once coverage is met.
+FROZEN via the injected setter + a ``WARMUP_FROZEN`` alert). A start too close to the window to warm
+up keeps answering not-ready; entries reopen only once coverage is met.
 
 Every blocker carries its CLASS in its rendered prefix (:func:`blocker_class`): ``orb:`` ⇒ intraday
 1-minute coverage, ``rsi2/trend/mom:`` ⇒ completed daily sessions, ``regime:`` ⇒ NIFTY 50 / India
-VIX history — and its SYMBOL in the rest of the line (:func:`blocker_symbol`). Since the 2026-09-13
-change the consequence is per class, and since the 2026-09-17 one it is
-also per SYMBOL: only the REGIME class (NIFTY 50 / India VIX — every candidate depends on them) and
-an UNATTRIBUTABLE blocker drive the global FROZEN-for-entries, while an INTRADAY or DAILY shortfall
-refuses THAT SYMBOL's candidates per-candidate (risk gate + pre-screen) instead of taking the whole
-book down for one symbol's coverage hole. ``ready`` keeps its old meaning — no blockers at all.
+VIX history — and its SYMBOL in the rest of the line (:func:`blocker_symbol`). The consequence is per
+class and per SYMBOL: only the REGIME class (every candidate depends on it) and an UNATTRIBUTABLE
+blocker drive the global FROZEN-for-entries, while an INTRADAY or DAILY shortfall refuses THAT
+SYMBOL's candidates per-candidate (risk gate + pre-screen). ``ready`` means no blockers at all.
 
-All store scans go through the ``MarketStore`` async wrappers (executor-offloaded — the loop is
-never blocked past the heartbeat budget).
+All store scans go through the ``MarketStore`` async wrappers (executor-offloaded).
 """
 
 from __future__ import annotations
@@ -61,24 +51,21 @@ DAILY_STRATEGY_SCOPE = "rsi2/trend/mom"
 #: Deepest daily feature lookback (200-DMA) — the gate's default daily coverage window.
 DAILY_LOOKBACK_SESSIONS = 200
 
-#: The three warm-up COVERAGE CLASSES (2026-09-13 plan change). A class is a property of the missing
-#: DATA, not of a strategy: ``intraday`` = today's 1-minute bars, ``daily`` = completed daily
-#: sessions, ``regime`` = index/VIX daily history.
+#: The three warm-up COVERAGE CLASSES: a property of the missing DATA, not of a strategy.
+#: ``intraday`` = today's 1-minute bars, ``daily`` = completed daily sessions, ``regime`` = index/VIX
+#: daily history.
 CLASS_INTRADAY = "intraday"
 CLASS_DAILY = "daily"
 CLASS_REGIME = "regime"
-#: A blocker whose scope prefix matches no class — a synthesized fail-closed sentinel (the
-#: composition root's "unrefreshed" snapshot, the lifecycle's "warmup check failed") or a future
-#: scope whose rendering was not classified here. Coverage that cannot be ATTRIBUTED blocks EVERY
-#: class (what cannot be verified is treated as missing), so a new scope fails safe by default.
+#: A blocker whose scope prefix matches no class — a synthesized fail-closed sentinel or a future
+#: unclassified scope. Coverage that cannot be ATTRIBUTED blocks EVERY class.
 CLASS_UNKNOWN = "unknown"
 
 _REAL_CLASSES = (CLASS_INTRADAY, CLASS_DAILY, CLASS_REGIME)
 
-#: Rendered-prefix ⇒ class. The prefix IS the class label: ``_missing_intraday`` renders ``orb:``,
-#: ``_classify_daily`` renders the scope it is called with (``DAILY_STRATEGY_SCOPE`` or ``regime``).
-#: Classification therefore reads a fact, never a guess — a new scope must be added here AND to the
-#: ``warmup_ready`` rows, or it falls to :data:`CLASS_UNKNOWN` and blocks everything.
+#: Rendered-prefix ⇒ class. The prefix IS the class label (``orb:``, or the scope passed to
+#: ``_classify_daily``). A new scope must be added here AND to the ``warmup_ready`` rows, or it
+#: falls to :data:`CLASS_UNKNOWN` and blocks everything.
 _CLASS_BY_PREFIX: tuple[tuple[str, str], ...] = (
     ("orb:", CLASS_INTRADAY),
     (f"{DAILY_STRATEGY_SCOPE}:", CLASS_DAILY),
@@ -98,9 +85,8 @@ def blocker_class(blocker: str) -> str:
 #: The SYMBOL inside a rendered blocker line. Anchored over EXACTLY the three renderings
 #: :meth:`WarmupGate._evaluate` produces — ``orb:{sym} bars {have}/{need}``,
 #: ``{scope}:{sym} daily bars {have}/{n}`` and ``{scope}:{sym} calendar horizon < {n} sessions`` —
-#: so the lazy symbol group plus the anchored suffix recover names that themselves contain spaces,
-#: ``&`` or ``-`` (``NIFTY 50``, ``INDIA VIX``, ``M&M``, ``GVT&D``, ``BAJAJ-AUTO``). Anything else
-#: is UNATTRIBUTABLE by construction (None), never a guessed symbol.
+#: so names containing spaces, ``&`` or ``-`` (``NIFTY 50``, ``M&M``, ``BAJAJ-AUTO``) are recovered.
+#: Anything else is UNATTRIBUTABLE (None), never a guessed symbol.
 _BLOCKER_SYMBOL_RE = re.compile(
     r"^(?P<scope>orb|" + re.escape(DAILY_STRATEGY_SCOPE) + r"|regime):"
     r"(?P<sym>.+?) (?:daily bars \d+/\d+|bars \d+/\d+|calendar horizon < \d+ sessions)$"
@@ -108,8 +94,7 @@ _BLOCKER_SYMBOL_RE = re.compile(
 
 
 def blocker_symbol(blocker: str) -> str | None:
-    """The SYMBOL one rendered blocker line is attributed to, or None when the line cannot be
-    attributed to any symbol. A None is the fail-closed case everywhere it is consumed: a shortfall
+    """The SYMBOL a rendered blocker line is attributed to, or None. None is fail-closed: a shortfall
     nobody can pin on a symbol refuses EVERY symbol in its class."""
     m = _BLOCKER_SYMBOL_RE.match(str(blocker))
     return m.group("sym") if m is not None else None
@@ -127,9 +112,8 @@ def classify_blockers(blockers: Sequence[str]) -> dict[str, list[str]]:
 def recent_sessions(calendar: NSECalendar, today: date, n: int) -> list[date] | None:
     """The most recent ``n`` completed trading sessions strictly before ``today``, DESCENDING
     (``[0]`` newest). None if the loaded calendars cannot supply ``n`` sessions (bounded walk).
-    Module-level so the daily gap-fill (backfill.daily_gap callers) and the gate share ONE
-    definition of the window — a fill that disagrees with the gate about which sessions count
-    can never clear the gate's blocker."""
+    Module-level so the daily gap-fill and the gate share ONE definition of the window — a fill that
+    disagrees with the gate about which sessions count can never clear the gate's blocker."""
     days: list[date] = []
     probe = today - timedelta(days=1)
     for _ in range(n * 3 + 90):   # bounded: weekends+holidays inflate ~n*1.5; never loop forever
@@ -144,14 +128,11 @@ def recent_sessions(calendar: NSECalendar, today: date, n: int) -> list[date] | 
 class WarmupStatus(BaseModel):
     ready: bool
     blockers: list[str] = Field(default_factory=list)   # rendered "scope:symbol have/need" lines
-    #: Young LISTINGS short of the daily lookback ONLY because they listed < the lookback ago, with
-    #: full coverage since listing (no gaps). Excluded from ``blockers`` (they can never satisfy a
-    #: 200-session gate, so gating on them freezes entries forever) but surfaced here for the operator
-    #: as "symbol(have/need)". A shortfall WITH gaps is a real blocker, not a young listing.
+    #: Young LISTINGS (full coverage since listing, no gaps) short of the daily lookback. Excluded
+    #: from ``blockers`` but surfaced as "symbol(have/need)". A shortfall WITH gaps is a real blocker.
     young_excluded: list[str] = Field(default_factory=list)
-    #: ``blockers`` bucketed by class. DERIVED on every construction rather than passed in, so every
-    #: construction site — this gate, the composition root's fail-closed sentinel, tests, a duck-typed
-    #: fake — answers per class consistently and none can hand out a stale or absent bucketing.
+    #: ``blockers`` bucketed by class. DERIVED on every construction, never passed in, so no
+    #: construction site can hand out a stale or absent bucketing.
     blockers_by_class: dict[str, list[str]] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -162,18 +143,14 @@ class WarmupStatus(BaseModel):
     def ready_for(self, cls: str, symbol: str | None = None) -> bool:
         """Is the ``cls`` coverage class satisfied — for the whole book, or for one SYMBOL?
 
-        ``symbol=None`` keeps the CLASS-WIDE meaning (False if ANY symbol is short in ``cls``); it is
-        what the freeze / lift / owner-notice code asks, because those answer a global question.
-        With a ``symbol`` the answer is per-symbol (owner-directed 2026-09-17): False iff a blocker
-        line in this class is attributed to THAT symbol, or cannot be attributed to any symbol. One
-        symbol's coverage hole must never refuse every candidate of its class — the 2026-09-16 13:36
-        PTCIL tradeless minute took the whole intraday book down from 13:37 to the close.
+        ``symbol=None`` is CLASS-WIDE (False if ANY symbol is short in ``cls``); the freeze / lift /
+        owner-notice code asks this. With a ``symbol``: False iff a blocker line in this class is
+        attributed to THAT symbol or to no symbol, so one symbol's coverage hole never refuses every
+        candidate of its class.
 
-        Fail-closed in four directions: an UNKNOWN-class blocker (unattributable coverage) holds
-        every class and every symbol down, a not-ready status carrying no blockers at all is
-        unattributable in the same way, a blocker in this class whose symbol cannot be parsed holds
-        every symbol in the class down, and an unrecognised ``cls`` is never "ready". ``ready`` (no
-        blockers anywhere) stays the whole-gate answer."""
+        Fail-closed: an UNKNOWN-class blocker holds every class and symbol down, a not-ready status
+        with no blockers is unattributable the same way, an unparseable blocker in this class holds
+        every symbol in it down, and an unrecognised ``cls`` is never "ready"."""
         if cls not in _REAL_CLASSES:
             return False
         if not self.ready and not self.blockers:
@@ -189,9 +166,8 @@ class WarmupStatus(BaseModel):
         return not any(blocker_symbol(line) in (None, want) for line in lines)
 
     def short_symbols(self, cls: str) -> list[str]:
-        """The symbols ``cls``'s blockers are attributed to — order preserved, de-duplicated, and
-        unattributable lines omitted (they are not a symbol; :meth:`ready_for` handles them). Feeds
-        the owner's per-class transition notice, which counts SYMBOLS rather than blocker lines."""
+        """The symbols ``cls``'s blockers are attributed to — order preserved, de-duplicated,
+        unattributable lines omitted (:meth:`ready_for` handles them)."""
         out: list[str] = []
         for line in self.blockers_by_class.get(cls) or []:
             sym = blocker_symbol(line)
@@ -243,8 +219,7 @@ class WarmupGate:
 
     # ------------------------------------------------------------------ public surface
     def set_symbols(self, symbols: Sequence[str], daily_symbols: Sequence[str] | None = None) -> None:
-        """Refresh the coverage set (2026-07-28 review: it was frozen at boot, so an 08:30 universe
-        change left the gate verifying YESTERDAY's watchlist for the rest of the day)."""
+        """Refresh the coverage set after a universe change (it is not frozen at boot)."""
         self._symbols = list(symbols)
         self._daily_symbols = list(daily_symbols) if daily_symbols is not None else list(symbols)
 
@@ -264,9 +239,7 @@ class WarmupGate:
     async def _evaluate(self) -> tuple[list[str], list[str]]:
         """Single pass over every lookback ⇒ ``(blockers, young_excluded)``.
 
-        Young listings (full coverage since a listing more recent than the lookback) are pulled OUT of
-        blockers so they never freeze entries forever, but reported in ``young_excluded`` so the
-        exclusion is visible, never silent (the freeze may only get MORE visible)."""
+        Young listings are pulled OUT of blockers but reported in ``young_excluded``, never silently."""
         blockers: list[str] = []
         young: list[str] = []
         blockers.extend(await self._missing_intraday())
@@ -318,21 +291,16 @@ class WarmupGate:
         a first bar more recent than ``n`` sessions); a shortfall with any gap stays a blocker."""
         sessions = self._recent_sessions(n)
         if sessions is None:
-            # Calendar horizon can't even ENUMERATE n sessions — conservative blocker ("no calendar,
-            # no trading"): coverage that cannot be verified is treated as missing.
+            # Calendar horizon can't ENUMERATE n sessions: unverifiable coverage counts as missing.
             return f"{scope}:{symbol} calendar horizon < {n} sessions", None
         bars = await self._store.aget_bars_1d(symbol, sessions[-1], sessions[0])
         present = {b.d for b in bars}
         have = sum(1 for d in sessions if d in present)
         if have >= n:
             return None, None
-        # Short of the lookback. Distinguish a YOUNG LISTING from a real gap: a young listing has its
-        # FIRST-EVER bar inside the lookback window (so it cannot supply n sessions) AND a bar for every
-        # session since that first bar (full coverage). A shortfall that fails EITHER test is a genuine
-        # gap and still blocks (never weakened). Coverage is judged INSIDE the session window only —
-        # the span's total counts every row including today's still-live bar (written by the 18:05
-        # daily_bars job), which the window excludes; comparing against it flipped every young listing
-        # back to a blocker each evening (observed GROWW 2026-07-28).
+        # A young listing has its FIRST-EVER bar inside the lookback window AND a bar for every
+        # session since; failing EITHER test is a genuine gap and blocks. Coverage is judged INSIDE the
+        # session window only: the span's total includes today's live bar, which the window excludes.
         first_bar, _total = await self._store.adaily_bar_span(symbol)
         if first_bar is not None and first_bar > sessions[-1]:
             since_listing = [d for d in sessions if d >= first_bar]

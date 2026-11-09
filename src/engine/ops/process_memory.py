@@ -1,25 +1,21 @@
 """Current-process memory telemetry (Windows), driven by the periodic health loop.
 
-Born from the 2026-08-17 crisis: the live engine's private commit ballooned to ~53 GB over ~18h
-(machine at 96.5% commit, crisis restart required) and the leak could not be diagnosed because there
-was exactly one snapshot (the crash) and no time series. This module gives :class:`~engine.ops.health.
-HealthMonitor` a cheap per-pulse reading of the current process's memory footprint via the Win32
-``GetProcessMemoryInfo`` API (``PROCESS_MEMORY_COUNTERS_EX``), so the ``process_memory`` log line can be
-grepped into a curve after the fact — no new dependency (psutil is only a transitive dep of ipython in
-``uv.lock``, not a project dependency; see ``pyproject.toml``).
+Gives :class:`~engine.ops.health.HealthMonitor` a cheap per-pulse reading of the current process's
+memory via the Win32 ``GetProcessMemoryInfo`` API (``PROCESS_MEMORY_COUNTERS_EX``), so the
+``process_memory`` log line can be grepped into a curve — no new dependency (psutil is not a project
+dependency).
 
-Three counters are read, all in bytes, for the CURRENT process:
+Three counters, all in bytes, for the CURRENT process:
 
-* ``PagefileUsage``      — private/commit bytes (what "96.5% commit" tracks; the field the crisis needed).
+* ``PagefileUsage``      — private/commit bytes (what machine commit pressure tracks).
 * ``WorkingSetSize``     — resident working-set bytes.
-* ``PeakWorkingSetSize`` — the high-water mark of the working set since process start.
+* ``PeakWorkingSetSize`` — the working-set high-water mark since process start.
 
-This is telemetry, not a check: a read failure logs one DEBUG line and
-returns ``None`` — it must never raise and must never affect the health verdict.
+Telemetry, not a check: a read failure logs one DEBUG line and returns ``None`` — it must never raise
+and must never affect the health verdict.
 
-Non-Windows platforms: :meth:`ProcessMemoryReader.read` is a guarded no-op (returns ``None``), following
-:mod:`engine.ops.keep_awake`'s platform-guarded ctypes pattern. The ctypes call is injectable so tests
-can record/fake it without touching the real Win32 API.
+Non-Windows platforms: :meth:`ProcessMemoryReader.read` is a guarded no-op (returns ``None``). The
+ctypes call is injectable so tests can fake it.
 """
 
 from __future__ import annotations
@@ -80,9 +76,7 @@ class ProcessMemoryReader:
 def _read_via_win32() -> ProcessMemory:
     """The real Win32 call: ``K32GetProcessMemoryInfo`` on the current process's pseudo-handle.
 
-    Imports ``ctypes``/``ctypes.wintypes`` locally so this module stays importable (and its ``read()``
-    no-op path exercisable) on non-Windows platforms — same discipline as
-    :func:`engine.ops.keep_awake._win32_set_execution_state`.
+    ``ctypes`` is imported locally so this module stays importable off-Windows.
     """
     import ctypes
     from ctypes import wintypes
@@ -102,10 +96,8 @@ def _read_via_win32() -> ProcessMemory:
             ("PrivateUsage", ctypes.c_size_t),
         ]
 
-    # Explicit argtypes/restype are required, not cosmetic: ctypes defaults an unset restype to
-    # c_int (32-bit signed). GetCurrentProcess() returns a 64-bit pseudo-handle (-1); without a HANDLE
-    # restype ctypes truncates it, GetProcessMemoryInfo is then called with a bogus handle, and the call
-    # fails silently (returns FALSE, GetLastError()==0) on 64-bit Windows.
+    # Explicit argtypes/restype are required: the default c_int restype truncates the 64-bit
+    # pseudo-handle from GetCurrentProcess(), and the call then fails silently on 64-bit Windows.
     kernel32 = ctypes.windll.kernel32
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.GetCurrentProcess.argtypes = []

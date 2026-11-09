@@ -1,24 +1,17 @@
 """Pre-open Kite access-token validity check.
 
-The Kite access token is minted daily and dies at ~06:00 IST. Nothing in the engine LOOKED at
-it between the boot probe and the first live call, so on 2026-08-20 a stale token survived the whole
-pre-open: the first rejection surfaced at 09:50 as a mid-session ``TokenException`` → FROZEN, and
-~108 minutes of the trade window were gone before the owner could re-login. The boot probe
-(:meth:`engine.broker.session.SessionManager.verify_token`) only fires at boot; an engine that has
-been up since the previous evening never re-probes.
+The Kite access token is minted daily and dies at ~06:00 IST. The boot probe
+(:meth:`engine.broker.session.SessionManager.verify_token`) only fires at boot, so an engine up since
+the previous evening would otherwise find a stale token mid-session.
 
-This job closes that hole with the cheapest possible answer to "is today's token usable?" — one
-authenticated REST call at 08:40 IST, ~35 minutes before the 09:15 open, with a loud owner alert if
-it fails. It is deliberately NOT a registry job and carries NO ``job_runs`` watermark: a
-pre-open check replayed at 14:00 by a catch-up pass answers a question nobody is asking any more.
-Missing today's fire is simply missing it; the boot probe and the mid-day circuit breaker
-remain the other two layers.
+One authenticated REST call at 08:40 IST, with a loud owner alert if it fails. Deliberately NOT a
+registry job and carries NO ``job_runs`` watermark: a pre-open check replayed by a catch-up pass at
+14:00 answers a question nobody is asking. The boot probe and the mid-day circuit breaker remain the
+other two layers.
 
 **Never load-bearing.** :meth:`TokenCheckJob.run` does not raise, does not freeze, does not gate
-anything. A network flake must not manufacture a "token is dead" story, so anything that is not an
-authentication failure degrades to a WARNING + a warning-severity notification, and the owner is
-told the check was inconclusive rather than that the token is bad — the same "cannot verify != is
-invalid" discipline ``verify_token`` uses.
+anything. Anything that is not an authentication failure degrades to a WARNING + a warning-severity
+notification saying the check was inconclusive — "cannot verify != is invalid", as in ``verify_token``.
 
 Log events: ``token_check_ok`` (INFO), ``token_check_failed`` (CRITICAL), ``token_check_error``
 (WARNING), ``token_check_skipped_non_trading_day`` (INFO).
@@ -39,8 +32,8 @@ from engine.notify.catalog import CatalogMessage, MessageKind, login_instruction
 
 _log = get_logger("engine.ops.token_check")
 
-#: Fire-time (IST) — far enough before the 09:15 open that the owner has time to complete the login
-#: flow on their phone, late enough that a token minted on the normal ~08:30 prompt is already in.
+#: Fire-time (IST): early enough for the owner to log in before the open, late enough that a token
+#: minted on the normal ~08:30 prompt is already in.
 TOKEN_CHECK_IST = time(8, 40)
 
 #: Typed owner-notification sink (``engine.ops.main.notify``).
@@ -53,21 +46,18 @@ class TokenCheckJob:
     Parameters
     ----------
     kite:
-        The :class:`~engine.broker.kite_client.KiteClient` facade. ``margins()`` is the probe: it is
-        the cheapest authenticated endpoint the facade exposes (Kite's ``/user/margins``), reads
-        account state only, and places/modifies/cancels nothing. It routes through
-        ``KiteClient._call``, so a ``TokenException`` ALSO fires the existing token-rejection circuit breaker
-        (``SessionManager.on_token_rejected`` → freeze entries + login link) — which is the correct
-        pre-open posture and is idempotent with this job's own alert.
+        The :class:`~engine.broker.kite_client.KiteClient` facade. ``margins()`` (``/user/margins``)
+        is the probe: cheapest authenticated endpoint, read-only. It routes through
+        ``KiteClient._call``, so a ``TokenException`` ALSO fires the token-rejection circuit breaker
+        (``SessionManager.on_token_rejected`` → freeze entries + login link), idempotent with this
+        job's own alert.
     clock, calendar:
-        Trading-day gate + the timestamp on the alert. A non-trading day skips silently.
+        Trading-day gate + the alert timestamp. A non-trading day skips silently.
     notify:
-        Typed owner sink. Failures here are swallowed: a notification that cannot be delivered must
-        not turn a best-effort check into an exception on the scheduler thread.
+        Typed owner sink; delivery failures are swallowed.
     login_url:
-        Zero-arg callable returning the broker login URL (``SessionManager.login_url``), so the
-        alert carries a tappable link. ``None`` (or a raising call) degrades to the ``/token``
-        instruction alone.
+        Zero-arg callable returning the broker login URL (``SessionManager.login_url``). ``None`` (or
+        a raising call) degrades to the ``/token`` instruction alone.
     """
 
     def __init__(
@@ -124,8 +114,7 @@ class TokenCheckJob:
         return "Send /token <request_token> after logging in to Kite."
 
     def _invalid_message(self, error: str) -> CatalogMessage:
-        # LOGIN_PROMPT is the notification kind for "the daily Kite login is required" — which is exactly the
-        # owner action here; the title/body carry the pre-open framing the generic prompt lacks.
+        # LOGIN_PROMPT is the kind for "the daily Kite login is required"; title/body carry the pre-open framing.
         return CatalogMessage(
             kind=MessageKind.LOGIN_PROMPT,
             title="Kite token invalid — re-login before open",
