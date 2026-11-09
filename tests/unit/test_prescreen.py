@@ -53,12 +53,7 @@ def _window(day: int = 17, start=(9, 15), end=(15, 30)) -> tuple[datetime, datet
 
 
 def _ctx(bar: Bar) -> ScanContext:
-    """Default provider: a normally-OPEN trade window on the scanned bar's own date.
-
-    Every test outside the "trade-window gate" section below is about dedupe/caps/ranking, so the
-    default context models an open 09:15-15:30 window — otherwise the 2026-08-18 window gate
-    (which fails closed on a ``None`` window) would refuse every candidate and mask what they test.
-    """
+    """Default provider: an OPEN 09:15-15:30 trade window on the bar's own date (the window gate fails closed on ``None``)."""
     day = bar.ts_minute.day
     return ScanContext(
         trade_window=_window(day),
@@ -104,8 +99,7 @@ def _ext_cand(symbol: str, strategy_id: str = "brk20"):
 
 
 def test_admit_applies_the_same_dedupe_and_caps_as_the_bar_path():
-    """2026-08-04 (brk20): externally-scanned candidates face the identical spine —
-    same-day (symbol, strategy) dedupe and the shared daily cap — or the sweep is a cap bypass."""
+    """Externally-scanned candidates face the same dedupe and the shared daily cap as the bar path."""
     from datetime import date as _date
     ps = _prescreen(max_candidates_per_day=3)
     day = _date(2026, 6, 17)
@@ -123,9 +117,7 @@ def test_admit_applies_the_same_dedupe_and_caps_as_the_bar_path():
 
 # ---------------------------------------------------------------------------- hydrate (restart-proof day state)
 def test_hydrate_restores_dedupe_and_caps_across_a_restart():
-    """2026-08-04: the day state was process memory only, so a restart reset both bounds (observed:
-    ~54 publications vs the 20/day cap across two mid-session restarts). A hydrated `seen` pair may
-    not re-publish; hydrated `charged` pairs count against the caps."""
+    """A hydrated `seen` pair may not re-publish; hydrated `charged` pairs count against the caps."""
     from datetime import date as _date
     day = _date(2026, 6, 17)
     ps = _prescreen(max_candidates_per_day=3)
@@ -141,8 +133,7 @@ def test_hydrate_restores_dedupe_and_caps_across_a_restart():
 
 
 def test_hydrate_charged_but_unseen_republishes_within_paid_quota():
-    """A pair published but LOST IN FLIGHT (evaluated=0 — the crash/restart shape) re-publishes,
-    and within its already-paid cap slot: the 2026-07-29 rearm semantics, now restart-proof."""
+    """A pair published but lost in flight (evaluated=0) re-publishes within its already-paid cap slot."""
     from datetime import date as _date
     day = _date(2026, 6, 17)
     ps = _prescreen(max_candidates_per_day=2)
@@ -174,7 +165,7 @@ def test_daily_cap_suppresses_after_limit():
 
 
 def test_per_strategy_cap_binds_before_daily_cap():
-    """The scalar form = the ``default``-only mapping (the shipped config used it before per-strategy caps)."""
+    """The scalar form is the ``default``-only mapping."""
     ps = _prescreen([_stub("s1"), _stub("s2")], max_candidates_per_day=20, max_per_strategy_day=1)
     assert len(ps.on_bar(_bar(symbol="AAA"))) == 2        # each strategy takes its 1
     assert ps.on_bar(_bar(symbol="BBB", mm=1)) == []      # both strategies exhausted; day cap untouched
@@ -187,11 +178,9 @@ def test_cap_constructor_validation():
         _prescreen(max_per_strategy_day=0)
 
 
-# ------------------------------------------------------------------ sweep (2026-07-29)
+# ------------------------------------------------------------------ rearm / sweep
 def test_rearm_gives_back_the_day_slot():
-    """A never-evaluated drop re-arms the (symbol, strategy) day slot so a still-true condition
-    can re-publish (2026-07-29: six candidates burned by a broken analyst were dedupe-blocked for
-    the rest of the day)."""
+    """A never-evaluated drop re-arms the (symbol, strategy) day slot so a still-true condition can re-publish."""
     ps = _prescreen()
     assert len(ps.on_bar(_bar(mm=0))) == 1
     assert ps.on_bar(_bar(mm=1)) == []                    # slot spent
@@ -201,9 +190,7 @@ def test_rearm_gives_back_the_day_slot():
 
 
 def test_caps_charge_once_per_pair_across_rearm_cycles():
-    """2026-07-29 owner decision: caps bind on UNIQUE pairs. A re-armed pair re-publishes within
-    its already-paid quota even with the cap full; a NEW pair is still suppressed. Without this,
-    an out-of-window re-arm/re-publish cycle would exhaust the day cap with zero evaluations."""
+    """Caps bind on UNIQUE pairs: a re-armed pair re-publishes within its paid quota even with the cap full; a NEW pair is still suppressed."""
     ps = _prescreen(max_candidates_per_day=1)
     assert len(ps.on_bar(_bar(symbol="AAA", mm=0))) == 1  # cap now full (1/1 unique pair)
     for cycle in range(3):                                # re-arm/re-publish churns freely
@@ -246,8 +233,7 @@ def test_sweep_scans_with_normal_dedupe_and_reports_pending():
 
 
 def test_sweep_suppresses_pending_for_pairs_that_already_published():
-    """Once (symbol, strategy) published today, its pending arm level is noise — the day slot is
-    spent and a re-break cannot re-enter the pipeline (once-per-day rule)."""
+    """Once a pair published today its pending arm level is noise (once-per-day rule)."""
 
     class _Both(Scanner):
         strategy_id = "both"
@@ -268,8 +254,7 @@ def test_sweep_suppresses_pending_for_pairs_that_already_published():
 
 
 def test_sweep_never_publishes_itself():
-    """sweep() is worker-thread-safe BECAUSE publication is the caller's job (handle_bar's split):
-    accepted candidates come back unpublished."""
+    """sweep() is worker-thread-safe because publication is the caller's job: accepted candidates come back unpublished."""
     bus = EventBus()
     received = []
 
@@ -413,9 +398,7 @@ def _multi_stub(sid: str, scored_symbols: dict[str, float]):
 
 
 def test_burst_admits_the_top_scored_not_the_earliest():
-    """Under a binding cap the batch is admitted SCORE-DESCENDING, so the best candidate
-    of a burst takes the last free slot instead of whichever scanner happened to emit first.
-    Before ranked admission this admitted LOW/MID (arrival order) and dropped the two best."""
+    """Under a binding cap the batch is admitted score-descending, not in emission order."""
     burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95, "HIGH": 0.80}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
     out = ps.on_bar(_bar(symbol="DRIVER"))
@@ -423,16 +406,14 @@ def test_burst_admits_the_top_scored_not_the_earliest():
 
 
 def test_burst_ties_keep_arrival_order_and_admission_stays_deterministic():
-    """Ties in score fall back to emission order (``sorted`` is stable), so replay of the same
-    bar stream still reproduces the same decisions byte-for-byte."""
+    """Score ties fall back to emission order (stable sort), so replay is deterministic."""
     burst = {"A": 0.50, "B": 0.50, "C": 0.90}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2)
     assert [c.symbol for c in ps.on_bar(_bar(symbol="DRIVER"))] == ["C", "A"]
 
 
 def test_admission_mode_arrival_is_the_rollback_to_arrival_order():
-    """The rollback is a config flag, not a revert. ``arrival`` restores the exact
-    pre-ranking behaviour — first emitted, first admitted, score ignored."""
+    """``arrival`` mode admits first-emitted first, ignoring score."""
     burst = {"LOW": 0.10, "MID": 0.50, "TOP": 0.95}
     ps = _prescreen([_multi_stub("s1", burst)], max_candidates_per_day=2,
                     admission_mode="arrival")
@@ -442,8 +423,7 @@ def test_admission_mode_arrival_is_the_rollback_to_arrival_order():
 
 
 def test_admit_batch_is_ranked_too():
-    """The brk20 daily sweep is the biggest real burst (dozens of candidates in ONE admit call) —
-    it must face the same score-descending selection as the bar path."""
+    """One ``admit`` call with many candidates faces the same score-descending selection as the bar path."""
     from datetime import date as _date
 
     from engine.strategy.types import RawLevels, SignalCandidate
@@ -462,8 +442,7 @@ def test_admit_batch_is_ranked_too():
 
 # ======================================================================== per-strategy caps
 def test_per_strategy_cap_mapping_binds_per_strategy():
-    """The sub-cap becomes a per-strategy MAP; ``default`` binds any strategy without
-    its own line (the structural ceiling, a third of the day as shipped, for strategies added later)."""
+    """The sub-cap is a per-strategy map; ``default`` binds any strategy without its own line."""
     ps = _prescreen(
         [_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7}),
          _multi_stub("rsi2", {"D": 0.6, "E": 0.5, "F": 0.4}),
@@ -481,9 +460,7 @@ def test_per_strategy_cap_mapping_binds_per_strategy():
 
 
 def test_an_orb_flood_cannot_starve_rsi2():
-    """An orb flood must not consume slots rsi2 could have used. On 2026-08-11 orb
-    took 55% of the day's publications purely by arriving first; with orb capped at 6/20 the flood
-    stops at its cap and rsi2's later, lower-scored candidates still publish."""
+    """An orb flood stops at its sub-cap and rsi2's later, lower-scored candidates still publish."""
     orb_flood = {f"ORB{i}": 0.99 - i / 100 for i in range(30)}
     ps = _prescreen(
         [_multi_stub("orb", orb_flood), _multi_stub("rsi2", {"RSI_A": 0.30, "RSI_B": 0.25})],
@@ -503,17 +480,15 @@ def test_an_orb_flood_cannot_starve_rsi2():
 def test_per_strategy_cap_mapping_validation():
     with pytest.raises(ValueError):
         _prescreen(max_per_strategy_day={"orb": -1})
-    # `default: 0` binds every strategy without a line of its own, so a typo there would park the
-    # whole platform — that stays a constructor error while a per-strategy 0 is now legal.
+    # `default: 0` would park every strategy without its own line, so it stays a constructor error; a per-strategy 0 is legal.
     with pytest.raises(ValueError):
         _prescreen(max_per_strategy_day={"default": 0, "orb": 1})
 
 
-# ================================================== parked strategies (orb, owner-directed 2026-09-12)
+# ================================================== parked strategies (orb)
 def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
-    """``max_per_strategy_day`` 0 for ONE strategy = admit nothing today. The refusal must land on
-    its own counter (not ``suppressed_cap``, which reads as starvation) and must not spend a day
-    slot the other strategies could use."""
+    """``max_per_strategy_day`` 0 admits nothing for that strategy; the refusal lands on its own counter (not
+    ``suppressed_cap``) and spends no day slot."""
     ps = _prescreen(
         [_multi_stub("orb", {"A": 0.9, "B": 0.8}), _multi_stub("rsi2", {"C": 0.7})],
         max_candidates_per_day=1,                        # ONE day slot: orb's refusals must leave it for C
@@ -534,8 +509,7 @@ def test_parked_strategy_admits_nothing_and_charges_no_slot(caplog):
 
 
 def test_parked_strategy_logs_again_on_the_next_day(caplog):
-    """Once per strategy per DAY: the day roll must clear both the counter and the log latch, or the
-    catchup_safety_jobs lesson (a latch with no symmetric clear) repeats in the log path."""
+    """The park log fires once per strategy per day: the day roll clears both the counter and the log latch."""
     from datetime import date as _date
     ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
     with caplog.at_level("INFO"):
@@ -549,8 +523,7 @@ def test_parked_strategy_logs_again_on_the_next_day(caplog):
 
 
 def test_parked_strategy_is_refused_ahead_of_the_window_gate():
-    """A parked strategy admits nothing at ANY hour, so the refusal is attributed to the park rather
-    than split across ``suppressed_window`` depending on when the bar fired."""
+    """A park refusal is attributed to the park, never to ``suppressed_window``."""
     def shut(bar):  # noqa: ANN001, ANN202 - test stub provider
         return ScanContext(
             trade_window=_window(bar.ts_minute.day, start=(14, 0), end=(15, 30)),
@@ -566,8 +539,7 @@ def test_parked_strategy_is_refused_ahead_of_the_window_gate():
 
 
 def test_parked_strategy_binds_the_batch_admit_path_too():
-    """``admit`` (the `ins`/`cat`/`hi52` batch spine) shares ``_admit_one_locked``, so parking binds
-    it without a second enforcement site — the property that makes the park a single switch."""
+    """``admit`` shares ``_admit_one_locked``, so the park binds the batch path with no second enforcement site."""
     from datetime import date as _date
     ps = _prescreen([], max_per_strategy_day={"default": 16, "orb": 0})
     assert ps.admit([_orb_cand("AAA", 0.9)], _date(2026, 6, 17)) == []
@@ -575,8 +547,7 @@ def test_parked_strategy_binds_the_batch_admit_path_too():
 
 
 def test_unparked_strategies_are_untouched_by_a_park():
-    """The park is per strategy: an absent line still falls through to ``default``, and ``None``
-    (the replay/backtest construction) is still no cap at all."""
+    """The park is per strategy: an absent line falls through to ``default``."""
     ps = _prescreen([_multi_stub("mom", {"A": 0.9, "B": 0.8, "C": 0.7})],
                     max_candidates_per_day=48, max_per_strategy_day={"default": 2, "orb": 0})
     assert len(ps.on_bar(_bar(symbol="DRIVER"))) == 2
@@ -584,11 +555,8 @@ def test_unparked_strategies_are_untouched_by_a_park():
 
 
 def test_parked_strategy_contributes_no_pending_arm_levels():
-    """The sweep verdict is the one surface the owner reads intraday, and a parked strategy's arm
-    levels are not "not yet triggered" — they can never trigger. The published-pair skip cannot mute
-    them either: the park gate refuses BEFORE ``_seen.add``, so a parked pair is never seen and would
-    keep rendering under "would arm at:" for a strategy that refuses every one of those candidates.
-    """
+    """A parked strategy's arm levels can never trigger, so they are not reported; the published-pair skip
+    cannot mute them because the park gate refuses before ``_seen.add``."""
     ps = _prescreen([_pending_stub("orb"), _pending_stub("rsi2")],
                     max_per_strategy_day={"default": 16, "orb": 0})
     accepted, pending = ps.sweep([_bar(symbol="AAA"), _bar(symbol="BBB", mm=1)])
@@ -600,10 +568,8 @@ def test_parked_strategy_contributes_no_pending_arm_levels():
 
 
 def test_a_mid_session_park_leaves_restored_pairs_on_the_dedupe_counter():
-    """Deploy-day shape: orb published under the old cap, the engine restarts with ``orb: 0``, and
-    :meth:`hydrate` restores those pairs. Their re-fires cost the park NOTHING — the slot was already
-    spent and the analyst already looked — so they stay ``suppressed_dedupe``; only a pair the park
-    genuinely refused belongs on ``suppressed_disabled``."""
+    """Pairs restored by :meth:`hydrate` under a new ``orb: 0`` stay ``suppressed_dedupe``; only a pair the park
+    itself refused is ``suppressed_disabled``."""
     from datetime import date as _date
 
     ps = _prescreen([_stub("orb")], max_per_strategy_day={"default": 16, "orb": 0})
@@ -616,10 +582,7 @@ def test_a_mid_session_park_leaves_restored_pairs_on_the_dedupe_counter():
 
 
 def test_shipped_settings_park_orb():
-    """``config/settings.yaml`` ships ``orb: 0`` (owner-directed 2026-09-12 after the 09-11 audit:
-    101 of 229 analyst forwards since 08-17 produced zero entry proposals, and the three intraday
-    price-only families were refuted at retail cost). Re-enabling is an owner decision, so this
-    assertion is the tripwire on an accidental un-park."""
+    """``config/settings.yaml`` ships ``orb: 0`` (owner decision); this is the tripwire on an accidental un-park."""
     from engine.core.config import load_settings
 
     caps = load_settings().strategy.prescreen.max_per_strategy_day
@@ -633,13 +596,12 @@ def test_shipped_settings_park_trend():
     caps = load_settings().strategy.prescreen.max_per_strategy_day
     assert isinstance(caps, dict)
     assert caps["trend"] == 0
-    assert caps["default"] >= 1                          # the park is orb's alone
+    assert caps["default"] >= 1                          # the park is per strategy, not platform-wide
 
 
 # ======================================================================== funnel counters
 def test_funnel_counters_track_raw_published_and_suppressed():
-    """Raw (what the scanners produced) vs published (what cleared dedupe/caps) is the top of
-    the funnel; without it "the analyst never saw it" and "nothing fired" are indistinguishable."""
+    """Raw (scanner output) vs published (cleared dedupe/caps) tops the funnel."""
     from datetime import date as _date
     ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8, "C": 0.7})],
                     max_candidates_per_day=20, max_per_strategy_day={"orb": 2})
@@ -653,13 +615,9 @@ def test_funnel_counters_track_raw_published_and_suppressed():
     assert ps.raw_counts(_date(2026, 6, 18)) == {}        # another day's counters are not this day's
 
 
-# ================================= raw counters survive a restart (2026-08-21, `funnel_raw_counts`)
-#
-# THE BUG this section pins. `raw` was the only funnel number with no DB home, so a mid-session
-# restart zeroed it and the nightly `funnel_utilization` line reported `raw=None` ("unmeasured") for
-# the WHOLE day — on 4 of the last 6 trade days. That is the funnel's own "the analyst never saw it" vs
-# "nothing fired" ambiguity, re-introduced by the restart. The counters are now seeded on every day
-# roll (the first roll of a fresh process included) from what the drain tick flushed.
+# ================================= raw counters survive a restart (`funnel_raw_counts`)
+# The raw counters are seeded on every day roll (the first roll of a fresh process included) from what the
+# drain tick flushed, so a mid-session restart does not zero them.
 
 def test_raw_counters_continue_from_the_loader_instead_of_restarting_at_zero():
     """A fresh process rolls onto today, hydrates the day's persisted total, and counts ON from it."""
@@ -677,8 +635,7 @@ def test_raw_counters_continue_from_the_loader_instead_of_restarting_at_zero():
 
 
 def test_raw_counter_hydration_is_per_day_never_carried_forward():
-    """A roll onto a genuinely NEW day loads that day's rows (none yet) and starts at zero — carrying
-    yesterday's total into today would be the same lie ``raw_counts`` already refuses to tell."""
+    """A roll onto a new day loads that day's rows (none yet) and starts at zero; yesterday's total is never carried."""
     from datetime import date as _date
     ps = _prescreen([_stub("orb")],
                     raw_counts_loader=lambda d: {"orb": 40} if d == _date(2026, 6, 17) else {})
@@ -689,8 +646,7 @@ def test_raw_counter_hydration_is_per_day_never_carried_forward():
 
 
 def test_a_broken_raw_counts_loader_never_costs_a_scan():
-    """A telemetry read that cannot be served degrades to the pre-2026-08-21 behaviour (counting
-    from zero) — it must never propagate out of the scan path."""
+    """A telemetry read that fails degrades to counting from zero and never propagates out of the scan path."""
     from datetime import date as _date
 
     def _boom(_d):
@@ -702,8 +658,7 @@ def test_a_broken_raw_counts_loader_never_costs_a_scan():
 
 
 def test_hydrate_seeds_the_raw_counters_too():
-    """The boot path (``engine.ops.main._hydrate_prescreen``) rolls the day through the same seam, so
-    a restart's dedupe/cap state and its raw counters are restored in one step."""
+    """``hydrate`` rolls the day through the same seam, restoring dedupe/cap state and raw counters in one step."""
     from datetime import date as _date
     day = _date(2026, 6, 17)
     ps = _prescreen([_stub("orb")], raw_counts_loader=lambda d: {"orb": 40, "rsi2": 6})
@@ -711,25 +666,19 @@ def test_hydrate_seeds_the_raw_counters_too():
     assert ps.raw_counts(day) == {"orb": 40, "rsi2": 6}
 
 
-# ================================================ trade-window gate (2026-08-18 origination fix)
-#
-# THE BUG this section pins. The caps bind on unique (symbol, strategy) pairs and are never refunded
-# ("the spam bound counts attempts, not outcomes" — SignalPreScreen.rearm). Before this gate the
-# pre-screen published on every bar from session open, the pipeline dropped each one as
-# `signal_candidate_out_of_window` and re-armed it — but the CHARGE stayed. Live 2026-08-18: 15 of
-# the day's 20 slots, and all 6 of orb's sub-cap, were spent before the trade window ever opened;
-# the cap filled completely 44 s after it did, and the session produced 2,549 refusals and 0
-# proposals. The gate refuses BEFORE charging, which is the only place a doomed candidate can be
-# stopped — there is deliberately no decrement path for `_charged` anywhere in the codebase.
+# ================================================ trade-window gate
+# Caps bind on unique (symbol, strategy) pairs and are never refunded ("the spam bound counts attempts,
+# not outcomes" — SignalPreScreen.rearm). The gate therefore refuses BEFORE charging, the only place a
+# doomed candidate can be stopped; there is deliberately no decrement path for `_charged`.
 
 def _not_yet_open(bar: Bar) -> ScanContext:
-    """Window opens LATER than the scanned bar — the live 2026-08-18 shape (owner window 10:10)."""
+    """Window opens LATER than the scanned bar (owner window 10:10)."""
     return ScanContext(trade_window=_window(bar.ts_minute.day, start=(10, 10), end=(15, 30)),
                        session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST))
 
 
 def _already_closed(bar: Bar) -> ScanContext:
-    """Window already SHUT for the scanned bar (10:10-13:45 — today's early close)."""
+    """Window already SHUT for the scanned bar (10:10-13:45)."""
     return ScanContext(trade_window=_window(bar.ts_minute.day, start=(10, 10), end=(13, 45)),
                        session_open=datetime(2026, 6, bar.ts_minute.day, 9, 15, tzinfo=IST))
 
@@ -739,15 +688,14 @@ def test_out_of_window_candidate_is_refused_after_the_close():
 
 
 def test_out_of_window_candidate_charges_no_day_slot():
-    """THE regression. A pre-window bar must leave the pair able to publish once the window opens —
-    that is the whole defect: those early fires permanently consumed the slot."""
+    """A pre-window bar must leave the pair able to publish once the window opens."""
     state = {"open": False}
 
     def provider(bar: Bar) -> ScanContext:
         return _ctx(bar) if state["open"] else _not_yet_open(bar)
 
     ps = _prescreen(context_provider=provider, max_candidates_per_day=1)
-    for minute in range(5):                     # 09:52-09:56, exactly the live pre-window burst
+    for minute in range(5):                     # 09:52-09:56, before the 10:10 window
         assert ps.on_bar(_bar(hh=9, mm=52 + minute)) == []
     state["open"] = True
     admitted = ps.on_bar(_bar(hh=10, mm=10))    # the window opens: the slot must still be there
@@ -756,8 +704,7 @@ def test_out_of_window_candidate_charges_no_day_slot():
 
 
 def test_out_of_window_does_not_consume_the_per_strategy_sub_cap():
-    """orb's 6-slot sub-cap was exhausted at 10:01 against a stale window, nine minutes before the
-    real one opened — so the sub-cap must survive a shut window too, not just the day cap."""
+    """The per-strategy sub-cap must survive a shut window too, not just the day cap."""
     state = {"open": False}
 
     def provider(bar: Bar) -> ScanContext:
@@ -774,15 +721,13 @@ def test_out_of_window_does_not_consume_the_per_strategy_sub_cap():
 
 
 def test_absent_window_fails_closed():
-    """No window ⇒ nothing originates: the fail-to-zero direction every other guard takes.
-    A ``None`` here means "not a trading day" or an unreadable window, never "unrestricted"."""
+    """No window ⇒ nothing originates: ``None`` means "not a trading day" or an unreadable window, never "unrestricted"."""
     ps = _prescreen(context_provider=lambda bar: ScanContext())
     assert ps.on_bar(_bar()) == []
 
 
 def test_window_edges_are_inclusive_on_the_bar_close_instant():
-    """The instant tested is ts_minute + 1m — when an entry off this bar could actually be placed —
-    matching OrbScanner.scan's `entry_dt`, so orb and the pre-screen agree to the minute."""
+    """The instant tested is ts_minute + 1m (when an entry off this bar could be placed), matching OrbScanner.scan's `entry_dt`."""
     from engine.strategy.prescreen import bar_in_trade_window
     w = _window(17, start=(10, 0), end=(10, 30))
     assert not bar_in_trade_window(_bar(hh=9, mm=58), w)    # closes 09:59 — before the open
@@ -793,8 +738,7 @@ def test_window_edges_are_inclusive_on_the_bar_close_instant():
 
 
 def test_admit_batch_path_honours_the_window_flag():
-    """brk20/ins/cat carry no bar, so the sweep (which has the Clock) decides. Same property: a
-    refused batch charges nothing, so a later in-window sweep still admits."""
+    """Batch candidates carry no bar, so the caller passes ``in_window``; a refused batch charges nothing."""
     from datetime import date as _date
     ps = _prescreen([], max_candidates_per_day=1)
     day = _date(2026, 6, 17)
@@ -804,7 +748,7 @@ def test_admit_batch_path_honours_the_window_flag():
 
 
 def test_admit_defaults_to_in_window_for_backward_compatibility():
-    """The parameter is purely additive: omitting it reproduces pre-2026-08-18 behaviour exactly."""
+    """Omitting ``in_window`` means in-window."""
     from datetime import date as _date
     ps = _prescreen([])
     cands = _multi_stub("brk20", {"A": 0.9}).scan(_bar(), _ctx(_bar()))
@@ -812,8 +756,7 @@ def test_admit_defaults_to_in_window_for_backward_compatibility():
 
 
 def test_window_suppression_is_counted_apart_from_cap_suppression():
-    """A large suppressed_window is healthy budget protection; a large suppressed_cap is starvation.
-    Conflating them would make the funnel line unreadable. `raw` still counts what fired."""
+    """suppressed_window (budget protection) is counted apart from suppressed_cap (starvation); `raw` still counts what fired."""
     ps = _prescreen([_multi_stub("orb", {"A": 0.9, "B": 0.8})], context_provider=_not_yet_open)
     ps.on_bar(_bar(hh=9, mm=52))
     counters = ps.funnel_counters()
@@ -824,20 +767,17 @@ def test_window_suppression_is_counted_apart_from_cap_suppression():
 
 
 def test_window_gate_uses_bar_time_not_wall_clock():
-    """The pre-screen takes no Clock. The same bar stream must decide the same way whenever it
-    is replayed, so the gate reads bar.ts_minute against ctx.trade_window and nothing else."""
+    """The pre-screen takes no Clock: the gate reads bar.ts_minute against ctx.trade_window only, so replay is deterministic."""
     a = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
     b = _prescreen(context_provider=_not_yet_open).on_bar(_bar(hh=9, mm=52))
     assert a == b == []
     assert len(_prescreen(context_provider=_ctx).on_bar(_bar(hh=9, mm=52))) == 1
 
 
-# ============================== one ranked admission across batch legs (2026-08-18, the `cat` loss)
+# ============================== one ranked admission across batch legs
 def test_admit_ranks_across_strategies_in_one_batch():
-    """Live 2026-08-18: brk20 (0.552, 0.523) took the day's last slots and cat LT (0.82) was
-    suppressed 94 ms later, because run_scan_sweep made three SEPARATE admit calls and ranked admission ranks
-    only WITHIN a batch. `cat` is single-shot (MAX_EVENT_AGE_SESSIONS = 1), so that loss is
-    permanent. Concatenating the legs into ONE admit is what lets the best candidate win."""
+    """Ranking is only WITHIN one ``admit`` call, so batch legs are concatenated: the best candidate wins the
+    last slot even if its strategy comes later (`cat` is single-shot, so a loss is permanent)."""
     from datetime import date as _date
     ps = _prescreen([], max_candidates_per_day=1)
     ctx, bar = _ctx(_bar()), _bar()
@@ -848,7 +788,7 @@ def test_admit_ranks_across_strategies_in_one_batch():
     assert admitted[0].symbol == "LT"
 
 
-# ================================ cap displacement (2026-08-27: the KALYANKJIL/TATACONSUM lockout)
+# ================================ cap displacement
 def _scored(symbol: str, score: float, strategy_id: str = "orb", **kw):
     """One admissible candidate, built directly so a test can pin its score to the third decimal."""
     from engine.strategy.types import RawLevels, SignalCandidate
@@ -867,15 +807,8 @@ def _the_day():
 
 
 def test_a_better_later_candidate_displaces_an_unevaluated_slot():
-    """THE 2026-08-27 LOCKOUT, in the shape it happened.
-
-    All 7 of ``orb``'s daily admission slots were charged between 09:46:06 and 09:47:05 - inside 90
-    seconds of the trade window opening. KALYANKJIL then fired at 12:49 at score **1.0**, which the
-    scanner is designed to do (its entry window runs to 14:30; only the RANGE is the first 30
-    minutes), and was refused outright with ``prescreen_cap_suppressed cap="strategy_day"``. Nothing
-    about its quality could have saved it. Since 2026-08-27 the cap protects the analyst BUDGET
-    rather than the morning's arrival order: the slot moves off the worst incumbent nobody looked at.
-    """
+    """The cap protects the analyst budget, not arrival order: a better later candidate takes the slot of the
+    worst incumbent nobody has evaluated."""
     ps = _prescreen([], max_per_strategy_day={"orb": 3})
     day = _the_day()
     morning = [_scored("SHRIRAMFIN", 0.55), _scored("POLICYBZR", 0.50), _scored("HDFCAMC", 0.72)]
@@ -894,9 +827,7 @@ def test_a_better_later_candidate_displaces_an_unevaluated_slot():
 
 
 def test_an_evaluated_candidate_never_loses_its_slot():
-    """INVARIANT #1, now load-bearing across three fixes (2026-07-29 rearm, the 2026-08-27 TTL
-    refund, and displacement). A candidate the analyst was actually spent on keeps its slot against
-    an arrival of ANY score - including a perfect one."""
+    """A candidate the analyst was actually spent on keeps its slot against an arrival of any score, a perfect one included."""
     ps = _prescreen([], max_per_strategy_day={"orb": 2})
     day = _the_day()
     assert len(ps.admit([_scored("SHRIRAMFIN", 0.20), _scored("POLICYBZR", 0.21)], day)) == 2
@@ -907,18 +838,13 @@ def test_an_evaluated_candidate_never_loses_its_slot():
     assert ps.take_displaced() == []
     assert ps.funnel_counters()["suppressed_cap"] == {"orb": 1}
     assert ps._charged == {("SHRIRAMFIN", "orb"), ("POLICYBZR", "orb")}
-    # …and the refusal log says so: zero displaceable incumbents, the diagnostic the same single
-    # scan that picks a victim now also produces.
+    # The refusal diagnostic reports zero displaceable incumbents.
     assert ps._displacement_scan_locked(_scored("KALYANKJIL", 1.0)).displaceable == 0
 
 
 def test_a_displaced_pair_is_refused_the_analyst_slot_it_was_queued_for():
-    """The other half of invariant #1: a freed slot must never be spent twice.
-
-    The pipeline can be holding a forward-queue pointer to a pair the pre-screen has just displaced.
-    ``claim_slot`` is the compare-and-set that tells it so - otherwise the displaced candidate and
-    the candidate that took its slot would BOTH reach the analyst, breaching the cap by a real call.
-    """
+    """A freed slot is never spent twice: ``claim_slot`` is the compare-and-set that tells the pipeline its queued
+    pair was displaced, else both pairs would reach the analyst and breach the cap."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     day = _the_day()
     assert len(ps.admit([_scored("POLICYBZR", 0.50)], day)) == 1
@@ -931,9 +857,7 @@ def test_a_displaced_pair_is_refused_the_analyst_slot_it_was_queued_for():
 
 
 def test_displacement_needs_a_real_margin_not_a_rounding_error():
-    """Sufficiently-better is ``displacement_margin`` (shipped 0.10), not a bare ``>``. Scores are
-    clamped floats in [0, 1]; strict inequality would let 0.801 evict 0.800 - a publication and a
-    journal write spent on noise, and an oscillation the margin makes structurally impossible."""
+    """Sufficiently-better is ``displacement_margin`` (shipped 0.10), not a bare ``>``, so 0.801 cannot evict 0.800."""
     from engine.strategy.prescreen import DEFAULT_DISPLACEMENT_MARGIN
     assert DEFAULT_DISPLACEMENT_MARGIN == 0.10
     day = _the_day()
@@ -947,21 +871,16 @@ def test_displacement_needs_a_real_margin_not_a_rounding_error():
     assert len(at.admit([_scored("POLICYBZR", 0.80)], day)) == 1
     assert [c.symbol for c in at.admit([_scored("TATACONSUM", 0.90)], day)] == ["TATACONSUM"]
 
-    # Saturation is the honest limit: orb clamps at 1.0 and fired 883 times at exactly 1.0 on
-    # 2026-08-18. Equal incumbents are undisplaceable, which is correct - there is no basis to
-    # prefer the later one - but it is why this fix cannot rescue every locked-out candidate.
+    # Saturation: scores clamp at 1.0, and equal incumbents are undisplaceable (no basis to prefer the later one).
     flat = _prescreen([], max_per_strategy_day={"orb": 1})
     assert len(flat.admit([_scored("SHRIRAMFIN", 1.0)], day)) == 1
     assert flat.admit([_scored("KALYANKJIL", 1.0)], day) == []
 
 
 def test_displacement_is_budgeted_so_the_spam_bound_survives():
-    """This is the first decrement path ``_charged`` has ever had, and the trade-window gate's
-    docstring warns that one would erode the spam bound. A SWAP does not - the charged count is
-    invariant, so analyst spend is still exactly the cap - but PUBLICATIONS would become unbounded.
-    Displacements are budgeted at the strategy's own cap, so admissions per strategy per day are
-    bounded by 2x cap with no second owner knob to drift out of sync with ``max_per_strategy_day``.
-    """
+    """Displacement is the only decrement path of ``_charged``, and the trade-window gate's docstring warns that
+    one would erode the spam bound. A swap keeps analyst spend at the cap, but publications would be unbounded, so
+    displacements are budgeted at the strategy's own cap: admissions per strategy per day are bounded by 2x cap."""
     ps = _prescreen([], max_per_strategy_day={"orb": 2})
     day = _the_day()
     assert len(ps.admit([_scored("A", 0.10), _scored("B", 0.11)], day)) == 2
@@ -976,10 +895,8 @@ def test_displacement_is_budgeted_so_the_spam_bound_survives():
 
 
 def test_a_catalyst_candidate_is_never_evicted():
-    """Anti-manipulation: ``_catalyst_refs`` is the news-entry budget and it only GROWS.
-    Displacing a catalyst-bearing candidate would decrement it and let news-originated entries churn
-    the guard, so they are excluded from the victim pool outright (the carve-out fails to LESS
-    activity). An ARRIVAL may still carry one; it simply faces the catalyst cap on its own."""
+    """``_catalyst_refs`` (the news-entry budget) only grows: catalyst-bearing candidates are excluded from the
+    victim pool. An arrival may still carry one and faces the catalyst cap on its own."""
     ps = _prescreen([], max_per_strategy_day={"cat": 1}, catalyst_cap_fn=lambda: 5)
     day = _the_day()
     news = _scored("LT", 0.20, strategy_id="cat", catalyst_ref="01CATREF")
@@ -992,11 +909,8 @@ def test_a_catalyst_candidate_is_never_evicted():
 
 
 def test_displacement_never_reaches_inside_one_batch():
-    """Displacement decides CROSS-batch competition; the ranking decides intra-batch competition.
-    They must not overlap: the accepted list is what the caller PUBLISHES, so a candidate admitted
-    and then evicted by a later member of its own batch would be published holding no slot. Only the
-    ``arrival`` rollback can order a batch worst-first, and a rollback flag that quietly changed
-    behaviour would not be one."""
+    """Displacement decides cross-batch competition and ranking decides intra-batch; a candidate admitted and then
+    evicted by a later member of its own batch would be published holding no slot."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1}, admission_mode="arrival")
     admitted = ps.admit([_scored("LOW", 0.10), _scored("TOP", 0.95)], _the_day())
     assert [c.symbol for c in admitted] == ["LOW"]              # arrival order, cap bites at 1
@@ -1004,20 +918,9 @@ def test_displacement_never_reaches_inside_one_batch():
 
 
 def test_displacement_replays_byte_for_byte():
-    """9.6 DETERMINISM, checked rather than asserted.
-
-    Every input to the decision - the charged set, each pair's admission score and sequence, the
-    per-strategy counters and the displacement budget - is written only by the admission spine and
-    derived only from the candidate stream in arrival order. No Clock is read on this path, the
-    victim tie-break (score, then admission sequence) is TOTAL because two pairs cannot share a
-    sequence, and float comparison of identical inputs is exact. So the same stream replays to the
-    same admissions AND the same evictions.
-
-    The one live-only input is ``_evaluated``, written by ``claim_slot`` on the pipeline's 3-minute
-    drain cadence - the same composition-root-only coupling ``hydrate`` and ``raw_counts_loader``
-    already carve out, and a replay never wires it. That is what this test pins: with no pipeline in
-    the loop, the mechanism is a pure function of the stream.
-    """
+    """With no pipeline in the loop, admissions and evictions are a pure function of the candidate stream: no Clock
+    is read, and the victim tie-break (score, then admission sequence) is total. The one live-only input,
+    ``_evaluated`` (written by ``claim_slot``), is never wired in replay."""
     day = _the_day()
     stream = [
         [_scored("A", 0.30), _scored("B", 0.30)],   # a TIE, so the seq tie-break is what decides
@@ -1043,17 +946,15 @@ def test_displacement_replays_byte_for_byte():
 
 
 def test_displacement_margin_is_an_owner_knob_in_settings():
-    """The margin is owner-tunable without a code deploy (2026-08-27), like every other threshold in
-    this subsystem. ``config/settings.yaml`` is the authority; the module constant is only the
-    fallback for a directly-constructed pre-screen (tests, replay, backtest), and the two must agree
-    or the shipped engine and every test in this file would be arguing about different policy."""
+    """``config/settings.yaml`` is the authority for the margin; the module constant is the fallback for a
+    directly-constructed pre-screen, and the two must agree."""
     from engine.core.config import load_settings
     from engine.strategy.prescreen import DEFAULT_DISPLACEMENT_MARGIN
 
     shipped = load_settings().strategy.prescreen.displacement_margin
     assert shipped == DEFAULT_DISPLACEMENT_MARGIN == 0.10
 
-    # And the knob is REAL: a wider margin refuses a displacement the shipped value would allow.
+    # A wider margin refuses a displacement the shipped value would allow.
     day = _the_day()
     strict = _prescreen([], max_per_strategy_day={"orb": 1}, displacement_margin=0.50)
     assert len(strict.admit([_scored("POLICYBZR", 0.50)], day)) == 1
@@ -1062,9 +963,7 @@ def test_displacement_margin_is_an_owner_knob_in_settings():
 
 
 def test_displacement_margin_none_is_the_rollback_flag():
-    """``null`` in settings.yaml disables displacement entirely, restoring the pre-2026-08-27
-    behaviour where whoever fires first keeps the strategy's slots for the whole session. The way
-    ``admission_mode='arrival'`` is the ranking's rollback: a flag, not a revert."""
+    """A ``null`` margin disables displacement: whoever fires first keeps the strategy's slots for the session."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1}, displacement_margin=None)
     day = _the_day()
     assert len(ps.admit([_scored("POLICYBZR", 0.10)], day)) == 1
@@ -1074,21 +973,16 @@ def test_displacement_margin_none_is_the_rollback_flag():
 
 
 def test_displacement_margin_rejects_a_nonsense_value():
-    """A margin outside (0, 1] cannot mean anything against a [0, 1] clamped score: 0 would make
-    displacement fire on ties (churn), and >1 could never be met. Fail at construction rather than
-    silently never displacing, so a fat-fingered settings.yaml is a boot error, not a quiet regime
-    change nobody notices until the funnel goes quiet."""
+    """A margin outside (0, 1] is meaningless against a [0, 1] score (0 churns on ties, >1 never fires): a boot error."""
     for bad in (0.0, -0.1, 1.5):
         with pytest.raises(ValueError, match="displacement_margin"):
             _prescreen([], displacement_margin=bad)
 
 
-# ================================= declined incumbents are displaceable (2026-09-04, the 09-03 lockout)
+# ================================= declined incumbents are displaceable
 def test_a_declined_incumbent_is_displaceable_again():
-    """2026-09-03: five analyst no_action verdicts held all five orb slots from 09:52/11:30 to the
-    close (``displaceable=0`` on 3,984 refusals, UNITDSPR at 0.967 among them). A declined evaluation
-    holds no position, so it must not hold the slot either: it stays SEEN (no re-publication) and
-    is evicted by the first materially better arrival, exactly like an unevaluated incumbent."""
+    """A declined evaluation holds no position, so it must not hold the slot: it stays SEEN (no re-publication)
+    and is evicted by the first materially better arrival, like an unevaluated incumbent."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     day = _the_day()
     assert len(ps.admit([_scored("IREDA", 0.72)], day)) == 1
@@ -1105,9 +999,8 @@ def test_a_declined_incumbent_is_displaceable_again():
 
 
 def test_a_declined_displacement_spends_the_day_budget_not_the_strategy_budget():
-    """Evicting a declined incumbent costs one more analyst call, which the day-level displacement
-    budget and the forward cap bound. The per-strategy budget bounds PRE-evaluation churn only — on
-    2026-09-03 it was spent (5/5) by 11:30 and would otherwise have re-locked the afternoon."""
+    """Evicting a declined incumbent costs one more analyst call, bounded by the day-level displacement budget and
+    the forward cap; the per-strategy budget bounds pre-evaluation churn only."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     day = _the_day()
     assert len(ps.admit([_scored("A", 0.30)], day)) == 1
@@ -1131,15 +1024,10 @@ def test_the_day_displacement_budget_still_binds_declined_displacements():
     assert ps.funnel_counters()["suppressed_cap"] == {"orb": 1}
 
 
-# =========================================== displacement/catalyst accounting audit (2026-08-28)
+# =========================================== displacement/catalyst accounting
 def test_displacements_are_bounded_by_the_day_cap_too():
-    """The per-strategy displacement budget alone does not bound the DAY.
-
-    Displacement fires on a full ``max_candidates_per_day`` as well as on a full per-strategy cap,
-    but its budget was charged per strategy only — so N strategies could each spend their own budget
-    against the ONE day cap and publish ~sum(caps) beyond it while ``_count_day`` still read the cap.
-    A day-level budget (derived from ``max_candidates_per_day``, no new knob) closes it: total
-    publications per day are bounded by 2x the day cap, exactly as they are per strategy."""
+    """Displacement also fires on a full day cap, so a day-level budget (derived from ``max_candidates_per_day``)
+    bounds total publications per day at 2x the day cap, as the per-strategy budget does per strategy."""
     ps = _prescreen([], max_candidates_per_day=2, max_per_strategy_day={"orb": 5, "rsi2": 5})
     day = _the_day()
     # The DAY cap is what binds; neither strategy is anywhere near its own.
@@ -1156,9 +1044,7 @@ def test_displacements_are_bounded_by_the_day_cap_too():
 
 
 def test_displacement_is_bounded_with_no_per_strategy_cap_at_all():
-    """``max_per_strategy_day=None`` (the replay/backtest construction) makes ``_cap_for`` ``None``,
-    which made the per-strategy budget test vacuous — every arrival could displace, forever. The
-    day-level budget bounds it whether or not a per-strategy cap exists."""
+    """With ``max_per_strategy_day=None`` (replay/backtest) the per-strategy budget is vacuous; the day-level budget still bounds displacement."""
     ps = _prescreen([], max_candidates_per_day=2, max_per_strategy_day=None)
     day = _the_day()
     assert len(ps.admit([_scored("A", 0.10), _scored("B", 0.11)], day)) == 2
@@ -1172,10 +1058,7 @@ def test_displacement_is_bounded_with_no_per_strategy_cap_at_all():
 
 
 def test_a_republished_pair_is_judged_on_its_newest_score():
-    """``_admitted`` was written only on the FIRST charge, so a re-armed pair that re-published at a
-    better level was still offered up for displacement at its stale score — the arrival was compared
-    against a number no longer describing anything. The refresh is a fact about the candidate
-    stream, so replay is untouched."""
+    """A re-armed pair that re-publishes at a better score is offered for displacement at that newest score, not the stale one."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     day = _the_day()
     assert len(ps.admit([_scored("SHRIRAMFIN", 0.30)], day)) == 1
@@ -1187,10 +1070,8 @@ def test_a_republished_pair_is_judged_on_its_newest_score():
 
 
 def test_rearm_gives_back_displaceability_too():
-    """:meth:`claim_slot` marks a pair EVALUATED at dispatch; :meth:`rearm` is the statement that the
-    analyst call never actually happened. Discarding from ``_seen`` alone left the pair permanently
-    undisplaceable on the strength of a call that did not run — memory and journal disagreeing about
-    the same fact. Safe because only a never-completed call ever re-arms."""
+    """:meth:`claim_slot` marks a pair evaluated at dispatch; :meth:`rearm` says the call never ran, so the pair
+    is displaceable again. Safe because only a never-completed call re-arms."""
     day = _the_day()
     ps = _prescreen([], max_per_strategy_day={"orb": 1})
     assert len(ps.admit([_scored("SHRIRAMFIN", 0.20)], day)) == 1
@@ -1207,45 +1088,37 @@ def test_rearm_gives_back_displaceability_too():
 
 
 def test_the_displacement_walk_is_skipped_when_displacement_is_off():
-    """With ``displacement_margin=None`` no victim can exist, so walking ``_admitted`` bought only a
-    log field — and a fabricated ``displaceable=0`` reads exactly like "every incumbent was already
-    evaluated", the opposite diagnosis. ``None`` logs as null: disabled, not zero."""
+    """With displacement off the scan reports ``None`` (disabled), not a fabricated ``displaceable=0``."""
     ps = _prescreen([], max_per_strategy_day={"orb": 1}, displacement_margin=None)
     day = _the_day()
     assert len(ps.admit([_scored("POLICYBZR", 0.10)], day)) == 1
     assert ps._displacement_scan_locked(_scored("KALYANKJIL", 1.0)) == (None, None)
-    # And the enabled case still counts, which is what makes the two readings distinguishable.
+    # Enabled, it counts.
     on = _prescreen([], max_per_strategy_day={"orb": 1})
     assert len(on.admit([_scored("POLICYBZR", 0.10)], day)) == 1
     assert on._displacement_scan_locked(_scored("KALYANKJIL", 1.0)).displaceable == 1
 
 
 def test_hydrate_restores_the_catalyst_budget_across_a_restart():
-    """Before this, ``hydrate`` deliberately left the catalyst counter at zero, justified by
-    ``max_per_strategy_day['cat']`` being equal to the guard. Adding ``cat_reversal: 2`` broke that
-    coincidence — the post-restart bound became 4 against a guard of 2. The journal has no ref
-    column, so the set is reconstructed from the SYMBOLS of the charged catalyst-strategy pairs."""
+    """``hydrate`` restores the catalyst budget; the journal has no ref column, so the set is reconstructed from the
+    SYMBOLS of the charged catalyst-strategy pairs."""
     day = _the_day()
     ps = _prescreen([], max_candidates_per_day=20, max_per_strategy_day={"default": 5},
                     catalyst_cap_fn=lambda: 2)
     ps.hydrate(day, seen=[("HINDZINC", "cat")],
                charged=[("HINDZINC", "cat"), ("TCS", "orb")],
                catalyst_strategies=("cat", "cat_reversal"))
-    # The restored story already holds one of the two entries, so ONE genuinely new story fits...
+    # The restored story holds one of the two entries, so one new story fits and the next is refused;
+    # the pre-restart story is matched by SYMBOL, so its other leg costs no second entry even with the budget spent.
     assert [c.symbol for c in ps.admit([_scored("TITAN", 0.5, "cat", catalyst_ref="r2")], day)] \
         == ["TITAN"]
-    # ...the next is refused, exactly as it would have been without the restart...
     assert ps.admit([_scored("LT", 0.5, "cat", catalyst_ref="r3")], day) == []
-    # ...and the pre-restart story is reconstructed by SYMBOL, so its other leg costs no second entry,
-    # even with the budget spent.
     assert len(ps.admit([_scored("HINDZINC", 0.5, "cat_reversal", catalyst_ref="r1")], day)) == 1
 
 
-# ------------------------------------------ cap release schedule (owner-directed 2026-09-02)
-# Three days running (08-27 KALYANKJIL 1.0@12:49; 09-01 PERSISTENT et al.; 09-02 IDEA/VMM/OIL 1.0),
-# the orb sub-cap was fully spent within the window-open burst and later, better fires were locked
-# out. The schedule releases the cap in cumulative tranches by IST bar time, so afternoon capacity
-# is guaranteed; scores (de-saturated the same day) + displacement then allocate WITHIN a tranche.
+# ------------------------------------------ cap release schedule
+# The schedule releases a strategy's cap in cumulative tranches by IST bar time, so afternoon capacity is
+# guaranteed; scores + displacement then allocate WITHIN a tranche.
 def _sched_prescreen(**kw):
     defaults = dict(
         scanners=[],
@@ -1275,8 +1148,7 @@ def _at(hh: int, mm: int):
 
 
 def test_cap_schedule_releases_cumulative_tranches() -> None:
-    """Before 11:30 only the first tranche (3) admits; a bar at 11:30 opens tranche 2 (5); 13:00
-    opens the full cap (7). The suppression at a full tranche logs the EFFECTIVE cap."""
+    """Tranches release cumulatively (3 until 11:30, 5 until 13:00, then the full 7)."""
     from datetime import date as _date
 
     ps = _sched_prescreen()
@@ -1295,8 +1167,7 @@ def test_cap_schedule_releases_cumulative_tranches() -> None:
 
 
 def test_cap_schedule_unscheduled_paths_use_flat_cap() -> None:
-    """No `at` (the batch admit path) and strategies without a schedule line use the flat cap
-    exactly as before — the schedule is purely additive."""
+    """No `at` (the batch admit path) and strategies without a schedule line use the flat cap."""
     from datetime import date as _date
 
     ps = _sched_prescreen(max_per_strategy_day={"orb": 7, "brk20": 2})
@@ -1340,8 +1211,7 @@ def test_cap_schedule_is_capped_by_the_flat_cap_and_validated() -> None:
 
 
 def test_cap_schedule_before_first_release_uses_first_tranche() -> None:
-    """A bar EARLIER than the first schedule entry admits under the first tranche's value — the
-    schedule keys mark release times, and pre-open/early candidates get the opening allocation."""
+    """A bar earlier than the first schedule entry admits under the first tranche's value."""
     from datetime import date as _date
 
     ps = _sched_prescreen()
@@ -1354,8 +1224,7 @@ def test_cap_schedule_before_first_release_uses_first_tranche() -> None:
 
 
 def test_cap_schedule_tranche_boundary_uses_entry_time_convention() -> None:
-    """2026-09-02 review: the tranche instant is ENTRY time (ts_minute + 1m, the file-wide boundary
-    convention) - an 11:29-close bar enters AT 11:30 and gets the 11:30 tranche."""
+    """The tranche instant is ENTRY time (ts_minute + 1m): an 11:29 bar enters at 11:30 and gets the 11:30 tranche."""
     from datetime import date as _date
 
     ps = _sched_prescreen()
@@ -1369,9 +1238,8 @@ def test_cap_schedule_tranche_boundary_uses_entry_time_convention() -> None:
 
 
 def test_cap_schedule_bounds_the_displacement_budget_per_tranche() -> None:
-    """2026-09-02 review (blocking): the displacement budget derives from the RELEASED tranche, not
-    the flat cap - a busy early tranche can no longer burn the whole day's displacement allowance
-    and void the afternoon's contested-seat guarantee."""
+    """The displacement budget derives from the RELEASED tranche, not the flat cap, so an early tranche cannot
+    burn the whole day's displacement allowance."""
     from datetime import date as _date
 
     ps = _sched_prescreen(
@@ -1397,8 +1265,7 @@ def test_cap_schedule_bounds_the_displacement_budget_per_tranche() -> None:
 
 
 def test_cap_schedule_duplicate_release_times_are_a_loud_error() -> None:
-    """2026-09-02 review: "09:00" and "9:00" parse to one instant - a silent last-writer-wins on an
-    owner-typed YAML block must be a constructor error instead."""
+    """"09:00" and "9:00" parse to one instant: a constructor error, not a silent last-writer-wins."""
     import pytest as _pytest
 
     with _pytest.raises(ValueError):

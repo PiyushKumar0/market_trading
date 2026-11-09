@@ -86,9 +86,8 @@ def gate_clock() -> Clock:
     return Clock(time_source=lambda: NOW)
 
 
-#: `ins` (2026-08-17): the per-strategy pre-registered expected edge the composition root wires
-#: from ``settings.yaml`` (``ins.expected_edge_pct`` = the validated T+20 NET drift). Consumed by
-#: ``min_viable_size`` ONLY for a proposal with no target; every other strategy is unaffected.
+#: `ins`'s pre-registered expected edge (``settings.yaml`` ``ins.expected_edge_pct``, the validated T+20 NET
+#: drift). Consumed by ``min_viable_size`` ONLY for a proposal with no target.
 INS_EDGE_PCT = Decimal("1.58")
 
 
@@ -104,8 +103,7 @@ def gate(limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock) -> R
 def gate_no_registered_edges(
     limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
 ) -> RiskGate:
-    """The pre-2026-08-17 gate: no strategy registers a measured edge, so a targetless entry is a hard
-    cost-gate reject for EVERY strategy. Pins that the new path is opt-in, not a weakening of the default."""
+    """No strategy registers a measured edge, so a targetless entry is a hard cost-gate reject for every strategy."""
     return RiskGate(_StubLimits(limit_table), cost_model, gate_clock)
 
 
@@ -194,18 +192,13 @@ def check_of(verdict: GateVerdict, rule_id: str):
     return matches[0]
 
 
-#: The shipped cost surface at module scope, so the CASES table can DERIVE its ``min_viable_size``
-#: boundary instead of hardcoding one. Same discipline as the rest of the file (assert against the
-#: shipped table, never against numbers duplicated here) — and load-bearing now that costs.yaml is a
-#: moving surface: the 2026-08-13 ``spread_pct`` addition shifted the MIS breakeven 0.106% -> 0.126%
-#: and silently stale-dated the literal that used to sit here.
+#: The shipped cost surface at module scope, so the CASES table derives its ``min_viable_size`` boundary
+#: from costs.yaml instead of hardcoding one.
 _COSTS = CostModel(load_cost_rates(COSTS_YAML), edge_multiple_min=Decimal("2.0"))
 
 
 def target_at_edge_multiple(entry: Decimal, qty: int, product: str, multiple: Decimal) -> Decimal:
-    """A LONG target whose expected edge is EXACTLY ``multiple`` x the shipped breakeven at
-    ``qty x entry`` notional — an exact boundary that tracks config/costs.yaml instead of drifting
-    from it."""
+    """A LONG target whose expected edge is EXACTLY ``multiple`` x the shipped breakeven at ``qty x entry`` notional."""
     breakeven = _COSTS.round_trip(Decimal(qty) * entry, product).breakeven_pct
     return entry * (Decimal(1) + multiple * breakeven / Decimal(100))
 
@@ -213,17 +206,15 @@ def target_at_edge_multiple(entry: Decimal, qty: int, product: str, multiple: De
 #: The exact-2x-breakeven target for the BASE_ACTION shape (entry 100, qty 10, MIS).
 BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 10, "MIS", Decimal("2"))
 
-#: …and for a proposal SHRUNK to 3 units. Separate because ``min_viable_size`` is re-run at the
-#: shrunk notional, where paise-rounding of the fee components moves the breakeven (₹300 ⇒ 0.130%
-#: vs ₹1,000 ⇒ 0.126%) — a target calibrated at the opening ask would not sit on the boundary there.
+#: …and for a proposal SHRUNK to 3 units: ``min_viable_size`` re-runs at the shrunk notional, where paise-rounding
+#: of the fee components moves the breakeven (₹300 ⇒ 0.130% vs ₹1,000 ⇒ 0.126%).
 SHRUNK_BOUNDARY_TARGET = target_at_edge_multiple(Decimal("100"), 3, "MIS", Decimal("2"))
 
-#: A real `ins` proposal (2026-08-17): CNC swing, long-only, entry on the pre-open reference,
-#: stop a flat 6% below it, and NO target — the exit is the 20-td time cap. qty 66 is the
-#: gap-unaware "≈ ₹6.7k notional" sizing (2% of this file's ₹20,000 equity = ₹400 budget / a ₹6 stop
-#: distance). The gate charges overnight_gap_mult x the stop distance, so its cap at this stop is
-#: floor(400 / 12) = 33 (see test_ins_stop_still_binds_per_trade_risk): INS_ACTION is an over-ask
-#: the gate shrinks, and tests that need an approvable shape override quantity.
+#: A real `ins` proposal: CNC swing, long-only, entry on the pre-open reference, stop a flat 6% below it, NO
+#: target (the exit is the 20-td time cap). qty 66 is the gap-unaware sizing (2% of ₹20,000 = ₹400 budget / a
+#: ₹6 stop). The gate charges overnight_gap_mult x the stop distance, so its cap here is floor(400 / 12) = 33
+#: (see test_ins_stop_still_binds_per_trade_risk): INS_ACTION is an over-ask the gate shrinks; tests needing an
+#: approvable shape override quantity.
 INS_ACTION: dict[str, Any] = {
     "style": "swing",
     "entry_type": "LIMIT",
@@ -260,7 +251,7 @@ CASES: tuple[Case, ...] = (
     Case("proposal_stale", "expired", "fail", False,
          act={"valid_until": NOW - timedelta(seconds=1)}),
     Case("proposal_stale", "valid_until == now", "boundary", False, act={"valid_until": NOW}),
-    # 2026-07-28 review: direction from action.side, never inferred from the stop.
+    # Direction comes from action.side, never inferred from the stop.
     Case("levels_coherent", "BUY stop below entry, target above", "pass", True),
     Case("levels_coherent", "BUY stop ABOVE entry (inverted short shape)", "fail", False,
          act={"stop_price": Decimal("105"), "target_price": Decimal("95")}),
@@ -311,8 +302,7 @@ CASES: tuple[Case, ...] = (
     Case("surveillance", "empty string is unflagged", "pass", True,
          ctx={"surveillance_flag": "  "}),
     # ---- capital / risk / leverage -----------------------------------------------------
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — max_deployed_capital_inr 20000 -> 40000, so every
-    # deployed_capital literal below is shifted by the same +20000 to keep sitting on the real cap.
+    # deployed_capital literals sit on the real cap (max_deployed_capital_inr 40000).
     Case("capital_cap", "nothing deployed", "pass", True),
     Case("capital_cap", "cap exhausted", "fail", False,
          ctx={"deployed_capital": Decimal("39999")}),
@@ -359,9 +349,7 @@ CASES: tuple[Case, ...] = (
     Case("max_new_trades_day", "cap reached", "fail", False, ctx={"entry_recs_today": 5}),
     Case("max_new_trades_day", "one slot left", "boundary", True, ctx={"entry_recs_today": 4}),
     # ---- open exposure -----------------------------------------------------------------
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — max_open_positions.total 3 -> 6 (max_mis unchanged
-    # at 2), so both the "reached" and "last slot" counts move to sit on the new total cap.
-    # 2026-11-05 (owner): caps 6-2-4 -> 30-2-28; the counts move with the total again.
+    # Counts sit on the shipped caps (total 30, MIS 2).
     Case("max_open_positions", "book empty", "pass", True),
     Case("max_open_positions", "total cap reached", "fail", False, ctx={"open_total": 30}),
     Case("max_open_positions", "last total slot", "boundary", True,
@@ -375,8 +363,7 @@ CASES: tuple[Case, ...] = (
          ctx={"open_symbols": frozenset({SYMBOL})}),
     Case("per_stock_exposure", "pending rec in the symbol", "fail", False,
          ctx={"pending_rec_symbols": frozenset({SYMBOL})}),
-    # Owner decision 2026-09-23: cnc_notional_inr 8000 -> 12000, so both existing-notional literals move +4000
-    # to keep sitting on / Rs500 over the cap with the baseline Rs1,000 ask (11000 + 1000 = 12000).
+    # cnc_notional_inr 12000: 11000 + the baseline Rs1,000 ask sits exactly on the cap; 11500 is Rs500 over.
     Case("per_stock_exposure", "CNC notional exactly on the cap", "boundary", True, act=CNC,
          ctx={"per_symbol_cnc_notional": {SYMBOL: Decimal("11000")}}),
     Case("per_stock_exposure", "CNC notional over the cap", "fail", False, act=CNC,
@@ -447,26 +434,21 @@ CASES: tuple[Case, ...] = (
     # stated entry does not clear it from the price the market has actually moved to.
     Case("min_viable_size", "edge measured from the live reference, not the stated entry",
          "fail", False, act={"target_price": BOUNDARY_TARGET}, ctx={"ltp": Decimal("100.50")}),
-    # `ins` (2026-08-17): targetless BY DESIGN (the exit is the 20-td time cap), so the cost-gate
-    # edge comes from the strategy's pre-registered measured drift instead of from a fabricated level.
-    # The registered edge IS consumed (see the value string) — and at a wide enough stop it still
-    # falls short of the 2x floor, because the wider stop shrinks the position. Pinned in
-    # ``test_ins_at_a_wide_8pct_stop_is_structurally_rejected`` below; this case asserts the live
-    # arithmetic. (Before the owner's 2.0x multiplier, at 2.5x the 6% stop
-    # already failed here; at 2.0x it clears, so 8%.)
+    # `ins` is targetless by design (the exit is the 20-td time cap), so the cost-gate edge comes from the
+    # strategy's pre-registered measured drift. At a wide enough stop it still falls short of the 2x floor,
+    # because the wider stop shrinks the position (see ``test_ins_at_a_wide_8pct_stop_is_structurally_rejected``).
     Case("min_viable_size", "ins: registered edge consumed but 8% stop sizes below the cost floor",
          "fail", False, act={**INS_ACTION, "stop_price": Decimal("92")}),
-    # A 4% stop DOES clear — the same shape, sized larger, so the mechanism itself is sound.
+    # A 4% stop clears: the same shape, sized larger.
     Case("min_viable_size", "ins: registered edge clears costs at a 4% stop", "pass", True,
          act={**INS_ACTION, "stop_price": Decimal("96"), "quantity": 40}),
-    # ...and the exception is strategy-scoped: the SAME targetless shape under any other strategy_id
-    # is the unchanged hard cost-gate reject, on the "no target at all" ground rather than on the numbers.
+    # The exception is strategy-scoped: the same targetless shape under another strategy_id is a hard
+    # reject on the "no target at all" ground.
     Case("min_viable_size", "targetless under an unregistered strategy still fails", "fail", False,
          act={**INS_ACTION, "strategy_id": "brk20"}),
 )
 
-#: Rules whose threshold is a plain boolean flag — there is no interior value to sit exactly on, so
-#: the pass/fail pair IS the boundary. Documented rather than faked with a bogus "boundary" case.
+#: Rules whose threshold is a plain boolean flag: no interior value to sit on, so the pass/fail pair IS the boundary.
 BOOLEAN_ONLY_RULES: frozenset[str] = frozenset({
     "mode_risk_state", "kill_state", "instrument_eligible", "surveillance",
     "warmup_ready", "regime_data_ready", "clock_skew", "levels_coherent",
@@ -516,8 +498,7 @@ def test_rule_case(gate: RiskGate, case: Case) -> None:
 
 
 def test_every_documented_rule_has_a_case() -> None:
-    """Adding a limit without tests must fail. Every rule needs a pass AND a fail case; every
-    threshold-bearing rule additionally needs an exact-boundary case."""
+    """Every rule needs a pass AND a fail case; every threshold-bearing rule also an exact-boundary case."""
     kinds: dict[str, set[str]] = {}
     for case in CASES:
         kinds.setdefault(case.rule_id, set()).add(case.kind)
@@ -577,21 +558,19 @@ EXPECTED_ENTER_RULES: tuple[str, ...] = (
 
 
 def test_documented_rule_registry_is_frozen(gate: RiskGate) -> None:
-    """The rule_ids the gate EMITS must equal the documented registry exactly — a new check without
-    a registry entry (or vice versa) fails loudly."""
+    """The rule_ids the gate emits equal the documented registry exactly."""
     assert DOCUMENTED_ENTER_RULES == EXPECTED_ENTER_RULES
     verdict = gate.evaluate(make_action(), make_ctx())
     assert {c.rule_id for c in verdict.checks} == set(EXPECTED_ENTER_RULES)
 
 
 def test_limits_yaml_rule_ids_are_partitioned() -> None:
-    """Every ``limits:`` block is either gate-checked or consciously listed as enforced elsewhere.
-    A NEW block in limits.yaml therefore fails here until someone decides which it is."""
+    """Every ``limits:`` block is either gate-checked or listed as enforced elsewhere."""
     block_ids = set(LimitsBlock.model_fields)
     gate_ids = set(DOCUMENTED_ENTER_RULES)
     assert block_ids - gate_ids == set(NOT_GATE_ENFORCED_LIMITS)
     assert not (set(NOT_GATE_ENFORCED_LIMITS) & gate_ids)
-    # The risk limits pin the origination-guard block as enforced UPSTREAM at digest/pre-screen, never here.
+    # The origination guard is enforced UPSTREAM at digest/pre-screen, never here.
     assert "catalyst_guard" not in gate_ids
     assert "catalyst_guard" in NOT_GATE_ENFORCED_LIMITS
     # And the yaml itself carries exactly the blocks the model types (no drift).
@@ -600,12 +579,10 @@ def test_limits_yaml_rule_ids_are_partitioned() -> None:
 
 
 def test_shrinkable_registry_covers_yaml_on_breach() -> None:
-    """Every rule limits.yaml marks ``shrink*`` must be shrinkable in the gate.
+    """Every rule limits.yaml marks ``shrink*`` is shrinkable in the gate.
 
-    ``capital_cap`` is the one deliberate ADDITION: its yaml marker is ``reject_entry``, but sizing
-    down to the deployed-capital headroom is strictly safer than rejecting outright, and the shrink
-    loop re-runs ``min_viable_size`` at the reduced size (so a shrink that stops clearing costs still
-    ends in reject). Asserted explicitly so the deviation cannot drift silently.
+    ``capital_cap`` is the one deliberate addition (yaml marker ``reject_entry``): shrinking to the headroom is
+    safer than rejecting, and the shrink loop re-runs ``min_viable_size`` at the reduced size.
     """
     raw = yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8"))["limits"]
     yaml_shrinkable = {
@@ -618,9 +595,7 @@ def test_shrinkable_registry_covers_yaml_on_breach() -> None:
 
 # --------------------------------------------------------------------------- shrink loop
 def test_shrink_bound_by_capital_cap(gate: RiskGate) -> None:
-    # MIS charged at FULL notional on BOTH sides (2026-07-28 review: the old notional/3x new-leg
-    # basis mixed units against the tracker's notional-based deployed figure).
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
+    # MIS is charged at FULL notional on both sides (the tracker's deployed figure is notional-based); Rs300 headroom.
     verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("39700")))
     assert verdict.verdict == "shrink"
     assert verdict.original_qty == 10
@@ -641,7 +616,7 @@ def test_shrink_bound_by_per_trade_risk(gate: RiskGate) -> None:
 
 
 def test_shrink_bound_by_per_stock_exposure_cnc_notional(gate: RiskGate) -> None:
-    # Owner decision 2026-09-23: cap 8000 -> 12000, existing notional 7500 -> 11500 to keep Rs500 of headroom.
+    # Existing notional 11500 against the 12000 cap leaves Rs500 of headroom.
     verdict = gate.evaluate(
         make_action(style="swing", target_price=Decimal("110")),
         make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("11500")}),
@@ -664,8 +639,7 @@ def test_shrink_bound_by_max_leverage(gate: RiskGate) -> None:
 
 def test_shrink_to_sub_viable_size_rejects_mis(gate: RiskGate) -> None:
     """Shrink-then-recheck ends in REJECT when the shrunk size no longer clears costs."""
-    # Owner decision 2026-09-07: base 40000 — 39900 keeps the pre-change Rs100 of headroom (it was 19900 under the old
-    # 20000 cap), so the capital cap shrinks the ask to 1 unit and min_viable_size re-runs at that size.
+    # 39900 of 40000 leaves Rs100 headroom: the capital cap shrinks the ask to 1 unit and min_viable_size re-runs there.
     verdict = gate.evaluate(
         make_action(target_price=Decimal("100.10")),
         make_ctx(deployed_capital=Decimal("39900")),
@@ -680,9 +654,7 @@ def test_shrink_to_sub_viable_size_rejects_mis(gate: RiskGate) -> None:
 
 def test_shrink_to_sub_viable_size_rejects_cnc(gate: RiskGate) -> None:
     """The DP charge makes a small delivery clip structurally sub-viable."""
-    # Owner decision 2026-09-23: cap 8000 -> 12000, existing notional 7500 -> 11500 so the CNC cap still SHRINKS
-    # the ask to 5 units (Rs500 headroom) before the recheck; at 7500 the ask no longer breached the
-    # cap and the reject came from the full-size check, bypassing the shrink path this test pins.
+    # 11500 existing notional makes the CNC cap shrink the ask to 5 units (Rs500 headroom) before the recheck.
     verdict = gate.evaluate(
         make_action(style="swing"),
         make_ctx(per_symbol_cnc_notional={SYMBOL: Decimal("11500")}),
@@ -694,15 +666,12 @@ def test_shrink_to_sub_viable_size_rejects_cnc(gate: RiskGate) -> None:
     assert check_of(verdict, "min_viable_size").passed is False
 
 
-# --------------------------------------------------------------------------- `ins` (2026-08-17)
+# --------------------------------------------------------------------------- `ins`
 def test_ins_at_a_wide_8pct_stop_is_structurally_rejected(gate: RiskGate) -> None:
     """A registered edge buys no pass at a stop that sizes the position below the cost floor.
 
-    The `ins` sizing sketch sizes the leg as "2% swing risk / 6% stop ≈ ₹6.7k notional ⇒ CNC
-    round-trip ≈ 0.53% ⇒ edge multiple ≈ 3x". That arithmetic omits ``per_trade_risk``'s
-    ``overnight_gap_mult``: for a swing/overnight position the gate charges **2.0 x the stop
-    distance** per unit (owner decision; 2.5x before it — ``gate.py`` ``_rule_per_trade_risk``), not the stop
-    distance itself. At 8%, the top of the ``stop_pct`` [4-8] envelope, on this file's ₹20,000 equity:
+    ``per_trade_risk`` charges ``overnight_gap_mult`` (2.0) x the stop distance per unit for a swing position.
+    At 8%, the top of the ``stop_pct`` [4-8] envelope, on this file's ₹20,000 equity:
 
         unit risk   = 2.0 x ₹8.00        = ₹16.00      (not ₹8.00)
         budget      = 2% x ₹20,000       = ₹400
@@ -711,12 +680,8 @@ def test_ins_at_a_wide_8pct_stop_is_structurally_rejected(gate: RiskGate) -> Non
         breakeven   = CNC round trip @ ₹2,500          = 0.856400%
         edge mult   = 1.58 / 0.856400    = 1.8449x  <  2.0x  ⇒ REJECT
 
-    History: found 2026-08-17 building this leg and pinned as an OPEN BLOCKER at the scanner-default
-    6% stop — at 2.5x that sized to 26 units / ₹2,600 / 0.832692% breakeven / 1.8975x REJECT, and the
-    shipped ``ins.stop_pct`` was cut to 5% the same day. The owner's 2.0x moves 6% to 33 units / 2.2330x
-    PASS, so the pinned case moved to 8% (7% is 1.9991x — a reject by 0.0009x, too thin to pin). At
-    the ₹40,000 base (owner decision) no stop in [4-8] rejects. This test asserts what the code ACTUALLY does;
-    the numbers are pinned so the geometry cannot be silently "fixed" by moving a risk limit."""
+    7% is 1.9991x (too thin to pin), hence 8%. The numbers are pinned so the geometry cannot be silently
+    "fixed" by moving a risk limit."""
     verdict = gate.evaluate(make_action(**{**INS_ACTION, "stop_price": Decimal("92")}), make_ctx())
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
@@ -736,18 +701,16 @@ def test_ins_at_a_wide_8pct_stop_is_structurally_rejected(gate: RiskGate) -> Non
 
 
 def test_ins_clears_the_cost_floor_at_a_4pct_stop(gate: RiskGate) -> None:
-    """The mechanism is sound — only the wide end of the envelope is out of reach. Sweeping the `ins`
-    envelope [4-8] against the SHIPPED cost surface at ₹20,000 equity, with the 2.0x overnight
-    multiplier applied (owner decision; the earlier 2.5x result in parentheses):
+    """Only the wide end of the `ins` stop envelope [4-8] is out of reach. Against the shipped cost surface at
+    ₹20,000 equity with the 2.0x overnight multiplier:
 
-        4% stop -> 50 units, ₹5,000 notional, 0.549400% breakeven -> 2.8759x  PASS   (2.5230x)
-        5% stop -> 40 units, ₹4,000 notional, 0.626250% breakeven -> 2.5230x  PASS   (2.1878x)
-        6% stop -> 33 units, ₹3,300 notional, 0.707576% breakeven -> 2.2330x  PASS   (1.8975x REJECT)
-        7% stop -> 28 units, ₹2,800 notional, 0.790357% breakeven -> 1.9991x  REJECT (1.6809x)
-        8% stop -> 25 units, ₹2,500 notional, 0.856400% breakeven -> 1.8449x  REJECT (1.5659x)
+        4% stop -> 50 units, ₹5,000 notional, 0.549400% breakeven -> 2.8759x  PASS
+        5% stop -> 40 units, ₹4,000 notional, 0.626250% breakeven -> 2.5230x  PASS
+        6% stop -> 33 units, ₹3,300 notional, 0.707576% breakeven -> 2.2330x  PASS
+        7% stop -> 28 units, ₹2,800 notional, 0.790357% breakeven -> 1.9991x  REJECT
+        8% stop -> 25 units, ₹2,500 notional, 0.856400% breakeven -> 1.8449x  REJECT
 
-    A WIDER stop makes it worse, not better: it shrinks the position, and the CNC DP flat charge is
-    a bigger fraction of a smaller notional. The whole viable band is the bottom of the envelope."""
+    A wider stop shrinks the position, and the CNC DP flat charge is a bigger fraction of a smaller notional."""
     verdict = gate.evaluate(
         make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 50}), make_ctx()
     )
@@ -760,24 +723,20 @@ def test_ins_clears_the_cost_floor_at_a_4pct_stop(gate: RiskGate) -> None:
 
 
 def test_ins_targetless_shape_is_levels_coherent(gate: RiskGate) -> None:
-    """``levels_coherent`` must accept a missing target (BUY: stop < entry, target unconstrained) —
-    otherwise the targetless design could never reach the edge check at all."""
+    """``levels_coherent`` accepts a missing target (BUY: stop < entry, target unconstrained)."""
     check = check_of(gate.evaluate(make_action(**INS_ACTION), make_ctx()), "levels_coherent")
     assert check.passed is True
 
 
 def test_ins_stop_still_binds_per_trade_risk(gate: RiskGate) -> None:
-    """The 6% stop is a REAL risk distance, not a formality: it caps the position at the overnight
-    risk budget exactly as for any other swing. The cap here is floor(₹400 / (2.0 x ₹6.00)) = 33
-    units (owner decision), which clears the cost gate at 2.2330x, so the over-ask SHRINKS to it. (Before that, at 2.5x the cap
-    was 26 units, which then failed the cost gate — the verdict was reject; that geometry is now pinned at 8% in
-    the blocker test.)"""
+    """The 6% stop is a real risk distance: it caps the position at the overnight risk budget,
+    floor(₹400 / (2.0 x ₹6.00)) = 33 units, which clears the cost gate at 2.2330x, so the over-ask shrinks to it."""
     verdict = gate.evaluate(make_action(**{**INS_ACTION, "quantity": 200}), make_ctx())
     ptr = check_of(verdict, "per_trade_risk")
     assert ptr.passed is False
     assert "max qty 33" in ptr.headroom                    # 400 budget / (2.0 x 6.00) = 33.3 -> 33
     assert verdict.verdict == "shrink" and verdict.approved_qty == 33
-    # ...and a tighter stop binds proportionally later: the same over-ask at 4% shrinks to more units.
+    # A tighter stop binds later: the same over-ask at 4% shrinks to more units.
     ok = gate.evaluate(
         make_action(**{**INS_ACTION, "stop_price": Decimal("96"), "quantity": 200}), make_ctx()
     )
@@ -788,8 +747,7 @@ def test_ins_stop_still_binds_per_trade_risk(gate: RiskGate) -> None:
 def test_ins_measured_edge_is_opt_in_not_a_weakening_of_the_cost_gate(
     gate_no_registered_edges: RiskGate,
 ) -> None:
-    """Without the registration the pre-2026-08-17 behaviour is byte-for-byte intact: a targetless
-    entry — `ins` or otherwise — is a hard cost-gate reject. The new path cannot be reached by accident."""
+    """Without a registration a targetless entry, `ins` or otherwise, is a hard cost-gate reject."""
     verdict = gate_no_registered_edges.evaluate(make_action(**INS_ACTION), make_ctx())
     check = check_of(verdict, "min_viable_size")
     assert check.passed is False
@@ -798,9 +756,7 @@ def test_ins_measured_edge_is_opt_in_not_a_weakening_of_the_cost_gate(
 
 
 def test_ins_registered_edge_is_never_used_when_a_target_exists(gate: RiskGate) -> None:
-    """The override is scoped to the targetless case ONLY. If an `ins` proposal ever DID carry a
-    target, the edge must still be derived from that target — a registered number may not silently
-    replace a stated one."""
+    """The registered edge applies to the targetless case ONLY; a stated target still sets the edge."""
     verdict = gate.evaluate(
         make_action(**{**INS_ACTION, "target_price": Decimal("110")}), make_ctx()
     )
@@ -812,8 +768,7 @@ def test_ins_registered_edge_is_never_used_when_a_target_exists(gate: RiskGate) 
 def test_ins_measured_edge_still_faces_the_cost_floor(
     limit_table: LimitTable, gate_clock: Clock
 ) -> None:
-    """The registered edge is an INPUT to the cost gate, never an exemption from it: a strategy whose measured
-    edge does not clear 2x the breakeven at the approved size is rejected exactly like any other."""
+    """The registered edge is an input to the cost gate, never an exemption from it."""
     thin = RiskGate(
         _StubLimits(limit_table),
         CostModel(load_cost_rates(COSTS_YAML), edge_multiple_min=Decimal("2.0")),
@@ -828,8 +783,7 @@ def test_ins_measured_edge_still_faces_the_cost_floor(
 def test_a_registered_edge_mapping_changed_after_construction_is_seen(
     limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
 ) -> None:
-    """The gate keeps the edges map by reference, so a live `StrategyEdges` whose limits
-    table moves (a capital change) re-derives hi52's cap without rebuilding the gate."""
+    """The gate keeps the edges map by reference, so a live `StrategyEdges` re-derives hi52's edge after a capital change."""
     from engine.strategy.hi52_edge import StrategyEdges
 
     raw = yaml.safe_load(LIMITS_YAML.read_text(encoding="utf-8"))
@@ -847,15 +801,13 @@ def test_a_registered_edge_mapping_changed_after_construction_is_seen(
 
 
 def test_ins_edge_matches_the_shipped_settings_value() -> None:
-    """The 1.58 asserted above is the validated T+20 NET drift the settings file actually
-    ships — the tests must not drift from the config the engine boots with."""
+    """INS_EDGE_PCT equals the value settings.yaml ships."""
     from engine.core.config import load_settings
 
     assert Decimal(str(load_settings().ins.expected_edge_pct)) == INS_EDGE_PCT
 
 
 def test_zero_headroom_rejects_without_shrinking(gate: RiskGate) -> None:
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital at the new cap (was 20000).
     verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("40000")))
     assert verdict.verdict == "reject"
     assert verdict.approved_qty == 0
@@ -864,7 +816,7 @@ def test_zero_headroom_rejects_without_shrinking(gate: RiskGate) -> None:
 
 def test_hard_failure_beats_shrink(gate: RiskGate) -> None:
     """Verdict precedence: a non-shrinkable breach forces reject even when a shrink would fit."""
-    # Owner decision 2026-09-07: base 40000 — 39900 leaves Rs100 of headroom, so a capital-cap shrink is pending.
+    # 39900 of 40000 leaves Rs100 of headroom, so a capital-cap shrink is pending.
     verdict = gate.evaluate(
         make_action(), make_ctx(deployed_capital=Decimal("39900"), killed=True)
     )
@@ -923,12 +875,8 @@ SHORT: dict[str, Any] = {
 
 
 def sizing_refs_of(verdict: GateVerdict) -> tuple[Decimal, Decimal]:
-    """The two sizing bases the gate ACTUALLY sized on, read back off the audit trail.
-
-    Deliberately parsed from the shipped CheckResults rather than recomputed here: the reference is
-    only auditable (and only renderable into the payload) if the verdict states it, so these
-    strings are part of the contract, not incidental prose.
-    """
+    """The two sizing bases the gate actually sized on, parsed from the CheckResults: the verdict must state
+    them, so those strings are part of the contract."""
     risk = re.search(r"stop distance from ([\d.]+)", check_of(verdict, "per_trade_risk").value)
     notional = re.search(r"@ ([\d.]+)", check_of(verdict, "capital_cap").value)
     assert risk and notional, "the gate must state the price each sizing rule sized off"
@@ -966,31 +914,27 @@ REF_CASES: tuple[RefCase, ...] = (
 
 @pytest.mark.parametrize("case", REF_CASES, ids=lambda c: c.label)
 def test_sizing_reference_selection(gate: RiskGate, case: RefCase) -> None:
-    """ONE selection point, stated as ``max(entry, LTP)`` long / ``min`` short for the risk
-    basis and ``max`` on both sides for the notional basis."""
+    """Risk basis is ``max(entry, LTP)`` long / ``min`` short; notional basis is ``max`` on both sides."""
     verdict = gate.evaluate(make_action(**case.act), make_ctx(ltp=case.ltp))
     risk, notional = sizing_refs_of(verdict)
     assert (str(risk), str(notional)) == (case.risk_ref, case.notional_ref)
 
 
 def test_entry_sanity_band_still_judges_the_STATED_entry(gate: RiskGate) -> None:
-    """The sizing reference explicitly leaves the hard-reject alone: it compares ``action.entry_price`` with the
-    live LTP. Routing it through the sizing reference would make it compare the LTP with itself and
-    the band could never fail — the exact rule that catches a nonsense limit price."""
+    """The band compares ``action.entry_price`` with the live LTP; routing it through the sizing reference
+    would compare the LTP with itself and the band could never fail."""
     action = make_action(entry_price=Decimal("102"))          # 2% off a 100 LTP; MIS band is 1%
     verdict = gate.evaluate(action, make_ctx())
     band = check_of(verdict, "entry_sanity_band")
     assert band.passed is False
     assert "102" in band.value and "100" in band.value
     assert verdict.verdict == "reject"
-    # ...and the sizing reference did move, so the band is failing on its own terms, not by accident.
+    # The sizing reference did move, so the band fails on its own terms.
     assert sizing_refs_of(verdict) == (Decimal("102.00"), Decimal("102.00"))
 
 
 def test_entry_sanity_band_distinguishes_no_price_from_no_ltp(gate: RiskGate) -> None:
-    """2026-09-21: a LIMIT with no ``entry_price`` at all (the pipeline default only fills this from
-    the candidate's own level when one exists) is a different failure than a live-LTP outage — the
-    owner-facing message must say which one happened instead of always blaming a missing LTP."""
+    """A LIMIT with no ``entry_price`` is a different failure from a live-LTP outage, and the message says which."""
     action = make_action(entry_price=None)          # ctx LTP (100) is present and valid
     verdict = gate.evaluate(action, make_ctx())
     band = check_of(verdict, "entry_sanity_band")
@@ -1000,10 +944,9 @@ def test_entry_sanity_band_distinguishes_no_price_from_no_ltp(gate: RiskGate) ->
 
 
 def test_sizing_reference_shrink_then_recheck_rejects(gate: RiskGate) -> None:
-    """Shrink-then-recheck through the sizing reference: the live price shrinks the capital-cap
-    headroom, and ``min_viable_size`` — re-run at the SHRUNK size and the SAME live price — no
-    longer clears costs, so the shrink ends in reject rather than a thinner recommendation."""
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
+    """The live price shrinks the capital-cap headroom, and ``min_viable_size`` re-run at the shrunk size and the
+    same live price no longer clears costs, so the shrink ends in reject."""
+    # 39700 of 40000 leaves Rs300 headroom.
     action = make_action(target_price=SHRUNK_BOUNDARY_TARGET)  # exactly 2x breakeven at qty 3
     stale = gate.evaluate(action, make_ctx(deployed_capital=Decimal("39700")))
     assert stale.verdict == "shrink" and stale.approved_qty == 3     # Rs300 headroom / Rs100
@@ -1024,13 +967,8 @@ IN_BAND_LTPS = (Decimal("99.20"), Decimal("99.60"), Decimal("100"), Decimal("100
 
 
 def test_sizing_reference_can_only_shrink_long_and_short(gate: RiskGate) -> None:
-    """THE monotone-safety property: switching from the stale stated-entry basis to
-    the live reference can only DECREASE the approved size — never increase it — in BOTH directions.
-
-    The stale basis is reproduced exactly by evaluating with ``LTP == entry_price``, where the
-    selection is provably a no-op (``max(x, x) == min(x, x) == x``); every other point is compared
-    against it.
-    """
+    """Switching from the stated-entry basis to the live reference can only decrease the approved size, long
+    and short. The stated-entry basis is reproduced by evaluating with ``LTP == entry_price`` (selection is a no-op)."""
     strict_decreases = 0
     for side, qty, dep, style, ltp in product(
         ("BUY", "SELL"), (1, 10, 133, 200), (Decimal("0"), Decimal("19000")),
@@ -1054,8 +992,7 @@ def test_sizing_reference_can_only_shrink_long_and_short(gate: RiskGate) -> None
 
 @pytest.mark.parametrize("side", ["BUY", "SELL"])
 def test_adverse_reference_widens_the_risk_distance(gate: RiskGate, side: str) -> None:
-    """Why the shrink direction is guaranteed: with coherent levels the adverse fill always sits on
-    the far side of the stated entry FROM the stop, so |ref - stop| can only grow."""
+    """With coherent levels the adverse fill sits on the far side of the stated entry from the stop, so |ref - stop| only grows."""
     act = {} if side == "BUY" else SHORT
     stop = Decimal("99") if side == "BUY" else Decimal("101")
     adverse = Decimal("100.80") if side == "BUY" else Decimal("99.20")
@@ -1235,7 +1172,6 @@ def test_gate_verdict_json_round_trips(gate: RiskGate) -> None:
 
 
 def test_shrink_verdict_json_round_trips(gate: RiskGate) -> None:
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — deployed_capital shifted +20000 to keep Rs300 headroom.
     verdict = gate.evaluate(make_action(), make_ctx(deployed_capital=Decimal("39700")))
     restored = GateVerdict.model_validate_json(verdict.model_dump_json())
     assert restored.verdict == "shrink"
@@ -1253,14 +1189,10 @@ FORBIDDEN_SOURCES = ("news", "news_clusters", "sentiment_agg", "catalyst_watchli
 
 
 def test_gate_source_reads_no_origination_tables() -> None:
-    """GateContext is assembled from deterministic broker/exchange sources ONLY.
-
-    The origination-guard block is enforced UPSTREAM at digest/pre-screen — a
-    reference to any of the four media/origination tables inside the gate or its context builder is a
-    structural violation, so the module source is scanned for them directly.
-    """
+    """GateContext is assembled from deterministic broker/exchange sources ONLY: a reference to any media or
+    origination table in the gate module is a structural violation (the origination guard lives upstream)."""
     source = Path(gate_module.__file__).read_text(encoding="utf-8")
-    # Non-vacuous: this really is the module that carries the gate AND its builder.
+    # Non-vacuous: this is the module that carries the gate AND its builder.
     assert "class RiskGate" in source
     assert "class GateContextBuilder" in source
     offenders = [
@@ -1273,11 +1205,8 @@ def test_gate_source_reads_no_origination_tables() -> None:
 
 
 def test_exiting_positions_do_not_occupy_position_or_sector_slots() -> None:
-    """Owner-directed 2026-09-07: a position the platform has already told the owner to SELL
-    (an exit recommendation delivered within the last 3 days) is EXITING — it must not hold a
-    position-count or sector slot against a new BUY. Two through-the-stop CNC positions with 39
-    expired exit recommendations had the book at 2/2 for eleven sessions. Still one-per-symbol
-    (a BUY on an exiting name stays blocked) and still deployed cash; only the counts change."""
+    """A position with an exit recommendation delivered within the last 3 days is EXITING: it holds no
+    position-count or sector slot against a new BUY. It still blocks a BUY on itself and still counts as deployed cash."""
     import json as _json
     from datetime import datetime as _dt
 
@@ -1306,11 +1235,9 @@ def test_exiting_positions_do_not_occupy_position_or_sector_slots() -> None:
 
 
 def test_positions_the_broker_no_longer_holds_are_excluded_from_the_counts() -> None:
-    """2026-09-12: a position the holdings journal shows EMPTY on two consecutive sessions
-    gets no further exit recommendations (the position-event screen is quiet on it), so it would
-    age out of ``_exiting_symbols``'s 3-day window and re-take a slot — the exiting-exclusion shape with the sign
-    reversed. It is excluded on the journal itself. Scope is the same as EXITING: counts only; the
-    symbol still blocks a fresh BUY on itself and deployed cash is untouched."""
+    """A position the holdings journal shows EMPTY on two consecutive sessions gets no further exit
+    recommendations, so it would age out of ``_exiting_symbols``'s 3-day window and re-take a slot; it is
+    excluded on the journal itself. Counts only, as for EXITING."""
     positions = [
         {"position_id": "pos-gone", "symbol": "HDFCAMC", "product": "CNC"},
         {"position_id": "pos-live", "symbol": "HINDZINC", "product": "CNC"},
@@ -1319,8 +1246,7 @@ def test_positions_the_broker_no_longer_holds_are_excluded_from_the_counts() -> 
     assert gate_module._gone_symbols(positions, set()) == frozenset()
     assert gate_module._gone_symbols(positions, {"pos-gone", "not-a-position"}) == frozenset({"HDFCAMC"})
 
-    # Union with the exiting set is what build() does: a gone position and a recently-exited one
-    # both leave the counts; the live position keeps its slot.
+    # build() unions it with the exiting set: both leave the counts; the live position keeps its slot.
     exiting = frozenset({"RELIANCE"}) | gate_module._gone_symbols(positions, {"pos-gone"})
     sector_of = {"HDFCAMC": "FINANCIAL_SERVICES", "HINDZINC": "METAL", "RELIANCE": "ENERGY"}
     total, mis, cnc, sectors = gate_module._active_counts(
@@ -1332,33 +1258,27 @@ def test_positions_the_broker_no_longer_holds_are_excluded_from_the_counts() -> 
 
 
 def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> None:
-    """2026-09-13: ``warmup_ready`` stopped being one flat answer. The builder
-    asks the SAME snapshot for the class the candidate's style reads — ``intraday`` ⇒ today's
-    1-minute coverage, ``swing``/``position`` ⇒ the completed daily sessions — exactly as
-    ``regime_data_ready`` has always been its own class. An unknown style takes the DAILY class:
-    the broader one, which is also the one that still gates the risk state.
-
-    2026-09-17 (per-SYMBOL): within that class the answer is narrowed to the candidate's
-    own SYMBOL, so COROMANDEL's minute hole refuses COROMANDEL and nobody else — PTCIL's tradeless
-    13:36 on 2026-09-16 refused every intraday candidate in the book until the close."""
+    """The builder asks the warm-up snapshot for the class the candidate's style reads (``intraday`` ⇒ today's
+    1-minute coverage, ``swing``/``position`` ⇒ completed daily sessions); an unknown style takes the DAILY class,
+    the broader one, which also gates the risk state. Within the class the answer is narrowed to the candidate's
+    own SYMBOL, so one symbol's minute hole refuses only that symbol."""
     from engine.ops.warmup import WarmupStatus
     from engine.risk.gate import GateContextBuilder
 
     builder = GateContextBuilder.__new__(GateContextBuilder)
 
-    # The 2026-09-04 11:09 shape: one symbol's minute hole, every daily lookback covered.
+    # One symbol's minute hole, every daily lookback covered.
     builder._warmup_status_fn = lambda: WarmupStatus(
         ready=False, blockers=["orb:COROMANDEL bars 113/114"]
     )
     assert builder._warmup_ready("intraday", "COROMANDEL") is False
-    assert builder._warmup_ready("intraday", "RELIANCE") is True    # per SYMBOL since 2026-09-17
+    assert builder._warmup_ready("intraday", "RELIANCE") is True    # per SYMBOL
     assert builder._warmup_ready("swing", "COROMANDEL") is True
     assert builder._warmup_ready("position", "COROMANDEL") is True
     assert builder._warmup_ready("unheard-of", "COROMANDEL") is True  # daily class, daily covered
-    assert builder._regime_ready() is True                 # untouched by this change
+    assert builder._regime_ready() is True
 
-    # The mirror image: daily short, minute bars complete. The intraday leg may still be judged, and
-    # so may every OTHER symbol's daily leg.
+    # Mirror image: daily short, minute bars complete.
     builder._warmup_status_fn = lambda: WarmupStatus(
         ready=False, blockers=["rsi2/trend/mom:RELIANCE daily bars 3/200"]
     )
@@ -1366,8 +1286,7 @@ def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> Non
     assert builder._warmup_ready("swing", "RELIANCE") is False
     assert builder._warmup_ready("swing", "COROMANDEL") is True
 
-    # Fail-closed seams, both unchanged in spirit: no snapshot function at all, and a snapshot with
-    # no per-class answer (an older or duck-typed one) falling back to the flat `ready`.
+    # Fail-closed seams: no snapshot function at all; a snapshot with no per-class answer falls back to the flat `ready`.
     builder._warmup_status_fn = None
     assert builder._warmup_ready("swing", "RELIANCE") is False
     builder._warmup_status_fn = lambda: SimpleNamespace(ready=True, blockers=[])
@@ -1376,8 +1295,7 @@ def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> Non
     assert builder._warmup_ready("intraday", "RELIANCE") is False
     assert builder._warmup_ready("swing", "RELIANCE") is False   # no class answer ⇒ the flat one
 
-    # …and the third fail-closed direction, now per symbol: a line in the class that attributes to
-    # NO symbol refuses every symbol in that class.
+    # A blocker line in the class that attributes to no symbol refuses every symbol in that class.
     builder._warmup_status_fn = lambda: WarmupStatus(
         ready=False, blockers=["orb:?? garbage"]
     )
@@ -1386,13 +1304,9 @@ def test_warmup_readiness_is_answered_for_the_candidates_coverage_class() -> Non
 
 
 def test_the_two_warmup_class_names_are_the_same_strings_on_both_sides_of_the_tier_line() -> None:
-    """``engine.risk.gate`` (Tier 2) spells the class names rather than importing
-    ``engine.ops.warmup``, exactly as ``_regime_ready`` string-matches the ``"regime:"`` prefix. A
-    deliberate duplication gets a test asserting the pair (the per-SOURCE-watermark idiom),
-    because nothing else would catch a drift: each half is built from its own module's constant, so a
-    rename would leave every test green while ``ready_for`` answered False for EVERY swing candidate
-    (fail-closed, and therefore a silent origination stop rather than a crash). Tests may import both
-    tiers even though the gate may not."""
+    """``engine.risk.gate`` (Tier 2) spells the class names rather than importing ``engine.ops.warmup``. This pins
+    the duplicated pair: a drift would make ``ready_for`` answer False for every swing candidate (fail-closed,
+    a silent origination stop). Tests may import both tiers even though the gate may not."""
     from engine.ops import warmup as warmup_module
 
     assert (gate_module.WARMUP_CLASS_INTRADAY, gate_module.WARMUP_CLASS_DAILY) == (
@@ -1403,11 +1317,8 @@ def test_the_two_warmup_class_names_are_the_same_strings_on_both_sides_of_the_ti
 def _stub_context_builder(limit_table: LimitTable, clock: Clock, warmup_status_fn):
     """A :class:`GateContextBuilder` with every seam but the warm-up one stubbed out.
 
-    ``build`` is the only place ``style`` becomes ``warmup_ready``/``warmup_class``, and the two
-    lines that do it are otherwise untested end to end: ``_warmup_ready`` is tested directly and the
-    rule is tested against hand-built contexts, so a wrong argument at the build site (``side`` for
-    ``style``, a stale flat read) would leave every other test green while live intraday proposals
-    hit the class-mismatch branch forever.
+    ``build`` is the only place ``style`` becomes ``warmup_ready``/``warmup_class``; a wrong argument there
+    would leave the direct ``_warmup_ready`` and hand-built-context tests green.
     """
     from engine.risk.exposure import OpenCounts
     from engine.risk.gate import GateContextBuilder
@@ -1464,10 +1375,9 @@ def _stub_context_builder(limit_table: LimitTable, clock: Clock, warmup_status_f
 async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
     limit_table: LimitTable, gate_clock: Clock
 ) -> None:
-    """End to end through ``build``: ONE mixed-blocker snapshot, two styles, two answers — and the
-    class the builder judged is pinned into the context it returns. Since 2026-09-17 ``build`` must
-    also pass the proposal's own SYMBOL, so a snapshot naming a DIFFERENT symbol leaves this one
-    ready (the argument-passing bug this test exists to catch is now two arguments wide)."""
+    """End to end through ``build``: one mixed-blocker snapshot, two styles, two answers, and the judged class is
+    pinned into the returned context. ``build`` must also pass the proposal's own SYMBOL, so a snapshot naming a
+    different symbol leaves this one ready."""
     from engine.ops.warmup import WarmupStatus
 
     assert SYMBOL != "COROMANDEL"
@@ -1479,13 +1389,12 @@ async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
     assert (intraday_ctx.warmup_class, intraday_ctx.warmup_ready) == ("intraday", False)
     assert (swing_ctx.warmup_class, swing_ctx.warmup_ready) == ("daily", True)
 
-    # ANOTHER symbol's minute hole leaves this symbol's intraday leg ready — the 2026-09-16 PTCIL
-    # shape, where one tradeless minute refused the whole book.
+    # Another symbol's minute hole leaves this symbol's intraday leg ready.
     other = WarmupStatus(ready=False, blockers=["orb:COROMANDEL bars 113/114"])
     builder = _stub_context_builder(limit_table, gate_clock, lambda: other)
     assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
 
-    # The mirror image, so neither answer is a constant — and the same per-symbol split on daily.
+    # Mirror image, so neither answer is a constant.
     daily_short = WarmupStatus(ready=False, blockers=[f"rsi2/trend/mom:{SYMBOL} daily bars 3/200"])
     builder = _stub_context_builder(limit_table, gate_clock, lambda: daily_short)
     assert (await builder.build(SYMBOL, "BUY", "intraday", NOW.date())).warmup_ready is True
@@ -1500,10 +1409,9 @@ async def test_build_answers_warmup_for_the_candidates_style_and_pins_the_class(
 async def test_build_correlates_the_candidate_only_with_its_own_sector_and_unknown_sectors(
     limit_table: LimitTable, gate_clock: Clock, candidate: str, peers: set[str]
 ) -> None:
-    """Owner 2026-11-05: across 2023-2026 a 20d correlation above 0.7 between two sectors mostly did not
-    last (next 20 sessions: median 0.38, 10% still above 0.7; same sector 0.53 and 24%), so held and
-    pending symbols of another sector are not correlated against. Either sector unknown keeps the pair:
-    unclassified is not evidence of being unrelated."""
+    """Owner decision: a 20d correlation across sectors mostly does not persist, so held and pending symbols of
+    another sector are not correlated against. Either sector unknown keeps the pair: unclassified is not
+    evidence of being unrelated."""
     from engine.ops.warmup import WarmupStatus
 
     builder = _stub_context_builder(limit_table, gate_clock, lambda: WarmupStatus(ready=True, blockers=[]))
@@ -1528,15 +1436,9 @@ async def test_build_correlates_the_candidate_only_with_its_own_sector_and_unkno
 
 
 def test_warmup_rule_is_judged_per_style_and_fails_closed_on_a_class_mismatch(gate: RiskGate) -> None:
-    """The rule half of the same change. A context pins WHICH class it judged, so:
-
-    * an intraday proposal against an intraday-class context reads that class's answer;
-    * a swing proposal against a daily-class context reads that one;
-    * a proposal evaluated against the OTHER class's context has no answer to its question and
-      fails closed rather than borrowing one (a context is reusable per symbol, and nothing may
-      turn that reuse into a warm-up pass the builder never granted);
-    * an unclassified context (hand-built, or a pre-2026-09-13 one) keeps the flat answer.
-    """
+    """A context pins which warm-up class it judged: a proposal against a matching-class context reads that
+    answer; against the OTHER class's context it fails closed (a context is reusable per symbol, and reuse must
+    never become a warm-up pass the builder did not grant); an unclassified context keeps the flat answer."""
     intraday_cold = make_ctx(warmup_ready=False, warmup_class="intraday")
     assert not check_of(gate.evaluate(make_action(), intraday_cold), "warmup_ready").passed
 
@@ -1546,7 +1448,7 @@ def test_warmup_rule_is_judged_per_style_and_fails_closed_on_a_class_mismatch(ga
     assert swing_check.passed
     assert "daily class" in swing_check.value and "daily-class feature lookbacks" in swing_check.limit
 
-    # Class mismatch in BOTH directions — the ready flag is True in each and neither passes.
+    # Class mismatch in both directions: the ready flag is True in each and neither passes.
     mismatched = check_of(gate.evaluate(make_action(), daily_warm), "warmup_ready")
     assert not mismatched.passed
     assert "context judged the daily class" in mismatched.headroom
@@ -1574,8 +1476,7 @@ def test_a_failing_holdings_journal_read_excludes_nothing() -> None:
 
 
 def test_max_open_positions_ledger_names_the_exiting_exclusion(gate: RiskGate) -> None:
-    """The rule reads the already-reduced counts; its ledger line must say how many exiting
-    positions were left out, so a verdict is auditable against the raw book (owner decision)."""
+    """The ledger line says how many exiting positions were left out of the reduced counts, so a verdict is auditable."""
     verdict = gate.evaluate(
         make_action(),
         make_ctx(open_total=2, open_mis=1, exiting_symbols=frozenset({"HDFCAMC", "HINDZINC"})),
@@ -1586,12 +1487,9 @@ def test_max_open_positions_ledger_names_the_exiting_exclusion(gate: RiskGate) -
 
 
 def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() -> None:
-    """Owner decision 2026-09-04: with the eligible set at ~350–450 NIFTY 500 names and the tick watchlist
-    capped at 200, ``universe_daily`` rows excluded for ``watchlist_cap`` ALONE are eligible and must
-    clear the gate's ``in_universe`` check — reading ``included_only`` (the pre-widening shortcut, exact
-    only while the cap did not bind) would have rejected every swing candidate from the widened
-    tail as out-of-universe. Extended-leg rows (``not_in_index``, legacy ``not_nifty200``) and rows
-    with any real exclusion stay OUT: the RECOMMEND boundary is the eligible set by definition."""
+    """``universe_daily`` rows excluded for ``watchlist_cap`` ALONE are eligible and clear ``in_universe`` (the
+    eligible set exceeds the tick watchlist cap). Extended-leg rows (``not_in_index``, legacy ``not_nifty200``)
+    and rows with any real exclusion stay OUT: the RECOMMEND boundary is the eligible set."""
     rows = [
         {"symbol": "RELIANCE", "included": True, "exclusion_reasons": None, "mis_candidate": True},
         {"symbol": "NIACL", "included": False, "exclusion_reasons": ["watchlist_cap"], "mis_candidate": False},
@@ -1612,10 +1510,8 @@ def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() 
 async def test_surveillance_input_is_the_universe_rows_surveillance_codes(
     gate: RiskGate, limit_table: LimitTable, gate_clock: Clock
 ) -> None:
-    """No job writes ``instruments_daily.surveillance``; the universe build is the authority. The
-    builder reads the ``surveillance_*`` codes off the candidate's ``universe_daily`` row (one read
-    shared with eligibility): a flagged symbol is ineligible AND its surveillance check names the
-    codes; an eligible symbol carries none."""
+    """The builder reads ``surveillance_*`` codes off the candidate's ``universe_daily`` row (the universe build is
+    the authority; the read is shared with eligibility): a flagged symbol is ineligible and its check names the codes."""
     from engine.ops.warmup import WarmupStatus
 
     rows = [
