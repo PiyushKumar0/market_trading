@@ -2,6 +2,24 @@
 
 Newest first. About two weeks of entries are kept; older ones are in git history.
 
+## 2026-11-09 09:40 — Identifier cleanup and the brk20 report re-key; overnight outage was the lid closing; limits key rename waits for the close
+
+- **Owner, answered ~09:2x:** rename `max_leverage.phase4_start_x` to `live_auto_start_x` (signed store); keep migration
+  0003's filename (applied migrations are tracked by filename); re-key the registered 2026-09-12 brk20 report.
+- **Commit `c87703c`:** `forward_verdicts`' regime-gate arms are `RegimeGateArms` / `regime_gate`; the offline tests load
+  the study scripts as `exit_geometry` / `regime_filter` / `selection_filters`; the exit-geometry cost-of-stop keys
+  name the arms; dead section-sign folds removed; migration 0003's filename no longer repeated in its header or
+  `causes.py`; this log and FABLE_HANDOFF say "the working branch". 175 affected tests pass; ruff clean.
+- **brk20 report:** re-keyed to the script's current names; all 1811 numbers unchanged; original bytes in
+  `data\backups\backtest_brk20_2026-09-12.original.json`; the rec card's brk20 evidence line renders identically.
+- **Outage 02:02–09:03 (not the deploy):** the 01:31 boot ran 30 min with no errors. At 02:01:58 the ticker lost its
+  connection and the engine took a graceful SIGINT stop (`exit_clean` 02:02:07); Kernel-Power 506 at 02:02:22, "entering
+  Modern Standby, Reason: Lid"; asleep 06:52–09:03. Started 09:03 on `8c6fdea` (the 01:31 code); Kite login 09:04:17,
+  post-login recovery ok. `c87703c` goes live at the next restart.
+- **Pending:** the limits key rename needs the engine stopped and an unsigned `limits.yaml` for a few minutes, so it
+  runs after the 15:30 close: stop, rename in limits.yaml + limits.py + the test (and drop the comment's pointer to a
+  never-built overlay file), full gate, reseed, restart.
+
 ## 2026-11-09 01:35 — Cleanup finished: study labels named, analyst prompts and protected configs cleaned (owner: "Apply now", "Clean both now"); engine restarted 01:31
 
 - **Commits:** `97bf032` study labels and the remaining citations (four Sonnet agents renamed the research labels, the
