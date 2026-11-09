@@ -1,17 +1,10 @@
 """RECOMMEND pipeline (``max_holding``) — book + trigger handlers.
 
-The seams are faked exactly where a fake is the point (the Claude harness, the context assembler, the
-governor) and REAL everywhere the behaviour under test depends on real policy:
-
-* the end-to-end approve path runs the **real** :class:`~engine.risk.gate.RiskGate` over the shipped
-  ``config/limits.yaml`` and the **real** :class:`~engine.strategy.cost_model.CostModel` from
-  ``config/costs.yaml`` — a recommendation that the shipped limit table would not approve must not
-  pass here either;
-* a stub gate is used only to reach the verdict branches (shrink / owner_approval_required) that a
-  passing baseline cannot produce;
-* the ledger matrix runs against the **real** migrated SQLite schema and asserts the P&L to the
-  paisa, including that :class:`~engine.risk.exposure.ExposureTracker` reads the closed position back
-  as the same net figure (positions.realized_pnl is GROSS, costs are a separate column).
+Faked: the Claude harness, the context assembler, the governor. Real: the shipped
+``config/limits.yaml`` through :class:`~engine.risk.gate.RiskGate`, the ``config/costs.yaml``
+:class:`~engine.strategy.cost_model.CostModel`, and the migrated SQLite schema. A stub gate only
+reaches the verdict branches (shrink / owner_approval_required) a passing baseline cannot produce.
+The ledger matrix asserts P&L to the paisa; positions.realized_pnl is GROSS, costs a separate column.
 """
 
 from __future__ import annotations
@@ -339,15 +332,10 @@ def agent_defs() -> dict[str, AgentDef]:
 
 
 async def publish_candidate(pipeline: RecommendationPipeline, cand: SignalCandidate) -> None:
-    """Publish a candidate AND let the drain spend a slot on the queue.
+    """Publish a candidate AND run one drain tick (an arriving candidate only enqueues).
 
-    Since 2026-08-14 an arriving candidate only ENQUEUES — the analyst call is made by the paced
-    drain tick, so a test that wants a candidate evaluated has to run the drain too.
-    ``_drain_one_forward`` is that tick with its cadence guard removed: the cadence itself is pinned
-    by the pacing block at the bottom of this file (through the PUBLIC ``drain_forward_queue``), and
-    every other test here is about what happens to a candidate AFTER it is dispatched rather than
-    about when. A drain on an empty queue is a no-op, so the "nothing was forwarded" tests keep
-    asserting exactly what they did before.
+    ``_drain_one_forward`` is the paced tick without its cadence guard; the cadence is pinned by the
+    pacing block at the bottom of this file. A drain on an empty queue is a no-op.
     """
     await pipeline.on_signal_candidate(cand)
     await pipeline._drain_one_forward()
@@ -486,13 +474,8 @@ async def test_happy_path_writes_the_full_provenance_chain(
 async def test_missing_limit_entry_price_defaults_from_the_candidates_level(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """2026-09-21 evidence: 7 of 13 sonnet-5 LIMIT proposals since 09-16 arrived with entry_price
-    null, and the gate rejected every one on a band check that could not see a price even though the
-    scanner's own (pre-screened) level was sitting right there in ``candidate.raw_levels.entry``. The
-    pipeline now fills the gap instead of dropping the proposal. Sibling of
-    ``test_happy_path_writes_the_full_provenance_chain`` with ``entry_price`` stripped from the
-    analyst payload.
-    """
+    """A LIMIT proposal with null entry_price is filled from ``candidate.raw_levels.entry`` rather
+    than dropped, so the gate's band check sees a price."""
     harness = FakeHarness(dict(ENTER_JSON, entry_price=None))
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
@@ -507,8 +490,7 @@ async def test_missing_limit_entry_price_defaults_from_the_candidates_level(
     assert proposal is not None, "the proposal must still be persisted, not dropped"
 
     payload = json.loads(proposal["payload"])
-    # Same string form a STATED price gets: DecimalStr serialises via str(Decimal(...)), and the
-    # happy-path sibling's stated "100" normalises to the identical string (compare the two forms).
+    # Same string form a STATED price gets (DecimalStr serialises via str(Decimal(...))).
     assert payload["entry_price"] == str(Decimal(ENTER_JSON["entry_price"])) == "100"
 
     verdict_payload = json.loads(verdict["payload"])
@@ -578,9 +560,8 @@ async def test_agent_failure_alerts_and_writes_no_proposal(
 async def test_agent_infra_failure_rearms_the_prescreen_slot(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """Owner-directed 2026-07-29: an analyst INFRASTRUCTURE failure hands the (symbol, strategy)
-    day slot back so a still-true condition can re-publish; a governor block (budget policy,
-    the call never went out) must NOT re-arm."""
+    """An analyst INFRASTRUCTURE failure hands the (symbol, strategy) day slot back; a governor
+    block (budget policy, no call went out) does not."""
     rearmed: list[tuple[str, str]] = []
 
     harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
@@ -608,8 +589,7 @@ async def test_agent_infra_failure_rearms_the_prescreen_slot(
 async def test_never_evaluated_drops_rearm_the_slot(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-07-29 owner decision: out-of-window / mode / freeze drops re-arm the day slot (the
-    candidate was never evaluated) — so a still-true condition is waiting when the window opens."""
+    """Out-of-window / mode / freeze drops re-arm the day slot: the candidate was never evaluated."""
     rearmed: list[tuple[str, str]] = []
 
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)      # outside the seeded 10:00–10:30 window
@@ -638,14 +618,9 @@ async def test_never_evaluated_drops_rearm_the_slot(
 async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-09-13 per-class warm-up. The risk state no longer freezes on an
-    intraday-only coverage hole, so the refusal is per candidate — and it happens BEFORE the analyst
-    call, because the gate would reject the proposal on ``warmup_ready`` after the call was spent.
-    The day slot goes back (never evaluated; a minute hole heals mid-session), and the daily-class
-    candidate riding the SAME snapshot is forwarded: the whole point of the change.
-
-    The hole is attributed to the candidate's OWN symbol, because since 2026-09-17 that is what the
-    screen asks (see the sibling test for another symbol's hole)."""
+    """An intraday coverage hole on the candidate's own symbol refuses it BEFORE the analyst call
+    (the gate would reject on ``warmup_ready`` anyway) and re-arms the slot; a daily-class candidate
+    on the same snapshot is still forwarded."""
     from engine.ops.warmup import WarmupStatus
 
     intraday_hole = WarmupStatus(ready=False, blockers=[f"orb:{SYMBOL} bars 113/114"])
@@ -663,8 +638,7 @@ async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call
     assert harness.calls == []
     assert rearmed == [(cand.symbol, cand.strategy_id)]
 
-    # Same snapshot, same tick: the swing leg reads completed daily bars and is NOT this screen's
-    # business, so it reaches the analyst.
+    # The swing leg reads completed daily bars; this screen does not apply.
     rearmed.clear()
     swing_harness = FakeHarness(dict(NO_ACTION_JSON))
     swing_pipeline, _ = make_pipeline(
@@ -681,11 +655,8 @@ async def test_intraday_warmup_shortfall_rearms_without_spending_an_analyst_call
 async def test_another_symbols_intraday_hole_does_not_rearm_this_candidate(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-09-17 per-SYMBOL readiness. ``ready_for`` was CLASS-WIDE, so ONE symbol's hole refused
-    every intraday candidate in the book: on 2026-09-16 PTCIL printed no trade at 13:36 (Kite
-    publishes no candle for a tradeless minute — the bar is unfillable, not late) and
-    ``orb:PTCIL bars 374/375`` refused everything from 13:37 to the close. The screen now asks about
-    the candidate's own symbol, so this candidate reaches the analyst."""
+    """Readiness is per SYMBOL: one symbol's hole (a tradeless minute has no candle, so it is
+    unfillable) must not refuse every intraday candidate."""
     from engine.ops.warmup import WarmupStatus
 
     other_hole = WarmupStatus(ready=False, blockers=["orb:PTCIL bars 374/375"])
@@ -721,10 +692,8 @@ async def test_another_symbols_intraday_hole_does_not_rearm_this_candidate(
 async def test_intraday_warmup_screen_is_silent_when_it_cannot_answer(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The screen is a cost optimisation, never the enforcement (the GATE fails closed on the same
-    snapshot), so every case it cannot answer fails OPEN — one wasted analyst call at worst, never a
-    lost candidate. Unwired seam, a status with no per-class answer, a raising seam, and a covered
-    intraday class all let the candidate through."""
+    """The screen is a cost optimisation (the GATE fails closed), so it fails OPEN: an unwired seam,
+    a status with no per-class answer, a raising seam and a covered class all let the candidate through."""
     from engine.ops.warmup import WarmupStatus
 
     def boom():
@@ -747,11 +716,9 @@ async def test_intraday_warmup_screen_is_silent_when_it_cannot_answer(
 async def test_day_slot_journal_and_rehydration_round_trip(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-08-04 (owner-directed): the prescreen's dedupe/caps day state was process memory, so a
-    restart reset the 20/day bound (~54 publications observed across two restarts). Publications now
-    journal to ``prescreen_day_slots`` — evaluated=1 on receipt (the conservative default for every
-    handler path), flipped to 0 by the never-evaluated rearm paths — and ``_hydrate_prescreen``
-    rebuilds a fresh prescreen from those rows exactly per the 2026-07-29 rearm semantics."""
+    """Publications journal to ``prescreen_day_slots`` (evaluated=1 on receipt, 0 on the
+    never-evaluated rearm paths) and ``_hydrate_prescreen`` rebuilds the day state from those rows,
+    so a restart does not reset the per-day bound."""
     from datetime import date as _date
 
     from engine.ops.main import _hydrate_prescreen
@@ -808,10 +775,8 @@ async def test_day_slot_journal_and_rehydration_round_trip(
 async def test_swing_max_qty_charges_the_overnight_gap_mult_like_the_gate(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-08-26: the gate's first three LIVE verdicts all rejected on ``per_trade_risk`` because
-    this quote omitted the overnight gap multiplier — every swing proposal arrived sized ~2.5× over
-    the real budget and prompt rule 7 had bound the analyst to the bad number. The quote must
-    MIRROR the gate's unit-risk formula: gap-charged for swing/position, raw distance intraday."""
+    """The qty quote mirrors the gate's unit-risk formula: gap-charged for swing/position, raw
+    distance intraday."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=real_gate(limit_table, cost_model, pclock), ctx=passing_ctx(),
@@ -833,10 +798,8 @@ async def test_swing_max_qty_charges_the_overnight_gap_mult_like_the_gate(
     )
     assert pipeline._max_qty_by_risk(swing) == expected_swing
     assert pipeline._max_qty_by_risk(intraday) == expected_intraday
-    # Non-vacuous: the gap IS charged — the swing quote sits strictly below the same swing budget
-    # over the RAW stop distance (the 08-26 bug's number). Deliberately not compared with the
-    # intraday quote: that ordering held only while swing_pct/gap (2%/2.5) < intraday_pct (1%); at
-    # the owner-decided 2.0x (2026-09-24) the two coincide (2%/2.0 == 1%), so equal quotes there prove nothing either way.
+    # The gap IS charged: the swing quote sits below the same budget over the RAW stop distance.
+    # Not compared with the intraday quote: at gap 2.0 the two coincide (2%/2.0 == 1%).
     ungapped_swing = int(
         (Decimal(str(ptr.swing_position_pct)) / 100 * equity) / (entry - stop)
     )
@@ -854,12 +817,8 @@ def _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model):
 
 
 def _horizon_calendar(tmp_path: Path, pclock: Clock, conn) -> NSECalendar:
-    """A calendar whose verified horizon the TEST owns: 2026 and nothing else.
-
-    The fallback branch is reached by running off the END of the loaded calendars, and pointing that
-    probe at the repo's ``config/calendar`` would make these tests fail the routine December morning
-    someone adds ``2027.yaml``. Copying one year into ``tmp_path`` keeps the trigger condition
-    permanent and local."""
+    """A calendar whose verified horizon the TEST owns: 2026 only, so adding ``2027.yaml`` to the
+    repo cannot move the end-of-calendar fallback these tests reach."""
     (tmp_path / "2026.yaml").write_text(
         (CALENDAR_DIR / "2026.yaml").read_text(encoding="utf-8"), encoding="utf-8"
     )
@@ -869,9 +828,7 @@ def _horizon_calendar(tmp_path: Path, pclock: Clock, conn) -> NSECalendar:
 async def test_ttl_intraday_is_now_plus_ttl_minutes(
     conn, pclock, ticker, calendar, book, limit_table, cost_model
 ):
-    """Intraday is the only style _ttl treats specially: TTL_INTRADAY_MIN minutes from now, even five
-    minutes before a Friday close where the swing/position branch would otherwise land on today's own
-    15:30."""
+    """Intraday is TTL_INTRADAY_MIN minutes from now, even five minutes before the close."""
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 6, 19, 15, 25, tzinfo=IST)             # 5 minutes before Friday close
     assert pipeline._ttl("intraday") == ticker.at + timedelta(minutes=TTL_INTRADAY_MIN)
@@ -880,14 +837,9 @@ async def test_ttl_intraday_is_now_plus_ttl_minutes(
 async def test_ttl_swing_and_position_are_todays_close(
     conn, pclock, ticker, calendar, book, limit_table, cost_model
 ):
-    """_ttl is keyed on style alone: an entry, an exit, a stop adjust and the forward-queue
-    horizon all keep TODAY's close. the one-exit-per-session cadence depends on it
-    (``_delivered_exit_today`` screens today's deliveries only), and the forward queue is a
-    within-day structure. For entries this is the 2026-09-23 owner directive ("trade recommendations
-    should close automatically and free the gate count at the end of the day if no trade decision
-    were made"), which withdrew the 2026-09-13 next-session entry TTL: on 2026-09-21/22 four
-    untaken pending entry recs held the CNC ``max_open_positions`` cap of 4 across two sessions,
-    killing 12 of 19 gate verdicts."""
+    """_ttl is keyed on style alone: entries, exits, stop adjusts and the forward-queue horizon all
+    expire at TODAY's close, so untaken entry recs free the gate's open-position count at day end and
+    the one-exit-per-session cadence (``_delivered_exit_today``) holds."""
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 6, 19, 10, 5, tzinfo=IST)              # Friday, a trading day
     assert pipeline._ttl("swing") == datetime(2026, 6, 19, 15, 30, tzinfo=IST)
@@ -897,9 +849,8 @@ async def test_ttl_swing_and_position_are_todays_close(
 async def test_a_swing_exit_recommendation_is_still_stamped_to_todays_close(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The same scope line end to end, on the delivered payload rather than the seam. Two live exit
-    recs naming two different stops for one position is what a shared two-session TTL would put in
-    front of the owner, because the repeat-exit screen is bounded by today's ``delivered_at``."""
+    """End to end on the delivered payload: a swing exit rec expires at today's close, since the
+    repeat-exit screen is bounded by today's ``delivered_at``."""
     position_id = _open_position(conn, pclock, style="swing")
     ticker.at = datetime(2026, 6, 19, 11, 0, tzinfo=IST)              # Friday, a trading day
     pipeline, _ = _exit_pipeline(
@@ -917,11 +868,9 @@ async def test_a_swing_exit_recommendation_is_still_stamped_to_todays_close(
 async def test_ttl_never_mints_an_already_dead_stamp(
     conn, pclock, ticker, book, limit_table, cost_model, tmp_path
 ):
-    """``on_bar`` is never window-gated, so a stop-proximity event in the 15:30-15:45 settlement
-    buffer can reach _ttl after today's close has already passed. A ``valid_until`` at or before now
-    is rejected by the gate's own envelope check (``_rule_proposal_stale``, "expired/unstamped
-    proposal - fail closed"), so a dead stamp would silently swallow a risk-reducing exit the owner
-    should have seen; _ttl falls back to the intraday TTL instead."""
+    """``on_bar`` is not window-gated, so _ttl can run after the close. A ``valid_until`` at or
+    before now fails the gate's stale check and would swallow a risk-reducing exit; _ttl falls back
+    to the intraday TTL."""
     calendar = _horizon_calendar(tmp_path, pclock, conn)
     pipeline = _ttl_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ticker.at = datetime(2026, 12, 31, 15, 40, tzinfo=IST)            # past the 15:30 close
@@ -932,9 +881,8 @@ async def test_ttl_never_mints_an_already_dead_stamp(
 async def test_stopless_candidate_never_reaches_the_analyst(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-07-29 owner decision: no stop level ⇒ max_qty_by_risk is 0 ⇒ a guaranteed no_action —
-    the analyst call is never spent (today: `mom` until rebalance state lands). The slot stays
-    consumed (no stop will appear today) and the forward cap is not charged."""
+    """No stop level ⇒ max_qty_by_risk is 0 ⇒ a guaranteed no_action, so no analyst call is spent.
+    The slot stays consumed (no stop will appear today) and the forward cap is not charged."""
     rearmed: list[tuple[str, str]] = []
     harness = FakeHarness()                 # any call would raise "more times than results"
     pipeline, _ = make_pipeline(
@@ -959,11 +907,8 @@ async def test_stopless_candidate_never_reaches_the_analyst(
 async def test_stopless_candidate_never_appears_in_best_unforwarded(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-08-14 nightly-review confusion: a `mom` candidate scored 1.0 with no stop was journalled
-    like any other refused candidate, so the funnel's ``best_unforwarded_score`` (the direct
-    starvation reading) reported 1.0 sitting unforwarded — indistinguishable from a good
-    candidate that never got an analyst slot. A structurally-unsizeable candidate was never eligible
-    for a slot in the first place and must never surface there."""
+    """A structurally unsizeable candidate was never slot-eligible, so it must not surface as the
+    funnel's ``best_unforwarded_score`` (the starvation reading)."""
     from engine.ops.nightly_review import build_funnel_summary
 
     pipeline, _ = make_pipeline(
@@ -986,12 +931,9 @@ async def test_stopless_candidate_never_appears_in_best_unforwarded(
 async def test_qty_zero_candidate_never_reaches_the_analyst(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """2026-08-14 extension: a candidate WITH a real stop can still be structurally unsizeable when
-    the per-trade-risk budget cannot afford even one share at that stop's absolute distance —
-    OFSS-shaped, live 2026-08-14: entry 11366.0 / stop 10911.35 (₹454.65/share) against a ₹400 (2%
-    swing) budget on the ₹20,000 test account. Same funnel category as the stopless case: journalled
-    unsizeable, never enqueued, never forwarded, no analyst spend — and never surfaces as the day's
-    best unforwarded score even though nothing else was published."""
+    """A real stop can still be unsizeable: entry 11366.0 / stop 10911.35 (₹454.65/share) exceeds a
+    ₹400 (2% swing) budget on the ₹20,000 account. Same as the stopless case: journalled unsizeable,
+    never enqueued or forwarded, no analyst spend, never the best unforwarded score."""
     from engine.ops.nightly_review import build_funnel_summary
 
     rearmed: list[tuple[str, str]] = []
@@ -1031,8 +973,7 @@ async def test_qty_zero_candidate_never_reaches_the_analyst(
 async def test_sizeable_candidate_is_unaffected_by_the_qty_zero_check(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The qty-zero check must not become a second, over-eager stopless gate: a candidate whose stop
-    distance the risk budget CAN afford still enqueues and reaches the analyst exactly as before."""
+    """A candidate whose stop distance the risk budget CAN afford still reaches the analyst."""
     harness = FakeHarness(dict(NO_ACTION_JSON))
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
@@ -1066,8 +1007,7 @@ async def test_no_action_records_no_proposal(
     assert conn.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 0
     assert parts["notify"].messages == []
-    # 2026-09-04: a no_action verdict hands the slot back to displacement (the analyst RAN, so the
-    # day slot itself stays spent — this is not the 2026-07-29 infrastructure re-arm).
+    # no_action hands the slot back to displacement; the analyst RAN, so the day slot stays spent.
     assert declined == [(cand.symbol, cand.strategy_id)]
     row = conn.execute(
         "SELECT evaluated FROM prescreen_day_slots WHERE symbol=? AND strategy_id=?",
@@ -1208,8 +1148,8 @@ async def test_owner_approval_required_opens_a_pending_row(
 async def test_owner_approval_on_a_position_event_names_the_symbol(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """An exit/modify action carries only a position_id, so the prompt used to be a bare ULID — an
-    owner cannot approve what they cannot identify. The caller's symbol is persisted and printed."""
+    """An exit/modify action carries only a position_id; the caller's symbol is persisted and
+    printed so the owner can identify what they approve."""
     position_id = _open_position(conn, pclock)
     exit_json = {
         "action": "exit", "position_id": position_id, "exit_type": "MARKET",
@@ -1276,10 +1216,8 @@ async def test_market_entry_zone_spans_the_sanity_band(
 async def test_an_expired_recommendation_still_accepts_the_owners_taken(
     conn, ticker, pclock, book, cost_model
 ):
-    """2026-08-26, the FIRST live /taken: the owner executed intraday and recorded in the evening —
-    the 15:45 sweep had already labelled the row 'expired' and the book refused the platform's first
-    real fill. Expiry marks 'no longer actionable', never 'never happened': expired → taken is
-    legal; dismissed stays refused."""
+    """Expiry marks 'no longer actionable', never 'never happened': expired → taken is legal;
+    dismissed stays refused."""
     rec = make_rec(cost_model)
     book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
     conn.execute(
@@ -1303,17 +1241,11 @@ async def test_an_expired_recommendation_still_accepts_the_owners_taken(
 async def test_a_gapped_fill_is_recorded_and_the_stop_risk_drift_is_called_out(
     conn, ticker, pclock, book, cost_model, caplog
 ):
-    """The overnight-gap drift check, made visible where it lands — and judged on the gate's OWN
-    basis (re-review 2026-09-13). ``take`` never gates on ``valid_until`` (a swing rec can be
-    confirmed the morning after its TTL expired at yesterday's close), and nothing re-gates at
-    capture: the position row is written with the RECOMMENDATION's stop. But the gate
-    sized that swing on overnight_gap_mult x the stop distance (_rule_per_trade_risk), so a fill
-    anywhere inside that allowance carries stop risk the per_trade_risk verdict ALREADY approved and
-    is silent; the call-out fires only once the approved budget is genuinely exceeded. The fill is
-    recorded regardless — the owner is the authority on what they executed and an untracked live
-    position is the worse failure — and the drift is said in the reply and at WARNING in the log.
-    A fill anywhere INSIDE the delivered zone is never called out; a fill on the WRONG SIDE of the
-    stop is called out unconditionally. Zone 1000-1020, stop 940: planned 80/share; gap 2.5 ⇒ 200."""
+    """``take`` does not re-gate: the position gets the RECOMMENDATION's stop. The gate sized the
+    swing on overnight_gap_mult x the stop distance, so a fill inside that allowance is silent; the
+    call-out (reply + WARNING) fires only once the approved budget is exceeded. The fill is recorded
+    regardless. A fill inside the delivered zone is never called out; one on the WRONG SIDE of the
+    stop always is. Zone 1000-1020, stop 940: planned 80/share; gap 2.5 ⇒ 200."""
     gated = RecommendationBook(conn, pclock, cost_model, overnight_gap_mult_fn=lambda: Decimal("2.5"))
 
     def swing_rec():
@@ -1752,11 +1684,9 @@ async def test_stop_proximity_fires_once_then_debounces(
     assert len(harness.calls) == 1
     assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
 
-    # Past the debounce the hour-cadence no longer blocks the event. Since the exit-hygiene change the SECOND gate on
-    # this path is the repeat-exit screen, so the position also has to have changed for the analyst
-    # to be worth calling — the owner tightened the stop on a long (99 -> 99.5) here. The unchanged
-    # case (a second identical exit recommendation, suppressed) is
-    # ``test_repeat_exit_is_skipped_until_the_stop_changes`` below.
+    # Past the debounce the repeat-exit screen still needs the position to have changed: the owner
+    # tightens the stop on a long (99 -> 99.5). The unchanged case is
+    # ``test_repeat_exit_is_skipped_until_the_stop_changes``.
     conn.execute("UPDATE positions SET stop='99.5' WHERE position_id=?", (position_id,))
     conn.commit()
     ticker.at = ticker.at + timedelta(minutes=POSITION_EVENT_DEBOUNCE_MIN + 1)
@@ -1807,13 +1737,9 @@ async def test_aged_position_exit_is_deterministic(
 
 
 # =========================================================================== exit hygiene
-# 2026-09-11 forensics: two positions the owner sold outside the ledger on 08-26 stayed OPEN until
-# 09-11 and produced 68 exit recommendations (6-10 a day), 182 position-event analyst calls and 11
-# day plans that reasoned about their "overnight risk". The month's one genuine ins entry
-# (JINDALSTEL, 09-08) arrived as notification 2 of 8 that day; the other seven were those repeats.
-#
-# _run_position_event is the single convergence point of every position-event ENTRY POINT -- today
-# only on_bar (trigger b) reaches it -- so both screens are pinned through the public on_bar path.
+# Two position-event screens: (a) positions sold outside the ledger, (b) repeat exits.
+# _run_position_event is the single convergence point of the position-event entry points, so both
+# are pinned through the public on_bar path.
 EXIT_JSON: dict[str, Any] = {
     "action": "exit", "exit_type": "MARKET", "reason": "risk_event", "confidence": 0.9,
     "thesis": "Price is inside half an ATR of the stop; the breakout thesis is failing.",
@@ -1853,11 +1779,7 @@ async def test_position_sold_outside_the_ledger_never_reaches_the_analyst(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
 ):
     """Screen (a): two consecutive broker observations show the position unheld => no analyst call,
-    no exit recommendation, and NO governor decision either (the screen runs before admission).
-
-    The platform cannot recommend an exit from a position that does not exist. The owner is still
-    told - once a day by the reconcile alert, and every morning by the day plan's "sold outside
-    the ledger" block - and ``/closed`` is what ends it."""
+    no exit recommendation, and NO governor decision (the screen runs before admission)."""
     position_id = _open_position(conn, pclock)
     _observe_holding(conn, position_id, TODAY - timedelta(days=1))
     _observe_holding(conn, position_id, TODAY)
@@ -1886,8 +1808,7 @@ async def test_position_sold_outside_the_ledger_never_reaches_the_analyst(
 async def test_one_short_observation_day_does_not_silence_the_exit_path(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The asymmetry that makes screen (a) safe: ONE short reading (a settlement edge, a truncated
-    holdings payload) is not evidence of a sale, so the exit recommendation still fires."""
+    """ONE short reading (a settlement edge, a truncated holdings payload) is not evidence of a sale."""
     position_id = _open_position(conn, pclock)
     _observe_holding(conn, position_id, TODAY)
     harness = FakeHarness(_exit_json(position_id))
@@ -1905,9 +1826,8 @@ async def test_one_short_observation_day_does_not_silence_the_exit_path(
 async def test_a_position_back_in_holdings_is_managed_again_the_same_day(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The reconcile REWRITES today's observation hourly (last write of the day wins), so the screen
-    is re-decided on every event: the 13:00 pulse that finds the position held must un-silence it
-    immediately, which a per-day cached missing set could not do."""
+    """The reconcile rewrites today's observation hourly, so the screen is re-decided on every
+    event; a per-day cached missing set could not un-silence the position."""
     position_id = _open_position(conn, pclock)
     _observe_holding(conn, position_id, TODAY - timedelta(days=1))
     _observe_holding(conn, position_id, TODAY)
@@ -1933,13 +1853,8 @@ async def test_a_position_back_in_holdings_is_managed_again_the_same_day(
 async def test_a_partial_holding_is_short_but_still_gets_its_exit_recommendation(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """Screen (a) means "the broker holds NONE of it", not "the broker is short".
-
-    The journal's wide predicate is ``held < tracked``, which also catches a partial exit the
-    owner never reported. Those 3 remaining shares are real exposure with a real stop, so withholding
-    every exit recommendation from them would turn a diagnostic into a hole in the only protective
-    output RECOMMEND mode has. The owner still hears about the mismatch - the reconcile alert and the day
-    plan's block both use the wide reading - but the exit path keeps running."""
+    """Screen (a) means "the broker holds NONE of it", not "held < tracked". The 3 remaining shares
+    of an unreported partial exit are real exposure with a real stop, so the exit path keeps running."""
     position_id = _open_position(conn, pclock, style="swing")
     _observe_holding(conn, position_id, TODAY - timedelta(days=1), tracked=10, held=3)
     _observe_holding(conn, position_id, TODAY, tracked=10, held=3)
@@ -1960,9 +1875,8 @@ async def test_a_partial_holding_is_short_but_still_gets_its_exit_recommendation
 async def test_a_position_that_only_reaches_zero_today_is_not_silenced_yet(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The two-day rule applies to the ZERO run in its own right. Held 3 yesterday and 0 today means
-    the position only became "gone" on one observation - the same single reading the whole design
-    refuses to act on, because a truncated holdings payload looks exactly like this."""
+    """The two-day rule applies to the ZERO run: held 3 yesterday and 0 today is one "gone" reading,
+    which a truncated holdings payload also produces."""
     position_id = _open_position(conn, pclock, style="swing")
     _observe_holding(conn, position_id, TODAY - timedelta(days=1), tracked=10, held=3)
     _observe_holding(conn, position_id, TODAY, tracked=10, held=0)
@@ -1980,15 +1894,11 @@ async def test_a_position_that_only_reaches_zero_today_is_not_silenced_yet(
 async def test_repeat_exit_is_skipped_until_the_stop_changes(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """Screen (b): today's exit recommendation already says everything this event would say, so the
-    second one is not sent. A MOVED STOP is new information and passes - the screen compares the
-    delivered payload against the position row, not a bare "seen today" flag.
+    """Screen (b): a second exit recommendation saying the same thing is not sent; a MOVED STOP is
+    new information and passes (the screen compares the delivered payload with the position row).
 
-    A SWING/CNC position at in-session times, which is the shape the 2026-09-11 incident actually
-    had (HDFCAMC and HINDZINC were CNC): a swing exit is stamped valid to the session close, so the
-    day's first recommendation is still a live instruction when the next breach arrives. The intraday
-    case, where the 20-minute TTL kills the instruction before the 60-minute debounce lets the next
-    event through, is ``test_an_expired_exit_no_longer_suppresses_the_next_event``."""
+    Swing/CNC: the exit is valid to the close, so the day's first rec is still live at the next
+    breach. The intraday case is ``test_an_expired_exit_no_longer_suppresses_the_next_event``."""
     position_id = _open_position(conn, pclock, style="swing")
     harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
@@ -2021,10 +1931,8 @@ async def test_repeat_exit_is_skipped_until_the_stop_changes(
 async def test_a_changed_quantity_also_passes_the_repeat_screen(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """A partial exit the owner reported changes what "close the position" means, so the day's
-    second exit recommendation is a different instruction and must be delivered. Swing/CNC and both
-    events inside the session, so the qty comparison is the ONLY thing that can let the second
-    recommendation through."""
+    """A reported partial exit changes what "close the position" means, so the second exit rec is a
+    different instruction. Swing/CNC, both events in-session: only the qty comparison can pass it."""
     position_id = _open_position(conn, pclock, style="swing")
     harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
@@ -2051,12 +1959,9 @@ async def test_an_expired_exit_no_longer_suppresses_the_next_event(
 ):
     """Screen (b) suppresses a repeat only while the earlier exit is STILL AN INSTRUCTION.
 
-    An INTRADAY (MIS) exit is stamped ``now + TTL_INTRADAY_MIN`` (20 minutes) while the position-event
-    debounce is 60, so the day's first exit recommendation is always dead by the time the next breach
-    is allowed through. Suppressing on "delivered today" alone would leave an owner whose MIS stop
-    stayed breached all session with exactly one exit instruction, one that left ``/pending`` twenty
-    minutes after it arrived - the platform's only protective output in RECOMMEND mode, silently
-    withheld for five more hours. A swing exit is valid to the session close and is unaffected."""
+    An intraday exit lives TTL_INTRADAY_MIN (20 min) against a 60-min debounce, so it is always dead
+    when the next breach is allowed through; suppressing on "delivered today" alone would withhold
+    the only protective output for the rest of the session."""
     position_id = _open_position(conn, pclock, style="intraday")
     harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
@@ -2079,9 +1984,8 @@ async def test_an_expired_exit_no_longer_suppresses_the_next_event(
 async def test_an_exit_the_owner_actioned_still_suppresses_the_repeat(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The other half of "still an instruction": ``taken``/``dismissed``/``closed`` mean the owner
-    ENGAGED with the message. Re-sending it is exactly the noise the exit-hygiene change removes, so an actioned
-    recommendation suppresses the repeat even once its TTL has passed."""
+    """``taken``/``dismissed``/``closed`` mean the owner ENGAGED, so an actioned recommendation
+    suppresses the repeat even once its TTL has passed."""
     position_id = _open_position(conn, pclock, style="intraday")
     harness = FakeHarness(_exit_json(position_id), _exit_json(position_id))
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
@@ -2103,18 +2007,14 @@ async def test_an_exit_the_owner_actioned_still_suppresses_the_repeat(
 async def test_exactly_one_exit_per_session_while_the_stop_stays_breached(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """THE constraint on screen (b). It is scoped to the DAY, so a position sitting through its stop
-    still produces one exit recommendation every session - which is what keeps it inside
-    ``gate._exiting_symbols``'s three-calendar-day window (gate.py:1166-1205) and therefore off the
-    position and sector caps. A screen scoped to the position's lifetime would let the exit-pending
-    relaxation lapse and re-block every new swing entry for capacity, which is the 2026-09-07 bug
-    this must not re-introduce.
+    """Screen (b) is scoped to the DAY, so a position sitting through its stop gets one exit rec per
+    session, which keeps it inside ``gate._exiting_symbols``'s three-calendar-day window and off the
+    position and sector caps. A lifetime-scoped screen would lapse the relaxation and re-block new
+    swing entries.
 
-    Swing/CNC, the shape the two 08-26 positions actually had: its exit is valid to the session
-    close, so "one per session" is the day-scoped screen doing the work and not a lapsed TTL. The
-    ``_exiting_symbols`` assertion is read at the TOP of sessions 2 and 3 - BEFORE that day's own
-    recommendation exists - because that is the only moment where a lapse could show: read straight
-    after a rec is created it would pass on a zero-age rec no matter how short the window was."""
+    Swing/CNC, so "one per session" is the screen and not a lapsed TTL. ``_exiting_symbols`` is read
+    at the TOP of sessions 2 and 3, before that day's rec exists: read after creation it would pass
+    on a zero-age rec however short the window."""
     position_id = _open_position(conn, pclock, style="swing")
     harness = FakeHarness(*(_exit_json(position_id) for _ in range(3)))
     pipeline, _ = _exit_pipeline(
@@ -2129,8 +2029,7 @@ async def test_exactly_one_exit_per_session_while_the_stop_stays_breached(
     for n, session in enumerate(sessions, start=1):
         ticker.at = datetime(session.year, session.month, session.day, 11, 0, tzinfo=IST)
         if n > 1:
-            # Yesterday's recommendation, one calendar day old and alone, still carries the exit-pending
-            # relaxation into this morning. This is the assertion a lifetime-scoped screen fails.
+            # Yesterday's rec alone still carries the exit-pending relaxation; a lifetime screen fails here.
             assert _exiting() == frozenset({SYMBOL}), f"session {session}: exit-pending window lapsed"
 
         await pipeline.on_bar(_near_bar())
@@ -2148,10 +2047,9 @@ async def test_exactly_one_exit_per_session_while_the_stop_stays_breached(
 async def test_an_unreadable_repeat_exit_query_still_lets_the_event_through(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """Fail-to-zero on screen (b)'s read. The query exists only to WITHHOLD the one protective
-    output RECOMMEND mode has, so a database that cannot answer it must not get to decide: the event
-    runs. Raising instead would be worse than wrong — ``on_bar`` awaits this inside its per-position
-    loop, so one unreadable row would abandon every OTHER position on the same bar."""
+    """Fail-to-zero on screen (b)'s read: the query only withholds a protective output, so an
+    unanswerable database lets the event run. Raising would abandon every OTHER position on the bar
+    (``on_bar`` awaits it inside its per-position loop)."""
     position_id = _open_position(conn, pclock, style="swing")
     harness = FakeHarness(dict(NO_ACTION_JSON))
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)
@@ -2170,20 +2068,12 @@ async def test_an_unreadable_repeat_exit_query_still_lets_the_event_through(
 async def test_a_sold_outside_the_ledger_position_ages_out_of_the_exiting_window(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """THE KNOWN COST of screen (a), pinned here rather than discovered live.
+    """Screen (a) delivers no exit rec, so three calendar days after the last one the position
+    leaves ``gate._exiting_symbols``'s window and counts against ``max_open_positions`` /
+    ``per_sector_exposure`` again until ``/closed`` lands (the time exit skips it too).
 
-    Screen (b) leaves one exit recommendation per session standing, which is exactly what keeps a
-    breached position inside ``gate._exiting_symbols``'s three-calendar-day window. Screen (a)
-    delivers NO exit recommendation at all, so three calendar days after the last one the position
-    stops reading as "exiting" and starts counting against the ``max_open_positions`` /
-    ``per_sector_exposure`` caps again - capacity the owner no longer really has, until the ``/closed``
-    reply lands (the time exit skips such a position too).
-
-    It is a CAPACITY cost, never a risk one - the caps get tighter, not looser - and the alternative
-    inside that change's file scope was worse: teaching the gate this predicate would relax a risk limit on
-    the strength of a broker heuristic, and ``risk/gate.py`` is outside that scope. The skip logs
-    the consequence at WARNING (``position_event_skipped_sold_outside_ledger``), and this test is the
-    other half of that record: a change in either direction has to come past it."""
+    A capacity cost, never a risk one (the caps tighten). Teaching the gate the predicate would
+    relax a risk limit on a broker heuristic. The skip logs the consequence at WARNING."""
     position_id = _open_position(conn, pclock, style="swing")
     harness = FakeHarness(_exit_json(position_id))         # exactly ONE canned verdict: a second
     ticker.at = datetime(2026, 6, 17, 11, 0, tzinfo=IST)   # analyst call would raise
@@ -2279,17 +2169,12 @@ def _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model):
 def test_a_position_sold_outside_the_ledger_leaves_the_open_positions_line(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The analyst sees the book the OWNER holds, not the platform's fiction.
+    """A position the journal reads empty on two sessions leaves the open counts and moves to a
+    trailing line naming the evidence and the reply that settles it.
 
-    The position-event screen already refuses to spend a call on a position the journal reads
-    empty on two sessions, but this line still counted it as open — which is how two 08-26 positions
-    stayed in the intraday context for eleven sessions. It moves to a trailing line naming the
-    evidence and the reply that settles it, and comes out of the counts above.
-
-    The headroom line is asserted UNCHANGED in the same breath: it reads the raw
-    ``ExposureTracker.open_position_counts()``, so those positions still show there until
-    ``/closed`` lands, even though the gate's own admission count has excluded them since the exit-hygiene change
-    (2026-09-12, ``missing_holdings_fn``). The two lines disagreeing is the ambiguity, stated."""
+    The headroom line is unchanged: it reads the raw ``ExposureTracker.open_position_counts()``, so
+    those positions still show there until ``/closed``, though the gate's admission count excludes
+    them (``missing_holdings_fn``)."""
     _open_position(conn, pclock, style="intraday")                        # MIS, still held
     gone = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")  # CNC, broker holds none
     _observe_holding(conn, gone, TODAY - timedelta(days=1))
@@ -2310,8 +2195,8 @@ def test_a_position_sold_outside_the_ledger_leaves_the_open_positions_line(
 def test_a_held_position_renders_exactly_as_it_did_before(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """No journal rows at all (a fresh position, an engine that was down, a broker erring all week)
-    ⇒ the rendering before the exit-hygiene change, with no trailing line to explain away."""
+    """No journal rows at all (fresh position, engine down, broker erring) ⇒ plain counts, no
+    trailing line."""
     _open_position(conn, pclock, style="intraday")
     _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
     pipeline = _summary_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
@@ -2322,9 +2207,8 @@ def test_a_held_position_renders_exactly_as_it_did_before(
 def test_a_partial_holding_stays_in_the_open_positions_line(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """``require_zero=True``, the same reading the exit screen uses: held 3 of a tracked 10 is an
-    unreported PARTIAL exit, and those 3 shares are real exposure the analyst must still reason
-    about. Only "the broker held nothing on every day of the run" leaves the book."""
+    """``require_zero=True``, as in the exit screen: held 3 of a tracked 10 is real exposure; only
+    "the broker held nothing on every day of the run" leaves the book."""
     partial = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
     _observe_holding(conn, partial, TODAY - timedelta(days=1), tracked=10, held=3)
     _observe_holding(conn, partial, TODAY, tracked=10, held=3)
@@ -2336,9 +2220,8 @@ def test_a_partial_holding_stays_in_the_open_positions_line(
 def test_the_whole_book_sold_outside_the_ledger_reads_none_open(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The 08-26 shape itself: the counts must say "none open" rather than go negative or keep a
-    phantom, and the trailing line carries every name. ``sessions`` is the SHORTEST zero-run among
-    them (3 and 2 here), so the line never claims evidence one of its names does not have."""
+    """The counts say "none open" (not negative, no phantom) and the trailing line names every
+    symbol. ``sessions`` is the SHORTEST zero-run among them (3 and 2 here)."""
     old = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
     new = _open_position(conn, pclock, style="swing", symbol="HINDZINC")
     for day in (TODAY - timedelta(days=2), TODAY - timedelta(days=1), TODAY):
@@ -2356,8 +2239,8 @@ def test_the_whole_book_sold_outside_the_ledger_reads_none_open(
 def test_an_unreadable_holdings_journal_leaves_the_plain_counts(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """Fail-to-zero on a context line: a database that cannot answer the journal question degrades
-    to the rendering before the exit-hygiene change — it never raises into the analyst path and never edits the book."""
+    """Fail-to-zero on a context line: an unreadable journal degrades to plain counts, never raising
+    into the analyst path."""
     gone = _open_position(conn, pclock, style="swing", symbol="HDFCAMC")
     _observe_holding(conn, gone, TODAY - timedelta(days=1))
     _observe_holding(conn, gone, TODAY)
@@ -2413,8 +2296,7 @@ async def test_forward_cap_stops_analyst_calls_for_the_day(
 
 # ======================================================= forward queue + journalled counter
 class TunableGovernor(FakeGovernor):
-    """A governor whose forward cap the test can move — the live cap really does move
-    (agents.yaml ``prescreen_cap_per_day`` is 12 at DG0 and 4 at DG1+)."""
+    """A governor whose forward cap the test can move (the live cap is 12 at DG0, 4 at DG1+)."""
 
     def __init__(self, cap: int) -> None:
         super().__init__()
@@ -2436,16 +2318,13 @@ def forward_journal(conn) -> dict[tuple[str, str], int]:
 async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """At an analyst slot the queue picks the highest per-strategy score QUANTILE, not
-    the highest raw score - scores are comparable within a strategy and meaningless across them.
-    Here rsi2's 0.30 is the top of rsi2's measured day and orb's 0.95 is the top of orb's; the tie
-    inside the top quantile band falls back to fired_at and then to arrival order, so the earlier
-    one goes first even though its raw score is a third of its rival's.
+    """At an analyst slot the queue picks the highest per-strategy score QUANTILE, not the highest
+    raw score (scores are meaningless across strategies). rsi2's 0.30 tops rsi2's day and orb's 0.95
+    tops orb's; the tie in the top band falls back to fired_at, then arrival order, so the earlier
+    goes first despite a raw score a third of its rival's.
 
-    Both strategies need a MEASURED day for that comparison to mean anything: since the rank-population floor a
-    population below :data:`MIN_RANK_POPULATION` lands in the middle band instead of the top, so the
-    singleton rsi2 this test used to rely on no longer wins by arithmetic (see the 09-10 inversion
-    test below)."""
+    Both strategies need a MEASURED day: a population below :data:`MIN_RANK_POPULATION` lands in the
+    middle band."""
     gov = TunableGovernor(0)               # no slots yet: everything queues, nothing is lost
     harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
     pipeline, parts = make_pipeline(
@@ -2481,9 +2360,7 @@ async def test_forward_queue_selects_by_per_strategy_quantile_not_raw_score(
 async def test_forward_count_survives_a_mid_day_restart(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The forward counter is journalled, so a restart RESUMES the day's analyst quota.
-    Before this it was process memory - the same defect the 2026-08-04 journal fixed for the
-    publication caps, still open on the more expensive of the two bounds."""
+    """The forward counter is journalled, so a restart RESUMES the day's analyst quota."""
     gov = TunableGovernor(3)
     harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
     pipeline, _ = make_pipeline(
@@ -2513,8 +2390,7 @@ async def test_forward_count_survives_a_mid_day_restart(
 async def test_forward_mode_arrival_is_the_rollback_to_fifo(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """admission_mode='arrival' restores first-come-first-served
-    forwarding, so a rollback is a settings edit rather than a revert."""
+    """admission_mode='arrival' restores first-come-first-served forwarding."""
     gov = TunableGovernor(0)
     harness = FakeHarness(dict(NO_ACTION_JSON))
     pipeline, parts = make_pipeline(
@@ -2535,9 +2411,8 @@ async def test_forward_mode_arrival_is_the_rollback_to_fifo(
 async def test_queued_candidate_expires_instead_of_going_stale(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """A queued candidate is a REFUSED one we kept a pointer to; it must never be forwarded past
-    its own 5.2 TTL horizon - a 90-minute-old breakout level is not the setup the scanner saw.
-    Expiry does not re-arm the day slot (the forward cap deliberately never re-arms, 2026-07-29)."""
+    """A queued candidate is never forwarded past its own TTL: a stale breakout level is not the
+    setup the scanner saw. Expiry does not re-arm the day slot (the forward cap never re-arms)."""
     gov = TunableGovernor(0)
     harness = FakeHarness(dict(NO_ACTION_JSON))
     pipeline, parts = make_pipeline(
@@ -2555,14 +2430,13 @@ async def test_queued_candidate_expires_instead_of_going_stale(
     assert forward_journal(conn)[("TCS", "orb")] == 0
 
 
-# ============================================== 2026-08-14: the PACED drain (the ranking's teeth)
+# ============================================== the PACED drain
 def paced_pipeline(conn, pclock, calendar, book, limit_table, cost_model, *, cap, results=6,
                    rearm=None, prescreen=None, warmup_status_fn=None):
     """A ranked+paced pipeline whose forward cap the test can move, with canned analyst declines.
 
-    ``prescreen`` wires the whole prescreen admission seam at once (2026-08-27) — the ``rearm`` callback
-    plus the two displacement halves — so an integration test drives a REAL ``SignalPreScreen``
-    rather than a mock of the class whose bookkeeping is the thing under test.
+    ``prescreen`` wires the whole prescreen admission seam (``rearm`` plus the two displacement
+    halves) so a test can drive a REAL ``SignalPreScreen``.
     """
     gov = TunableGovernor(cap)
     harness = FakeHarness(*[dict(NO_ACTION_JSON) for _ in range(results)])
@@ -2591,13 +2465,8 @@ def slot_evaluated(conn) -> dict[tuple[str, str], int]:
 async def test_an_arriving_candidate_never_drains_its_own_slot(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """THE 2026-08-14 REGRESSION, in the shape it actually happened.
-
-    Under the inline drain the queue held exactly one entry at every slot — the candidate that had
-    just arrived — so "forward the best pending" chose between a set of one and the day's 12 slots
-    went to rsi2 [0.14 .. 0.66] inside the first five minutes while 0.83 arrived later and never got
-    one. Paced: the 0.14 only ENQUEUES, and at the next tick the 0.83 that landed inside the same
-    interval takes the slot.
+    """An arriving candidate only ENQUEUES: an inline drain would choose "the best pending" from a
+    set of one. At the next tick the 0.83 that landed in the same interval takes the slot over 0.14.
     """
     pipeline, parts, harness, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=12)
@@ -2621,10 +2490,8 @@ async def test_an_arriving_candidate_never_drains_its_own_slot(
 async def test_the_drain_spends_one_slot_per_pacing_interval(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """One candidate per tick, never a burst: draining the whole remaining budget the moment it is
-    available is the inline drain again, just batched — the day's later candidates would still meet
-    an exhausted cap. And a tick INSIDE the interval is a no-op, which is what makes the interval an
-    accumulation window rather than a 60 s pulse."""
+    """One candidate per tick, never a burst (a batch is the inline drain again). A tick INSIDE the
+    interval is a no-op, so the interval is an accumulation window."""
     pipeline, _, harness, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=12)
     for i, symbol in enumerate(("TCS", "INFY", "WIPRO")):
@@ -2650,16 +2517,10 @@ async def test_the_drain_spends_one_slot_per_pacing_interval(
 async def test_an_intraday_hole_that_opens_after_a_candidate_is_queued_costs_no_analyst_call(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """2026-09-13 per-class warm-up, at the OTHER commit point. The arrival screen cannot see this:
-    under the default paced drain the candidate is queued while coverage is complete and dispatched
-    minutes later — and a reconnect can open a market-wide one-bar hole in between (09-09 14:47).
-    Since that no longer freezes the risk state, the drain would pass mode/risk/kill/window/governor,
-    claim the prescreen admission slot and spend a forward slot on a call the gate then rejects
-    on ``warmup_ready`` — a charge that bought a verdict, so nothing is refunded.
-
-    The screen therefore runs at :meth:`_take_forward_slot`, in the band screen's idiom:
-    DEFER, never drop. ``orb`` publishes once a day, so re-arming it out of the queue would silence
-    the level for the session; coverage heals mid-session and the queued candidate is still there."""
+    """The arrival screen cannot see a hole that opens while a candidate is queued (a reconnect can
+    open a one-bar hole), so the same screen runs at :meth:`_take_forward_slot`: DEFER, never drop.
+    ``orb`` publishes once a day, so dropping would silence the level for the session; coverage
+    heals mid-session and the queued candidate is still there."""
     from engine.ops.warmup import WarmupStatus
 
     snapshot = {"status": WarmupStatus(ready=True)}
@@ -2688,8 +2549,7 @@ async def test_an_intraday_hole_that_opens_after_a_candidate_is_queued_costs_no_
 async def test_a_daily_class_candidate_drains_through_an_intraday_hole(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The whole point of the change, at the drain: the same snapshot that defers the intraday leg
-    lets the swing leg through — it reads completed daily bars and no 1-minute bar at all."""
+    """The snapshot that defers the intraday leg lets the swing leg through (daily bars only)."""
     from engine.ops.warmup import WarmupStatus
 
     snapshot = {"status": WarmupStatus(ready=True)}
@@ -2715,9 +2575,8 @@ async def test_a_daily_class_candidate_drains_through_an_intraday_hole(
 async def test_the_drain_stops_at_the_forward_cap_and_keeps_the_rest_queued(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The cap bounds analyst SPEND, and a candidate refused at a full cap stays available for
-    a slot that opens later (a degrade-tier recovery raises the cap mid-day) — pacing must not turn
-    that into a drop."""
+    """A candidate refused at a full cap stays queued for a slot that opens later (a degrade-tier
+    recovery raises the cap mid-day)."""
     pipeline, parts, harness, gov = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=1)
     await pipeline.on_signal_candidate(
@@ -2742,9 +2601,7 @@ async def test_the_drain_stops_at_the_forward_cap_and_keeps_the_rest_queued(
 async def test_the_drain_skips_a_candidate_past_its_own_ttl(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """Pacing delays a candidate, so TTL expiry is the thing it must not break: a level the scanner
-    saw 20 minutes ago is not the setup any more. Expiry costs no analyst slot — and since
-    2026-08-27 it hands the admission slot back, because nothing evaluated it."""
+    """Expiry costs no analyst slot and hands the admission slot back, because nothing evaluated it."""
     rearmed: list[tuple[str, str]] = []
     pipeline, _, harness, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=12,
@@ -2765,15 +2622,10 @@ async def test_the_drain_skips_a_candidate_past_its_own_ttl(
 async def test_a_candidate_that_ages_out_unseen_gets_its_day_slot_back(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """THE 2026-08-27 BURN, in the shape it actually happened, against a REAL pre-screen.
-
-    SHRIRAMFIN and POLICYBZR (both ``orb``) were admitted at 09:46:0x, queued behind the paced
-    drain, and aged out at their own 20-minute TTL with ZERO rows between them anywhere in
-    ``agent_calls`` — no analyst call, no gate verdict, nobody judged them. Expiry nevertheless left
-    both (symbol, strategy) pairs deduped for the rest of the session, permanently spending 2 of
-    ``orb``'s daily admission slots on candidates nothing had looked at. A never-evaluated drop is
-    exactly what :meth:`SignalPreScreen.rearm` is for (2026-07-29), so the pairs come back the SAME
-    day — inside their already-paid quota, since ``_charged`` is never refunded.
+    """Candidates that age out of the queue unevaluated must not stay deduped for the session: a
+    never-evaluated drop is what :meth:`SignalPreScreen.rearm` is for. Runs against a REAL
+    pre-screen; the pairs come back the same day inside their already-paid quota (``_charged`` is
+    never refunded).
     """
     prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 2})
     pipeline, _, harness, _ = paced_pipeline(
@@ -2795,20 +2647,16 @@ async def test_a_candidate_that_ages_out_unseen_gets_its_day_slot_back(
     assert forward_journal(conn) == {("SHRIRAMFIN", "orb"): 0, ("POLICYBZR", "orb"): 0}
     assert slot_evaluated(conn) == {("SHRIRAMFIN", "orb"): 0, ("POLICYBZR", "orb"): 0}
 
-    # THE FIX: both pairs are admissible again the same day, and the ``orb`` cap of 2 does not
-    # bite a second time — a re-armed pair re-publishes inside the quota it already paid for.
+    # Both pairs are admissible again; the ``orb`` cap of 2 does not bite a second time.
     assert [c.symbol for c in prescreen.admit(cands, TODAY)] == ["SHRIRAMFIN", "POLICYBZR"]
 
 
 async def test_a_real_evaluation_never_gets_its_day_slot_back(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The other half of the 2026-08-27 rule: only NEVER-EVALUATED is refundable.
-
-    An analyst that RAN and answered ``no_action``, and a candidate the gate actually judged, are
-    both real evaluations — the day slot stays spent, exactly as it did before (2026-07-29). Nor can
-    either be refunded retroactively: :meth:`_take_forward_slot` pops an entry off the queue before
-    anything downstream sees it, so no later expiry sweep can ever reach a dispatched candidate.
+    """Only NEVER-EVALUATED is refundable: an analyst ``no_action`` and a gate verdict are real
+    evaluations, so the day slot stays spent. Nor is a refund retroactive: :meth:`_take_forward_slot`
+    pops the entry before anything downstream sees it, so no expiry sweep reaches a dispatched candidate.
     """
     rearmed: list[tuple[str, str]] = []
     harness = FakeHarness(dict(NO_ACTION_JSON))
@@ -2846,13 +2694,11 @@ async def test_a_real_evaluation_never_gets_its_day_slot_back(
 async def test_the_drain_re_checks_the_window_it_was_queued_under(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """A queued candidate is dispatched LATER than it arrived, so every entry-path gate has to be
-    re-asked at the drain: the window can have closed since (trade_window). No
-    analyst call is made and the forward cap is untouched.
+    """Every entry-path gate is re-asked at the drain: the trade window can have closed since the
+    candidate was queued. No analyst call, forward cap untouched.
 
-    The CLOSED-window branch also flushes: unlike mode/FROZEN/kill, no later tick can
-    ever drain what is queued, so the entry leaves with its admission slot handed back rather
-    than sitting in a dead queue for the rest of the process (see the window-close test below)."""
+    A closed window also flushes: unlike mode/FROZEN/kill, no later tick can drain the queue, so the
+    entry leaves with its admission slot handed back (see the window-close test below)."""
     rearmed: list[tuple[str, str]] = []
     pipeline, _, harness, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=12,
@@ -2872,9 +2718,8 @@ async def test_the_drain_re_checks_the_window_it_was_queued_under(
 async def test_immediate_mode_is_the_rollback_to_the_inline_drain(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """forward_drain_mode='immediate' restores the pre-2026-08-14 behaviour byte for byte: the
-    arriving candidate drains its own slot inline and the paced tick does nothing at all, so the
-    rollback is a settings edit rather than a revert (and cannot double-dispatch)."""
+    """forward_drain_mode='immediate': the arriving candidate drains its own slot inline and the
+    paced tick does nothing (so it cannot double-dispatch)."""
     gov = TunableGovernor(2)
     harness = FakeHarness(dict(NO_ACTION_JSON), dict(NO_ACTION_JSON))
     pipeline, parts = make_pipeline(
@@ -2896,10 +2741,9 @@ async def test_immediate_mode_is_the_rollback_to_the_inline_drain(
 async def test_paced_drain_survives_a_mid_day_restart(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The two halves of the day's forward state under pacing: the journalled COUNTER resumes across
-    a restart while the in-memory pending QUEUE does not — a restart drops the pointers,
-    it does not refund the quota. Both are load-bearing: refilling the counter would double the
-    day's analyst spend, and resurrecting the queue would forward levels from before the outage."""
+    """The journalled COUNTER resumes across a restart; the in-memory pending QUEUE does not.
+    Refilling the counter would double the day's analyst spend; resurrecting the queue would
+    forward levels from before the outage."""
     pipeline, _, harness, gov = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=2)
     await pipeline.on_signal_candidate(
@@ -2932,15 +2776,9 @@ async def test_paced_drain_survives_a_mid_day_restart(
     assert sum(forward_journal(conn).values()) == 2
 
 
-# ================================= 2026-08-20: the drain never silently loses a candidate
+# ================================= the drain never silently loses a candidate
 class FlakyHarness(FakeHarness):
-    """A harness that blows up mid-call, exactly where the 2026-08-18 KALYANKJIL incident did.
-
-    An ``asyncio.CancelledError`` raised inside the analyst-call transport propagated out of
-    ``_evaluate_forward``, through the drain, and killed the APScheduler tick. The candidate had
-    already been popped from the queue and charged a forward in the day-slot journal, and the call
-    never reached the point where an ``agent_calls`` row is written -- so the day's record said
-    ``forwarded=1`` and every other measure said nothing at all. Invisible, not merely failed.
+    """A harness that blows up mid-call (e.g. ``asyncio.CancelledError`` from the transport).
 
     Raises ``error`` on the first ``failures`` calls, then behaves like :class:`FakeHarness`. A
     failing attempt is counted in ``attempts`` but never lands in ``calls``, so "was this candidate
@@ -2985,12 +2823,10 @@ async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_t
 ):
     """First failure: the tick survives, the candidate goes back at the FRONT, the next tick retries.
 
-    "Front" is the load-bearing word and this fixture proves it rather than assuming it. BOOM is
-    re-queued first; a HIGHER-scoring rival then arrives and would win the ranked selection outright
-    (orb's day is [0.9, 0.9, 0.99] by then - see the unmeasured-population tests for why the first candidate of the
-    day appears twice - which puts RIVAL in band 4 against BOOM's 3, above ``MIN_RANK_POPULATION``
-    so the floor does not flatten the two together). The re-queued candidate still goes first,
-    because it already won a slot once and is owed the answer that slot bought.
+    A HIGHER-scoring rival then arrives and would win the ranked selection outright (orb's day is
+    [0.9, 0.9, 0.99]: the first candidate appears twice; RIVAL lands in band 4 against BOOM's 3,
+    above ``MIN_RANK_POPULATION`` so the floor does not flatten them). BOOM still goes first: it
+    already won a slot and is owed the answer.
     """
     pipeline, parts, harness = flaky_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=1)
@@ -3019,10 +2855,8 @@ async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_t
     assert len(harness.calls) == 1
     assert parts["assembler"].contexts[-1].stable_block == "stable BOOM"
     assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["RIVAL"]
-    # The refund changed the arithmetic here, not the principle: the re-queue REFUNDS the charge the
-    # blown-up attempt made, because the front entry it enqueues is charged again when it is
-    # re-drained. One candidate, one net charge -- previously two, which at the DG1+ cap of 4 spent
-    # half the day on one symbol that was never evaluated.
+    # The re-queue REFUNDS the blown-up attempt's charge (the front entry is charged again when
+    # re-drained): one candidate, one net charge.
     assert forward_journal(conn)[("TCS", "orb")] == 1
     assert pipeline._forwarded_count == 1
 
@@ -3030,8 +2864,7 @@ async def test_a_blown_up_evaluation_is_requeued_at_the_FRONT_and_retried_next_t
 async def test_a_second_failure_is_lost_loudly_and_never_re_queued_again(
     conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
 ):
-    """One retry, not a loop. A candidate failing twice is failing for a reason a third attempt will
-    not fix, and a self-refilling queue would spend the whole day's analyst cap on one broken
+    """One retry, not a loop: a self-refilling queue would spend the day's analyst cap on one broken
     symbol. The drain survives both times; the loss is an ERROR line naming the candidate."""
     pipeline, _, harness = flaky_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=2)
@@ -3060,12 +2893,8 @@ async def test_a_second_failure_is_lost_loudly_and_never_re_queued_again(
 async def test_cancellation_requeues_the_candidate_and_still_propagates(
     conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
 ):
-    """THE INCIDENT ITSELF, in both halves.
-
-    A ``CancelledError`` is how the engine is asked to STOP: swallowing it to protect the tick would
-    make shutdown hang, so it is re-raised in every branch. But the candidate is still saved first --
-    which is precisely what did not happen on 2026-08-18, when the forwarded candidate left no
-    ``agent_calls`` row and simply ceased to exist.
+    """A ``CancelledError`` is how the engine is asked to STOP, so it is re-raised in every branch
+    (swallowing it would hang shutdown) -- but the candidate is saved first.
     """
     pipeline, _, harness = flaky_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model,
@@ -3096,9 +2925,7 @@ async def test_cancellation_requeues_the_candidate_and_still_propagates(
 async def test_the_retry_budget_is_per_day_like_the_rest_of_the_forward_state(
     conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
 ):
-    """The re-queued set rolls with ``_roll_forward_day``: a candidate that burned its one retry
-    yesterday is not still carrying that debt today, and the set can never outlive the queue it
-    points into."""
+    """The re-queued set rolls with ``_roll_forward_day`` and never outlives the queue it points into."""
     pipeline, _, _ = flaky_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, error=RuntimeError, failures=1)
     await pipeline.on_signal_candidate(
@@ -3114,12 +2941,7 @@ async def test_the_retry_budget_is_per_day_like_the_rest_of_the_forward_state(
 
 # ======================================================= hot-path read hygiene
 class CountingStore(FakeStore):
-    """A store double that HONORS the ``[start, end)`` bar window and COUNTS every read.
-
-    ``FakeStore`` returns every bar it holds regardless of the window, which is fine for the
-    behavioural tests above but useless here: this block is entirely about *how many* store reads the
-    trigger path performs and about the exact bar set a seed read returns.
-    """
+    """A store double that HONORS the ``[start, end)`` bar window and COUNTS every read."""
 
     def __init__(self, bars: list[Bar] | None = None, sectors: list[dict[str, str]] | None = None):
         super().__init__(bars, sectors)
@@ -3138,9 +2960,8 @@ class CountingStore(FakeStore):
 def _walk_bars(n: int, *, first_ts: datetime, symbol: str = SYMBOL, seed: int = 7) -> list[Bar]:
     """``n`` contiguous 1m bars on a deterministic random walk.
 
-    NOT flat bars: a constant range makes every ATR recursion return the same number, so an
-    equivalence test over flat bars passes even against a broken recursion. Every bar here has a
-    different true range, and gaps/closes wander, so the Wilder state genuinely has to be carried.
+    Not flat: a constant range makes every ATR recursion return the same number, so an equivalence
+    test would pass against a broken recursion. Each bar has a different true range.
     """
     rng = random.Random(seed)
     bars: list[Bar] = []
@@ -3158,8 +2979,7 @@ def _walk_bars(n: int, *, first_ts: datetime, symbol: str = SYMBOL, seed: int = 
 
 
 def _store_atr(bars: list[Bar]) -> Decimal:
-    """ATR(14,1m) THE STORE-READ WAY: the shared primitive over a bar sequence, converted
-    exactly as ``_atr_1m`` converts it. This is the reference the incremental path must equal."""
+    """ATR(14,1m) the store-read way, converted as ``_atr_1m`` converts it: the incremental path's reference."""
     series = wilder_atr(
         [b.high for b in bars], [b.low for b in bars], [b.close for b in bars], ATR_PERIOD
     )
@@ -3169,14 +2989,12 @@ def _store_atr(bars: list[Bar]) -> Decimal:
 async def test_incremental_atr_equals_the_store_read_at_every_bar(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """EXACT equivalence across all three phases of the ATR seam.
+    """EXACT equivalence across the ATR seam's phases.
 
-    * **seed** — the first bar for a symbol reads the store once and lands on the store value;
-    * **steady state** — every subsequent contiguous bar is served by the Wilder recursion alone,
-      and equals the store-derived ATR over the same anchored window to the last bit;
-    * **gap** — a bar whose minute is not contiguous with the last seen minute RESEEDS from the
-      store rather than carrying a stale ATR forward, and the reseeded value differs from what
-      carrying forward would have produced (otherwise the reseed would be untested decoration).
+    * **seed** — the first bar for a symbol reads the store once;
+    * **steady state** — contiguous bars use the Wilder recursion alone and equal the store-derived ATR;
+    * **gap** — a non-contiguous bar RESEEDS from the store, and the value differs from carrying
+      forward (else the reseed would be untested).
     """
     history = _walk_bars(30, first_ts=NOW - timedelta(minutes=30))       # 09:35..10:04
     store = CountingStore(bars=list(history))
@@ -3220,10 +3038,8 @@ async def test_incremental_atr_equals_the_store_read_at_every_bar(
 async def test_seed_does_not_double_count_a_bar_the_store_already_holds(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The PRODUCTION ordering: ``BarBuilder._write_and_publish`` persists the batch BEFORE it
-    publishes on ``bar.1m``, so the very first bar a symbol is seeded on is already in the store.
-    Its true range must be folded in exactly once - the seed already contains it, so the recursion
-    must NOT advance on top of the seed."""
+    """``BarBuilder._write_and_publish`` persists a bar BEFORE publishing it, so the seed bar is
+    already in the store: its true range is folded in once, the recursion must not advance on the seed."""
     history = _walk_bars(21, first_ts=NOW - timedelta(minutes=20))    # ..NOW: includes the live bar
     store = CountingStore(bars=list(history))
     pipeline, _ = make_pipeline(
@@ -3239,8 +3055,7 @@ async def test_seed_does_not_double_count_a_bar_the_store_already_holds(
 async def test_on_bar_stops_reading_the_store_per_bar(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The per-bar read defect through the PUBLIC path: ``on_bar`` used to issue one ``get_bars_1m`` per bar
-    for every symbol carrying an open recommended position. Twelve bars must now cost one read."""
+    """Through the public path: twelve bars for a symbol with an open position cost one store read."""
     _open_position(conn, pclock, stop="90")                              # far from stop: no analyst
     history = _walk_bars(20, first_ts=NOW - timedelta(minutes=20))
     store = CountingStore(bars=list(history))
@@ -3261,8 +3076,8 @@ async def test_on_bar_stops_reading_the_store_per_bar(
 async def test_sector_map_is_read_once_per_trading_date(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The sector map is a WEEKLY snapshot read per candidate. Four
-    candidates in one session == one read; the next trading date invalidates the cache == two."""
+    """The sector map is a WEEKLY snapshot: four candidates in one session == one read; the next
+    trading date invalidates the cache == two."""
     harness = FakeHarness(*[dict(NO_ACTION_JSON) for _ in range(5)])
     store = CountingStore()
     pipeline, _ = make_pipeline(
@@ -3284,8 +3099,7 @@ async def test_sector_map_is_read_once_per_trading_date(
 async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """The one-line session log is what makes the before/after quantifiable, so the
-    counters behind it are asserted rather than trusted."""
+    """The counters behind the one-line session log."""
     _open_position(conn, pclock, stop="90")
     store = CountingStore(bars=_walk_bars(20, first_ts=NOW - timedelta(minutes=20)))
     harness = FakeHarness(dict(NO_ACTION_JSON))
@@ -3308,12 +3122,9 @@ async def test_hot_path_stats_count_reads_avoided_against_reads_performed(
     assert stats["atr_store_read_ms"] >= 0.0 and stats["atr_incremental_ms"] >= 0.0
 
 
-# ================================ 2026-08-21: the RAW counters survive a restart (funnel_raw_counts)
-#
-# THE BUG. `raw` — what the scanners PRODUCED, before dedupe and the caps — was the one funnel number
-# with no DB home, so every engine restart zeroed it and the nightly `funnel_utilization` line reported
-# `raw=None` ("unmeasured") for the whole day. That happened on 4 of the last 6 trade days. The 60 s
-# drain tick now flushes the counters; the pre-screen loads them back on its first day roll.
+# ================================ the RAW counters survive a restart (funnel_raw_counts)
+# `raw` (what the scanners produced, before dedupe and the caps) is flushed by the drain tick and
+# loaded back by the pre-screen on its first day roll.
 
 def funnel_rows(conn, d: date = TODAY) -> dict[str, int]:
     rows = conn.execute(
@@ -3324,8 +3135,8 @@ def funnel_rows(conn, d: date = TODAY) -> dict[str, int]:
 
 
 def restartable_prescreen(conn) -> SignalPreScreen:
-    """A pre-screen wired to the DB exactly as the composition root wires it — no scanners needed,
-    since `admit` (the brk20/cat batch leg) runs the same raw-counting spine as the bar path."""
+    """A pre-screen wired to the DB as the composition root wires it; `admit` (the batch leg) runs
+    the same raw-counting spine as the bar path, so no scanners are needed."""
     return SignalPreScreen([], lambda bar: None,
                            raw_counts_loader=lambda d: read_funnel_raw_counts(conn, d))
 
@@ -3333,8 +3144,7 @@ def restartable_prescreen(conn) -> SignalPreScreen:
 async def test_the_drain_tick_flushes_the_raw_funnel_counters(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """One flush per tick, ABSOLUTE values, and only when the counts CHANGED — the counters move at
-    most once per bar, so an unchanged afternoon must cost a dict comparison and no write at all."""
+    """One flush per tick, ABSOLUTE values, and only when the counts CHANGED."""
     counts: dict[str, int] = {"orb": 3}
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
@@ -3358,8 +3168,7 @@ async def test_the_drain_tick_flushes_the_raw_funnel_counters(
 async def test_a_restart_continues_the_raw_count_instead_of_resetting_it(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """THE REGRESSION, in the shape it actually happened: new pre-screen + new pipeline over the same
-    DB (a mid-session restart) must CONTINUE the day's count, not start it over."""
+    """A new pre-screen + pipeline over the same DB (a mid-session restart) CONTINUES the day's count."""
     day = pclock.today()
     ps1 = restartable_prescreen(conn)
     p1, _ = make_pipeline(
@@ -3388,9 +3197,8 @@ async def test_a_restart_continues_the_raw_count_instead_of_resetting_it(
 async def test_a_failed_raw_funnel_flush_warns_and_never_reaches_the_drain(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """Telemetry must not be able to break trading. A dead connection costs the raw row for this
-    tick and nothing else — and leaves the flushed-state marker untouched, so the next healthy tick
-    still writes rather than believing it already had."""
+    """Telemetry must not break trading. A dead connection costs this tick's raw row only and leaves
+    the flushed-state marker untouched, so the next healthy tick still writes."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
@@ -3404,7 +3212,7 @@ async def test_a_failed_raw_funnel_flush_warns_and_never_reaches_the_drain(
     assert pipeline._funnel_raw_flushed == {} and pipeline._funnel_raw_day is None
 
 
-# ====================== 2026-08-27: the per-strategy cap stops being "first 90 seconds wins the day"
+# ====================== per-strategy cap displacement
 def orb_candidate(symbol: str, score: float, **kw) -> SignalCandidate:
     """An ``orb`` candidate with NO catalyst_ref - the default one would make it undisplaceable."""
     return candidate(symbol=symbol, signal_id=f"01{symbol}", score=score, catalyst_ref=None, **kw)
@@ -3413,17 +3221,10 @@ def orb_candidate(symbol: str, score: float, **kw) -> SignalCandidate:
 async def test_a_better_afternoon_candidate_takes_a_locked_out_admission_slot(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """THE 2026-08-27 LOCKOUT, end to end against a REAL pre-screen and a REAL forward queue.
-
-    All 7 of ``orb``'s daily admission slots were charged between 09:46:06 and 09:47:05 - 90 seconds
-    of the trade window. TATACONSUM (0.80, 12:28) and KALYANKJIL (**1.0**, 12:49) were then refused
-    outright with ``prescreen_cap_suppressed cap="strategy_day"``, three hours later, with zero
-    chance regardless of quality and no trace anywhere but the raw log line. A 12:49 ``orb`` fire is
-    by design: the scanner's entry window runs to 14:30 and only its RANGE is the first 30 minutes.
-
-    Now the slot moves off the worst incumbent NOBODY HAS LOOKED AT, and both halves of that land:
-    the pre-screen re-assigns the admission slot, and the pipeline drops the evicted candidate from
-    the forward queue and reverts its journal row - so the freed slot cannot be spent twice.
+    """A late, better candidate takes a locked-out admission slot, end to end against a REAL
+    pre-screen and forward queue. The slot moves off the worst incumbent NOBODY HAS LOOKED AT: the
+    pre-screen re-assigns it, and the pipeline drops the evicted candidate from the queue and
+    reverts its journal row, so the slot cannot be spent twice.
     """
     prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 2})
     pipeline, _, harness, _ = paced_pipeline(
@@ -3436,14 +3237,13 @@ async def test_a_better_afternoon_candidate_takes_a_locked_out_admission_slot(
     assert harness.calls == []                                  # queued, unevaluated, paced
     assert slot_evaluated(conn) == {("SHRIRAMFIN", "orb"): 1, ("POLICYBZR", "orb"): 1}
 
-    # 12:49. Before this fix `prescreen.admit` returned [] here, and KALYANKJIL ended the day with
-    # zero rows in prescreen_day_slots and zero in agent_calls - the log line was its only trace.
+    # Hours later, with the cap full:
     kalyan = orb_candidate("KALYANKJIL", 1.0)
     assert [c.symbol for c in prescreen.admit([kalyan], TODAY)] == ["KALYANKJIL"]
     await pipeline.on_signal_candidate(kalyan)
 
-    # SHRIRAMFIN (0.50, the WORST unevaluated incumbent - not merely the oldest) gave up its slot,
-    # and the pipeline acted on that: off the queue, and journalled as never-evaluated.
+    # SHRIRAMFIN (0.50, the WORST unevaluated incumbent, not merely the oldest) gave up its slot:
+    # off the queue, journalled as never-evaluated.
     queued = {(p.candidate.symbol, p.candidate.strategy_id) for p in pipeline._pending_forwards}
     assert queued == {("POLICYBZR", "orb"), ("KALYANKJIL", "orb")}
     assert slot_evaluated(conn)[("SHRIRAMFIN", "orb")] == 0
@@ -3462,13 +3262,8 @@ async def test_a_better_afternoon_candidate_takes_a_locked_out_admission_slot(
 async def test_an_evaluated_candidate_survives_a_better_arrival(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """INVARIANT #1 END TO END - now load-bearing across three fixes (2026-07-29 re-arm, the
-    2026-08-27 TTL refund, and displacement), so it gets an integration test of its own.
-
-    Once the analyst has actually been spent on a candidate its slot is permanent. A later arrival
-    scoring a PERFECT 1.0 - the strongest displacement claim the score range can express - is
-    refused flat, because the cap is now protecting a budget that has genuinely been consumed
-    rather than protecting an arrival order.
+    """Once the analyst has been spent on a candidate its slot is permanent: a later arrival scoring
+    a PERFECT 1.0 is refused flat, because the cap protects a budget that was actually consumed.
     """
     prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 1})
     pipeline, _, harness, _ = paced_pipeline(
@@ -3493,13 +3288,12 @@ async def test_an_evaluated_candidate_survives_a_better_arrival(
 async def test_a_displaced_candidate_is_refused_at_the_analyst_slot(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The belt-and-braces half: ``claim_slot`` catches a displacement the queue sweep has not seen.
+    """``claim_slot`` catches a displacement the queue sweep has not seen.
 
-    ``_apply_displacements`` is the tidy path and runs on the event loop, but the pre-screen decides
-    displacement on a SCAN WORKER THREAD, so a drain tick can pop an entry in between. Here the
-    displacing candidate is admitted and deliberately NOT published, which leaves the pipeline
-    holding a queue pointer to a pair that no longer owns an admission slot. Forwarding it anyway
-    would spend the re-assigned slot twice and breach the cap by a real analyst call.
+    The pre-screen decides displacement on a SCAN WORKER THREAD while ``_apply_displacements`` runs
+    on the event loop, so a drain tick can pop an entry in between. The displacing candidate is
+    admitted but deliberately NOT published, leaving a queue pointer to a pair that no longer owns
+    a slot; forwarding it would spend the re-assigned slot twice.
     """
     prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 1})
     pipeline, _, harness, _ = paced_pipeline(
@@ -3529,12 +3323,8 @@ async def test_a_displaced_candidate_is_refused_at_the_analyst_slot(
 async def test_a_queue_overflow_hands_back_the_admission_slot_it_drops(
     conn, pclock, calendar, book, limit_table, cost_model, monkeypatch
 ):
-    """The ``MAX_PENDING_FORWARDS`` eviction is the same never-evaluated fact a TTL expiry is.
-
-    Both leave the queue without ever reaching ``_take_forward_slot``, so no analyst call, no
-    ``agent_calls`` row and no gate verdict exists for the dropped candidate - which is exactly the
-    case the 2026-08-27 TTL refund was written for. The overflow path was left out of that change
-    and went on burning the (symbol, strategy) admission slot permanently.
+    """A ``MAX_PENDING_FORWARDS`` eviction is a never-evaluated drop, like a TTL expiry: the
+    candidate never reaches ``_take_forward_slot``, so its admission slot goes back.
     """
     monkeypatch.setattr(pipeline_module, "MAX_PENDING_FORWARDS", 2)
     prescreen = SignalPreScreen([], lambda bar: None, max_per_strategy_day={"orb": 5})
@@ -3548,8 +3338,7 @@ async def test_a_queue_overflow_hands_back_the_admission_slot_it_drops(
     assert harness.calls == []
     assert [p.candidate.symbol for p in pipeline._pending_forwards] == ["AAA", "CCC"]
 
-    # BBB was the worst pending candidate and is the one the overflow drops - so its slot goes back,
-    # in memory and in the journal, and it may compete again later.
+    # BBB, the worst pending, is dropped: its slot goes back in memory and in the journal.
     assert slot_evaluated(conn)[("BBB", "orb")] == 0
     assert ("BBB", "orb") not in prescreen._seen
     assert slot_evaluated(conn)[("AAA", "orb")] == 1       # the retained entries are untouched
@@ -3559,14 +3348,10 @@ async def test_a_queue_overflow_hands_back_the_admission_slot_it_drops(
 async def test_a_queue_overflow_hands_back_a_front_entry_too(
     conn, pclock, calendar, book, limit_table, cost_model, monkeypatch, caplog
 ):
-    """The third exit that used to EXCLUDE a drain-retry ``front`` entry, made to agree with the refund.
-
-    The exclusion's premise was "a forward was already charged for this entry, so its slot stays
-    spent". The re-queue refunds that charge now, so an evicted front entry holds no charge, has no
-    ``agent_calls`` row and no verdict - the exact ``evaluated=1, forwarded=0`` orphan signature
-    the boot orphan sweep exists to eliminate. ``_forward_key`` still makes a front entry the LAST thing a full
-    queue drops (it is the only entry known to be mid-retry); this is about what happens when it is
-    dropped anyway."""
+    """An evicted drain-retry ``front`` entry also hands its slot back: the re-queue refunds its
+    charge, so it holds no charge, no ``agent_calls`` row and no verdict (the ``evaluated=1,
+    forwarded=0`` orphan signature). ``_forward_key`` still makes a front entry the LAST thing a
+    full queue drops; this is about when it is dropped anyway."""
     monkeypatch.setattr(pipeline_module, "MAX_PENDING_FORWARDS", 1)
     rearmed: list[tuple[str, str]] = []
     pipeline, _ = make_pipeline(
@@ -3589,10 +3374,8 @@ async def test_a_front_entry_kept_in_the_queue_is_not_re_armed(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
     """``_apply_displacements`` walks the queue and the displaced pairs separately, and the two must
-    agree. The prune deliberately RETAINS a drain-retry ``front`` entry (a forward was already charged for
-    it, so the pre-screen could not have chosen it as a victim), but the re-arm walk flipped every
-    pair in the notice list - handing back a slot the queue still holds a live pointer to. Latent
-    under the live wiring; cheap to make consistent."""
+    agree: the prune RETAINS a drain-retry ``front`` entry, so the re-arm walk must not hand back a
+    slot the queue still points into."""
     rearmed: list[tuple[str, str]] = []
     notices = [("SHRIRAMFIN", "orb"), ("POLICYBZR", "orb")]
     pipeline, _ = make_pipeline(
@@ -3615,17 +3398,15 @@ async def test_a_front_entry_kept_in_the_queue_is_not_re_armed(
 async def test_expired_then_taken_then_closed_records_the_real_outcome(
     conn, ticker, pclock, book, cost_model
 ):
-    """2026-09-02 review (CONFIRMED): expire_stale stamps outcome_label='no_action', and close()'s
-    completion UPDATE matches `outcome_label IS NULL` only - so before the fix an expired->taken->
-    closed trade kept the no_action label forever and its real P&L never reached the ledger.
-    take() must un-expire the ledger row (outcome_label/closed_at back to NULL)."""
+    """expire_stale stamps outcome_label='no_action' and close() completes only `outcome_label IS
+    NULL` rows, so take() must un-expire the ledger row (outcome_label/closed_at back to NULL)."""
     from datetime import timedelta as _td
 
     rec = make_rec(cost_model)
     book.deliver(rec, ledger_fields=dict(LEDGER_FIELDS))
     assert book.expire_stale(NOW + _td(days=1)) == [rec.rec_id]
     row = conn.execute("SELECT outcome_label FROM learning_ledger WHERE rec_id=?", (rec.rec_id,)).fetchone()
-    assert row["outcome_label"] == "no_action"                # the expiry stamp the fix must undo
+    assert row["outcome_label"] == "no_action"                # the expiry stamp
 
     await book.take(rec.rec_id, 10, Decimal("100.00"))
     row = conn.execute(
@@ -3641,7 +3422,7 @@ async def test_expired_then_taken_then_closed_records_the_real_outcome(
     assert row["net_pnl"] is not None
 
 
-# ============================== 2026-09-12: a slot is spent only by something that was looked at
+# ============================== a slot is spent only by something that was looked at
 def insert_slot(conn, symbol: str, strategy_id: str, *, evaluated: int, forwarded: int,
                 unsizeable: int = 0, d=TODAY, score: float = 0.5) -> None:
     """Write a day-slot journal row straight into the DB - the state a RESTART actually inherits."""
@@ -3657,13 +3438,9 @@ def insert_slot(conn, symbol: str, strategy_id: str, *, evaluated: int, forwarde
 async def test_a_restart_re_arms_only_the_forward_queue_orphans(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """The boot orphan sweep, in the shape it actually happened (verified 2026-09-11).
-
-    ``_roll_forward_day`` clears the pending queue and rehydrates only the COUNTER, and the owner
-    restarts the engine 2-3 times per session - so every restart dropped the queue while the journal
-    rows kept ``evaluated=1, forwarded=0``. The pairs stayed deduped for the rest of the day and
-    nothing ever looked at them: ~70 admitted candidates burned since 08-17, 210 of 520 slots
-    all-time never forwarded. The boot sweep hands exactly those rows back, and nothing else.
+    """``_roll_forward_day`` clears the pending queue and rehydrates only the COUNTER, so a restart
+    leaves journal rows with ``evaluated=1, forwarded=0`` that stay deduped all day. The boot sweep
+    hands exactly those rows back, and nothing else.
     """
     insert_slot(conn, "TCS", "orb", evaluated=1, forwarded=0)            # THE ORPHAN
     insert_slot(conn, "INFY", "orb", evaluated=1, forwarded=1)           # really evaluated
@@ -3676,9 +3453,8 @@ async def test_a_restart_re_arms_only_the_forward_queue_orphans(
         rearm=lambda sym, sid: rearmed.append((sym, sid)) or True)
 
     with caplog.at_level(logging.INFO, logger="engine.ops.pipeline"):
-        # The arriving candidate is journalled BEFORE the day roll, so its own row looks exactly
-        # like an orphan - the in_flight exclusion is what keeps the sweep off the candidate it is
-        # admitting.
+        # The arriving candidate is journalled BEFORE the day roll, so its row looks like an orphan;
+        # the in_flight exclusion keeps the sweep off it.
         await pipeline.on_signal_candidate(
             candidate(symbol="ITC", strategy_id="orb", signal_id="ARRIVAL", score=0.9))
 
@@ -3724,12 +3500,10 @@ async def test_the_orphan_sweep_runs_once_per_day_not_once_per_candidate(
 async def test_the_orphan_sweep_reaches_a_day_where_no_candidate_ever_arrives(
     conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
 ):
-    """The sweep rides the day roll, and the roll has to reach a RESTART, not just a publication.
-
-    The orphaned pairs are exactly the ones the pre-screen's boot rehydration keeps deduped, so they
-    cannot publish themselves - and on a thin day nothing else does either. Hung off
-    ``on_signal_candidate`` alone the sweep would then never run and the slots would stay burned, the
-    very drought the orphan sweep is aimed at. ``drain_forward_queue`` is the 60 s tick that always fires."""
+    """The day roll must be reachable from a RESTART, not just a publication: orphaned pairs are
+    deduped by the pre-screen's rehydration and cannot publish themselves, so on a thin day a sweep
+    hung off ``on_signal_candidate`` alone would never run. ``drain_forward_queue`` is the tick that
+    always fires."""
     insert_slot(conn, "BHEL", "hi52", evaluated=1, forwarded=0, score=0.9705)
     insert_slot(conn, "INFY", "brk20", evaluated=1, forwarded=1)
     rearmed: list[tuple[str, str]] = []
@@ -3753,15 +3527,11 @@ async def test_the_orphan_sweep_reaches_a_day_where_no_candidate_ever_arrives(
 async def test_the_window_closing_flushes_the_queue_once_and_hands_the_slots_back(
     conn, pclock, calendar, book, limit_table, ticker, cost_model, caplog
 ):
-    """Six candidates were stranded at 12:26 on 2026-09-10, the best of them the hi52 BHEL
-    at 0.9705.
-
-    ``_drain_one_forward`` returned on a closed window without touching the queue, and
-    ``_expire_forwards`` only ever runs inside ``_take_forward_slot`` - which that early return never
-    reaches. So a candidate queued near the close neither forwarded nor expired: it sat in a dead
-    queue holding a day slot nothing would ever look at. A ``front`` entry (a drain retry) goes with
-    the rest: the re-queue now REFUNDS its forward charge, so leaving it behind would strand
-    the one entry whose journal row is already the ``evaluated=1, forwarded=0`` orphan signature.
+    """A closed window flushes the queue once and hands the slots back. ``_expire_forwards`` runs
+    only inside ``_take_forward_slot``, which a closed window never reaches, so without the flush a
+    candidate queued near the close would sit in a dead queue holding a day slot. A ``front`` entry
+    (a drain retry) goes too: its charge was refunded, so leaving it would strand an
+    ``evaluated=1, forwarded=0`` orphan.
     """
     rearmed: list[tuple[str, str]] = []
     pipeline, _, harness, _ = paced_pipeline(
@@ -3789,8 +3559,7 @@ async def test_the_window_closing_flushes_the_queue_once_and_hands_the_slots_bac
     assert closed[0].front == 1
     assert closed[0].closed_at == datetime(2026, 6, 17, 10, 30, tzinfo=IST).isoformat()
 
-    # ONCE per close: an entry that reaches the queue again under the SAME closed window is not
-    # re-announced and not re-flushed - that is what the latch is for.
+    # ONCE per close: an entry queued under the SAME closed window is not re-announced or re-flushed.
     caplog.clear()
     pipeline._enqueue_forward(
         candidate(symbol="LT", strategy_id="orb", signal_id="LATE", score=0.20))
@@ -3801,11 +3570,9 @@ async def test_the_window_closing_flushes_the_queue_once_and_hands_the_slots_bac
     assert [p.candidate.signal_id for p in pipeline._pending_forwards] == ["LATE"]
     assert len(rearmed) == 3
 
-    # ...but a window the owner RE-OPENS is a NEW close, not the latched one. ``trade_window`` re-reads
-    # the sticky trade_window_state row on every call, and on 2026-08-18 the owner really did
-    # move a window mid-session. Keyed on the day, the flush would stay disabled for the rest of that
-    # day and the second window's queue would be stranded exactly as before the flush - silently, since
-    # the one log line had already been emitted.
+    # ...but a window the owner RE-OPENS is a NEW close, not the latched one (``trade_window``
+    # re-reads the sticky trade_window_state row on every call). Latched per day, the second
+    # window's queue would be stranded silently.
     conn.execute(
         "INSERT INTO trade_window_state (id, start_ist, end_ist, squareoff_buffer_min) "
         "VALUES (1, '12:30', '14:00', 0)")
@@ -3827,8 +3594,7 @@ async def test_the_window_closing_flushes_the_queue_once_and_hands_the_slots_bac
 async def test_a_window_that_has_not_opened_yet_leaves_the_queue_alone(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The flush is for a window BEHIND us. Before the open the queue is still live and a later tick
-    will drain it - dropping it there would burn the slot the open is about to use."""
+    """The flush is for a window BEHIND us; before the open the queue is still live."""
     rearmed: list[tuple[str, str]] = []
     pipeline, _, _, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=12,
@@ -3846,11 +3612,9 @@ async def test_a_window_that_has_not_opened_yet_leaves_the_queue_alone(
 async def test_an_analyst_infrastructure_failure_refunds_the_forward_charge(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """``_take_forward_slot`` charges the cap and journals the forward BEFORE the call, so a
-    timeout or an SDK death spent a slot on a call that produced no verdict, no ``agent_calls`` row
-    and no proposal - 110 charges burned that way, and at the DG1+ cap of 4 one timeout is a quarter
-    of the day. The admission slot was already refunded on this path (2026-07-29); the analyst quota
-    now follows it, one unit, for the same reason: nothing evaluated it."""
+    """``_take_forward_slot`` charges the cap BEFORE the call, so a timeout or SDK death would spend
+    a slot on a call that produced no verdict. The analyst quota is refunded, one unit, alongside
+    the admission slot: nothing evaluated the candidate."""
     rearmed: list[tuple[str, str]] = []
     harness = FakeHarness(AgentResult.Failed("timeout", "45s elapsed", call_id="01CALL"))
     pipeline, _ = make_pipeline(
@@ -3863,8 +3627,8 @@ async def test_an_analyst_infrastructure_failure_refunds_the_forward_charge(
         await publish_candidate(
             pipeline, candidate(symbol="TCS", strategy_id="orb", signal_id="DEAD", score=0.9))
 
-    assert rearmed == [("TCS", "orb")]                       # the 2026-07-29 admission re-arm
-    assert pipeline._forwarded_count == 0                    # and now the 5.2(a) charge too
+    assert rearmed == [("TCS", "orb")]                       # the admission re-arm
+    assert pipeline._forwarded_count == 0                    # and the forward charge
     assert forward_journal(conn)[("TCS", "orb")] == 0
     refunds = log_events(caplog, "forward_cap_refunded")
     assert len(refunds) == 1 and refunds[0].reason == "timeout"
@@ -3873,9 +3637,8 @@ async def test_an_analyst_infrastructure_failure_refunds_the_forward_charge(
 async def test_a_governor_block_is_policy_and_refunds_nothing(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """The other half of the refund. A governor block is a deliberate budget decision, not an outage:
-    it re-arms nothing (2026-07-29) and refunds nothing, or a blocked window would hand the day's
-    whole quota back and hammer the admission gate the moment the block lifts."""
+    """A governor block is a deliberate budget decision, not an outage: it re-arms and refunds
+    nothing, or a blocked window would hand the day's quota back."""
     rearmed: list[tuple[str, str]] = []
     harness = FakeHarness(AgentResult.Failed("governor_blocked", "DG4", call_id="01CALL"))
     pipeline, _ = make_pipeline(
@@ -3897,13 +3660,12 @@ async def test_a_governor_block_is_policy_and_refunds_nothing(
 async def test_a_refund_can_never_drive_either_counter_negative(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """A restart loses the in-memory count but not the journal row, so a refund can legitimately
-    meet a 0 on one side and a stale value on the other. Both are floored: a negative forward count
-    would hand the day free analyst calls.
+    """A restart loses the in-memory count but not the journal row, so a refund can meet a 0 on one
+    side and a stale value on the other. Both are floored: a negative count would hand the day free
+    analyst calls.
 
-    Two DIFFERENT signal_ids for the same pair, which is the live shape - a re-armed pair
-    re-publishes with a freshly minted ULID - and the shape that still drives the floor twice now
-    that a repeat refund of the SAME charge is memoed away (see the idempotency test below)."""
+    Two DIFFERENT signal_ids for the same pair (a re-armed pair re-publishes with a fresh ULID),
+    since a repeat refund of the SAME charge is memoed away (see the idempotency test below)."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
@@ -3924,16 +3686,11 @@ async def test_a_refund_can_never_drive_either_counter_negative(
 async def test_a_refunded_front_entry_hands_its_admission_slot_back_when_it_ages_out(
     conn, pclock, calendar, book, limit_table, ticker, cost_model
 ):
-    """The refund and the drain-retry ``front`` exclusions had to be made to agree.
-
-    Every front exclusion (TTL expiry, queue overflow, the window-close flush) rested on "a forward
-    was already charged for this entry, so its slot stays spent". The refund makes that false: a
-    re-queued entry carries no charge. Live shape - an ``orb`` candidate is drained, the transport
-    blows up, the guard refunds and re-queues it at the FRONT, and then the warm-up freeze re-arms
-    (the 2026-08-28 freeze ran 57 minutes) so no tick reaches ``_take_forward_slot`` before the
-    entry's 20-minute TTL. It then aged out with ``evaluated=1, forwarded=0``, zero ``agent_calls``
-    rows and no verdict: the exact orphan signature the boot orphan sweep exists to eliminate, and one the
-    same-process day can never sweep, because the sweep runs only on a day CHANGE."""
+    """A re-queued ``front`` entry carries no charge, so TTL expiry must hand its admission slot
+    back. Shape: the transport blows up, the guard refunds and re-queues at the FRONT, and no tick
+    reaches ``_take_forward_slot`` before the TTL. Left alone it would age out as an
+    ``evaluated=1, forwarded=0`` orphan that the same-process day never sweeps (the sweep runs only
+    on a day CHANGE)."""
     rearmed: list[tuple[str, str]] = []
     harness = FlakyHarness(RuntimeError, 1, dict(NO_ACTION_JSON))
     pipeline, _ = make_pipeline(
@@ -3962,13 +3719,9 @@ async def test_a_refunded_front_entry_hands_its_admission_slot_back_when_it_ages
 async def test_a_raising_owner_alert_never_refunds_the_same_charge_twice(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """The refund is ONE unit per charge, and the alert is the seam that could double it.
-
-    ``_evaluate_forward`` runs inside ``_evaluate_forward_guarded``'s try, so an owner-notify seam
-    that raises after the refund lands in ``_handle_forward_failure``, which refunds AGAIN for the
-    front re-queue it makes - two units undone for one charge, and the re-queued entry is then
-    charged a third time when it drains. Ordering the alert BEFORE the refund is what makes the
-    arithmetic exact."""
+    """The refund is ONE unit per charge. A notify seam raising after the refund would land in
+    ``_handle_forward_failure``, which refunds AGAIN for the front re-queue; the alert is therefore
+    ordered BEFORE the refund."""
     async def exploding_alert(trigger, result):
         raise RuntimeError("notify seam died")
 
@@ -3993,19 +3746,13 @@ async def test_a_raising_owner_alert_never_refunds_the_same_charge_twice(
 async def test_one_charge_is_refunded_once_and_a_new_charge_is_refundable_again(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """The refund is memoed per CHARGE, not merely ordered around the one seam that could
-    double it.
+    """The refund is memoed per CHARGE: anything raising between the refund and
+    ``_evaluate_forward``'s return reaches ``_handle_forward_failure``, which would refund again,
+    handing the day an analyst call the cap never granted (over-charging is safe, under-charging is
+    a budget breach).
 
-    Ordering the alert first fixes the known double; the memo fixes the CLASS. Anything that raises
-    between the refund and ``_evaluate_forward``'s return lands in ``_handle_forward_failure``,
-    which refunds again for the re-queue it makes - and two units undone for one charge hands the
-    day an analyst call the forward cap never granted, the one direction of the refund that is not
-    conservative (over-charging is safe, under-charging is a budget breach).
-
-    The memo is per charge and not per candidate-day: ``_take_forward_slot`` clears it when it
-    charges the same candidate again, because the front retry really does make a SECOND
-    charge, and that one is really refundable. Anything else would silently re-open the burn the refund
-    exists to close."""
+    The memo is per charge, not per candidate-day: ``_take_forward_slot`` clears it when it charges
+    the same candidate again, since the front retry makes a SECOND, refundable charge."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
@@ -4049,15 +3796,11 @@ def test_a_strategy_with_an_unmeasured_day_lands_in_the_middle_band(
 ):
     """An UNMEASURED population is not a TOP one.
 
-    The SINGLETON is the live shape, not the empty set: ``on_signal_candidate`` appends the arriving
-    score to ``_day_scores`` one line before it enqueues, so a strategy's first candidate of the day
-    is ranked against a population of exactly itself - quantile 1/1 = 1.0, the top band, by
-    arithmetic rather than by standing. ``MIN_RANK_POPULATION`` is the floor that removes it, and it
-    covers the empty case a journal-hydrated day can present as well.
-
-    Two observations are not a measured day either, which is why the floor is 3 and not 2: a
-    two-element CDF can only return 0.5 or 1.0, so the second candidate of a strategy's day would
-    still take the TOP band by out-scoring exactly one rival."""
+    ``on_signal_candidate`` appends the arriving score to ``_day_scores`` before enqueueing, so a
+    strategy's first candidate is ranked against a population of itself: quantile 1/1 = 1.0, the top
+    band by arithmetic. ``MIN_RANK_POPULATION`` is the floor that removes it (and covers the empty
+    case of a journal-hydrated day). The floor is 3, not 2: a two-element CDF returns only 0.5 or
+    1.0, so the second candidate would take the TOP band by beating exactly one rival."""
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=FakeHarness(),
         gate=StubGate(verdict_of("approve", cost_model)), ctx=passing_ctx(),
@@ -4073,7 +3816,7 @@ def test_a_strategy_with_an_unmeasured_day_lands_in_the_middle_band(
     assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.99)) == QUANTILE_BANDS // 2
     assert pipeline._quantile_band(candidate(strategy_id="orb", score=0.10)) == QUANTILE_BANDS // 2
 
-    # A MEASURED population still ranks exactly as before - only the unrankable case moved.
+    # A MEASURED population ranks normally.
     pipeline._day_scores["hi52"] = [0.1, 0.2, 0.3, 0.9705]
     assert pipeline._quantile_band(candidate(strategy_id="hi52", score=0.9705)) == QUANTILE_BANDS - 1
     assert pipeline._quantile_band(candidate(strategy_id="hi52", score=0.05)) == 0
@@ -4085,17 +3828,13 @@ def test_a_strategy_with_an_unmeasured_day_lands_in_the_middle_band(
 async def test_a_lone_late_candidate_no_longer_outranks_a_measured_day(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """THE 2026-09-10 INVERSION, driven through the real admission and selection path.
-
-    A lone late ``orb`` candidate took band 4 on the strength of its own score being the only one in
-    its population, tied with the genuinely top-of-its-day ``hi52`` BHEL at 0.9705, and won the tie
-    on arrival order. The analyst spent the slot on the 0.12. Asserting through
-    ``_quantile_band`` alone cannot tell the fixed code from the broken code here - only which
-    candidate the harness actually SEES can."""
+    """A lone ``orb`` candidate must not tie a genuinely top-of-day ``hi52`` (0.9705) in band 4 and
+    win on arrival order. Driven through the real selection path: only which candidate the harness
+    SEES discriminates, not ``_quantile_band`` alone."""
     pipeline, parts, harness, _ = paced_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, cap=1)
 
-    # The lone orb arrives FIRST, so under the old rule it also won the band-4 tie-break.
+    # The lone orb arrives FIRST, so a band-4 tie would go to it.
     await pipeline.on_signal_candidate(
         candidate(symbol="TATASTEEL", strategy_id="orb", signal_id="LONE_ORB", score=0.12))
     for symbol, signal_id, score in (("SBIN", "HI52_LOW", 0.62), ("LT", "HI52_MID", 0.71),
@@ -4103,15 +3842,13 @@ async def test_a_lone_late_candidate_no_longer_outranks_a_measured_day(
         await pipeline.on_signal_candidate(
             candidate(symbol=symbol, strategy_id="hi52", signal_id=signal_id, score=score))
 
-    # The orb "population of one" is really TWO here, and the difference is why the floor is 3:
-    # ``_journal_slot`` writes the arriving row BEFORE ``_roll_forward_day`` hydrates the day's
-    # scores from the journal, so the day's very first candidate is counted once by the hydration
-    # and once by the append below it. A floor of 2 would have read that as a measured day and
-    # handed LONE_ORB the top band all over again.
+    # The orb "population of one" is really TWO, which is why the floor is 3: ``_journal_slot``
+    # writes the arriving row BEFORE ``_roll_forward_day`` hydrates scores from the journal, so
+    # the day's first candidate is counted by the hydration and by the append.
     assert pipeline._day_scores["orb"] == [0.12, 0.12]
     assert len(pipeline._day_scores["hi52"]) == 3                             # a really measured day
     assert pipeline._quantile_band(
-        candidate(strategy_id="orb", score=0.12)) == QUANTILE_BANDS // 2      # was QUANTILE_BANDS - 1
+        candidate(strategy_id="orb", score=0.12)) == QUANTILE_BANDS // 2
     assert pipeline._quantile_band(
         candidate(strategy_id="hi52", score=0.9705)) == QUANTILE_BANDS - 1
     assert await pipeline._drain_one_forward() is True
@@ -4157,16 +3894,14 @@ def band_pipeline(conn, pclock, calendar, book, limit_table, cost_model, ltp):
 async def test_a_brk20_level_outside_the_entry_band_never_spends_an_analyst_slot(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """6 of 15 brk20 proposals died on the gate's ``entry_sanity_band``, each after spending
-    an analyst slot. The level is pinned to the 20-day breakout price, so a candidate that waits in
-    the paced queue while the price walks away from it is a GUARANTEED reject - deterministic, and
-    knowable before the call.
+    """The brk20 level is pinned to the 20-day breakout price, so a candidate queued while the price
+    walks out of the entry band is a GUARANTEED ``entry_sanity_band`` reject, knowable before the call.
 
-    A DEFERRAL, not a drop. The deviation is a live reading and the band screen is a proxy for the
-    gate's rule (the gate bands the analyst's proposal, this bands the scanner's level), so a
-    momentary excursion must not end the candidate's day - and it would: brk20 originates only from
-    ``run_scan_sweep``, so a pair re-armed out of the queue has nothing to re-publish it. The entry
-    stays queued at its own TTL, un-charged and unclaimed, and is re-tested at the next drain."""
+    A DEFERRAL, not a drop: the screen is a proxy (the gate bands the analyst's proposal, this the
+    scanner's level) and the deviation a live reading, so a momentary excursion must not end the
+    day: brk20 originates only from ``run_scan_sweep``, so a re-armed pair has nothing to
+    re-publish it. The entry stays queued until its TTL, un-charged and unclaimed, and is re-tested
+    at the next drain."""
     # CNC band is 2.0%; |100 - 97| / 97 = 3.09%.
     ltp = [Decimal("97")]
     pipeline, harness, probe, rearmed = band_pipeline(
@@ -4186,8 +3921,7 @@ async def test_a_brk20_level_outside_the_entry_band_never_spends_an_analyst_slot
     assert (skipped[0].symbol, skipped[0].entry, skipped[0].ltp) == ("TCS", "100", "97")
     assert skipped[0].band == "2.0"
 
-    # The price comes back inside the band and the very next drain forwards it - which is the whole
-    # reason the entry was kept rather than handed back.
+    # The price comes back inside the band and the next drain forwards it.
     ltp[0] = Decimal("99")                                   # |100 - 99| / 99 = 1.01% <= 2.0%
     assert await pipeline._drain_one_forward() is True
     assert len(harness.calls) == 1
@@ -4199,8 +3933,7 @@ async def test_a_brk20_level_outside_the_entry_band_never_spends_an_analyst_slot
 async def test_a_brk20_level_exactly_on_the_band_edge_is_forwarded(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """The gate's rule is ``dev <= band``, so the edge is a PASS - the screen mirrors it exactly
-    rather than approximating it, or it would drop candidates the gate would have approved."""
+    """The gate's rule is ``dev <= band``, so the edge is a PASS; the screen mirrors it exactly."""
     # |102 - 100| / 100 = 2.00% == the CNC band.
     pipeline, harness, probe, rearmed = band_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, Decimal("100"))
@@ -4216,8 +3949,8 @@ async def test_a_brk20_level_exactly_on_the_band_edge_is_forwarded(
 async def test_an_unknown_ltp_forwards_the_brk20_candidate_unchanged(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """Fails OPEN in every unknown. No tick for the symbol means "we cannot say this is a
-    guaranteed reject", and the direction for that is to forward it and let the gate decide."""
+    """Fails OPEN: no tick for the symbol means "cannot say it is a guaranteed reject", so forward
+    it and let the gate decide."""
     pipeline, harness, probe, rearmed = band_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, None)
     await publish_candidate(pipeline, brk20_candidate("100", "98"))
@@ -4232,7 +3965,7 @@ async def test_an_unknown_ltp_forwards_the_brk20_candidate_unchanged(
 async def test_an_unwired_ltp_seam_forwards_the_brk20_candidate_unchanged(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """``ltp_fn`` unwired is the pre-2026-09-12 behaviour byte for byte - the screen is opt-in."""
+    """``ltp_fn`` unwired: the screen is opt-in."""
     harness = FakeHarness(dict(NO_ACTION_JSON))
     pipeline, _ = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book, harness=harness,
@@ -4247,10 +3980,9 @@ async def test_an_unwired_ltp_seam_forwards_the_brk20_candidate_unchanged(
 async def test_a_price_relative_strategy_is_never_band_screened(
     conn, pclock, calendar, book, limit_table, cost_model
 ):
-    """Scoped to the LIMIT-at-level legs only. An ``orb`` entry tracks the live price, so the same
-    screen there would drop candidates on a stale tick rather than on a structural mismatch - this
-    one deviates 3.09% against the 1.0% MIS band and is still forwarded, and the LTP seam is never
-    even asked."""
+    """Scoped to the LIMIT-at-level legs. An ``orb`` entry tracks the live price, so the screen
+    would drop on a stale tick: this one deviates 3.09% against the 1.0% MIS band, is forwarded,
+    and the LTP seam is never asked."""
     pipeline, harness, probe, rearmed = band_pipeline(
         conn, pclock, calendar, book, limit_table, cost_model, Decimal("97"))
     await publish_candidate(
@@ -4266,9 +3998,8 @@ async def test_a_price_relative_strategy_is_never_band_screened(
 async def test_a_raising_ltp_seam_forwards_the_brk20_candidate_and_warns(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """A broken seam is the same undecidable case as a missing tick: it warns and forwards. A screen
-    that could withhold evaluations whenever its own inputs broke would be a silent kill switch on
-    the whole brk20 leg."""
+    """A broken seam is the same undecidable case as a missing tick: warn and forward, else the
+    screen is a silent kill switch on the brk20 leg."""
     def ltp_fn(symbol: str):
         raise RuntimeError("tick cache exploded")
 
@@ -4288,7 +4019,7 @@ async def test_a_raising_ltp_seam_forwards_the_brk20_candidate_and_warns(
 
 
 # =========================================================================== sweep rule levels
-#: BHEL 2026-10-06: the sweep's rule geometry (6% stop); the rec came at 445.00.
+#: The sweep's rule geometry for BHEL (6% stop); the rec comes at 445.00.
 BHEL_RAW = RawLevels(entry=Decimal("427.90"), stop=Decimal("402.25"), target=None)
 EDGES = {"hi52": Decimal("1.53"), "ins": Decimal("1.58")}
 EQUITY_40K = Decimal("40000")
