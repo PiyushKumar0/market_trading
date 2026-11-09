@@ -31,9 +31,8 @@ from tests.unit.test_lifecycle_selftest import OWNER_OK, _build
 
 @pytest.fixture
 def temp_config(tmp_path):
-    """Hermetic protected-store config dir for the lifecycle-consequence tests (mirrors the fixture
-    in test_lifecycle_selftest; a fixture cannot cross module boundaries, so it is defined locally
-    rather than imported — importing it and re-using the name as a test parameter trips ruff F811)."""
+    """Hermetic protected-store config dir (local copy of test_lifecycle_selftest's: importing a fixture
+    and reusing its name as a parameter trips ruff F811)."""
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "limits.yaml").write_text("schema_version: 1\nlimits: {}\n", encoding="utf-8")
@@ -52,8 +51,7 @@ class FakeStore:
         self.daily: dict[str, list[date]] = {}
         self.intraday_ranges: list[tuple[str, datetime, datetime]] = []
         # Optional (first_bar, total) override for the young-listing probe. Unset ⇒ derived from
-        # ``daily`` (min/len) — i.e. the daily dict IS the symbol's whole history. Set it to model an
-        # OLD security whose in-window shortfall is a real gap, not a fresh listing.
+        # ``daily`` (the dict is the symbol's whole history); set it to model an OLD security.
         self.spans: dict[str, tuple[date | None, int]] = {}
 
     async def acoverage_gaps(self, symbol, start, end):
@@ -83,9 +81,9 @@ def _fill_ready(store):
     store.daily["INDIA VIX"] = list(RECENT_5[:3])
 
 
-# --------------------------------------------------------------------- daily window (2026-09-15:
-# the daily_gap repair fetches exactly this window — it must be the SAME window the gate checks, or
-# a fill that disagrees with the gate can never clear its blocker).
+# --------------------------------------------------------------------- daily window
+# The daily_gap repair fetches exactly this window; it must be the gate's own, or a fill that
+# disagrees with the gate can never clear its blocker.
 def test_daily_window_is_the_gates_own_lookback(clock):
     assert _gate(store=FakeStore(), clock=clock).daily_window() == RECENT_5
 
@@ -139,7 +137,7 @@ async def test_daily_shortfall_blocks_daily_strategies(clock):
 
 @pytest.mark.asyncio
 async def test_missing_regime_history_blocks_regime(clock):
-    """regime_data_ready: NIFTY 50 + India VIX history must be present, not just the watchlist."""
+    """NIFTY 50 + India VIX history must be present, not just the watchlist."""
     store = FakeStore()
     _fill_ready(store)
     store.daily["NIFTY 50"] = []
@@ -153,8 +151,7 @@ async def test_missing_regime_history_blocks_regime(clock):
 
 @pytest.mark.asyncio
 async def test_non_trading_day_has_no_intraday_requirement():
-    """Sunday start (no session) ⇒ no orb requirement even with zero intraday bars; the daily
-    lookbacks still bind."""
+    """No session ⇒ no orb requirement; the daily lookbacks still bind."""
     sunday = Clock(time_source=lambda: datetime(2026, 6, 14, 10, 5, tzinfo=IST))
     store = FakeStore()
     week = [date(2026, 6, 12), date(2026, 6, 11), date(2026, 6, 10), date(2026, 6, 9), date(2026, 6, 8)]
@@ -180,9 +177,8 @@ async def test_before_open_accrues_no_intraday_requirement():
 # --------------------------------------------------------------------- young-listing exclusion
 @pytest.mark.asyncio
 async def test_young_listing_alone_does_not_block(clock):
-    """A fresh listing (a bar for every session since it listed < the lookback ago) can never satisfy
-    the 200-session gate, so it is EXCLUDED from blockers and reported in young_excluded — not frozen
-    forever. With everything else covered, the gate is READY despite the shortfall."""
+    """A fresh listing with a bar for every session since listing can never satisfy the 200-session
+    gate, so it is excluded from blockers and reported in young_excluded; the gate is READY."""
     store = FakeStore()
     _fill_ready(store)
     # GROWW listed 3 sessions ago and has a bar for each: full coverage since its first bar (3/5).
@@ -196,8 +192,8 @@ async def test_young_listing_alone_does_not_block(clock):
 
 @pytest.mark.asyncio
 async def test_young_excluded_but_gaps_and_old_shortfalls_still_block(clock):
-    """The exclusion must not weaken the gate: only a fresh listing with FULL coverage is excluded.
-    A young-aged symbol WITH an interior gap, and an OLD symbol with a gap, both still block."""
+    """Only a fresh listing with FULL coverage is excluded; a young symbol with an interior gap and an
+    old symbol with a gap still block."""
     store = FakeStore()
     store.daily["NIFTY 50"] = list(RECENT_5)          # regime covered (5/5)
     store.daily["INDIA VIX"] = list(RECENT_5[:3])     # regime covered (3/3)
@@ -219,10 +215,8 @@ async def test_young_excluded_but_gaps_and_old_shortfalls_still_block(clock):
 
 @pytest.mark.asyncio
 async def test_young_listing_survives_todays_bar_landing(clock):
-    """Regression (observed GROWW 2026-07-28): the evening daily_bars job writes TODAY'S bar, which
-    the session window excludes — the span total then reads sessions-since-listing + 1 and the old
-    ``total == since_listing`` young test failed, flipping the listing back to a blocker every
-    evening. Young-ness is judged on in-window coverage only."""
+    """The evening daily_bars job writes TODAY'S bar, which the session window excludes, so the span
+    total is sessions-since-listing + 1; young-ness is judged on in-window coverage only."""
     store = FakeStore()
     _fill_ready(store)
     # Full coverage for the 3 sessions since listing; the span carries one EXTRA bar (today's,
@@ -236,12 +230,11 @@ async def test_young_listing_survives_todays_bar_landing(clock):
     assert not any(b.startswith("rsi2/trend/mom:GROWW") for b in status.blockers)
 
 
-# --------------------------------------------------------------------- coverage classes (2026-09-13)
+# --------------------------------------------------------------------- coverage classes
 @pytest.mark.asyncio
 async def test_every_rendered_blocker_classifies_from_its_prefix(clock):
-    """Classification reads the gate's OWN rendering, never a guess: one live blocker per class,
-    produced by the gate itself, must land in its class — a rendering change that breaks this is a
-    scoping bug, not a cosmetic one."""
+    """Classification reads the gate's OWN rendering: a blocker per class, produced by the gate,
+    must land in its class (a rendering change that breaks this is a scoping bug)."""
     store = FakeStore()
     _fill_ready(store)
     store.gaps["RELIANCE"] = [FIXED_NOW.replace(hour=9, minute=30, second=0, microsecond=0)]
@@ -260,8 +253,8 @@ async def test_every_rendered_blocker_classifies_from_its_prefix(clock):
 
 
 def test_blocker_class_falls_back_to_unknown():
-    """An unclassifiable line (the composition root's fail-closed sentinel, the lifecycle's
-    "warmup check failed", a future scope) is UNKNOWN — and UNKNOWN holds every class down."""
+    """An unclassifiable line (fail-closed sentinel, "warmup check failed", a future scope) is UNKNOWN,
+    which holds every class down."""
     assert blocker_class("warmup:unrefreshed 0/0") == CLASS_UNKNOWN
     assert blocker_class("warmup check failed") == CLASS_UNKNOWN
     status = WarmupStatus(ready=False, blockers=["warmup:unrefreshed 0/0"])
@@ -279,19 +272,17 @@ def test_ready_for_is_per_class_with_mixed_blockers():
 
 
 def test_ready_for_fails_closed_on_an_unattributable_not_ready_status():
-    """Not ready with NOTHING attributed cannot be scoped to a class, so no class is ready; an
-    unrecognised class name is never "ready" either (a typo must not open a leg)."""
+    """Not ready with nothing attributed ⇒ no class is ready; an unrecognised class name is never ready
+    (a typo must not open a leg)."""
     assert WarmupStatus(ready=False).ready_for(CLASS_DAILY) is False
     assert WarmupStatus(ready=True).ready_for("intradya") is False
     assert WarmupStatus(ready=True).ready_for(CLASS_DAILY) is True
 
 
-# ------------------------------------------------------------------ per-symbol readiness (2026-09-17)
+# ------------------------------------------------------------------ per-symbol readiness
 def test_ready_for_is_per_symbol():
-    """Owner-directed 2026-09-17. One symbol's coverage hole refuses THAT symbol's candidates and no
-    others — the 2026-09-16 13:36 PTCIL tradeless minute took the whole intraday book down from
-    13:37 to the close, and OLAELEC's daily hole froze the book for ~12 hours on 09-15. Class-wide
-    (``symbol=None``) keeps its old meaning: the freeze/lift/notice code asks a global question."""
+    """One symbol's coverage hole refuses that symbol's candidates and no others. Class-wide
+    (``symbol=None``) stays a global question for the freeze/lift/notice code."""
     status = WarmupStatus(ready=False, blockers=[
         "orb:RELIANCE bars 10/50",
         f"{DAILY_STRATEGY_SCOPE}:RELIANCE daily bars 3/200",
@@ -304,8 +295,8 @@ def test_ready_for_is_per_symbol():
     assert status.ready_for(CLASS_DAILY) is False
     assert status.ready_for(CLASS_REGIME, "TCS") is True      # nothing regime is short
 
-    # A line in the class that attributes to NOBODY refuses every symbol in it (fail closed) —
-    # and only in it: the daily class still answers per symbol.
+    # A line in the class that attributes to NOBODY refuses every symbol in it (fail closed), and
+    # only in it.
     unattributed = WarmupStatus(ready=False, blockers=[
         "orb:RELIANCE bars 10/50",
         f"{DAILY_STRATEGY_SCOPE}:RELIANCE daily bars 3/200",
@@ -317,7 +308,7 @@ def test_ready_for_is_per_symbol():
     assert unattributed.ready_for(CLASS_INTRADAY, "RELIANCE") is False
     assert unattributed.ready_for(CLASS_DAILY, "TCS") is True
 
-    # An UNKNOWN-CLASS line holds every class and every symbol down, exactly as before.
+    # An UNKNOWN-CLASS line holds every class and every symbol down.
     unknown = WarmupStatus(ready=False, blockers=[
         "orb:RELIANCE bars 10/50",
         f"{DAILY_STRATEGY_SCOPE}:RELIANCE daily bars 3/200",
@@ -329,9 +320,8 @@ def test_ready_for_is_per_symbol():
 
 
 def test_blocker_symbol_parses_every_rendering():
-    """The parse is anchored over EXACTLY the three lines ``WarmupGate._evaluate`` renders, so a
-    symbol carrying a space, ``&`` or ``-`` comes back whole. Anything else is UNATTRIBUTABLE
-    (None) rather than a guessed symbol — the fail-closed input ``ready_for`` depends on."""
+    """The parse is anchored on the three lines ``WarmupGate._evaluate`` renders, so a symbol with a
+    space, ``&`` or ``-`` comes back whole; anything else is None (fail-closed input to ``ready_for``)."""
     assert blocker_symbol("orb:PTCIL bars 374/375") == "PTCIL"
     assert blocker_symbol("orb:BAJAJ-AUTO bars 1/50") == "BAJAJ-AUTO"
     assert blocker_symbol(f"{DAILY_STRATEGY_SCOPE}:M&M daily bars 193/200") == "M&M"
@@ -349,8 +339,7 @@ def test_blocker_symbol_parses_every_rendering():
 
 
 def test_short_symbols_lists_attributed_symbols_once():
-    """The owner notice counts SYMBOLS, not blocker lines: order preserved, de-duplicated, and
-    unattributable lines omitted (they are not a symbol — ``ready_for`` is what handles them)."""
+    """The owner notice counts SYMBOLS: order preserved, de-duplicated, unattributable lines omitted."""
     status = WarmupStatus(ready=False, blockers=[
         f"{DAILY_STRATEGY_SCOPE}:OLAELEC daily bars 193/200",
         f"{DAILY_STRATEGY_SCOPE}:M&M daily bars 12/200",
@@ -374,10 +363,8 @@ class _FakeGate:
 
 @pytest.mark.asyncio
 async def test_lifecycle_freezes_entries_when_warmup_not_ready(conn, clock, temp_config, monkeypatch):
-    """A REGIME-class shortfall ⇒ FROZEN-for-entries via the risk-state setter +
-    WARMUP_FROZEN alert — never trade on thin data. Cold start too close to the window is exactly
-    this path (chaos 18). The intraday line rides along and must NOT read as the cause (2026-09-13;
-    the freezing blocker is a ``regime:`` one since 2026-09-17, when DAILY stopped freezing)."""
+    """A REGIME-class shortfall ⇒ FROZEN-for-entries via the risk-state setter + WARMUP_FROZEN alert.
+    The intraday line rides along and must NOT read as the cause."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -398,9 +385,8 @@ async def test_lifecycle_freezes_entries_when_warmup_not_ready(conn, clock, temp
     frozen_msg = next(m for m in sent if str(m.kind) == "warmup_frozen")
     assert "orb:RELIANCE bars 12/50" in frozen_msg.body
     assert "classes short: intraday, regime — entries FROZEN" in frozen_msg.body
-    # The summary rides its OWN field: every element of ``blockers`` stays a rendered
-    # "scope: have/need" line, which is the contract catalog.warmup_frozen states and the shape
-    # anything re-classifying the payload depends on.
+    # The summary rides its OWN field: every ``blockers`` element stays a rendered "scope: have/need"
+    # line (the catalog.warmup_frozen contract).
     assert frozen_msg.data["blockers"] == blockers
     assert frozen_msg.data["classes"] == ["intraday", "regime"]
 
@@ -413,8 +399,7 @@ async def test_lifecycle_freezes_entries_when_warmup_not_ready(conn, clock, temp
     ["warmup check failed"],                                    # UNATTRIBUTABLE ⇒ freezes
 ])
 async def test_lifecycle_freezes_on_every_freezing_class(conn, clock, temp_config, monkeypatch, blockers):
-    """2026-09-17: the freezing set is REGIME ∪ UNATTRIBUTABLE and nothing else. A non-freezing class
-    riding along in the same shortfall never stops the freeze the regime/unknown line owes."""
+    """The freezing set is REGIME ∪ UNATTRIBUTABLE; a non-freezing class riding along never stops the freeze."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, store, lifecycle = _build(conn, clock, temp_config)
     store.register_initial("limits.yaml", OWNER_OK)
@@ -428,9 +413,8 @@ async def test_lifecycle_freezes_on_every_freezing_class(conn, clock, temp_confi
 
 @pytest.mark.asyncio
 async def test_lifecycle_freezes_when_a_not_ready_gate_renders_no_blocker(conn, clock, temp_config, monkeypatch):
-    """The class scoping may only ever narrow a shortfall it can NAME. A duck-typed gate answering
-    not-ready with an EMPTY blocker list is unattributable, so it must take the freeze — the empty
-    list must never read as "nothing outside the intraday class ⇒ leave the risk state alone"."""
+    """Class scoping only narrows a shortfall it can NAME: not-ready with an empty blocker list is
+    unattributable and must freeze."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -448,7 +432,7 @@ async def test_lifecycle_freezes_when_a_not_ready_gate_renders_no_blocker(conn, 
     assert mode.risk_state() == RiskState.FROZEN
     assert any(str(m.kind) == "warmup_frozen" for m in sent)
 
-    # …and the post-login half of the same seam re-freezes rather than lifting.
+    # the post-login half re-freezes rather than lifting
     res = await lifecycle.reapply_warmup_gate()
     assert res.outcome == "frozen" and res.classes_short == [CLASS_UNKNOWN]
 
@@ -467,16 +451,9 @@ async def test_lifecycle_freezes_when_a_not_ready_gate_renders_no_blocker(conn, 
 async def test_lifecycle_does_not_freeze_on_a_single_class_shortfall(
     conn, clock, temp_config, monkeypatch, blocker: str, cls: str, note: str, body_line: str
 ):
-    """2026-09-13 plan change: one symbol's minute hole (09-04 11:09 COROMANDEL) or a market-wide
-    one-bar hole after a reconnect (09-09 14:47) no longer freezes the daily-bar legs. Visible, not
-    silent: no WARMUP_FROZEN page (nothing froze), so the OWNER-FACING notice is the STARTUP_REPORT
-    body itself — `frozen: none` with no coverage line is the silence this whole branch creates.
-
-    2026-09-17 plan change: DAILY stopped being a freezing class. On 2026-09-15 ONE symbol short
-    of the 200-session lookback (``rsi2/trend/mom:OLAELEC daily bars 193/200``) set the GLOBAL
-    ``warmup_ready`` FROZEN cause and held it for ~12 hours; its swing/position candidates are now
-    refused one by one at the gate instead, and the book keeps trading. Visible, not silent: the
-    STARTUP_REPORT names the class, exactly as it does for an intraday-only shortfall."""
+    """INTRADAY and DAILY are not freezing classes: a single-class shortfall does not freeze (candidates
+    are refused per symbol at the gate). Visible, not silent: with no WARMUP_FROZEN page, the
+    STARTUP_REPORT body is the owner-facing notice and names the class."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -496,8 +473,7 @@ async def test_lifecycle_does_not_freeze_on_a_single_class_shortfall(
     assert note in report.notes
     assert not any(str(m.kind) == "warmup_frozen" for m in sent)
 
-    # The owner's boot message NAMES the class and the blocker behind it — this is the only
-    # Telegram message this state produces, so it may not read as a clean boot.
+    # the only Telegram message this state produces: it must name the class and blocker
     startup = next(m for m in sent if str(m.kind) == "startup_report")
     assert body_line in startup.body
     assert "frozen: none" in startup.body
@@ -508,8 +484,7 @@ async def test_lifecycle_does_not_freeze_on_a_single_class_shortfall(
 async def test_startup_report_says_nothing_about_warmup_when_every_class_is_covered(
     conn, clock, temp_config, monkeypatch
 ):
-    """The coverage line is conditional: a clean boot must not grow a permanent empty line that the
-    owner learns to skip past (which is how the line stops being read at all)."""
+    """The coverage line is conditional: a clean boot grows no permanent line the owner learns to skip."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     sent = []
 
@@ -538,15 +513,9 @@ async def test_startup_report_says_nothing_about_warmup_when_every_class_is_cove
 async def test_reapply_lifts_with_one_class_still_short(
     conn, clock, temp_config, monkeypatch, blocker: str, cls: str
 ):
-    """The LIFT is owed to the freezing classes: regime covered ⇒ the ``warmup_ready`` cause clears
-    through the latch even though a non-freezing class is still short. ``ready`` stays False (coverage
-    IS missing); the outcome names the state, and the blockers still ride the result so post-login
-    detail keeps naming them. The boot freeze is a real regime-class one, so the lift is exercised
-    against a cause the same lifecycle set — not a hand-planted latch row.
-
-    2026-09-17: the DAILY class joined INTRADAY on the non-freezing side, so one symbol's daily
-    hole no longer holds the lift. (On 2026-09-15 ``rsi2/trend/mom:OLAELEC daily bars 193/200`` held
-    the global FROZEN cause for ~12 hours.) Its candidates are refused per symbol at the gate."""
+    """Regime covered ⇒ the ``warmup_ready`` cause clears through the latch even though a non-freezing
+    class is still short. ``ready`` stays False and the blockers still ride the result. The boot
+    freeze is a real regime-class one, not a hand-planted latch row."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     from tests.unit.test_lifecycle_selftest import _build_with_latch
 
@@ -568,9 +537,8 @@ async def test_reapply_lifts_with_one_class_still_short(
 
 @pytest.mark.asyncio
 async def test_reapply_refreezes_on_a_regime_class_shortfall(conn, clock, temp_config, monkeypatch):
-    """The other direction: a regime-class shortfall at post-login re-freezes, never lifts — every
-    candidate reads the market context built from NIFTY 50 / India VIX, so there is no per-symbol
-    answer to give."""
+    """A regime-class shortfall at post-login re-freezes, never lifts: every candidate reads the
+    NIFTY 50 / India VIX context, so there is no per-symbol answer."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     from tests.unit.test_lifecycle_selftest import _build_with_latch
 
@@ -606,10 +574,9 @@ async def test_lifecycle_stays_normal_when_warmup_ready(conn, clock, temp_config
 
 @pytest.mark.asyncio
 async def test_selftest_freshness_surfaces_warmup_fail(conn, clock, temp_config, monkeypatch):
-    """The pre-entries self-test rides the same gate, split per class on 2026-09-17: a GLOBAL shortfall (regime / unattributable) is still
-    FAIL implying FROZEN, while a per-symbol INTRADAY or DAILY one is a WARN implying nothing — a
-    self-test that kept implying FROZEN would re-impose the global freeze the moment the standalone
-    ``run()`` (or a dashboard/CLI selftest endpoint) was wired."""
+    """The self-test splits per class: a GLOBAL shortfall (regime / unattributable) is FAIL implying
+    FROZEN; a per-symbol INTRADAY or DAILY one is a WARN implying nothing, or the standalone ``run()``
+    would re-impose the global freeze."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _mode, _kill, _store, lifecycle = _build(conn, clock, temp_config)
     lifecycle._selftest._warmup_gate = _FakeGate(ready=False, blockers=["regime:NIFTY 50 daily bars 0/200"])
@@ -629,8 +596,8 @@ async def test_selftest_freshness_surfaces_warmup_fail(conn, clock, temp_config,
     assert "per-symbol coverage short: rsi2/trend/mom:OLAELEC daily bars 193/200" == check.detail
     assert "warmup_ready" not in report.frozen_reasons
 
-    # An UNATTRIBUTABLE blocker is a global condition and keeps the FROZEN implication, and so
-    # does a duck-typed status with no per-class answer at all (the flat fallback, never looser).
+    # An UNATTRIBUTABLE blocker keeps the FROZEN implication, as does a duck-typed status with no
+    # per-class answer (the flat fallback, never looser).
     lifecycle._selftest._warmup_gate = _FakeGate(ready=False, blockers=["warmup check failed"])
     report = await lifecycle._selftest.run(check_skew=False)
     assert "warmup_ready" in report.frozen_reasons

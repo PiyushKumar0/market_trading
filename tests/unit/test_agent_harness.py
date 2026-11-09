@@ -1,12 +1,10 @@
 """AgentHarness: the single SDK call site — admission, retries, metering, audit.
 
-The Claude Agent SDK is NEVER imported here. Both SDK seams (``query`` and the options class) are
-injected, so these tests exercise the real harness logic against fake message streams — which is also
-how the harness is meant to be usable at the unit-test tier at all (the SDK spawns a CLI subprocess).
+The Claude Agent SDK is not imported here: both SDK seams (``query`` and the options class) are
+injected, so the real harness logic runs against fake message streams (the SDK spawns a CLI subprocess).
 
-Fake message objects deliberately use the SDK's own field names (``input_tokens``,
-``cache_read_input_tokens``, ``total_cost_usd``) so the defensive usage extraction is tested against the
-shape it will actually meet, not against our internal ``TokenUsage`` names.
+Fake messages use the SDK's own field names (``input_tokens``, ``cache_read_input_tokens``,
+``total_cost_usd``) so usage extraction meets the shape it will see live.
 """
 
 from __future__ import annotations
@@ -207,8 +205,8 @@ def real_cfg() -> dict:
 
 @pytest.fixture
 def gov(conn, clock, calendar) -> BudgetGovernor:
-    # PINNED governor numbers (credit/allocations/ladder), NOT the live owner-tunable agents.yaml —
-    # admission-boundary tests here must not move when the owner rebalances the budget (2026-08-03).
+    # PINNED governor numbers, not the live owner-tunable agents.yaml: admission-boundary tests must
+    # not move when the owner rebalances the budget.
     from tests.unit.test_budget_governor import PINNED_CFG
 
     return BudgetGovernor(conn, clock, calendar, PINNED_CFG)
@@ -266,8 +264,7 @@ def rows(conn) -> list:
 
 # --------------------------------------------------------------------------- load_agent_defs
 def test_tools_enabled_without_explicit_allowlist_is_refused() -> None:
-    # `tools_enabled: true` NEVER means "SDK defaults" — the harness refuses to run an
-    # agent definition that lacks an explicit allowlist. This is the allowlist test.
+    # `tools_enabled: true` never means "SDK defaults": a def without an explicit allowlist is refused.
     cfg = {
         "agents": {
             "rogue": {"model": "sonnet-5.5", "shape": "agentic", "tools_enabled": True, "max_turns": 4}
@@ -290,9 +287,8 @@ def test_single_shot_defs_get_empty_allowlist(real_cfg) -> None:
 
 
 def test_shipped_roster_loads_with_weekly_parked(real_cfg) -> None:
-    # The shipped roster loads whole: nightly_reviewer is single-shot in RECOMMEND mode (agents.yaml
-    # deviation note), and weekly_researcher is `enabled: false` until its read-only MCP
-    # allowlist is wired (not built) — a parked def is SKIPPED, never silently runnable.
+    # nightly_reviewer is single-shot in RECOMMEND mode; weekly_researcher is `enabled: false` until its
+    # MCP allowlist is wired: a parked def is skipped, never silently runnable.
     defs = load_agent_defs(real_cfg)
     assert "weekly_researcher" not in defs
     nightly = defs["nightly_reviewer"]
@@ -402,12 +398,12 @@ async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov
     assert opts.allowed_tools == []                # single-shot agents get no tools
     assert "WebSearch" in opts.disallowed_tools and "Bash" in opts.disallowed_tools
     assert opts.max_output_tokens == 1200
-    # The schema knob was sent, so the StructuredOutput tool round-trip gets its extra turn
-    # (observed live 2026-07-28: max_turns=1 + json_schema => error_max_turns on every call).
+    # With a schema knob the StructuredOutput tool round-trip needs an extra turn (max_turns=1 +
+    # json_schema ⇒ error_max_turns on every call).
     assert opts.max_turns == 4
     assert opts.system_prompt == "SYSTEM PROMPT (byte-stable)"
     assert opts.output_schema == {"type": "object"}
-    # System prompt went in the options, so the prompt is exactly the assembled context block.
+    # the system prompt rode the options, so the prompt is exactly the assembled context block
     assert fake.calls[0].prompt == FakeContext().prompt_text
 
 
@@ -466,16 +462,16 @@ async def test_schema_invalid_twice_then_valid(defs, gov, clock, conn, alert, al
     assert result.payload == {"action": "no_action", "reason": "regime unclear"}
     assert len(fake.calls) == 3                       # 1 + 2 retries
 
-    # Each retry is a FRESH query whose prompt carries the previous validation error verbatim.
+    # each retry is a FRESH query whose prompt carries the previous validation error verbatim
     assert "Previous output failed validation" not in fake.calls[0].prompt
     assert "action must be 'no_action'" in fake.calls[1].prompt
     assert "not valid JSON" in fake.calls[2].prompt
     assert "Emit ONLY valid JSON matching the schema." in fake.calls[1].prompt
-    # Retries do not compound: the tail is appended to the ORIGINAL context, not to the last retry.
+    # retries do not compound: the tail is appended to the ORIGINAL context
     assert fake.calls[2].prompt.startswith(FakeContext().prompt_text)
     assert fake.calls[2].prompt.count("Previous output failed validation") == 1
 
-    # One audit row per SDK call (each has its own prompt/usage/cost — replayability).
+    # one audit row per SDK call (own prompt/usage/cost)
     audit = rows(conn)
     assert [r["ok"] for r in audit] == [0, 0, 1]
     assert [r["fail_reason"] for r in audit] == ["schema_invalid", "schema_invalid", None]
@@ -501,7 +497,7 @@ async def test_schema_invalid_three_times_fails(defs, gov, clock, conn, alert, a
 
 
 async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
-    # an answer that MIXES prose with a fence is a schema violation, not something to regex out.
+    # prose mixed with a fence is a schema violation, not something to regex out
     fenced = f"Here is my answer:\n```json\n{ENTER_JSON}\n```"
     fake = FakeQuery([FakeAssistantMessage(fenced), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake)
@@ -513,9 +509,8 @@ async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
 
 
 async def test_lone_fenced_block_is_unwrapped(defs, gov, clock, conn) -> None:
-    """2026-07-29: when the structured-output knob silently disengages (union schema), the model
-    answers in a BARE fenced block — that is the JSON in the CLI's habitual framing, not prose.
-    A whole-string fence unwraps; anything around it still fails (previous test)."""
+    """When the structured-output knob silently disengages (union schema) the model answers in a bare
+    fenced block: a whole-string fence unwraps; anything around it still fails (previous test)."""
     fake = FakeQuery([FakeAssistantMessage(f"```json\n{ENTER_JSON}\n```"), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake)
 
@@ -527,8 +522,8 @@ async def test_lone_fenced_block_is_unwrapped(defs, gov, clock, conn) -> None:
 
 # --------------------------------------------------------------------------- structured output (CLI json_schema path)
 async def test_structured_tool_payload_wins_over_trailing_text(defs, gov, clock, conn) -> None:
-    # The CLI fulfils json_schema via a StructuredOutput TOOL call; the payload is the tool input.
-    # Any assistant text after the tool ack is commentary and must never shadow the payload.
+    # The CLI fulfils json_schema via a StructuredOutput TOOL call; assistant text after it must
+    # never shadow the payload.
     fake = FakeQuery(
         [
             FakeStructuredToolMessage(ENTER_PAYLOAD, USAGE_SDK),
@@ -559,8 +554,7 @@ async def test_no_schema_means_no_turn_bump(defs, gov, clock, conn) -> None:
 
 
 async def test_schema_without_knob_keeps_single_turn(defs, gov, clock, conn) -> None:
-    # An options surface with max_turns but NO schema knob: the schema is not sent, so the turn
-    # cap must stay 1 — a bump would let a no-tools agent idle through a second turn for nothing.
+    # With no schema knob the schema is not sent, so the turn cap stays 1.
     @dataclass
     class NoSchemaKnob:
         model: str | None = None
@@ -582,8 +576,8 @@ async def test_schema_without_knob_keeps_single_turn(defs, gov, clock, conn) -> 
 
 
 async def test_output_format_fallback_mapping_and_turn_bump(defs, gov, clock, conn) -> None:
-    # The shipped SDK (0.2.x) exposes `output_format`, not `output_schema` — the schema is wrapped
-    # and the tool round-trip still needs its extra turn.
+    # The shipped SDK (0.2.x) exposes `output_format`, not `output_schema`: the schema is wrapped and
+    # the extra turn still applies.
     @dataclass
     class OutputFormatOptions:
         model: str | None = None
@@ -625,8 +619,8 @@ class SdkToolsOptions:
 
 
 async def test_builtin_base_set_is_emptied_for_single_shot(defs, gov, clock, conn) -> None:
-    # 2026-10-09 transcripts: with only allowed_tools=[] sent, the pinned CLI still offered the
-    # news analyst Skill/ToolSearch/Workflow and deferred Cron*/SendMessage/RemoteTrigger.
+    # With only allowed_tools=[] the pinned CLI still offers Skill/ToolSearch/Workflow and deferred
+    # Cron*/SendMessage/RemoteTrigger, so `tools=[]` is sent too.
     fake = FakeQuery([FakeStructuredToolMessage(ENTER_PAYLOAD), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=SdkToolsOptions)
 
@@ -655,8 +649,8 @@ async def test_builtin_base_set_is_emptied_for_agentic_mcp_allowlist(defs, gov, 
 
 
 async def test_effort_sent_and_thinking_never_pinned(defs, gov, clock, conn) -> None:
-    # Thinking depth is the agents.yaml effort knob. The deprecated max_thinking_tokens=0 did not stop
-    # Sonnet 5 thinking (2026-10-03 audit) and Opus 5.5 rejects disabled thinking, so it is never sent.
+    # Thinking depth is the agents.yaml effort knob; max_thinking_tokens=0 does not stop Sonnet 5
+    # thinking and Opus 5.5 rejects disabled thinking, so it is never sent.
     @dataclass
     class ThinkingOptions:
         model: str | None = None
@@ -718,7 +712,7 @@ async def test_pinned_cli_path_is_sent_with_updater_off(defs, gov, clock, conn, 
     opts = fake.calls[0].options
     assert opts.cli_path == str(cli)
     assert opts.env == ISOLATION_ENV
-    # Literal names, so a rename of either knob in ISOLATION_ENV fails here (CLI 2.1.288).
+    # Literal names, so a rename of any knob in ISOLATION_ENV fails here.
     assert opts.env["DISABLE_AUTOUPDATER"] == "1"
     assert opts.env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
     assert opts.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
@@ -803,8 +797,7 @@ async def test_strict_mcp_falls_back_to_extra_args(defs, gov, clock, conn) -> No
 
 
 async def test_real_sdk_surface_translates_isolation_flags(defs, gov, clock, conn, tmp_path) -> None:
-    """Producer→consumer seam on the installed SDK: the harness's options become the CLI flags the
-    isolation fix depends on. Offline — the command is built, no subprocess is spawned."""
+    """The harness's options become the CLI flags isolation depends on (offline: the command is built, not spawned)."""
     pytest.importorskip("claude_agent_sdk")
     from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
@@ -895,7 +888,7 @@ async def test_timeout_fails_without_retry(defs, gov, clock, conn, alert, alerts
         (RuntimeError("CLI subprocess died"), "sdk_error"),
         (RuntimeError("You've hit your session limit · resets 2:30pm (Asia/Kolkata)"), "overloaded"),
         (RuntimeError("error type rate_limit"), "overloaded"),
-        # The stored claude.ai login, verbatim from engine.log 2026-09-14 and 2026-09-25.
+        # The stored claude.ai login's verbatim errors.
         (RuntimeError("Claude Code returned an error result: Not logged in · Please run /login"),
          "auth_failed"),
         (RuntimeError("Failed to authenticate. API Error: 401 OAuth access token has been revoked."),
@@ -940,7 +933,7 @@ async def test_credit_exhausted_trips_dg4(defs, clock, conn, calendar) -> None:
     # The ledger only sees calls that SUCCEEDED, so the billing error is the only DG4 signal.
     assert gov.degrade_tier() == DegradeTier.DG4
     assert gov.can_invoke("intraday_analyst").allowed is False
-    # ...and the tier change is published, so the owner and the dashboard hear of it.
+    # the tier change is published
     assert [(e.old_tier, e.new_tier) for e in seen] == [(DegradeTier.DG0, DegradeTier.DG4)]
 
 
@@ -1024,9 +1017,8 @@ async def test_every_persisted_call_has_a_prompt_version(defs, gov, clock, conn)
 
 
 class FakeErrorResultMessage(FakeResultMessage):
-    """The CLI's limit-hit shape (2026-09-03 12:42–14:32, 31 calls): a result with ``is_error`` set,
-    subtype ``success``, an empty ``errors`` list and the real reason only in ``result``. The SDK
-    then raises a bare "Claude Code returned an error result: success" — which is all the log had."""
+    """The CLI's limit-hit shape: ``is_error`` set, subtype ``success``, empty ``errors``, the real reason
+    only in ``result``; the SDK then raises a bare "Claude Code returned an error result: success"."""
 
     def __init__(self, text: str) -> None:
         super().__init__(usage=None, total_cost_usd=0.0)
@@ -1056,8 +1048,7 @@ async def test_an_error_result_fails_with_the_clis_own_text(defs, gov, clock, co
 
 # --------------------------------------------------------------------------- tool-knob guarantees
 async def test_missing_tool_knob_refuses_tools_enabled_agent(defs, gov, clock, conn) -> None:
-    # Uniform no-action failure shape: the SDK-surface refusal is an ordinary Failed (callers degrade to
-    # no-proposal + alert), never an exception leaning on bus isolation.
+    # The SDK-surface refusal is an ordinary Failed (callers degrade to no-proposal + alert), never an exception.
     fake = FakeQuery([FakeAssistantMessage("{}"), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)
 
@@ -1069,8 +1060,7 @@ async def test_missing_tool_knob_refuses_tools_enabled_agent(defs, gov, clock, c
 
 
 async def test_missing_tool_knob_refuses_single_shot_too(defs, gov, clock, conn) -> None:
-    """2026-07-28 review: an options surface with NO tool knob means the SDK's DEFAULT builtin
-    toolset would run — refused for EVERY shape (fail closed), not warned past for single-shot."""
+    """No tool knob means the SDK's default builtin toolset would run: refused for every shape (fail closed)."""
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)
 
@@ -1094,7 +1084,7 @@ async def test_system_prompt_falls_back_into_the_prompt_when_unsupported(defs, g
     result = await harness.run_single_shot(defs["intraday_analyst"], FakeContext(), enter_validator(clock))
 
     assert result.ok
-    # Stable system block FIRST, volatile context after it (the ordering survives the fallback).
+    # stable system block first, volatile context after it
     assert fake.calls[0].prompt.startswith("SYSTEM PROMPT (byte-stable)\n\n")
     assert fake.calls[0].prompt.endswith(FakeContext().prompt_text)
 
@@ -1122,7 +1112,7 @@ async def test_agentic_run_aborts_when_billed_tokens_exceed_the_run_budget(defs,
     (row,) = rows(conn)
     assert row["ok"] == 0 and row["fail_reason"] == "sdk_error"
     assert (row["in_tokens"], row["out_tokens"]) == (2000, 600)
-    # Tokens burned before the abort are still metered — the run was billed for them.
+    # tokens burned before the abort are still metered
     (ledger,) = conn.execute("SELECT * FROM budget_ledger").fetchall()
     assert ledger["out_tokens"] == 600
     assert alerts
@@ -1153,8 +1143,7 @@ async def test_agentic_run_within_budget_returns_ok(defs, gov, clock, conn) -> N
 
 
 async def test_agentic_retries_are_bounded_by_the_same_run_budget(defs, gov, clock, conn) -> None:
-    # Retries apply to agentic runs too, but the token cap is CUMULATIVE over the run: the second
-    # attempt's tokens land on top of the first, so a retry can never buy a fresh budget.
+    # The token cap is CUMULATIVE over the run: a retry can never buy a fresh budget.
     fake = FakeQuery(
         [
             FakeAssistantMessage("not json", {"input_tokens": 800, "output_tokens": 200}),
@@ -1215,9 +1204,8 @@ async def test_run_sdk_smoke_happy_path(defs, gov, clock, conn) -> None:
 
 
 async def test_run_sdk_smoke_exercises_the_structured_output_path(defs, gov, clock, conn) -> None:
-    # The SDK smoke must test the path production agents actually use: every production call sends a
-    # json_schema, so the smoke call sends one too (2026-07-28: a schema-less smoke passed WARN-only
-    # while every real call failed on the untested structured-output path).
+    # Every production call sends a json_schema, so the smoke call must too (a schema-less smoke
+    # would pass while real calls fail on the structured-output path).
     from engine.intelligence.harness import run_sdk_smoke
 
     fake = FakeQuery([FakeStructuredToolMessage({"ok": True}),
@@ -1239,10 +1227,9 @@ async def test_run_sdk_smoke_raises_on_wrong_payload(defs, gov, clock, conn) -> 
         await run_sdk_smoke(harness)
 
 
-# --------------------------------------------------------------------------- roster quarantine (2026-08-03)
+# --------------------------------------------------------------------------- roster quarantine
 def test_claude5_family_models_are_mapped() -> None:
-    # The 2026-08-03 incident: the owner moved the roster to sonnet-5 before this map knew the
-    # 5-family, and the strict loader darkened the whole LLM tier for two boots.
+    # A roster naming a model this map lacks darkens the whole LLM tier at the strict loader.
     assert MODEL_API_IDS["sonnet-5"] == "claude-sonnet-5"
     assert MODEL_API_IDS["opus-5"] == "claude-opus-5"
     assert MODEL_API_IDS["fable-5"] == "claude-fable-5"

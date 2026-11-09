@@ -1,9 +1,8 @@
 """Dashboard API routes: real reads/writes over risk/oms/learning/intelligence
 state via the app's OPTIONAL collaborators (``conn``/``store``/``exposure``/``governor``/
 ``limits_engine``), with every route degrading to its stub shape when its own collaborator is
-unwired. Mirrors ``test_api_auth.py``'s ``TestClient`` pattern; inserts rows directly into ``conn``
-(migrated by the shared ``conn`` fixture, tests/conftest.py) rather than going through write paths that
-don't exist yet."""
+unwired. Mirrors ``test_api_auth.py``'s ``TestClient`` pattern; inserts rows directly into the shared
+``conn`` fixture (tests/conftest.py)."""
 
 from __future__ import annotations
 
@@ -59,8 +58,7 @@ def _client(**collaborators) -> TestClient:
 # --------------------------------------------------------------------------- collaborator fixtures
 @pytest.fixture
 def store(tmp_path, conn, clock) -> ProtectedStore:
-    """A ProtectedStore over a config/ dir seeded with the REAL limits.yaml + envelope.yaml, both
-    registered (mirrors ``test_limits_engine.py``'s ``store``/``registered_store`` pattern)."""
+    """A ProtectedStore over a config/ dir seeded with the REAL limits.yaml + envelope.yaml, both registered."""
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "limits.yaml").write_bytes((REAL_CONFIG / "limits.yaml").read_bytes())
@@ -236,7 +234,7 @@ def _paper_at_40k(conn, clock) -> PaperControl:
 
 
 def test_paper_route_shows_history_at_the_live_capital_base(tmp_path, conn, clock) -> None:
-    """The owner's dashboard capital change: snapshots stored at 40,000, the verified limits now at 60,000 — the route reads the live base."""
+    """Snapshots stored at 40,000 with verified limits now at 60,000: the route reads the live base."""
     cfg = tmp_path / "config"
     cfg.mkdir()
     text = (REAL_CONFIG / "limits.yaml").read_text(encoding="utf-8")
@@ -364,9 +362,8 @@ def test_decisions_and_verdicts_keep_one_row_per_proposal_with_the_paper_verdict
 
 
 def test_decisions_subject_resolves_position_and_order_ids_to_symbols(conn, clock) -> None:
-    """Owner-reported 2026-09-02: the decision log printed exit proposals as their position ULID. The
-    proposal payload only carries the id (contracts: exit/modify-* → position_id, cancel → order_id), so
-    the route resolves each to the position's symbol; an id with no row falls back to the id itself."""
+    """The proposal payload only carries an id (exit/modify-* → position_id, cancel → order_id), so the
+    route resolves each to the position's symbol; an id with no row falls back to the id itself."""
     _insert_position(conn, "pos-1", symbol="HDFCAMC")
     _insert_order(conn, "o-1", role="protective_sl", position_id="pos-1")
     _insert_order(conn, "o-orphan", role="entry")  # no position_id → cannot resolve
@@ -439,7 +436,7 @@ def test_risk_headroom_wired_with_exposure_and_caps(conn, clock, exposure, limit
     assert headroom["open_positions"] == {"total": 1, "mis": 1, "cnc": 0}
     assert headroom["consecutive_losses"] == 0
     assert headroom["deployed_capital"] == "1000"  # 10 * 100
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4 — read off the loaded table instead of pinning literals.
+    # read off the loaded table instead of pinning literals
     table = limits_engine.table()
     assert headroom["caps"]["max_deployed_capital_inr"] == str(table.limits.capital_cap.max_deployed_capital_inr)
     assert headroom["caps"]["max_open_positions_total"] == table.limits.max_open_positions.total
@@ -506,15 +503,12 @@ async def test_budget_wired_per_agent_and_degrade_tier(conn, clock, governor) ->
     assert r.status_code == 200
     body = r.json()
     assert body["degrade_tier"] == "DG0"
-    # Compare as Decimal, not string: the governor's own Decimal formatting (trailing zeros) is not
-    # this route's contract to pin down.
+    # Compare as Decimal, not string: the governor's trailing-zero formatting is not this route's contract.
     assert Decimal(body["budget"]["window_spend_usd"]) == Decimal("1")
     assert Decimal(body["budget"]["per_agent_spend_usd"]["weekly_researcher"]) == Decimal("1")
-    # Amount-AGNOSTIC vs the owner-tunable agents.yaml (2026-08-03 rebalance lesson): the route's
-    # contract is that it serves the GOVERNOR's allocation, not any particular dollar figure.
+    # Amount-agnostic vs the owner-tunable agents.yaml: the route serves the GOVERNOR's allocation.
     assert Decimal(body["budget"]["allocations_usd"]["weekly_researcher"]) == governor.allocations()["weekly_researcher"]
-    # The quota WINDOW, not a month (2026-09-12): the owner surface must say WHICH week the
-    # spend belongs to, and the cap the tier is currently imposing.
+    # the quota WINDOW, not a month: which week the spend belongs to, and the cap the tier imposes
     assert body["budget"]["window_key"] == governor.window_key()
     start, end = governor.window_bounds()
     assert (body["budget"]["window_start"], body["budget"]["window_end"]) == (
@@ -527,10 +521,9 @@ async def test_budget_wired_per_agent_and_degrade_tier(conn, clock, governor) ->
 async def test_budget_per_agent_split_shows_an_agent_that_billed_without_an_allocation(
     conn, clock, governor
 ) -> None:
-    """The split spans the UNION of allocated agents and the ones that billed. `sdk_smoke` exists in
-    the live ledger with spend and no `budget_allocations_usd` entry: keyed off allocations alone it
-    would sit inside `window_spend_usd` and in no row, so the panel's bars would not add up to the
-    total printed above them."""
+    """The split spans the UNION of allocated agents and agents that billed: `sdk_smoke` has spend and no
+    `budget_allocations_usd` entry, and keyed off allocations alone it would sit in `window_spend_usd`
+    but in no row."""
     await governor.record("sdk_smoke", "haiku-4.5", TokenUsage(in_tokens=200_000, out_tokens=0))
     await governor.record("weekly_researcher", "haiku-4.5", TokenUsage(in_tokens=1_000_000, out_tokens=0))
     body = _client(conn=conn, clock=clock, governor=governor).get("/budget", headers=AUTH).json()
@@ -661,9 +654,8 @@ def test_ws_live_broadcasts_bus_event(conn, clock, bus) -> None:
 
 
 # --------------------------------------------------------------------------- /news/watchlist
-# The dashboard's news panel reads today's catalyst watchlist + the digest
-# freshness label. The route is duck-typed on ``store``: a MarketStore answers it, a ProtectedStore (or
-# no store) degrades to the empty shape with ``status: null``.
+# The route is duck-typed on ``store``: a MarketStore answers it, a ProtectedStore (or no store)
+# degrades to the empty shape with ``status: null``.
 @pytest.fixture
 def market_store(tmp_path, clock):
     from engine.marketdata.store import MarketStore
@@ -699,8 +691,7 @@ def test_news_watchlist_unwired_and_non_market_store_return_empty_shape(conn, cl
 
     # (a) nothing wired at all
     assert _client().get("/news/watchlist", headers=AUTH).json() == empty
-    # (b) a ProtectedStore is wired (today's real composition): it has no news-layer readers, so the
-    #     route must degrade exactly like an unwired one rather than 500 the dashboard poll.
+    # (b) a ProtectedStore has no news-layer readers: degrade like unwired rather than 500 the dashboard poll
     assert _client(conn=conn, clock=clock, store=store).get("/news/watchlist", headers=AUTH).json() == empty
 
 
@@ -756,8 +747,8 @@ def test_news_watchlist_digest_stale_and_missing(clock, market_store, limits_eng
 
 
 # --------------------------------------------------------------------------- /recommendations
-# /decisions is the proposal→verdict provenance view and carries no Recommendation payload; the
-# dashboard's recommendation panel reads the delivered artifact + the owner's human_action from here.
+# /decisions carries no Recommendation payload; the recommendation panel reads the delivered
+# artifact + the owner's human_action from here.
 def test_recommendations_unwired_returns_stub_shape() -> None:
     assert _client().get("/recommendations", headers=AUTH).json() == {"recommendations": []}
 
@@ -863,10 +854,10 @@ def test_positions_and_orders_carry_is_paper(conn, clock) -> None:
     assert {o["order_id"]: o["is_paper"] for o in orders} == {"o-pos-real": 0, "o-pos-paper": 1}
 
 
-# Owner ad-hoc read surface (owner-directed 2026-08-19): the engine process HOLDS market.duckdb, so it
-# answers read-only questions instead of being STOPPED for them. Read-only is enforced by statement
-# TYPE (DuckDB's parser) / authorizer action (SQLite) — never by inspecting the SQL text, so these
-# rejection cases must hold for anything the parser classifies as a write, not just the literal strings.
+# Owner ad-hoc read surface: the engine HOLDS market.duckdb, so it answers read-only questions instead
+# of being stopped. Read-only is enforced by statement TYPE (DuckDB's parser) / authorizer action
+# (SQLite), never by inspecting the SQL text, so these rejections must hold for anything the parser
+# classifies as a write, not just the literal strings.
 _REJECTED = [
     ("market", "INSERT INTO catalyst_watchlist (entry_id, d, symbol, grade) "
                "VALUES ('x', DATE '2026-08-19', 'AAA', 'context')", "insert"),
@@ -903,8 +894,7 @@ def test_db_query_unwired_dbs_answer_503_not_500() -> None:
 
 
 def test_db_query_state_allows_recursive_cte(conn, clock) -> None:
-    """SQLITE_RECURSIVE is in the allow-set (2026-08-19 review): WITH RECURSIVE is a read shape
-    (walking order_events chains) and authorizes recursion only — it must not be denied."""
+    """SQLITE_RECURSIVE is in the allow-set: WITH RECURSIVE is a read shape (walking order_events chains)."""
     client = _client(conn=conn, clock=clock)
     body = {
         "db": "state",
@@ -946,8 +936,7 @@ def test_db_query_market_roundtrip_encodes_decimal_and_date(clock, market_store)
     # DECIMAL crosses as a STRING (a float would corrupt the level), DATE as ISO-8601.
     assert body["rows"] == [["AAA", d.isoformat(), "1410.50"], ["BBB", d.isoformat(), None]]
 
-    # EXPLAIN is the one non-SELECT statement type enumerated as read-only (a plan is what the owner
-    # asks for next when a read is slow).
+    # EXPLAIN is the one non-SELECT statement type enumerated as read-only
     assert client.post("/db/query", headers=AUTH,
                        json={"db": "market", "sql": "EXPLAIN SELECT 1"}).status_code == 200
 
@@ -995,8 +984,7 @@ def test_db_query_row_cap_flags_truncation(conn, clock, market_store) -> None:
 
 
 def test_db_query_timeout_interrupts_the_query_and_answers_504(clock, market_store) -> None:
-    """A runaway owner query is interrupted at ITS OWN cursor: this is a trading process first, and the
-    store's connection must survive the interrupt untouched."""
+    """A runaway owner query is interrupted at ITS OWN cursor; the store's connection survives untouched."""
     client = _client(clock=clock, market_store=market_store)
 
     r = client.post("/db/query", headers=AUTH, json={
@@ -1010,10 +998,8 @@ def test_db_query_timeout_interrupts_the_query_and_answers_504(clock, market_sto
 
 
 def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> None:
-    """2026-08-18 (the 53 GB incident) generalized: the LIVE store connection carries an
-    explicit DuckDB memory_limit, so nothing — this endpoint's arbitrary SELECTs included — can commit
-    the machine. Asserted numerically because DuckDB renders the limit in GiB (mirrors
-    test_tick_compaction.py::test_compaction_connection_is_memory_bounded)."""
+    """The LIVE store connection carries an explicit DuckDB memory_limit, so this endpoint's arbitrary
+    SELECTs cannot commit the machine. Asserted numerically because DuckDB renders the limit in GiB."""
     client = _client(clock=clock, market_store=market_store)
 
     r = client.post("/db/query", headers=AUTH,
@@ -1027,9 +1013,9 @@ def test_db_query_market_connection_is_memory_bounded(clock, market_store) -> No
 
 # --------------------------------------------------------------------------- /config/capital
 def _capital_client(tmp_path, conn, *, wired: bool = True, at=None):
-    """A client over a temp-config ProtectedStore + LimitsEngine (capital pinned at 40000), a clock
-    AFTER the 2026-06-17 close (the shared ``clock`` fixture sits inside the session) and a real
-    CapitalChanger. Returns (client, limits_engine)."""
+    """A client over a temp-config ProtectedStore + LimitsEngine (capital pinned at 40000), a clock AFTER
+    the 2026-06-17 close (the shared ``clock`` sits inside the session) and a real CapitalChanger.
+    Returns (client, limits_engine)."""
     from datetime import datetime
 
     from engine.core.clock import IST, Clock
@@ -1143,8 +1129,7 @@ def test_capital_routes_need_the_token(tmp_path, conn) -> None:
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 def test_both_capital_routes_are_async(method) -> None:
-    """A sync route would run in a worker thread, off the loop the ticks run on; both
-    routes await the changer (GET: the stored-price prefetch)."""
+    """A sync route would run in a worker thread, off the loop the ticks run on."""
     import inspect
 
     app = create_app(secrets=_FakeSecrets(_TOKEN))

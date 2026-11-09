@@ -1,11 +1,9 @@
 """BackfillJob: chunking, checkpoint resume, throttle wiring.
 
-Uses a fake kite client that records every historical() request, so chunk boundaries (the pinned
-Kite range caps: minute ≤60 days/request, day ≤2000 days/request), checkpoint resume after an
-interruption, and the src provenance of written bars are asserted exactly. Throttle: one test runs
-the REAL ``KiteClient`` facade with a spy limiter to prove every backfill request is acquired
-through the shared RateLimiter's ``historical`` bucket (≤3 req/s — pacing itself is covered by
-test_rate_limiter.py).
+A fake kite client records every historical() request, so chunk boundaries (Kite caps: minute ≤60
+days/request, day ≤2000), checkpoint resume and the src provenance of written bars are asserted
+exactly. One test runs the REAL ``KiteClient`` with a spy limiter to prove every request goes through
+the shared RateLimiter's ``historical`` bucket (pacing is test_rate_limiter.py's).
 """
 
 from __future__ import annotations
@@ -54,8 +52,7 @@ class FakeKite:
 
 
 def one_minute_candle(token, frm, to, interval):
-    """One 09:15 candle on the chunk's LAST day — data present through the requested end, so the
-    observed-through checkpoint lands on the chunk end (one bar per request keeps counting easy)."""
+    """One 09:15 candle on the chunk's LAST day, so the observed-through checkpoint lands on the chunk end."""
     ts = to.replace(hour=9, minute=15, second=0, microsecond=0)
     return [{"date": ts, "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.55, "volume": 1234}]
 
@@ -95,8 +92,7 @@ async def test_minute_backfill_chunks_at_60_days(store, clock, conn):
     assert len(report.fetched) == 3 and not report.failed
     assert _checkpoint(conn, "RELIANCE", "minute") == end.isoformat()
 
-    # Bars landed src='kite_official' (canonical official rows), prices Decimal-exact, NO
-    # re-adjustment applied (Kite candles are already corp-action adjusted).
+    # src='kite_official', prices Decimal-exact, no re-adjustment (Kite candles are already adjusted)
     bars = store.get_bars_1m(
         "RELIANCE",
         clock.combine(dt.date(2026, 1, 1), dt.time(0, 0)),
@@ -126,11 +122,10 @@ async def test_day_backfill_single_chunk_writes_bars_1d(store, clock, conn):
     assert _checkpoint(conn, "TCS", "day") == end.isoformat()
 
 
-# ---------------------------------------------------- observed-through checkpoints (2026-07-28)
+# ---------------------------------------------------- observed-through checkpoints
 async def test_empty_chunk_never_advances_the_checkpoint(store, clock, conn):
-    """The 2026-07-28 poisoning: a day requested before its bar exists (pre-close "today") must
-    stay un-checkpointed — recording the REQUESTED end as complete made the hole permanent
-    ("already_complete" on every later pass; warm-up froze on the missing session)."""
+    """A day requested before its bar exists (pre-close "today") stays un-checkpointed: recording the
+    REQUESTED end as complete would make the hole permanent ("already_complete" on every later pass)."""
     kite = FakeKite()                                           # returns [] for every request
     d = dt.date(2026, 7, 28)
     report = await _job(store, kite, clock, conn).run(["TCS"], "day", d, d)
@@ -148,8 +143,7 @@ async def test_empty_chunk_never_advances_the_checkpoint(store, clock, conn):
 
 
 async def test_checkpoint_advances_only_to_the_last_observed_candle(store, clock, conn):
-    """Candles short of the requested end (unpublished tail): checkpoint = observed-through, so
-    the missing tail is re-fetched by the next run instead of being skipped forever."""
+    """With candles short of the requested end the checkpoint is observed-through, so the missing tail is re-fetched."""
     def first_day_only(token, frm, to, interval):
         return [{"date": frm, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1}]
 
@@ -209,7 +203,7 @@ async def test_unknown_token_is_reported_failed_without_a_request(store, clock, 
     assert report.ok is True                    # one unmapped symbol: no retry can fetch it
 
 
-# ------------------------------------------------------------------ TokenException abort (2026-07-21)
+# ------------------------------------------------------------------ TokenException abort
 class _TokenKite:
     """historical() always raises TokenException (a dead token fails every call identically)."""
 
@@ -223,8 +217,7 @@ class _TokenKite:
 
 async def test_run_aborts_whole_run_on_token_rejection(store, clock, conn):
     """A rejected token aborts the ENTIRE run after the first request: the attempted span carries the
-    real token error, every remaining symbol is reported 'aborted_token_rejected' with no extra
-    requests (no per-symbol hammering)."""
+    real error, every remaining symbol is 'aborted_token_rejected' with no extra requests."""
     kite = _TokenKite()
     job = _job(store, kite, clock, conn)
     report = await job.run(
@@ -241,7 +234,7 @@ async def test_run_aborts_whole_run_on_token_rejection(store, clock, conn):
 
 
 async def test_run_non_token_error_only_fails_that_symbol_and_continues(store, clock, conn):
-    """A NON-token error is isolated to its symbol (existing behaviour): the next symbol still runs."""
+    """A non-token error is isolated to its symbol; the next symbol still runs."""
     kite = FakeKite(one_minute_candle, fail_on_call={0})   # RELIANCE (call 0) raises RuntimeError
     job = _job(store, kite, clock, conn)
     report = await job.run(["RELIANCE", "TCS"], "minute", dt.date(2026, 1, 1), dt.date(2026, 1, 10))
@@ -285,8 +278,7 @@ class _FakeKC:
 
 
 async def test_every_request_goes_through_the_rate_limiter(store, clock, conn):
-    """BackfillJob → KiteClient.historical → RateLimiter.acquire('historical') — the ≤3 req/s
-    budget is enforced by the shared limiter, one acquire per chunk request."""
+    """BackfillJob → KiteClient.historical → RateLimiter.acquire('historical'): one acquire per chunk request."""
     spy = _SpyLimiter()
     real_client = KiteClient(_FakeKC(), spy, clock)
     job = _job(store, real_client, clock, conn)
@@ -343,12 +335,11 @@ async def test_warmup_gap_failure_isolated_per_symbol(store, clock, conn):
     assert report.bars_written == 1
 
 
-# ------------------------- 2026-09-18: upstream-confirmed no-trade minutes (bars_1m_no_trade) ----
-# A thin, high-priced symbol (PTCIL 13:36 on 09-16; DEEPAKNTR 374/375 on 09-17) has minutes in which
-# NOTHING trades: no tick ⇒ no self-built bar, and Kite publishes no candle for a tradeless minute ⇒
-# the gap fill fetches the day and writes nothing. The minute was a permanent hole that refused the
-# symbol for the whole session. ``confirm_until`` lets warmup_gap record it as an OBSERVATION instead,
-# under four guards. The conftest clock is 2026-06-17 10:05 IST, so gaps are built well before it.
+# ------------------------- upstream-confirmed no-trade minutes (bars_1m_no_trade) ----
+# A thin, high-priced symbol has minutes in which NOTHING trades: no tick ⇒ no self-built bar, and
+# Kite publishes no candle ⇒ the gap fill writes nothing and the minute is a permanent hole.
+# ``confirm_until`` lets warmup_gap record it as an observation instead, under four guards.
+# The conftest clock is 2026-06-17 10:05 IST, so gaps are built well before it.
 NOW = dt.datetime(2026, 6, 17, 10, 5, tzinfo=IST)          # == tests.conftest.FIXED_NOW
 FOUR_TOKENS = {"PTCIL": 1, "MRF": 2, "SHYAMMETL": 3, "KIMS": 4}
 
@@ -371,9 +362,8 @@ def _minutes(base, *offsets):
 
 
 async def test_warmup_gap_confirms_upstream_empty_minutes(store, clock, conn):
-    """The PTCIL case end to end: Kite returns the day's candles for the symbol and a LATER one, but
-    none for 09:57 — which the store also lacks. That minute is upstream-confirmed no-trade, so it is
-    recorded in bars_1m_no_trade (never as a bar) and coverage_gaps then reads clean."""
+    """Kite returns candles plus a LATER one but none for 09:57, which the store also lacks: that minute
+    is upstream-confirmed no-trade, recorded in bars_1m_no_trade (never as a bar), and coverage_gaps reads clean."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)          # 09:55..09:59, ends 6 min before "now"
     quiet = base + dt.timedelta(minutes=2)                  # 09:57 — nothing traded
@@ -387,18 +377,17 @@ async def test_warmup_gap_confirms_upstream_empty_minutes(store, clock, conn):
     assert report.no_trade_confirmed == 1
     assert report.no_trade_correlated_skipped == 0
     assert not report.failed
-    # No synthetic bar: bars_1m holds the four real minutes and nothing at 09:57.
+    # no synthetic bar: bars_1m holds the four real minutes
     assert [b.ts_minute for b in store.get_bars_1m("PTCIL", frm, to)] == traded
     assert store.no_trade_minutes("PTCIL", frm, to) == {quiet}
-    # …and the startup recovery now sees contiguous coverage — the symbol is no longer refused all session.
+    # startup recovery now sees contiguous coverage
     assert store.coverage_gaps("PTCIL", frm, to) == []
     assert store.has_contiguous_coverage("PTCIL", frm, to) is True
 
 
 async def test_warmup_gap_guard_b_needs_a_later_kite_candle(store, clock, conn):
-    """Guard B: the missing minute must be BEFORE the symbol's last returned candle. Here it is the
-    last minute Kite could have returned, so a Kite-side truncation and a tradeless minute look
-    identical — leave the hole; the next pass will have a later candle to prove the feed got there."""
+    """Guard B: the missing minute must be BEFORE the symbol's last returned candle; at the span's tail a
+    Kite-side truncation and a tradeless minute look identical, so the hole stays until a later candle proves the feed got there."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     tail = base + dt.timedelta(minutes=4)                   # 09:59 — the LAST minute in the span
@@ -416,9 +405,8 @@ async def test_warmup_gap_guard_b_needs_a_later_kite_candle(store, clock, conn):
 async def test_warmup_gap_guard_c_never_confirms_a_minute_kite_may_not_have_published_yet(
     store, clock, conn
 ):
-    """Guard C: the cutoff is ``min(confirm_until, now − 2 min)``. 10:04 is one minute old — Kite may
-    simply not have published it yet — so it stays a hole even though a 10:05 candle exists (guard B
-    passes). The older 10:01 miss, the control, IS confirmed: only the cutoff separates them."""
+    """Guard C: the cutoff is ``min(confirm_until, now − 2 min)``. 10:04 is too new (Kite may not have
+    published it) so it stays a hole although a 10:05 candle exists; the older 10:01 miss is confirmed."""
     base = dt.datetime(2026, 6, 17, 10, 0, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=6)          # 10:00..10:05, now == 10:05
     too_new = base + dt.timedelta(minutes=4)                # 10:04 — inside now − 2 min
@@ -434,8 +422,7 @@ async def test_warmup_gap_guard_c_never_confirms_a_minute_kite_may_not_have_publ
 
 
 async def test_warmup_gap_guard_a_confirms_nothing_when_kite_returns_no_candles(store, clock, conn):
-    """Guard A: if Kite answered with NOTHING for the span, a broker outage and a genuinely dead
-    symbol are indistinguishable. Confirm nothing — every minute stays a hole."""
+    """Guard A: with NO candles for the span an outage and a dead symbol are indistinguishable, so nothing is confirmed."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     kite = FakeKite()                                       # returns [] for every request
@@ -450,9 +437,9 @@ async def test_warmup_gap_guard_a_confirms_nothing_when_kite_returns_no_candles(
 
 
 async def test_warmup_gap_guard_d_skips_correlated_misses(store, clock, conn):
-    """Guard D: thin symbols go quiet INDEPENDENTLY. The same minute missing across
-    ``max(3, ceil(5% of answered))`` of the swept symbols is a FEED gap, not four coincidences — it is
-    dropped for every symbol and counted, never confirmed. One symbol missing it alone is confirmed."""
+    """Guard D: thin symbols go quiet independently, so the same minute missing across
+    ``max(3, ceil(5% of answered))`` swept symbols is a FEED gap: dropped for every symbol and counted.
+    One symbol missing it alone is confirmed."""
     syms = list(FOUR_TOKENS)
 
     # (a) ALL FOUR miss 09:57 ⇒ 4 >= max(3, ceil(0.05*4)) = 3 ⇒ correlated ⇒ nothing confirmed.
@@ -492,8 +479,7 @@ async def test_warmup_gap_guard_d_skips_correlated_misses(store, clock, conn):
 
 
 async def test_warmup_gap_confirms_nothing_without_confirm_until(store, clock, conn):
-    """The legacy default is untouched: no ``confirm_until`` ⇒ no confirmation, no table row, and the
-    tradeless minute stays a coverage hole exactly as before 2026-09-18."""
+    """No ``confirm_until`` ⇒ no confirmation, no table row; the tradeless minute stays a coverage hole."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     quiet = base + dt.timedelta(minutes=2)
@@ -509,9 +495,8 @@ async def test_warmup_gap_confirms_nothing_without_confirm_until(store, clock, c
 
 
 async def test_confirmed_minutes_are_not_refetched(store, clock, conn):
-    """The confirmation is spent ONCE: coverage_gaps now reads clean for the healed symbol, so the
-    next warmup_gap's per-symbol gap check skips it before any network call (the same
-    fill-gaps-only contract that makes a fully-covered symbol free)."""
+    """The confirmation is spent ONCE: coverage_gaps reads clean for the healed symbol, so the next
+    warmup_gap skips it before any network call."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     kite = FakeKite(lambda *_a: _candles(_minutes(base, 0, 1, 3, 4)))
@@ -529,8 +514,7 @@ async def test_confirmed_minutes_are_not_refetched(store, clock, conn):
 
 
 class _LateTokenKite(_TokenKite):
-    """Answers the FIRST symbol (leaving it a real confirmation candidate), then dies like its
-    parent — the shape that proves the abort discards work already staged in the collect pass."""
+    """Answers the FIRST symbol (a real confirmation candidate), then dies like its parent."""
 
     def __init__(self, candles_fn) -> None:
         super().__init__()
@@ -544,8 +528,8 @@ class _LateTokenKite(_TokenKite):
 
 
 async def test_warmup_gap_token_abort_discards_pending_confirmations(store, clock, conn):
-    """A token rejection aborts the sweep mid-way, so ``answered`` is not the denominator guard D was
-    calibrated on. PTCIL was processed first and HAD a candidate — the write pass still confirms nothing."""
+    """A token abort mid-sweep leaves ``answered`` short of guard D's denominator, so the write pass
+    confirms nothing even though PTCIL, processed first, had a candidate."""
     base = dt.datetime(2026, 6, 17, 9, 55, tzinfo=IST)
     frm, to = base, base + dt.timedelta(minutes=5)
     quiet = base + dt.timedelta(minutes=2)
@@ -561,9 +545,7 @@ async def test_warmup_gap_token_abort_discards_pending_confirmations(store, cloc
     assert report.bars_written == 4                          # PTCIL's real bars still landed
 
 
-# ------------------------------------------------------------------ 2026-09-15: daily_gap (WarmupGate
-# daily window repair — OLAELEC entered the watchlist with a 57-session bars_1d hole and froze the
-# DAILY class for 12 h; the minute-only newcomer fill never touched daily history at all).
+# ------------------------------------------------------------------ daily_gap (WarmupGate daily window repair)
 DAILY_SESSIONS_5 = [
     dt.date(2026, 6, 10), dt.date(2026, 6, 11), dt.date(2026, 6, 12),
     dt.date(2026, 6, 13), dt.date(2026, 6, 14),
@@ -571,8 +553,7 @@ DAILY_SESSIONS_5 = [
 
 
 def five_session_day_candles(token, frm, to, interval):
-    """One candle per session in DAILY_SESSIONS_5 — the whole 5-day span fits one chunk (« 2000-day
-    cap), so a single request returns candles for every requested date regardless of frm/to."""
+    """One candle per session in DAILY_SESSIONS_5; the span fits one chunk, so a single request returns every date."""
     return [
         {"date": dt.datetime(d.year, d.month, d.day, tzinfo=IST), "open": 10.0, "high": 12.0,
          "low": 9.0, "close": 50.0 + i, "volume": 100 + i}

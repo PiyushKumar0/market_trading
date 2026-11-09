@@ -1,25 +1,14 @@
-"""Store isolation (2026-08-25): the tick-flush starvation class, closed.
+"""Store isolation: the tick-flush starvation class.
 
-Three trading days died of the same mechanism. ``flush_ticks`` is called once per tick event whose
-batch is due, it serialized whole flushes on ``_flush_lock``, and every wrapper on ``MarketStore``
-offloaded via ``asyncio.to_thread`` -- the ONE default executor the whole process shares. So a flush
-that ran long turned each further tick into another blocked worker: on 08-25 a stack dump caught ~20
-of them stopped at that lock, the pool was gone, and for 4 h 24 min nothing else in the engine could
-get a thread. The intelligence layer ran empty for the entire session -- zero candidates, zero
-analyst calls -- because scan-context reads never got a worker. The health watchdog could not say so
-either: its first probe never got a worker, and being strictly single-flight it then re-reported that
-same 09:15 observation 264 times.
-
-What is pinned here is the whole fix, in the order the failure unfolded:
+``flush_ticks`` runs once per due tick event and serializes on ``_flush_lock``; if store wrappers
+shared the process's default ``asyncio.to_thread`` executor, a long flush would turn every further
+tick into a blocked worker and starve the whole engine of threads. Pinned here:
 
 * a flush that finds another in flight RETURNS -- it never queues (and the staged ticks survive it);
-* store work runs on the store's OWN pools, ``mt-store`` for reads and ``mt-flush`` for the flush,
-  so neither can starve the other and nothing outside can starve either;
-* saturating the store pool leaves an unrelated ``asyncio.to_thread`` untouched -- the isolation
-  property, stated as a test;
-* a flush no longer re-proves ~200 partition directories into existence on every pass;
-* and the watchdog gets FRESH evidence every fifth pending pulse, so "probe_pending=true,
-  consecutive=264, nothing new for 4.4 h" is now unreachable.
+* store work runs on the store's OWN pools, ``mt-store`` for reads and ``mt-flush`` for the flush;
+* saturating the store pool leaves an unrelated ``asyncio.to_thread`` untouched;
+* a flush does not re-prove ~200 partition directories into existence on every pass;
+* the watchdog gets FRESH evidence every fifth pending pulse instead of re-reporting one stuck probe.
 """
 
 from __future__ import annotations
@@ -51,9 +40,8 @@ from tests.unit.test_store_stall_watchdog import (
 #: the assertion, never hang the suite (there is no pytest-timeout here).
 SLOW_FLUSH_MAX_S = 5.0
 
-#: Enough blocked calls to saturate the DEFAULT executor too (its width is min(32, cpu+4)), which is
-#: what makes the isolation test a real regression guard rather than a tautology: before the store isolation change these
-#: same calls WERE default-executor threads.
+#: Enough blocked calls to saturate the DEFAULT executor too (its width is min(32, cpu+4)), so the
+#: isolation test is a real regression guard rather than a tautology.
 SATURATING_CALLS = 40
 
 STORE_LOGGER = "engine.marketdata.store"
@@ -81,12 +69,8 @@ def log_lines(caplog, event: str) -> list:
 # ------------------------------------------------------------------ 1 + 2: skip, and lose nothing
 def test_a_flush_during_a_flush_returns_at_once_and_the_staged_ticks_survive(store, clock, caplog,
                                                                             monkeypatch):
-    """The pile-up, reproduced -- and refused.
-
-    One flush is held open inside ``_bulk_write``; the flush the next tick triggers must come
-    straight back rather than parking a thread on ``_flush_lock``. Its ticks are not dropped for
-    that: they are still staged, and the next cycle writes them.
-    """
+    """With one flush held open inside ``_bulk_write``, the flush the next tick triggers returns at once
+    rather than parking a thread on ``_flush_lock``; its ticks stay staged for the next cycle."""
     started, release = threading.Event(), threading.Event()
     real_bulk = store._bulk_write
 
@@ -101,8 +85,7 @@ def test_a_flush_during_a_flush_returns_at_once_and_the_staged_ticks_survive(sto
     slow.start()
     assert started.wait(SLOW_FLUSH_MAX_S), "the first flush never entered the critical section"
 
-    # A tick arrives mid-flush and trips the batch. Under the old code this call parked a worker
-    # thread here for the whole duration of the flush in front of it.
+    # a tick arrives mid-flush and trips the batch
     store.stage_tick(_tick(clock.now() + timedelta(seconds=1), vol=101))
     with caplog.at_level(logging.INFO, logger=STORE_LOGGER):
         t0 = time.monotonic()
@@ -113,8 +96,7 @@ def test_a_flush_during_a_flush_returns_at_once_and_the_staged_ticks_survive(sto
     assert elapsed < 1.0, f"the flush BLOCKED for {elapsed:.2f}s instead of skipping"
     assert store.tick_flush_skips == 3
     assert store.pending_tick_count == 1          # the second tick is staged, not lost, not written
-    # Skips are the designed response to a burst, so they are counted always and logged at most once
-    # a minute -- one line per skipped flush would be one line per tick during the storm itself.
+    # skips are counted always but logged at most once a minute (else one line per tick in a burst)
     skipped = log_lines(caplog, "flush_skipped_in_flight")
     assert len(skipped) == 1
     assert skipped[0].skipped_total == 1 and skipped[0].pending_ticks == 1
@@ -131,9 +113,8 @@ def test_a_flush_during_a_flush_returns_at_once_and_the_staged_ticks_survive(sto
 
 
 def test_close_waits_for_an_in_flight_flush_instead_of_skipping_it(tmp_path, clock, monkeypatch):
-    """The one caller that may not skip: after ``close`` the connection is gone, so a skipped batch
-    would have nowhere left to go. The wait is bounded -- shutdown must not hang on a wedged flush --
-    but it is a wait, and this is the call site the skip semantics had to be checked against."""
+    """``close`` is the one caller that may not skip (the connection is gone afterwards): it waits,
+    bounded so shutdown cannot hang on a wedged flush."""
     store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock)
     store.open()
     started, release = threading.Event(), threading.Event()
@@ -175,8 +156,7 @@ def test_close_waits_for_an_in_flight_flush_instead_of_skipping_it(tmp_path, clo
 
 # ------------------------------------------------------------------ 3: which pool ran what
 async def test_store_calls_run_on_mt_store_and_flushes_on_mt_flush(tmp_path, clock, monkeypatch):
-    """Thread names are the cheapest proof that the offloads landed where they were routed -- and
-    the only proof that survives a refactor of how they get there."""
+    """Thread names prove the offloads landed on the pool they were routed to."""
     store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=1)
     store.open()
     try:
@@ -192,8 +172,7 @@ async def test_store_calls_run_on_mt_store_and_flushes_on_mt_flush(tmp_path, clo
 
         monkeypatch.setattr(store, "ping", spy_ping)
         assert await store.aping() is True
-        # The probe rides the pool the engine really uses: a private thread would answer "the lock
-        # is free" while the path that matters was starved -- the one lie the watchdog must not tell.
+        # the probe rides the pool the engine really uses: a private thread could say "free" while that path is starved
         assert seen[-1].startswith("mt-store")
 
         real_flush = store.flush_ticks
@@ -207,8 +186,7 @@ async def test_store_calls_run_on_mt_store_and_flushes_on_mt_flush(tmp_path, clo
         assert len(await store.aflush_ticks()) == 1
         assert seen[-1].startswith("mt-flush")
 
-        # Separate pools, and the flush pool is exactly one thread wide: flushes are single-flight
-        # already, so a second flush thread could only ever wait on the first.
+        # Separate pools; the flush pool is one thread wide (flushes are single-flight).
         assert store._pool() is not store._flush_pool()
         assert store._pool()._max_workers == _STORE_EXECUTOR_WORKERS
         assert store._flush_pool()._max_workers == 1
@@ -218,11 +196,9 @@ async def test_store_calls_run_on_mt_store_and_flushes_on_mt_flush(tmp_path, clo
 
 
 async def test_the_live_flush_path_skips_without_even_reaching_the_pool(tmp_path, clock):
-    """``BarBuilder.on_tick_event`` awaits ``aflush_ticks`` once per due tick. If the skip were only
-    discovered inside the worker, each of those ticks would still queue behind a flush that can run
-    for seconds -- the pile-up in its last remaining form, now made of queue entries and tick-handler
-    latency instead of threads. So the skip is decided on the loop: no hop, no queue entry, and the
-    flush pool is not even constructed."""
+    """``BarBuilder.on_tick_event`` awaits ``aflush_ticks`` once per due tick; a skip discovered only
+    inside the worker would still queue each tick behind a long flush. So the skip is decided on the
+    loop: no hop, no queue entry, and the flush pool is not even constructed."""
     store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=1)
     store.open()
     started, release = threading.Event(), threading.Event()
@@ -247,18 +223,16 @@ async def test_the_live_flush_path_skips_without_even_reaching_the_pool(tmp_path
     finally:
         release.set()
         holder.join(SLOW_FLUSH_MAX_S * 2)
-        # ...and the next cycle, with the lock free, goes all the way through to parquet.
+        # with the lock free the next cycle goes through to parquet
         assert len(await store.aflush_ticks()) == 1
         store.close()
 
 
 async def test_a_flush_queued_behind_one_that_drained_the_batch_writes_nothing(tmp_path, clock,
                                                                               monkeypatch):
-    """``locked()`` cannot see a flush that is queued but not yet started, so every tick event of a
-    burst handled before the pool thread takes the lock queues one more. Live on 2026-09-29 the
-    queue ran back to back -- a flush every 3.2 s of ~630 ticks, ~280 files each -- because a queued
-    flush wrote whatever had been staged since the one in front of it. It must re-check that the
-    batch is still due once it holds the lock."""
+    """``locked()`` cannot see a queued-but-unstarted flush, so a burst queues one more per tick event;
+    a queued flush must re-check that the batch is still due once it holds the lock, else the queue
+    runs back to back writing tiny batches."""
     store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock, max_buffered_ticks=2)
     store.open()
     occupied, release = threading.Event(), threading.Event()
@@ -296,12 +270,8 @@ async def test_a_flush_queued_behind_one_that_drained_the_batch_writes_nothing(t
 
 # ------------------------------------------------------------------ 4: the isolation property
 async def test_a_saturated_store_pool_cannot_starve_an_unrelated_to_thread(tmp_path, clock):
-    """08-25 in one assertion.
-
-    ``SATURATING_CALLS`` blocked store calls is more than the default executor's whole width, so
-    before the store isolation change this is precisely the state the process was in when the intelligence layer went
-    silent: every default-executor thread held by the store, nothing else able to get one. With the
-    store on its own pool the unrelated offload does not even notice.
+    """``SATURATING_CALLS`` blocked store calls exceed the default executor's whole width; with the store
+    on its own pool an unrelated ``asyncio.to_thread`` does not notice.
     """
     store = MarketStore(tmp_path / "m.duckdb", tmp_path / "pq", clock)
     store.open()
@@ -326,9 +296,8 @@ async def test_a_saturated_store_pool_cannot_starve_an_unrelated_to_thread(tmp_p
 
 # ------------------------------------------------------------------ 5: the partition-dir cache
 def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock, monkeypatch):
-    """A steady-state flush used to spend ~200 filesystem round-trips re-proving directories that
-    the flush 60 s earlier had already created -- inside ``_flush_lock``, which is where flush
-    duration turns into caller pile-up. Cached per (date, symbol), dropped on date rollover."""
+    """A steady-state flush must not re-prove already-created directories (inside ``_flush_lock``, where
+    flush duration becomes caller pile-up). Cached per (date, symbol), dropped on date rollover."""
     made: list[str] = []
     real_mkdir = Path.mkdir
 
@@ -339,9 +308,8 @@ def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock
     monkeypatch.setattr(Path, "mkdir", spy_mkdir)
 
     def partitions_touched() -> set[str]:
-        """The tick partitions the flush made a filesystem call for. A SET, because
-        ``mkdir(parents=True)`` legitimately re-enters itself per path -- what is under test is
-        which partitions were touched at all, not how pathlib gets there."""
+        """The tick partitions the flush made a filesystem call for (a SET: ``mkdir(parents=True)``
+        re-enters itself per path)."""
         return {p.rsplit("/ticks/", 1)[1] for p in made if "/symbol=" in p}
 
     today = clock.today().isoformat()
@@ -358,7 +326,7 @@ def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock
     assert len(store.flush_ticks()) == 2
     assert partitions_touched() == set()              # second pass: zero filesystem calls
 
-    # Date rollover drops the cache -- tomorrow's partitions are new directories and must be made.
+    # date rollover drops the cache: tomorrow's partitions are new directories
     made.clear()
     tomorrow = clock.now() + timedelta(days=1)
     for symbol in ("RELIANCE", "TCS"):
@@ -374,12 +342,9 @@ def test_partition_dirs_are_created_once_per_day_not_once_per_flush(store, clock
 # ------------------------------------------------------------------ 6: the watchdog re-probe
 # (StuckThenFreshStore + drain_all live in test_store_stall_watchdog with the other watchdog fixtures.)
 async def test_a_pending_probe_no_longer_blocks_fresh_evidence(caplog):
-    """264 consecutive pulses of the same 09:15 observation must be unreachable.
-
-    Four pending pulses still start nothing (single-flight is right for a short seizure); the fifth
-    abandons the stuck probe and asks again. That fresh probe answers, which is the finding the old
-    watchdog structurally could not produce -- and the two facts it leaves are both logged: the store
-    is usable NOW, and one worker went in and never came back.
+    """A stuck probe must not be re-reported forever: four pending pulses start nothing (single-flight),
+    the fifth abandons the stuck probe and asks again. The fresh probe answers, and both facts are
+    logged: the store is usable NOW, and one worker went in and never came back.
     """
     at = Ticker(NOW)
     store = StuckThenFreshStore()
@@ -398,7 +363,7 @@ async def test_a_pending_probe_no_longer_blocks_fresh_evidence(caplog):
         assert all(s.abandoned == 0 for s in stalls)        # nothing abandoned while it was watched
         assert store.pings == 2, "the pending probe was never re-issued -- 08-25 all over again"
 
-        # The fresh probe answered while the old one still hangs: recovered, AND anomalous.
+        # the fresh probe answered while the old one still hangs: recovered, AND anomalous
         anomalies = events(caplog, "store_probe_anomaly")
         assert len(anomalies) == 1
         assert anomalies[0].levelname == "INFO"
@@ -414,8 +379,7 @@ async def test_a_pending_probe_no_longer_blocks_fresh_evidence(caplog):
 
 
 async def test_the_abandoned_count_drops_once_the_stuck_probe_finally_answers(caplog):
-    """``abandoned`` counts threads currently swallowed, not a lifetime total -- otherwise the number
-    that says "this is still happening" would keep saying it long after it stopped."""
+    """``abandoned`` counts threads currently swallowed, not a lifetime total."""
     at = Ticker(NOW)
     store = StuckThenFreshStore()
     mon = monitor(store, clock=Clock(time_source=at))
@@ -442,14 +406,12 @@ async def test_the_abandoned_count_drops_once_the_stuck_probe_finally_answers(ca
 
 
 def test_no_shared_executor_dispatch_remains_in_store_py():
-    """2026-09-02 review: five filings wrappers that predate the store isolation change were missed by the to_thread->_off
-    migration, silently re-opening the shared-executor starvation path. Pin the invariant the
-    store-isolation docstrings claim ("never asyncio.to_thread") at the source level."""
+    """store.py never dispatches through ``asyncio.to_thread``: a missed wrapper would silently re-open
+    the shared-executor starvation path."""
     from pathlib import Path
 
     import engine.marketdata.store as store_mod
 
     source = Path(store_mod.__file__).read_text(encoding="utf-8")
-    # Call sites only — the store-isolation docstrings legitimately NAME asyncio.to_thread while explaining
-    # why it must never be used here.
+    # call sites only: docstrings legitimately NAME asyncio.to_thread
     assert "asyncio.to_thread(" not in source

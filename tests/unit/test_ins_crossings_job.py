@@ -1,10 +1,8 @@
 """`ins` EOD job + morning admission — the crossing seam, the pending journal, the once-only bound.
 
-The load-bearing test in this file is :func:`test_golden_live_job_and_validated_study_agree`: the live
-job and the validated study must produce the SAME crossings from the same fixture, because the whole
-justification for shipping `ins` is evidence measured by that study. A drift between the two would
-mean trading a population the evidence never measured. It is pinned two ways — by FUNCTION IDENTITY
-(one definition, not two copies that happen to agree today) and by BEHAVIOUR on a shared fixture.
+The load-bearing test is :func:`test_golden_live_job_and_validated_study_agree`: the live job and the
+validated study must produce the SAME crossings, pinned by function identity and by behaviour on a
+shared fixture, so the traded population is the one the evidence measured.
 """
 
 from __future__ import annotations
@@ -89,8 +87,7 @@ class _FakeStore:
         self.bars_calls: list[str] = []
 
     def get_universe_eligible_symbols(self, d: date) -> list[str]:
-        # 2026-09-01: the predicate lives in the store. Owner decision 2026-10-08: the job no longer reads
-        # this view; it is kept so a regression back to it shows up as the non-core names leaking.
+        # The job does not read this view; kept so a regression to it shows as non-core names leaking.
         return sorted(self.universe + self.non_core)
 
     def get_core_eligible_symbols(self, d: date) -> list[str]:
@@ -137,7 +134,7 @@ def calendar(clock) -> NSECalendar:
 
 
 def _store_with_crossing_today() -> _FakeStore:
-    """Two ₹6L... no: two ₹60L open-market buys inside the trailing window, the second landing ON the
+    """Two ₹60L open-market buys inside the trailing window, the second landing ON the
     run day, so the trailing sum crosses ₹1cr exactly at ``RUN_DAY``."""
     filings = [
         _buy(SESSIONS[-3], 6_000_000),
@@ -159,24 +156,22 @@ def _pending_rows(conn) -> list[dict[str, Any]]:
 
 # =========================================================================== THE GOLDEN SEAM TEST
 def test_golden_shared_crossing_function_is_one_definition_not_a_copy():
-    """Identity, not equality: the study, the engine event builder and the live job must all resolve
-    to the SAME function object. Two copies that agree today are exactly the drift the strategy rules
-    forbid ("the live code MUST consume the same crossing function the validated study runs")."""
+    """Identity, not equality: the study, the engine event builder and the live job resolve to the SAME
+    function object; two copies that agree today are the drift the strategy rules forbid."""
     assert es.insider_cluster_events is insider_crossings.insider_cluster_events
     assert filings_events.insider_cluster_events is insider_crossings.insider_cluster_events
     assert es.is_open_market_buy is insider_crossings.is_open_market_buy
     assert es.entry_session_index is insider_crossings.entry_session_index
     assert es.INSIDER_TRAILING_SESSIONS == insider_crossings.INSIDER_TRAILING_SESSIONS == 10
-    # ...and no engine module path-loads the loose script any more (the pre-2026-08-17 shim).
+    # no engine module path-loads the loose script
     assert not hasattr(filings_events, "_es")
 
 
 def test_golden_live_job_and_validated_study_agree(conn, calendar):
-    """BEHAVIOURAL half of the golden test, on one shared fixture: every crossing session the validated
-    study reports is a crossing session the live job reports, for the same filings and sessions."""
-    # A fixture with three crossings separated by genuine RE-ARMS (each cluster must age out of the
-    # 10-session trailing window before the next can fire), plus an ESOP row the filings-layer taxonomy must
-    # exclude however large. The spacing is the point: it exercises the hysteresis, not just the sum.
+    """Behavioural half of the golden test: the live job's crossing is the validated study's last
+    crossing session on one shared fixture."""
+    # Three crossings separated by genuine RE-ARMS (each cluster must age out of the 10-session
+    # trailing window before the next fires), plus an ESOP row that must be excluded however large.
     filings = [
         _buy(SESSIONS[2], 6_000_000),
         _buy(SESSIONS[3], 6_000_000),        # crossing #1 at [3] (trailing 12M)
@@ -198,13 +193,11 @@ def test_golden_live_job_and_validated_study_agree(conn, calendar):
     result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
     assert result.ok
 
-    # The job journals only TODAY's crossing (older ones were journalled on their own run days), so
-    # the agreement to assert is: the job's crossing is exactly the study's LAST crossing session.
+    # The job journals only TODAY's crossing, so it must equal the study's LAST crossing session.
     rows = _pending_rows(conn)
     assert [r["crossing_session"] for r in rows] == [study_sessions[-1].isoformat()]
 
-    # ...and the full crossing SET agrees when the same window is put to the engine-side builder —
-    # the function both sides call.
+    # the full crossing SET agrees through the engine-side builder
     engine_sessions = [
         e["event_session"]
         for e in filings_events.insider_net_buy(filings, SESSIONS, min_value_inr=THRESHOLD)
@@ -235,8 +228,8 @@ def test_job_persists_pending_rows_for_the_next_session(conn, calendar):
 
 
 def test_friday_crossings_target_monday_when_special_sessions_are_excluded(conn, clock):
-    """The live calendar (include_special=False, 2026-10-11) closes the Sunday 2026-11-08 muhurat, so
-    Friday 11-06's crossings are keyed to Monday 11-09, the next session the live sweep runs."""
+    """With include_special=False the Sunday 2026-11-08 muhurat is closed, so Friday's crossings are
+    keyed to Monday 11-09."""
     friday = date(2026, 11, 6)
     sessions = _sessions(30, end=friday)
     store = _FakeStore(
@@ -253,8 +246,8 @@ def test_friday_crossings_target_monday_when_special_sessions_are_excluded(conn,
 
 
 def test_job_only_journals_crossings_dated_the_run_day(conn, calendar):
-    """A crossing that happened earlier in the lookback window was journalled on ITS run day.
-    Re-emitting it every night would re-originate stale events forever."""
+    """An earlier crossing was journalled on its own run day; re-emitting it nightly would re-originate
+    stale events."""
     filings = [_buy(SESSIONS[3], 11_000_000)]          # crosses at SESSIONS[3], not the run day
     store = _FakeStore(
         universe=["AAA"], filings=filings, closes={"AAA": {d: "100.00" for d in SESSIONS}}
@@ -266,8 +259,7 @@ def test_job_only_journals_crossings_dated_the_run_day(conn, calendar):
 
 
 def test_job_is_idempotent_per_day(conn, calendar):
-    """A catch-up replay / missed-job sweep / manual --once must UPSERT, never queue a duplicate
-    candidate: the (for_session, symbol) primary key is the structural bound."""
+    """Replays upsert, never queue a duplicate: the (for_session, symbol) primary key is the bound."""
     store = _store_with_crossing_today()
     job = InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD)
     first = _run(job)
@@ -279,9 +271,7 @@ def test_job_is_idempotent_per_day(conn, calendar):
 
 
 def test_a_rerun_never_un_consumes_an_already_admitted_row(conn, calendar):
-    """The idempotent upsert must leave ``consumed`` alone — otherwise an evening catch-up pass for
-    today would resurrect a candidate the morning sweep already admitted, and it would be admitted a
-    second time."""
+    """The upsert leaves ``consumed`` alone, else a catch-up pass would readmit a candidate already admitted."""
     store = _store_with_crossing_today()
     job = InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD)
     _run(job)
@@ -296,8 +286,7 @@ def test_a_rerun_never_un_consumes_an_already_admitted_row(conn, calendar):
 
 
 def test_esop_rows_never_produce_a_crossing(conn, calendar):
-    """Filings-layer taxonomy, end-to-end through the live job: an ESOP allotment is not an open-market buy
-    however large, so it can never originate an `ins` candidate."""
+    """An ESOP allotment or inter-se transfer is not an open-market buy however large."""
     filings = [
         _buy(SESSIONS[-1], 900_000_000, mode="ESOP Allotment"),
         _buy(SESSIONS[-1], 500_000_000, mode="Inter-se Transfer", ident="bse:interse"),
@@ -311,7 +300,7 @@ def test_esop_rows_never_produce_a_crossing(conn, calendar):
 
 
 def test_out_of_universe_symbols_are_ignored(conn, calendar):
-    """BSE serves the whole market; an out-of-universe scrip is EXPECTED, never a candidate."""
+    """BSE serves the whole market; an out-of-universe scrip is never a candidate."""
     filings = [_buy(SESSIONS[-2], 6_000_000, symbol="ZZZ"), _buy(SESSIONS[-1], 6_000_000, symbol="ZZZ")]
     store = _FakeStore(
         universe=["AAA"], filings=filings, closes={"ZZZ": {d: "100.00" for d in SESSIONS}}
@@ -322,9 +311,8 @@ def test_out_of_universe_symbols_are_ignored(conn, calendar):
 
 
 def test_eligible_but_non_core_symbols_are_ignored(conn, calendar):
-    """Owner decision 2026-10-08: the index widened to NIFTY Total Market, but the registered `ins` edge was
-    measured on NIFTY 500-class names, so an ELIGIBLE microcap (non-core) filing a ₹1.2cr buy never
-    becomes a crossing — the job reads the core view, not the eligible one."""
+    """The `ins` edge was measured on NIFTY 500-class names, so an eligible non-core microcap never
+    becomes a crossing: the job reads the core view, not the eligible one."""
     filings = [_buy(SESSIONS[-2], 6_000_000, symbol="MICRO"), _buy(SESSIONS[-1], 6_000_000, symbol="MICRO")]
     store = _FakeStore(
         universe=["AAA"], non_core=["MICRO"], filings=filings,
@@ -336,8 +324,7 @@ def test_eligible_but_non_core_symbols_are_ignored(conn, calendar):
 
 
 def test_missing_run_day_bar_is_counted_never_invented(conn, calendar):
-    """No completed bar for the run day (a bhavcopy gap, or a symbol that did not trade) ⇒ the entry
-    reference does not exist and must NOT be back-filled from an older close."""
+    """No run-day bar (bhavcopy gap or no trade) ⇒ no entry reference; never back-filled from an older close."""
     closes = {"AAA": {d: "100.00" for d in SESSIONS[:-1]}}      # everything EXCEPT the run day
     store = _FakeStore(
         universe=["AAA"],
@@ -352,8 +339,8 @@ def test_missing_run_day_bar_is_counted_never_invented(conn, calendar):
 
 
 def test_no_universe_for_the_day_sinks_the_watermark(conn, calendar):
-    """``ok=False`` = the day could not be EVALUATED, so the catch-up sweep retries it. Distinct from an
-    evaluated day with zero crossings, which is a real answer."""
+    """``ok=False`` = the day could not be evaluated, so the catch-up sweep retries it (unlike a
+    zero-crossing evaluated day)."""
     store = _FakeStore(universe=[], filings=[], closes={})
     result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
     assert result.ok is False
@@ -369,9 +356,7 @@ def test_zero_crossings_on_an_evaluated_day_is_ok_true(conn, calendar):
 
 # =========================================================================== starvation visibility
 def test_run_logs_fresh_feed_counts_next_to_crossings_found(conn, calendar, caplog):
-    """The binding starvation-visibility requirement: one line must distinguish "the BSE fresh
-    feed delivered nothing" (STARVATION — the live-reachability caveat biting) from "a genuinely quiet
-    day". A bare crossings=0 cannot."""
+    """The run line carries fresh-feed counts so starvation is distinguishable from a quiet day."""
     store = _store_with_crossing_today()
     with caplog.at_level("INFO"):
         result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
@@ -384,8 +369,7 @@ def test_run_logs_fresh_feed_counts_next_to_crossings_found(conn, calendar, capl
 
 
 def test_empty_fresh_feed_raises_the_starvation_warning(conn, calendar, caplog):
-    """Zero fresh rows on a run day is the shape of feed starvation and must warn on its own,
-    independent of whether any crossing was found."""
+    """Zero fresh rows on a run day warns on its own, whether or not a crossing was found."""
     store = _FakeStore(universe=["AAA"], filings=[], closes={"AAA": {d: "100.00" for d in SESSIONS}})
     with caplog.at_level("INFO"):
         result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
@@ -395,9 +379,8 @@ def test_empty_fresh_feed_raises_the_starvation_warning(conn, calendar, caplog):
 
 
 def _coverage_store(symbols_with_filings: int, universe_size: int) -> _FakeStore:
-    """A universe of ``universe_size`` names of which the first ``symbols_with_filings`` filed inside
-    the window. Closes are deliberately empty: coverage is about who FILED, and a symbol with no run-
-    day bar still counts (it is `symbols_missing_bar`, a different starvation)."""
+    """``universe_size`` names, the first ``symbols_with_filings`` of which filed in the window. Closes are
+    empty on purpose: coverage counts who FILED, regardless of a run-day bar."""
     universe = [f"S{i:04d}" for i in range(universe_size)]
     filings = [
         _buy(SESSIONS[-1], 1_000_000, symbol=sym) for sym in universe[:symbols_with_filings]
@@ -413,9 +396,8 @@ def _record(caplog, event: str):
 
 
 def test_run_line_carries_issuer_coverage(conn, calendar, caplog):
-    """The SECOND starvation shape (2026-09-12): rows arrive daily so `fresh_feed_empty` never fires,
-    but from a handful of ISSUERS. The 09-10 run: 22 symbols with filings over a 480-name eligible
-    universe — 4.6%, against the ~1,565-issuer NSE corpus the edge was measured on."""
+    """Rows arrive daily (so `fresh_feed_empty` never fires) but from few issuers: the run line carries
+    issuer coverage, 22 of 480 = 4.6%."""
     store = _coverage_store(22, 480)
     with caplog.at_level("INFO"):
         result = _run(InsCrossingsJob(store, conn, _FrozenClock(), calendar, threshold_inr=THRESHOLD))
@@ -427,8 +409,7 @@ def test_run_line_carries_issuer_coverage(conn, calendar, caplog):
 
 
 def test_coverage_warning_fires_below_ten_percent_and_not_at_it(conn, calendar, caplog):
-    """The threshold is strict: 9.9% warns, 10.0% does not. Pinned at the boundary because a feed
-    that drifts to exactly the floor must not silently stop alarming."""
+    """The threshold is strict: 9.9% warns, 10.0% does not."""
     with caplog.at_level("INFO"):
         _run(InsCrossingsJob(_coverage_store(99, 1000), conn, _FrozenClock(), calendar,
                              threshold_inr=THRESHOLD))
@@ -445,8 +426,7 @@ def test_coverage_warning_fires_below_ten_percent_and_not_at_it(conn, calendar, 
 
 
 def test_coverage_warning_is_once_per_run_not_per_symbol(conn, calendar, caplog):
-    """One line per run: the EOD job walks the whole universe, and a per-symbol warning would bury
-    the log exactly as the pre-screen's cap line did."""
+    """One warning per run, not per symbol, so the whole-universe walk does not bury the log."""
     with caplog.at_level("INFO"):
         _run(InsCrossingsJob(_coverage_store(1, 480), conn, _FrozenClock(), calendar,
                              threshold_inr=THRESHOLD))
@@ -454,8 +434,7 @@ def test_coverage_warning_is_once_per_run_not_per_symbol(conn, calendar, caplog)
 
 
 def test_coverage_percent_helper_handles_the_no_universe_day():
-    """``ok=False`` days carry ``universe_symbols=0``; the ``--once`` print formats them through the
-    same helper, so a zero universe must be 0.0, never a ZeroDivisionError."""
+    """A zero universe (``ok=False`` days) gives 0.0, never a ZeroDivisionError."""
     from engine.datafeeds.ins_crossings import coverage_percent
 
     assert coverage_percent(0, 0) == 0.0
@@ -464,10 +443,9 @@ def test_coverage_percent_helper_handles_the_no_universe_day():
 
 
 def test_the_run_line_names_todays_live_issuers_apart_from_the_corpus(conn, calendar, caplog):
-    """``coverage_pct``'s numerator is the 120-day CORPUS, which includes the ~70-day-embargoed NSE
-    PIT rows. One PIT backfill can therefore lift it past the threshold and SILENCE
-    ``ins_feed_coverage_low`` while the live BSE feed still reaches a handful of issuers.
-    ``fresh_symbols_in_universe`` is what survives that: the issuers broadcast ON the run day."""
+    """``coverage_pct`` counts the 120-day corpus (incl. embargoed NSE PIT rows), so a PIT backfill can
+    silence ``ins_feed_coverage_low`` while the live feed reaches few issuers;
+    ``fresh_symbols_in_universe`` (issuers broadcast ON the run day) survives that."""
     universe = [f"S{i:04d}" for i in range(480)]
     backfill = [                                           # bare ids => NSE source (row_source)
         _buy(SESSIONS[0], 1_000_000, symbol=sym, ident=f"pit-{sym}") for sym in universe[:100]
@@ -484,7 +462,7 @@ def test_the_run_line_names_todays_live_issuers_apart_from_the_corpus(conn, cale
 
 
 def test_the_coverage_warning_carries_the_live_issuer_count_too(conn, calendar, caplog):
-    """When the alarm DOES fire it must name both numerators, or reading it requires the run line."""
+    """The alarm names both numerators."""
     with caplog.at_level("INFO"):
         _run(InsCrossingsJob(_coverage_store(22, 480), conn, _FrozenClock(), calendar,
                              threshold_inr=THRESHOLD))
@@ -494,9 +472,8 @@ def test_the_coverage_warning_carries_the_live_issuer_count_too(conn, calendar, 
 
 # =========================================================================== morning admission
 def test_admission_reads_builds_and_consumes_exactly_once(conn, calendar):
-    """The restart-safe once-only bound: ``_read_ins_pending`` sees a row once, and after
-    ``_consume_ins_pending`` a second sweep (or a sweep after a mid-session restart — the flag is
-    PERSISTED, not process memory) sees nothing."""
+    """Once-only admission: after ``_consume_ins_pending`` a second sweep sees nothing, also after a
+    restart (the flag is persisted)."""
     from engine.ops.main import _consume_ins_pending, _read_ins_pending
 
     store = _store_with_crossing_today()
@@ -518,7 +495,7 @@ def test_admission_reads_builds_and_consumes_exactly_once(conn, calendar):
 
 
 def test_admission_ignores_rows_keyed_to_another_session(conn, calendar):
-    """``for_session`` is the key: yesterday's unconsumed leftovers must never leak into today."""
+    """Rows are keyed by ``for_session``; leftovers never leak into another day."""
     from engine.ops.main import _read_ins_pending
 
     store = _store_with_crossing_today()
@@ -528,7 +505,7 @@ def test_admission_ignores_rows_keyed_to_another_session(conn, calendar):
 
 
 def test_admission_survives_a_malformed_row(conn, calendar):
-    """A corrupt row costs itself and nothing else — the sweep must not die on one bad journal row."""
+    """A corrupt row costs only itself."""
     from engine.ops.main import _read_ins_pending
 
     with conn:
@@ -545,8 +522,7 @@ def test_admission_survives_a_malformed_row(conn, calendar):
 
 
 def test_prescreen_per_strategy_cap_binds_ins(conn, calendar):
-    """`ins` goes through ``SignalPreScreen.admit`` like brk20, so the prescreen's per-strategy cap binds —
-    the batch path is not a cap bypass. Shipped cap: 4/day."""
+    """`ins` goes through ``SignalPreScreen.admit``, so the per-strategy cap binds: the batch path is no bypass."""
     from engine.strategy.prescreen import SignalPreScreen
     from engine.strategy.scanners import ins
 
@@ -570,14 +546,8 @@ def test_prescreen_per_strategy_cap_binds_ins(conn, calendar):
 
 
 def test_shipped_settings_cap_ins(conn):
-    """``config/settings.yaml`` ships an explicit ``ins`` sub-cap, below the ``default``.
-
-    4→8 on 2026-08-18 when the day cap was rescaled 20→48 (the origination cap had fallen 2.4x below
-    the analyst forward cap it exists to protect). The behavioural test above deliberately pins its
-    OWN caps rather than reading the shipped file, so a future rescale changes this assertion only.
-    What must stay true is the SHAPE: `ins` is a rare EOD-batch event and stays capped under
-    `default`, so a cluster day cannot let it crowd out the per-bar strategies.
-    """
+    """``config/settings.yaml`` ships an explicit ``ins`` sub-cap below ``default``, so a cluster day
+    cannot crowd out the per-bar strategies. The test above pins its own caps; a rescale changes only this one."""
     from engine.core.config import load_settings
 
     caps = load_settings().strategy.prescreen.max_per_strategy_day
@@ -588,13 +558,11 @@ def test_shipped_settings_cap_ins(conn):
 
 # =========================================================================== the exit path
 def test_time_exit_needs_no_ins_specific_code():
-    """The time exit IS the `ins` exit path — `ins` ships NO exit code.
+    """The time exit IS the `ins` exit path; `ins` ships no exit code.
 
-    1. ``RecommendationPipeline.time_exit_check`` and its exit-session resolver name no strategy;
-       the hold comes from the hold map.
-    2. The hold map gives `ins` 20 sessions — exactly ``ins.hold_sessions``, the swing cap and the
-       validated T+20 horizon. If any number moved, the exit would silently stop matching the
-       horizon its evidence was measured over.
+    1. ``RecommendationPipeline.time_exit_check`` and its resolver name no strategy; the hold comes from the hold map.
+    2. The hold map gives `ins` 20 sessions = ``ins.hold_sessions`` = the swing cap = the validated T+20
+       horizon; if any moved, the exit would stop matching its evidence.
     """
     import inspect
     from types import SimpleNamespace

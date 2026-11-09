@@ -1,7 +1,7 @@
 """UniverseBuilder: the pinned universe rule with per-symbol exclusion reasons (auditable
 ``universe_daily``), the top-N watchlist cap, ``mis_candidates ⊆ F&O``, the configured-index
-(NIFTY 500 since owner decision 2026-09-04; NIFTY Total Market since owner decision 2026-10-08) download → cache → seed
-ladder, the CORE-index stamp, and never-raise fail-closed behavior on total failure."""
+(NIFTY Total Market) download → cache → seed ladder, the CORE-index (NIFTY 500) stamp, symbol renames,
+and never-raise fail-closed behavior on total failure."""
 
 from __future__ import annotations
 
@@ -291,11 +291,9 @@ def test_parse_index_constituents_csv_requires_symbol_column():
 
 
 def test_committed_seed_is_real_and_parses():
-    """The shipped seeds must always parse as usable fallbacks. The CORE seed is the NIFTY 500
-    file (owner decision 2026-09-04 made it the index seed; owner decision 2026-10-08 moved it to the core role) and the
-    index seed is NIFTY Total Market since that decision. The core list must sit inside the index list —
-    a core name outside the index could never be eligible, so a mismatch would silently shrink
-    every evidence-bound leg."""
+    """The shipped seeds must always parse as usable fallbacks: the CORE seed is the NIFTY 500 file, the
+    index seed is NIFTY Total Market. The core list must sit inside the index list: a core name outside
+    the index could never be eligible, silently shrinking every evidence-bound leg."""
     s = Settings()
     assert s.universe.core_index_seed_path == "config/universe/nifty500_seed.csv"
     assert s.universe.index_seed_path == "config/universe/niftytotalmarket_seed.csv"
@@ -308,15 +306,14 @@ def test_committed_seed_is_real_and_parses():
     assert len(core) >= 400                             # a meaningful subset of the 500
     assert len(index) >= 700                            # NIFTY 500 + Microcap 250, EQ series
     assert len(core) == len(set(core)) and len(index) == len(set(index))
-    # Stable blue-chips only — e.g. TATAMOTORS left the list when the 2025 demerger split it
-    # into TMCV/TMPV, so index membership of any single name is never guaranteed forever.
+    # stable blue-chips only: membership of any single name is never guaranteed forever
     for well_known in ("RELIANCE", "TCS", "HDFCBANK", "SBIN", "ICICIBANK"):
         assert well_known in core and well_known in index
-    # Both seeds are point-in-time snapshots (09-04 vs 10-08), so allow rebalance drift, not more.
+    # both seeds are point-in-time snapshots: allow rebalance drift, not more
     assert len(set(core) - set(index)) <= 25
 
 
-# ------------------------------------------------------ CORE index (2026-10-08)
+# ------------------------------------------------------ CORE index
 _CORE_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 
@@ -377,9 +374,8 @@ async def test_core_index_stamps_rows_and_scopes_the_core_view(tmp_path, store, 
 
 
 async def test_core_index_unavailable_fails_closed_for_core_legs_only(tmp_path, store, clock):
-    """Core-index fail-closed: core download, cache and seed all gone ⇒ every row non-core (the evidence
-    legs originate nothing) + a CRITICAL alert, while the build, the eligible set and the gate's
-    view carry on — degraded, never raised."""
+    """Core download, cache and seed all gone ⇒ every row non-core (evidence legs originate nothing) + a
+    CRITICAL alert, while the build, eligible set and gate view carry on degraded, never raised."""
     settings, transport = _core_setup(tmp_path, store, core_csv=None)
     msgs, sink = collect_alerts()
     builder = make_builder(settings, store, clock, transport, notify=sink)
@@ -394,8 +390,7 @@ async def test_core_index_unavailable_fails_closed_for_core_legs_only(tmp_path, 
 
 
 async def test_core_index_same_url_reuses_the_index_every_member_core(tmp_path, store, clock):
-    """The rollback line: core URL == index URL ⇒ no second download, every index member core,
-    the core view equals the eligible view (the shape before the 2026-10-08 widening)."""
+    """Core URL == index URL ⇒ no second download, every index member core, core view == eligible view."""
     settings, _ = _core_setup(tmp_path, store, core_csv=None)
     settings.universe.core_index_source_url = settings.universe.index_source_url
     calls: list[str] = []
@@ -470,7 +465,7 @@ def failing_transport_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=failing_transport())
 
 
-# ------------------------------------------------- extended leg (batch universe, 2026-09-01)
+# ------------------------------------------------- extended leg (batch universe)
 def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master=None):
     """Builder wired for the extended leg: the index from the fixture CSV, plus non-index candidates
     across every extended rule leg (good / illiquid / surveilled / no-MIS / not-in-master / no-data)."""
@@ -501,11 +496,11 @@ def _extended_setup(tmp_path, store, clock, *, enabled=True, ext_cap=600, master
 
 async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, store, clock):
     """Only criteria-PASSING non-index candidates get rows — included=False, reasons
-    ['not_in_index'] (the exact marker every batch reader keys on since the owner decision of 2026-09-04); failing
-    candidates get NO row, and the eligible view stays index-scoped while the batch view widens."""
+    ['not_in_index'] (the exact marker every batch reader keys on); failing candidates get NO row, and
+    the eligible view stays index-scoped while the batch view widens."""
     from engine.marketdata import store as store_mod
 
-    assert EXCL_INDEX == "not_in_index"          # Rename (owner decision) of the pre-2026-09-04 'not_nifty200'
+    assert EXCL_INDEX == "not_in_index"
     builder = _extended_setup(tmp_path, store, clock)
     universe = await builder.build(D)
 
@@ -529,10 +524,9 @@ async def test_extended_leg_builds_criteria_passing_non_index_rows(tmp_path, sto
 
 
 async def test_extended_leg_disabled_is_the_exact_rollback(tmp_path, store, clock):
-    """batch_universe_enabled=False restores the pre-extended-leg shape exactly — INCLUDING a same-day
-    re-build over rows an earlier enabled build already persisted (2026-09-01 review: upserts never
-    delete, so without the replace-write a flag flip mid-day would leave stale not_in_index rows
-    feeding the batch view for the rest of the day)."""
+    """batch_universe_enabled=False restores the no-extended-leg shape exactly, INCLUDING a same-day
+    re-build over rows an earlier enabled build persisted (upserts never delete, so the replace-write
+    is what keeps stale not_in_index rows out of the batch view)."""
     enabled = _extended_setup(tmp_path, store, clock, enabled=True)
     first = await enabled.build(D)
     assert first.extended == ("EXTGOOD", "EXTSECOND")            # the stale rows a retry must clear
@@ -563,7 +557,7 @@ async def test_extended_leg_cap_and_empty_master_fail_closed(tmp_path, store, cl
         store2.close()
 
 
-# ------------------------------------------------------ NIFTY 500 eligible set (2026-09-04)
+# ------------------------------------------------------ wide index (NIFTY 500-sized)
 _WIDE_INDEX_SIZE = 500
 _WIDE_SYMBOLS = [f"SYM{i:03d}" for i in range(_WIDE_INDEX_SIZE)]
 
@@ -575,14 +569,11 @@ def _wide_index_csv() -> str:
 
 
 async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, store, clock):
-    """Owner decision 2026-09-04: with the eligible set widened to NIFTY 500 the focus cap BINDS again —
-    ``universe_max_watchlist`` (a fixture cap of 200, the value at that time; settings.yaml has been 300
-    since 2026-09-07) is no longer ≥ the eligible set, as it was
-    for NIFTY200 since 2026-08-20. Exactly 200 rows come back ``included``, chosen top-down by
-    median traded value, and every one of the other 300 rule-passing names is persisted with the
-    single auditable reason ``watchlist_cap`` — never silently dropped. The extended leg's
-    candidate set still SUBTRACTS the index, so an index member that also sits in the MIS/equity
-    master never earns a second, ``not_in_index`` row."""
+    """With a NIFTY 500-sized eligible set the focus cap BINDS: with a fixture ``universe_max_watchlist``
+    of 200, exactly 200 rows come back ``included``, chosen top-down by median traded value, and every
+    other rule-passing name is persisted with the single auditable reason ``watchlist_cap``. The
+    extended leg's candidate set SUBTRACTS the index, so an index member that also sits in the
+    MIS/equity master never earns a second, ``not_in_index`` row."""
     settings = make_settings(
         tmp_path, universe_max_watchlist=200, batch_universe_enabled=True, batch_universe_max=600,
     )
@@ -623,8 +614,8 @@ async def test_wide_index_caps_watchlist_at_200_and_audits_the_rest(tmp_path, st
     assert set(store.get_batch_universe_symbols(D)) == {*_WIDE_SYMBOLS, "EXTONE"}
 
 
-# --------------------------------------------------------------------------- symbol renames (2026-10-23)
-# NSE renamed ICICIPRULI → ICICILIFE; Kite kept the token, the index lists and the MIS file did not.
+# --------------------------------------------------------------------------- symbol renames
+# After a rename Kite keeps the token; the index lists and the MIS file lag behind.
 _RENAME_CSV = (
     "Company Name,Industry,Symbol,Series,ISIN Code\n"
     "Reliance,Energy,RELIANCE,EQ,\n"
@@ -707,10 +698,10 @@ async def test_lagging_index_symbol_follows_the_rename(tmp_path, store, clock):
 
 
 async def test_rename_alert_fires_once_when_the_index_list_already_caught_up(tmp_path, store, clock):
-    """2026-10-26: NSE's lists named ICICILIFE before any build had remapped ICICIPRULI, so an alert tied
-    to the remap never told the owner. The alert follows the universe instead (previous build carried
-    the old symbol, this one the new) and says what the stored history needs — here nothing: a
-    two-session trading gap means the old bars stay and the new symbol counts as a fresh listing."""
+    """When NSE's lists name the new symbol before any build remapped the old one, the alert follows the
+    universe (previous build carried the old symbol, this one the new) and says what the stored history
+    needs — here nothing: a two-session trading gap means the old bars stay and the new symbol counts
+    as a fresh listing."""
     settings = make_settings(tmp_path)
     _seed_rename(store, old="OLDCO", new="NEWCO", token=77)
     seed_daily_bars(store, "RELIANCE", close="200.00", volume=500_000, days=25)

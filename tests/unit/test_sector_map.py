@@ -1,6 +1,6 @@
 """SectorMapJob: first-wins sector classification over the pinned source
 order (PSU Bank before Bank before Financial Services), the owner-override and NSE-Industry
-supplement rungs (2026-09-21) beneath it, UNCLASSIFIED for whatever none of them claims, the
+supplement rungs beneath it, UNCLASSIFIED for whatever none of them claims, the
 per-source frozen-fallback + alert path, keep-previous-snapshot when nothing classifies, verbatim
 ``theme_map`` seed refresh, and the never-raise guarantee."""
 
@@ -65,12 +65,11 @@ THEMES_YAML = (
     "    symbols: []\n"
 )
 
-#: Default for tests that don't care about overrides — isolates every test from the real
-#: config/sector_overrides.yaml (mirrors the THEMES_YAML isolation pattern above).
+#: Default for tests that don't care about overrides: isolates them from the real
+#: config/sector_overrides.yaml.
 OVERRIDES_YAML_EMPTY = "schema_version: 1\noverrides: {}\n"
 
-#: HDFCAMC/ICICIAMC — the two real AMC seed entries (mirrors what's shipped in
-#: config/sector_overrides.yaml), used by the override-specific tests below.
+#: HDFCAMC/ICICIAMC — the two real AMC seed entries shipped in config/sector_overrides.yaml.
 OVERRIDES_YAML = (
     "schema_version: 1\n"
     "overrides:\n"
@@ -193,10 +192,9 @@ async def test_failed_source_reuses_frozen_copy_and_alerts(tmp_path, store, cloc
 
 
 async def test_degraded_source_alert_dedups_and_rearms(tmp_path, store, clock):
-    """2026-08-13 (structural deviation representative — sector_map's 'degraded — frozen copies
-    reused' alert fires on an otherwise ``ok=True`` run, unlike bhavcopy's binary shape): dedup
-    guards each ``_alert`` call site, keyed on ``d``, not on ``ok``. Two consecutive runs with the
-    SAME failing source produce exactly one notify; a fully clean run re-arms it for a later streak."""
+    """The 'degraded — frozen copies reused' alert fires on an otherwise ``ok=True`` run, so dedup guards
+    each ``_alert`` call site, keyed on ``d``, not on ``ok``. Two consecutive runs with the SAME failing
+    source notify once; a fully clean run re-arms it for a later streak."""
     await make_job(tmp_path, store, clock, make_client()).run(D)     # seeds the frozen copies
 
     msgs, sink = collect_alerts()
@@ -264,9 +262,8 @@ async def test_theme_seed_unreadable_alerts_but_sector_part_proceeds(tmp_path, s
 
 # --------------------------------------------------------------------------- sector overrides (owner supplement)
 async def test_override_classifies_amc_as_financial_services(tmp_path, store, clock):
-    """HDFCAMC/ICICIAMC are NOT constituents of the real scraped Financial Services index (the
-    happy-path FINANCIAL_SERVICES fixture is a one-symbol filler, not either AMC) — the
-    owner-curated override supplement folds them into FINANCIAL_SERVICES anyway."""
+    """HDFCAMC/ICICIAMC are NOT constituents of the real scraped Financial Services index; the
+    owner-curated override folds them into FINANCIAL_SERVICES anyway."""
     job = make_job(tmp_path, store, clock, make_client(), overrides=OVERRIDES_YAML)
     result = await job.run(D, universe_symbols=["HDFCAMC", "ICICIAMC"])
 
@@ -278,11 +275,8 @@ async def test_override_classifies_amc_as_financial_services(tmp_path, store, cl
 
 
 async def test_override_never_reclassifies_a_symbol_already_in_a_real_index(tmp_path, store, clock):
-    """A conflicting override entry for a symbol ALREADY classified by a real scraped index must
-    never win: ``mapping.setdefault`` means the override only fills gaps, never overwrites real
-    classification. SBIN is genuinely PSU_BANK (first-wins over BANK too) via the real fixtures;
-    an override file that (wrongly) claims it for IT must be silently ignored for SBIN specifically,
-    while a non-conflicting entry in the SAME file still applies."""
+    """An override only fills gaps (``mapping.setdefault``): a file that claims SBIN (genuinely PSU_BANK)
+    for IT is ignored for SBIN, while a non-conflicting entry in the SAME file still applies."""
     conflicting = (
         "schema_version: 1\n"
         "overrides:\n"
@@ -299,9 +293,8 @@ async def test_override_never_reclassifies_a_symbol_already_in_a_real_index(tmp_
 
 
 async def test_override_applies_on_reused_frozen_cache_not_just_fresh_scrape(tmp_path, store, clock):
-    """The override merge happens AFTER the SECTOR_SOURCES loop, whose ``mapping`` already absorbed
-    both fresh-scrape and frozen-cache-reuse results by that point — so a run where a source is
-    degraded (reusing its frozen copy) still gets the override applied, not just the happy path."""
+    """The override merge runs AFTER the SECTOR_SOURCES loop has absorbed fresh and frozen-cache
+    results, so a degraded run (reusing a frozen copy) still gets overrides applied."""
     seed = make_job(tmp_path, store, clock, make_client(), overrides=OVERRIDES_YAML)
     assert (await seed.run(D)).ok is True                 # seeds the frozen cache for D
 
@@ -318,10 +311,9 @@ async def test_override_applies_on_reused_frozen_cache_not_just_fresh_scrape(tmp
 
 
 async def test_override_unknown_sector_name_skipped_and_alerts(tmp_path, store, clock):
-    """A typo'd sector name (not one of SECTOR_SOURCES) must not create a phantom one-symbol
-    bucket that per_sector_exposure never groups on — the affected symbol stays UNCLASSIFIED
-    (conservative, gate-visible) rather than escaping the cap silently. A valid sibling entry in
-    the SAME file still applies, and the alert names the bad sector string."""
+    """A typo'd sector name (not in SECTOR_SOURCES) must not create a phantom bucket per_sector_exposure
+    never groups on: the symbol stays UNCLASSIFIED (gate-visible). A valid sibling entry still applies
+    and the alert names the bad sector string."""
     typo = (
         "schema_version: 1\n"
         "overrides:\n"
@@ -341,8 +333,8 @@ async def test_override_unknown_sector_name_skipped_and_alerts(tmp_path, store, 
 
 
 async def test_missing_overrides_file_alerts_but_sector_part_proceeds(tmp_path, store, clock):
-    """Missing config/sector_overrides.yaml is never load-bearing (see the module docstring) — the
-    real index-scrape classification proceeds unaffected, just without any override applied."""
+    """A missing overrides file is never load-bearing (see the sector_map module docstring): the index-scrape
+    classification proceeds, with a warning alert."""
     themes_path = tmp_path / "themes.yaml"
     themes_path.write_text(THEMES_YAML, encoding="utf-8")
     msgs, sink = collect_alerts()
@@ -360,8 +352,7 @@ async def test_missing_overrides_file_alerts_but_sector_part_proceeds(tmp_path, 
 
 
 async def test_malformed_overrides_file_degrades_gracefully(tmp_path, store, clock):
-    """``overrides`` must be a mapping — a list (or any other malformed schema) raises an alert, but
-    classification proceeds exactly as if there were no overrides configured this run."""
+    """``overrides`` must be a mapping; a malformed schema alerts but classification proceeds as with no overrides."""
     (tmp_path / "sector_overrides.yaml").write_text("overrides: [not, a, mapping]\n", encoding="utf-8")
     msgs, sink = collect_alerts()
     job = make_job(tmp_path, store, clock, make_client(), overrides=None, notify=sink)  # keep the file above
@@ -399,9 +390,8 @@ def test_load_sector_overrides_missing_key_returns_empty_dict(tmp_path):
 
 
 def test_committed_sector_overrides_loads_and_contains_amc_seed():
-    """The shipped config/sector_overrides.yaml parses; seeded with the AMC names confirmed absent
-    from the real scraped Nifty Financial Services index (data/datafeeds/sector_lists.json,
-    as_of 2026-08-24) despite NSE tagging both Industry=Financial Services in the universe CSVs."""
+    """The shipped config/sector_overrides.yaml parses and carries the AMC names absent from the scraped
+    Nifty Financial Services index despite NSE tagging both Industry=Financial Services."""
     overrides = load_sector_overrides(repo_root() / "config" / "sector_overrides.yaml")
     assert overrides["HDFCAMC"] == "FINANCIAL_SERVICES"
     assert overrides["ICICIAMC"] == "FINANCIAL_SERVICES"
@@ -409,10 +399,9 @@ def test_committed_sector_overrides_loads_and_contains_amc_seed():
 
 # --------------------------------------------------------------------------- industry fallback (3rd rung)
 async def test_industry_label_classifies_symbols_no_index_or_override_claims(tmp_path, store, clock):
-    """2026-09-21: under the NIFTY 500 universe the ten sectoral indices claim ~170 names, so the
-    rest fell into the single UNCLASSIFIED bucket the gate caps at 1 open position. NSE's Industry
-    column classifies them instead — aliased onto a real index bucket where one exists
-    (Healthcare → PHARMA), else normalised (Capital Goods → CAPITAL_GOODS)."""
+    """The sectoral indices claim few names, and the rest would share the single UNCLASSIFIED bucket the
+    gate caps at 1 open position; NSE's Industry column classifies them instead — aliased onto a real
+    index bucket where one exists (Healthcare → PHARMA), else normalised (Capital Goods → CAPITAL_GOODS)."""
     path = write_industry_csv(tmp_path, INDUSTRY_CSV)
     job = make_job(tmp_path, store, clock, make_client(), industry_paths=(path,))
     result = await job.run(D, universe_symbols=["ACMELAB", "BOLTENG", "DRIFTBE", "RELIANCE"])
@@ -428,9 +417,8 @@ async def test_industry_label_classifies_symbols_no_index_or_override_claims(tmp
 
 
 async def test_industry_never_overrides_an_index_or_an_override_classification(tmp_path, store, clock):
-    """The fallback is the THIRD rung: ``mapping.setdefault`` after both the index scrape and the
-    owner overrides, so a mislabelled Industry column can never move a symbol a real index (SBIN =
-    PSU_BANK) or the owner (HDFCAMC = FINANCIAL_SERVICES) already placed."""
+    """The THIRD rung is ``mapping.setdefault`` after the index scrape and owner overrides, so a mislabelled
+    Industry column never moves a symbol an index (SBIN) or the owner (HDFCAMC) already placed."""
     path = write_industry_csv(
         tmp_path,
         "Company Name,Industry,Symbol,Series,ISIN Code\n"
@@ -452,10 +440,9 @@ async def test_industry_never_overrides_an_index_or_an_override_classification(t
 
 
 async def test_no_readable_industry_source_degrades_silently_to_unclassified(tmp_path, store, clock, caplog):
-    """The industry supplement, weaker than the override rung: a missing path and a path whose CSV has no
-    Industry column are both just "no fallback this run" — the run stays ok, nothing raises, the
-    symbol keeps the pre-2026-09-21 UNCLASSIFIED behaviour, and NO owner alert fires (the log line
-    ``sector_industry_source_unavailable`` is the whole signal)."""
+    """A missing path and a CSV with no Industry column both mean "no fallback this run": the run stays ok,
+    nothing raises, the symbol stays UNCLASSIFIED, and NO owner alert fires (the
+    ``sector_industry_source_unavailable`` log line is the whole signal)."""
     broken = write_industry_csv(
         tmp_path, "Company Name,Symbol,Series\nA Co,AAA,EQ\n", name="no_industry.csv"
     )
@@ -478,8 +465,7 @@ async def test_no_readable_industry_source_degrades_silently_to_unclassified(tmp
 
 # --------------------------------------------------------------------------- parsers / seeds
 def test_industry_sector_aliases_and_normalises():
-    """Aliases fold a label onto its real index bucket; everything else becomes a normalised
-    bucket. A blank label is NO classification ("" — never a phantom bucket)."""
+    """Aliases fold a label onto its real index bucket, the rest normalise; a blank label is "" (never a phantom bucket)."""
     assert industry_sector("Healthcare") == "PHARMA"
     assert industry_sector("  financial services  ") == "FINANCIAL_SERVICES"   # strip + case-insensitive
     assert industry_sector("Power") == "ENERGY"
@@ -491,8 +477,7 @@ def test_industry_sector_aliases_and_normalises():
 
 
 def test_industry_aliases_only_name_real_index_sectors():
-    """An alias target outside SECTOR_SOURCES would be a phantom bucket per_sector_exposure never
-    groups on — the same rule _load_overrides enforces for the owner file."""
+    """An alias target outside SECTOR_SOURCES would be a phantom bucket (the rule _load_overrides enforces too)."""
     known = {sector for sector, _ in SECTOR_SOURCES}
     assert set(INDUSTRY_SECTOR_ALIASES.values()) <= known
 
@@ -556,4 +541,4 @@ def test_load_theme_seed_rejects_non_mapping(tmp_path):
 
 
 def test_unclassified_constant_matches_plan():
-    assert sm.UNCLASSIFIED == "UNCLASSIFIED"             # sector-map job vocabulary, gate-visible
+    assert sm.UNCLASSIFIED == "UNCLASSIFIED"             # the gate-visible vocabulary

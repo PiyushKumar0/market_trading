@@ -1,10 +1,8 @@
 """NewsScoringJob — the batch triggers and the fan-out purity rule.
 
-The harness is faked (no SDK anywhere in the unit tier) but everything downstream of it is REAL: the
-fake returns raw JSON and the job's own ``news_analyst.parse_output`` validator turns it into scores,
-so the per-item drop path (out-of-enum ``event_type``) is exercised end to end. The resolver is
-the real :class:`EntityResolver` with a seeded alias map, because "the LLM never assigns a symbol"
-is only meaningfully tested against the real ambiguity rules.
+The harness is faked but everything downstream is REAL: the fake returns raw JSON and the job's own
+``news_analyst.parse_output`` validator scores it (so per-item drops are exercised), and the
+resolver is the real :class:`EntityResolver` with a seeded alias map ("the LLM never assigns a symbol").
 """
 
 from __future__ import annotations
@@ -162,8 +160,8 @@ def make_job(store, conn, resolver, scoring_clock):
     assembler = ContextAssembler(store, conn, scoring_clock, calendar)
 
     def _make(harness, governor=None, store_override=None) -> NewsScoringJob:
-        # ``store_override`` (2026-09-09) lets the lock tests wrap the real store in a probe; the
-        # assembler keeps the real one — only the job's own hops are under test.
+        # ``store_override`` lets the lock tests wrap the store in a probe; the assembler keeps the
+        # real one (only the job's own hops are under test).
         return NewsScoringJob(
             store_override if store_override is not None else store,
             resolver,
@@ -376,9 +374,8 @@ async def test_an_llm_sector_with_no_resolver_tag_persists_nothing(store, make_j
 async def test_only_entity_strings_found_in_the_shown_headline_reach_the_resolver(
     store, make_job, now_box, caplog
 ):
-    """The LLM never assigns a symbol: its VERBATIM strings re-enter the resolver. A string
-    absent from the headline — injected (chaos case 21) or misaligned to the wrong cluster — must
-    not attach another company, whether as an alias or as an exchange token."""
+    """The LLM never assigns a symbol: its verbatim strings re-enter the resolver. A string absent from
+    the headline (injected or misaligned) must not attach another company, as alias or exchange token."""
     seed_cluster(
         store,
         "c-1",
@@ -452,7 +449,7 @@ async def test_ambiguous_and_unmatched_entity_strings_add_no_symbol(store, make_
 
     row = rows_by_id(store)["c-1"]
     assert list(row["symbols"]) == []                # "bharti" maps to 2 symbols => never a guess
-    # The unmatched string is recorded for the weekly alias-suggestion loop.
+    # the unmatched string is recorded for the alias-suggestion loop
     unresolved = {(r["entity_text"], r["reason"]) for r in store.get_unresolved_entities()}
     assert ("Some Unknown Startup", "no_match") in unresolved
 
@@ -534,11 +531,10 @@ async def test_scored_at_and_scorer_model_are_platform_stamped(store, make_job, 
     assert row["untrusted"] is True                  # every LLM score stays untrusted evidence
 
 
-# -------------------------------------------------------- chain-lock hold (09-09)
-# The 2026-07-28 news_chain_lock serialises the news_clusters read-modify-write. Held around the
-# WHOLE batch it also spanned one LLM await per chunk, so the per-feed polls (whose resolve deadline
-# covers lock ACQUISITION) queued behind it — 14 news_resolve_timeout on 2026-09-07, nine inside one
-# second. These tests pin the new discipline: store hops under the lock, model calls outside it.
+# -------------------------------------------------------- chain-lock hold
+# news_chain_lock serialises the news_clusters read-modify-write. Held across the LLM await the
+# per-feed polls (whose resolve deadline covers lock ACQUISITION) queue behind it, so these tests pin:
+# store hops under the lock, model calls outside it.
 class LockProbeStore:
     """Delegates to the real store, recording ``lock.locked()`` at every store hop the job makes."""
 
@@ -605,9 +601,8 @@ async def test_the_lock_covers_the_store_hops_but_never_the_model_call(store, ma
     seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
     lock = asyncio.Lock()
     probe = LockProbeStore(store, lock)
-    # An unmatchable (but verbatim) entity string makes _log_unmatched fire, so the
-    # unresolved-entity hop — the job's OTHER write, easy to leave outside the hold — is pinned
-    # under the lock too.
+    # An unmatchable (but verbatim) entity makes _log_unmatched fire, pinning the job's OTHER write
+    # (the unresolved-entity hop) under the lock too.
     harness = LockProbeHarness(lock, overrides={"c-000": {"entities": ["state utility"]}})
 
     result = await make_job(harness, store_override=probe).run_batch(lock=lock)
@@ -670,12 +665,8 @@ async def test_a_cluster_rescored_mid_call_is_not_overwritten(store, make_job, n
 
 
 async def test_a_poll_merge_during_the_model_call_survives_the_write_back(store, make_job, now_box):
-    """The score columns are applied to the CURRENT row, never to the pre-LLM snapshot (09-09).
-
-    The upsert overwrites every non-key column, so re-emitting the snapshot would REVERT whatever a
-    per-feed poll merged in while the model was thinking — precisely the clobber the chain lock
-    exists to prevent, reintroduced by shortening the hold.
-    """
+    """Score columns are applied to the CURRENT row, never the pre-LLM snapshot: the upsert overwrites
+    every non-key column, so the snapshot would revert what a poll merged during the model call."""
     base = now_box[0] - timedelta(minutes=45)
     seed_cluster(store, "c-1", first_seen=base, domains=("economictimes.com",))
     merged_at = base + timedelta(minutes=10)
@@ -728,9 +719,8 @@ async def test_the_lock_is_free_during_every_chunk_of_a_multi_chunk_batch(store,
 
 
 async def test_without_a_lock_the_batch_still_does_the_conditional_reread(store, make_job, now_box):
-    """``lock=None`` is no longer a distinct code path (2026-09-23): the job owns a private lock for
-    the run and the write-back's conditional re-read always happens, so the queue is read TWICE (the
-    initial read, then the write-back's re-read) even with no caller-supplied lock."""
+    """``lock=None`` is not a distinct code path: the job owns a private lock and the write-back's
+    conditional re-read always happens, so the queue is read TWICE."""
     seed_many(store, 2, base=now_box[0] - timedelta(minutes=45))
     probe = LockProbeStore(store, asyncio.Lock())    # the lock is never handed to the job
 
@@ -746,13 +736,8 @@ async def test_a_stale_skip_is_excluded_from_the_chunk_failure_remaining_count(
 ):
     """``remaining`` on ``news_scoring_chunk_failed`` must not count an id that already left the queue.
 
-    Mirrors ``test_a_cluster_deleted_mid_call_is_not_resurrected_by_the_write_back`` (the stale
-    mechanic: a cluster deleted during chunk 1's model call is skipped, not resurrected, at that
-    chunk's write-back) combined with ``test_a_failed_chunk_keeps_the_earlier_chunks_and_leaves_the_
-    rest_queued`` (chunk 2's model call fails). 61 clusters make three 30/30/1 chunks. Before the fix,
-    ``remaining = len(clusters) - scored - len(dropped)`` still counts the deleted id as queued
-    (61 - 29 - 0 = 32); the fix subtracts the stale count too (61 - 29 - 0 - 1 = 31), matching the
-    actually-still-queued chunk 2 (30) + chunk 3 (1).
+    61 clusters make three 30/30/1 chunks; a cluster deleted during chunk 1's call is stale-skipped and
+    chunk 2 fails, so remaining = 61 - 29 scored - 0 dropped - 1 stale = 31 (chunk 2's 30 + chunk 3's 1).
     """
     base = now_box[0] - timedelta(minutes=90)
     ids = seed_many(store, 61, base=base)
@@ -775,18 +760,14 @@ async def test_a_stale_skip_is_excluded_from_the_chunk_failure_remaining_count(
     assert failed_log.remaining == 31                 # NOT 32: the stale id is not still queued
 
 
-# ------------------------------------------------------ batch single-flight (09-09)
+# ------------------------------------------------------ batch single-flight
 async def test_two_concurrent_batches_send_each_cluster_to_the_model_exactly_once(
     store, make_job, now_box
 ):
-    """job_news_chain's forced batch and the 300 s scoring_tick are DISTINCT scheduler jobs (09-09).
-
-    Now that the chain lock is dropped across the model call, nothing else keeps them apart: both
-    would read the same unscored queue and bill the same clusters twice. The job's own run lock makes
-    the second WAIT, so it re-reads an emptied queue and returns cheaply. Both calls pass the SAME
-    ``news_chain_lock`` (as the two real scheduler jobs would), so this exercises the shipped
-    combination — chain lock + concurrent batches + conditional write-back — not just the run lock in
-    isolation.
+    """job_news_chain's forced batch and the 300 s scoring_tick are distinct scheduler jobs. With the chain
+    lock dropped across the model call only the job's own run lock keeps them apart: the second WAITS,
+    then re-reads an emptied queue. Both pass the SAME ``news_chain_lock``, exercising the shipped
+    combination (chain lock + concurrent batches + conditional write-back).
     """
     ids = seed_many(store, 8, base=now_box[0] - timedelta(minutes=5))
     harness = FakeHarness()

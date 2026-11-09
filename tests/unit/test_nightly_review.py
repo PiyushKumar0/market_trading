@@ -1,11 +1,8 @@
 """Nightly Post-Trade Reviewer: deterministic context assembly, the suggestion filter,
 and the persist/notify contract.
 
-The harness is faked (the SDK is never reachable from the unit tier) but the VALIDATOR the job hands
-it is the real one, so a payload that would not survive ``NightlyReview`` cannot pass these tests
-either. The governor and the agent definitions are the real ones loaded from the shipped
-``config/agents.yaml`` — "the nightly reviewer is admitted at DG0 and blocked at DG4" is a property of
-that config, not of a stub.
+The harness is faked but the VALIDATOR the job hands it is the real one. The governor and agent
+definitions are the real ones from the shipped ``config/agents.yaml``.
 """
 
 from __future__ import annotations
@@ -248,8 +245,7 @@ def seed_day(conn, d: date = D) -> None:
 
 # =========================================================================== build_review_context
 def test_context_renders_the_seeded_day(conn) -> None:
-    # The reviewer sees the ledger, the recommendations, the gate's rejects BY FAILING RULE,
-    # the failed Tier-1 calls, the day's spend and the envelope — assembled deterministically here.
+    # Ledger, recommendations, gate rejects BY FAILING RULE, failed Tier-1 calls, spend and envelope.
     seed_day(conn)
     text = build_review_context(conn, None, D, BOUNDS)
 
@@ -281,8 +277,7 @@ def test_context_renders_the_seeded_day(conn) -> None:
 
 
 def test_context_empty_day_says_so_explicitly(conn) -> None:
-    # a quiet day must be DISTINGUISHABLE from a broken query — explicit "none"/"no trades" lines,
-    # never an empty prompt.
+    # a quiet day must be distinguishable from a broken query: explicit "none"/"no trades" lines
     seed_day(conn)                                  # seeded on D, so EMPTY_DAY must read clean
     text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
 
@@ -335,8 +330,7 @@ def test_envelope_bounds_come_from_the_protected_store(conn) -> None:
 
 
 def test_unverifiable_envelope_yields_an_empty_suggestible_set() -> None:
-    # with no VERIFIED envelope there is no legitimate suggestible set — the review still runs
-    # (fail to zero), but every suggestion it makes will be dropped.
+    # no verified envelope ⇒ no suggestible set: the review still runs but every suggestion is dropped
     store = FakeProtectedStore(error=RuntimeError("envelope.yaml hash mismatch"))
     assert load_envelope_bounds(store) == {}
 
@@ -359,7 +353,7 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
     assert payload["trade_attributions"] == REVIEW["trade_attributions"]
     assert rows[0]["created_at"] == clock.now().isoformat()
 
-    # The call went out as the shipped single-shot def under the schedule admission class.
+    # shipped single-shot def under the schedule admission class
     assert len(harness.calls) == 1
     call = harness.calls[0]
     assert call.agent_def.agent_id == "nightly_reviewer"
@@ -390,9 +384,8 @@ async def test_valid_review_is_persisted_and_summarised(conn, gov, clock, calend
 async def test_out_of_envelope_and_out_of_bounds_suggestions_are_dropped(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # The model may only suggest names it was SHOWN, inside the bounds it was shown. A knob
-    # outside the envelope (here a risk limit) or a value outside its range never reaches
-    # GET /config/params — and neither is ever APPLIED by any path in this module.
+    # Only names it was SHOWN, inside the bounds shown, survive; a knob outside the envelope (a risk
+    # limit) or a value outside its range never reaches GET /config/params.
     review = dict(REVIEW)
     review["param_suggestions"] = [
         {"parameter": "cat.rr_target", "proposed_value": 2.0, "evidence_refs": ["LL-1"]},
@@ -413,8 +406,7 @@ async def test_out_of_envelope_and_out_of_bounds_suggestions_are_dropped(
     ]
     assert sent[0].data["param_suggestions"] == 2
     assert sent[0].data["param_suggestions_dropped"] == 3
-    # Everything else in the review survives a dropped suggestion — one bad knob name must not void
-    # a sound day's lessons.
+    # a dropped suggestion does not void the rest of the review
     assert json.loads(reviews(conn)[0]["payload"])["lessons"] == REVIEW["lessons"]
 
 
@@ -434,8 +426,7 @@ async def test_no_envelope_means_every_suggestion_is_dropped(
 async def test_governor_block_makes_no_call_and_writes_no_row(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # DG4 (credit exhausted / SDK billing error) => zero SDK calls. The block is checked before
-    # any context assembly, so a blocked night costs nothing at all.
+    # DG4 (billing error) => zero SDK calls; the block is checked before any context assembly.
     gov.note_billing_error("test billing error")
     harness = FakeHarness(raw=json.dumps(REVIEW))
     job = make_job(conn, gov, clock, calendar, agent_defs, harness, notify=notify)
@@ -449,8 +440,7 @@ async def test_governor_block_makes_no_call_and_writes_no_row(
 async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # schema-invalid after retries resolves to no review + an owner message. A silent absence
-    # would read to the owner as "quiet day" rather than "the reviewer did not run".
+    # schema-invalid after retries ⇒ no review + an owner message (silence would read as "quiet day")
     harness = FakeHarness(
         failure=AgentResult.Failed("schema_invalid", "not valid JSON", call_id="CALL-9", attempts=3)
     )
@@ -468,9 +458,8 @@ async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
 async def test_a_dead_login_is_left_to_the_harness_alert(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # auth_failed already reached the owner as the harness's one account-wide alert, which names the
-    # cause; "review unavailable" repeated it on every catch-up retry (6 on 2026-10-23). The retry
-    # still runs, and the review arrives once the login is back.
+    # auth_failed already reached the owner as the harness's account-wide alert, so no "review
+    # unavailable" repeats it on each catch-up retry; the retry still runs.
     harness = FakeHarness(
         failure=AgentResult.Failed("auth_failed", "OAuth session expired", call_id="CALL-10", attempts=1)
     )
@@ -482,8 +471,7 @@ async def test_a_dead_login_is_left_to_the_harness_alert(
 
 @pytest.mark.asyncio
 async def test_rerun_replaces_the_row_for_that_day(conn, gov, clock, calendar, agent_defs) -> None:
-    # The date-keyed catch-up may replay a missed day, and the owner may redo one. One row per
-    # trading day; every call that produced either review stays in agent_calls.
+    # Catch-up or the owner may replay a day: one row per trading day; every call stays in agent_calls.
     first = FakeHarness(raw=json.dumps(REVIEW))
     assert await make_job(conn, gov, clock, calendar, agent_defs, first).run(D) is AdvisoryOutcome.RAN
 
@@ -515,9 +503,8 @@ async def test_missing_agent_def_is_a_logged_no_review(conn, gov, clock, calenda
 
 # =========================================================================== funnel telemetry
 def seed_funnel(conn, d: date = D) -> None:
-    """A day-slot journal shaped like a real starved session: orb published three and got two
-    analyst slots, rsi2 published two and got one, and the day's best UNFORWARDED score (0.85)
-    outranks one of the candidates that was actually evaluated."""
+    """A starved session: orb published three and got two analyst slots, rsi2 published two and got
+    one, and the best UNFORWARDED score (0.85) outranks one evaluated candidate."""
     rows = [
         # symbol,   strategy, score, forwarded
         ("TCS", "orb", 0.90, 1),
@@ -548,8 +535,8 @@ def seed_funnel(conn, d: date = D) -> None:
 
 
 def test_funnel_summary_aggregates_the_whole_day(conn) -> None:
-    """The funnel is raw -> published -> forwarded -> evaluated -> proposals -> verdicts, and
-    the number that says "a good candidate never reached the analyst" is best_unforwarded_score."""
+    """The funnel is raw -> published -> forwarded -> evaluated -> proposals -> verdicts;
+    best_unforwarded_score says "a good candidate never reached the analyst"."""
     seed_day(conn)
     seed_funnel(conn)
     summary = build_funnel_summary(conn, D, raw_by_strategy={"orb": 40, "rsi2": 6})
@@ -572,11 +559,9 @@ def test_funnel_summary_aggregates_the_whole_day(conn) -> None:
 
 
 def test_funnel_summary_splits_unsizeable_from_unforwarded(conn) -> None:
-    """2026-08-14: a stopless candidate is journalled BEFORE the pipeline's stopless short-circuit
-    (``prescreen_day_slots.unsizeable``), so it must never be counted as a starved/unforwarded
-    candidate even though it, too, was never forwarded. WIPRO here scores higher (0.95) than the
-    genuinely-starved TCS (0.85) but must not win ``best_unforwarded_score`` — it was never eligible
-    for a slot in the first place."""
+    """A stopless candidate is journalled before the pipeline's short-circuit
+    (``prescreen_day_slots.unsizeable``) and is never counted as starved: WIPRO (0.95, unsizeable)
+    must not beat the genuinely starved TCS (0.85) for ``best_unforwarded_score``."""
     conn.execute(
         "INSERT INTO prescreen_day_slots "
         "(d, symbol, strategy_id, published_at, evaluated, score, forwarded, unsizeable) VALUES "
@@ -599,7 +584,7 @@ def test_funnel_summary_splits_unsizeable_from_unforwarded(conn) -> None:
 
 
 def test_funnel_summary_of_an_empty_day_is_explicitly_empty(conn) -> None:
-    """A quiet day and a broken query must stay distinguishable (the module's convention)."""
+    """A quiet day and a broken query stay distinguishable."""
     summary = build_funnel_summary(conn, EMPTY_DAY)
     assert (summary.published, summary.forwarded, summary.evaluated) == (0, 0, 0)
     assert summary.raw is None                       # never measured is not the same as zero
@@ -619,7 +604,7 @@ def test_funnel_section_is_in_the_review_context(conn) -> None:
 
 
 def test_funnel_log_fields_are_flat_scalars(conn) -> None:
-    """The EOD line is a STRUCTURED log record — its fields have to survive JSON rendering."""
+    """The EOD line is a structured log record; its fields must survive JSON rendering."""
     seed_funnel(conn)
     fields = build_funnel_summary(conn, D, raw_by_strategy={"orb": 40}).log_fields()
     assert fields["d"] == D.isoformat()
@@ -629,7 +614,7 @@ def test_funnel_log_fields_are_flat_scalars(conn) -> None:
     assert json.dumps(fields)                        # no Decimal/date/Row leaks into the log line
 
 
-# ------------------------------------ 2026-08-21: the raw row is read from the table, not from RAM
+# ------------------------------------ the raw row is read from the table, not from RAM
 def seed_raw_counts(conn, d: date = D, **fires: int) -> None:
     for strategy_id, n in fires.items():
         conn.execute(
@@ -639,10 +624,8 @@ def seed_raw_counts(conn, d: date = D, **fires: int) -> None:
 
 
 def test_funnel_raw_prefers_the_persisted_rows_over_a_restarted_counter(conn) -> None:
-    """THE BUG (4 of the last 6 trade days): the pre-screen's raw counters are process memory, so a
-    mid-day restart zeroed them and the 21:00 line reported ``raw=None`` — or, worse, the handful of
-    fires that happened after the bounce. The table holds the day's total across every process that
-    ran it, so it WINS; ``raw_by_strategy`` here is the post-restart remnant it has to beat."""
+    """The pre-screen's raw counters are process memory, so a mid-day restart zeroes them; the table
+    holds the day's total across processes and WINS over the post-restart ``raw_by_strategy``."""
     seed_funnel(conn)
     seed_raw_counts(conn, orb=40, rsi2=6)
     summary = build_funnel_summary(conn, D, raw_by_strategy={"orb": 2})
@@ -652,17 +635,15 @@ def test_funnel_raw_prefers_the_persisted_rows_over_a_restarted_counter(conn) ->
 
 
 def test_funnel_raw_falls_back_to_the_in_process_counter_for_an_unflushed_day(conn) -> None:
-    """A day with no persisted rows (pre-2026-08-21, or counters that never flushed) still renders
-    the live number rather than dropping to "unmeasured" — the table is a preference, not a gate."""
+    """A day with no persisted rows still renders the live number; the table is a preference, not a gate."""
     seed_funnel(conn)
     assert build_funnel_summary(conn, D, raw_by_strategy={"orb": 40, "rsi2": 6}).raw == 46
     assert build_funnel_summary(conn, D).raw is None               # neither source ⇒ unmeasured
 
 
 def test_funnel_keeps_a_row_for_a_parked_strategy_that_fired_but_never_published(conn) -> None:
-    """2026-09-12: `orb` is parked (``max_per_strategy_day`` 0) — the pre-screen refuses it before
-    any slot is charged, so it has raw fires and NO day-slot row. Its fires must still appear as
-    their own line, or the aggregate ``raw`` headline cannot be reconciled with the breakdown."""
+    """A parked strategy (``max_per_strategy_day`` 0) has raw fires and no day-slot row; its fires
+    still appear as their own line so the ``raw`` headline reconciles with the breakdown."""
     conn.execute(
         "INSERT INTO prescreen_day_slots "
         "(d, symbol, strategy_id, published_at, evaluated, score, forwarded) "
@@ -684,8 +665,8 @@ def test_funnel_keeps_a_row_for_a_parked_strategy_that_fired_but_never_published
 
 
 def test_funnel_renders_a_day_where_everything_that_fired_was_parked(conn) -> None:
-    """Fires with zero publications is a real, reportable day (the whole intraday leg parked), not
-    'nothing published today' — that phrase stays reserved for a day nothing fired on either."""
+    """Fires with zero publications is a reportable day, not 'nothing published today' (reserved for
+    a day nothing fired)."""
     seed_raw_counts(conn, orb=1200)
     summary = build_funnel_summary(conn, D)
     assert (summary.raw, summary.published) == (1200, 0)
@@ -699,8 +680,7 @@ def test_funnel_renders_a_day_where_everything_that_fired_was_parked(conn) -> No
 async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
     conn, gov, clock, calendar
 ) -> None:
-    """End to end at the job seam: the 21:00 review is correct after any number of restarts because
-    ``_log_funnel`` goes through the same table-first read."""
+    """``_log_funnel`` uses the same table-first read, so the 21:00 line survives restarts."""
     seed_funnel(conn)
     seed_raw_counts(conn, orb=40, rsi2=6)
     job = make_job(conn, gov, clock, calendar, {}, FakeHarness(raw=json.dumps(REVIEW)),
@@ -718,9 +698,7 @@ async def test_the_eod_funnel_line_reads_the_table_after_a_mid_day_restart(
 async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
     conn, gov, clock, calendar
 ) -> None:
-    """Acceptance: the funnel line is emitted BEFORE any early return, so a governor-blocked
-    or agent-def-less night still leaves the day's funnel numbers in the log — the measurement must
-    not depend on the LLM call it is measuring."""
+    """The funnel line is emitted BEFORE any early return, so the measurement does not depend on the LLM call."""
     seed_funnel(conn)
     job = make_job(conn, gov, clock, calendar, {}, FakeHarness(raw=json.dumps(REVIEW)))
     captured: list[Any] = []
@@ -732,13 +710,12 @@ async def test_run_emits_the_eod_funnel_line_even_when_it_produces_no_review(
     assert captured[0].best_unforwarded_score == 0.85
 
 
-# ================================================== 2026-08-14: the analyst stage (evaluated -> ?)
+# ================================================== the analyst stage (evaluated -> ?)
 def _context_blob(symbol: str, strategy_id: str) -> bytes:
     """A prompt archived the way AgentHarness archives one: ``gzip(system + "\\n\\n" + prompt)``.
 
-    The candidate line is built from the REAL ``SignalCandidate`` through the REAL
-    ``engine.intelligence.context._json``, not from a hand-written dict — the whole reader depends
-    on that serialization, and a fixture that rendered it its own way would test the fixture.
+    The candidate line goes through the REAL ``SignalCandidate`` and ``engine.intelligence.context._json``:
+    the reader depends on that serialization.
     """
     cand = SignalCandidate(
         signal_id="01SIG", strategy_id=strategy_id, symbol=symbol, side="BUY", style="intraday",
@@ -755,8 +732,8 @@ def _context_blob(symbol: str, strategy_id: str) -> bytes:
 
 
 def seed_declines(conn, d: date = D) -> None:
-    """The 2026-08-14 shape: every forwarded candidate evaluated, every one declined, zero
-    proposals — plus one row whose output_json is not JSON at all."""
+    """Every forwarded candidate evaluated and declined, zero proposals, plus one row whose
+    output_json is not JSON."""
     rows = [
         ("D-1", "09:20", "TATAMOTORS", "rsi2", "premature - the 5-minute range has not resolved"),
         ("D-2", "09:24", "HDFCBANK", "rsi2", "no volume confirmation behind the move"),
@@ -806,9 +783,8 @@ def seed_declines(conn, d: date = D) -> None:
 
 
 def test_declines_are_counted_per_strategy_with_the_recent_reasons(conn) -> None:
-    """The stage the funnel stopped short of: 8 slots spent, 6 declines, 1 proposal, and the
-    per-strategy split that says whether ONE scanner is producing setups the analyst always
-    refuses. Identity comes from the archived prompt — a no_action payload carries none."""
+    """8 slots spent, 6 declines, 1 proposal, and a per-strategy split. Identity comes from the
+    archived prompt: a no_action payload carries none."""
     seed_declines(conn)
     declines = build_analyst_declines(conn, D)
 
@@ -827,8 +803,7 @@ def test_declines_are_counted_per_strategy_with_the_recent_reasons(conn) -> None
 
 
 def test_a_malformed_output_is_counted_not_raised(conn) -> None:
-    """The reason this reader parses defensively at all: the row that cannot be read is the
-    row most likely to be the interesting one, so it is COUNTED and the section still renders."""
+    """An unreadable row is COUNTED and the section still renders."""
     conn.execute(
         "INSERT INTO agent_calls (call_id, agent_id, trigger, model, output_json, ok, at) "
         "VALUES ('BAD-1', 'intraday_analyst', 'signal_candidate', 'sonnet-4.6', ?, 1, ?)",
@@ -846,7 +821,7 @@ def test_a_malformed_output_is_counted_not_raised(conn) -> None:
 
 def test_a_decline_without_a_readable_context_still_renders(conn) -> None:
     """agent_calls has no symbol column, so identity is best-effort: a missing/corrupt context blob
-    costs the LABEL, never the line — "we do not know which symbol" still beats no line at all."""
+    costs the label, never the line."""
     for call_id, blob in (("N-1", None), ("N-2", b"not gzip")):
         conn.execute(
             "INSERT INTO agent_calls "
@@ -868,13 +843,12 @@ def test_declines_section_is_in_the_review_context(conn) -> None:
     assert "evaluated 8 -> declined 6 / proposed 1 (unreadable output: 1)" in text
     assert "declines by strategy: orb=2 rsi2=2 trend=2" in text
     assert "- 10:10 SBIN (trend): gap unfilled" in text
-    # The section sits with the funnel it explains, and neither replaced the other.
+    # the section sits after the funnel it explains
     assert text.index(FUNNEL_TITLE) < text.index(DECLINES_TITLE)
 
 
 def test_a_day_with_no_analyst_calls_renders_none(conn) -> None:
-    """A quiet day and a broken query stay distinguishable (the module's convention) — the block
-    says "none" rather than reporting zero declines out of zero evaluations as a finding."""
+    """A quiet day says "none" rather than reporting zero declines out of zero evaluations."""
     assert build_analyst_declines(conn, EMPTY_DAY).lines() == []
     text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
     assert f"{DECLINES_TITLE}: none" in text

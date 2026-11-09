@@ -197,12 +197,11 @@ def test_naive_platform_valid_until_rejected_by_parse_and_stamp() -> None:
         parse_and_stamp(RAW_BY_ACTION["enter"], **naive_stamp)
 
 
-# --------------------------------------------------------------- guidance schema (2026-07-29)
+# --------------------------------------------------------------- guidance schema
 def test_intraday_guidance_schema_is_flat_and_covers_the_union() -> None:
-    """The runtime's output_format silently falls back to TEXT mode on any oneOf/anyOf union
-    (pinned live 2026-07-29: every intraday call answered in fenced prose and died), so the knob
-    gets a FLAT merge of the union. This pin fails when (a) a union keyword sneaks back in, or
-    (b) a variant grows a model-emitted field the guidance does not cover."""
+    """The runtime's output_format silently falls back to TEXT mode on any oneOf/anyOf union, so the
+    knob gets a FLAT merge of the union. Fails when a union keyword sneaks back in or a variant grows
+    a model-emitted field the guidance does not cover."""
     from engine.intelligence.schemas import NoActionOutput, intraday_guidance_json_schema
 
     g = intraday_guidance_json_schema()
@@ -229,11 +228,9 @@ def test_intraday_guidance_schema_is_flat_and_covers_the_union() -> None:
 
 
 def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
-    """2026-08-12 live bug (9 schema_invalid failures, one terminal): the FLAT guidance schema
-    (the CLI degrades on unions) advertises ``thesis``/``confidence`` for EVERY action, so
-    the model legitimately attaches them when declining — the validation side must accept what the
-    guidance side invites. Foreign fields (never advertised for no_action semantics, e.g. a
-    quantity) stay rejected: ``extra="forbid"`` keeps its teeth."""
+    """The FLAT guidance schema advertises ``thesis``/``confidence`` for EVERY action, so the model
+    legitimately attaches them when declining: validation must accept what guidance invites. Foreign
+    fields (e.g. a quantity) stay rejected: ``extra="forbid"`` keeps its teeth."""
     from engine.intelligence.schemas import NoActionOutput
 
     out = NoActionOutput.model_validate({
@@ -255,12 +252,10 @@ def test_no_action_accepts_the_fields_the_guidance_schema_advertises():
         })
 
 
-# ------------------------------------------------- guidance-extras sanitizer (2026-08-20)
-# The FLAT wire schema advertises every action's fields for EVERY action; the authoritative union
-# forbids extras on each variant. On 2026-08-20 BOTH first-ever ``enter`` outputs (ICICIAMC,
-# POLICYBZR brk20) burned all three retries on ``extra_forbidden`` and died — 8 of 13 intraday calls
-# failed that way, because a retry re-emits the shape the schema keeps inviting. parse_intraday now
-# drops exactly the advertised-but-wrong-for-this-action keys before validating.
+# ------------------------------------------------- guidance-extras sanitizer
+# The FLAT wire schema advertises every action's fields for EVERY action while the authoritative
+# union forbids extras on each variant, and a retry re-emits the shape the schema keeps inviting.
+# parse_intraday drops exactly the advertised-but-wrong-for-this-action keys before validating.
 
 
 def _enter_no_action_stamp(model) -> None:
@@ -290,7 +285,7 @@ def test_no_action_with_enter_only_extras_parses() -> None:
 
 
 def test_enter_with_no_action_extras_parses_and_is_stamped() -> None:
-    """The 2026-08-20 gating failure: a valid ``enter`` carrying no_action's ``reason``."""
+    """A valid ``enter`` carrying no_action's ``reason`` parses."""
     from engine.intelligence.schemas import parse_intraday
 
     raw = {**RAW_BY_ACTION["enter"], "reason": "breakout confirmed on the 20-day high"}
@@ -302,8 +297,7 @@ def test_enter_with_no_action_extras_parses_and_is_stamped() -> None:
 
 
 def test_sanitizer_does_not_admit_genuinely_foreign_keys() -> None:
-    """A key the guidance schema never advertised is a confabulation, not a schema mismatch — it
-    must still die schema_invalid (structural coherence: the union stays authoritative)."""
+    """A key the guidance schema never advertised is a confabulation and still dies schema_invalid."""
     from engine.intelligence.schemas import parse_intraday
 
     with pytest.raises(ValidationError):
@@ -357,8 +351,7 @@ def test_unrecognised_action_sanitizes_nothing_and_still_fails() -> None:
 
 
 def test_sanitizer_logs_one_line_naming_what_it_dropped(caplog) -> None:
-    """One structlog line per sanitized payload, carrying the action + the sorted dropped keys —
-    the mismatch must stay VISIBLE in the log, not silently papered over."""
+    """One structlog line per sanitized payload with the action and the sorted dropped keys (the mismatch stays visible)."""
     import logging
 
     from engine.intelligence.schemas import parse_intraday
@@ -386,8 +379,8 @@ def test_clean_payloads_log_nothing(caplog) -> None:
 
 
 def test_platform_stamped_fields_are_not_dropped_by_the_sanitizer() -> None:
-    """proposal_id/agent_id/valid_until/inputs_digest are NOT advertised, so the sanitizer leaves
-    them alone — parse_and_stamp keeps overwriting them exactly as before."""
+    """proposal_id/agent_id/valid_until/inputs_digest are not advertised, so the sanitizer leaves them
+    for parse_and_stamp to overwrite."""
     from engine.intelligence.schemas import parse_intraday
 
     raw = {
@@ -401,13 +394,11 @@ def test_platform_stamped_fields_are_not_dropped_by_the_sanitizer() -> None:
     _enter_no_action_stamp(parse_intraday(raw, **STAMP))
 
 
-# --------------------------------------------- prose-overflow clamp (2026-09-02 exit-thesis incident)
+# --------------------------------------------- prose-overflow clamp
 def test_overlong_advertised_thesis_is_clamped_not_fatal() -> None:
-    """The 2026-09-02 failure class: the wire schema advertises `thesis` as a bare string (the 600
-    cap lived only in a client-side prose note), so a verbose-but-valid EXIT died string_too_long
-    on all 3 attempts twice - both refreshed exit recommendations for open positions were lost.
-    An advertised prose field overflowing the MATCHED model's declared max_length is clamped, not
-    fatal: retries must converge, and an exit decision must never die of verbosity."""
+    """The wire schema advertises `thesis` as a bare string, so an advertised prose field overflowing
+    the MATCHED model's declared max_length is clamped, not fatal: retries must converge and an exit
+    decision must never die of verbosity."""
     from engine.intelligence.schemas import parse_intraday
 
     long_thesis = "Swing CNC long from 2668.80; " + ("invalidation detail " * 40)
@@ -417,9 +408,8 @@ def test_overlong_advertised_thesis_is_clamped_not_fatal() -> None:
 
 
 def test_clamp_keys_off_the_matched_models_own_cap() -> None:
-    """NoActionOutput.thesis is deliberately unconstrained - the same over-long prose on a
-    no_action passes through UNCLAMPED, proving the clamp reads the matched model's declared
-    max_length rather than a hardcoded number."""
+    """NoActionOutput.thesis is unconstrained, so the same over-long prose passes UNCLAMPED: the clamp
+    reads the matched model's declared max_length, not a hardcoded number."""
     from engine.intelligence.schemas import NoActionOutput, parse_intraday
 
     long_thesis = "declining on regime grounds " * 40
@@ -443,11 +433,9 @@ def test_clamp_never_softens_min_length_or_numeric_constraints() -> None:
 
 
 def test_guidance_schema_does_not_advertise_a_thesis_cap() -> None:
-    """2026-09-03: the wire schema must NOT carry maxLength for `thesis`. Advertised for one session
-    as 'prevention', it made the runtime bounce verbose StructuredOutput inputs turn after turn -
-    3-4x output tokens per call and the first-ever intraday max-turns sdk_error (terminal, no
-    retry) - while the client-side clamp would have truncated the same output for free. Prose
-    fields stay uncapped on the wire; the clamp is the converging mechanism."""
+    """The wire schema must NOT carry maxLength for `thesis`: advertised, it makes the runtime bounce
+    verbose StructuredOutput inputs turn after turn (3-4x output tokens, a terminal max-turns
+    sdk_error). Prose stays uncapped on the wire; the client-side clamp converges."""
     from engine.intelligence.schemas import intraday_guidance_json_schema
 
     props = intraday_guidance_json_schema()["properties"]
@@ -462,14 +450,13 @@ def test_guidance_schema_has_no_regime_note() -> None:
     assert "regime_note" not in NoActionOutput.model_fields
 
 
-# ------------------------------------------------- exit-reason enum (2026-09-11)
-# ``reason`` is advertised as free text (it is no_action's prose field) while ExitAction declares it a
-# CLOSED Literal, so EVERY position-event exit died literal_error on attempt 1 — 47 of 47 since
-# 2026-09-03, 85 rows from 08-27, 10 lost terminally before the retry started echoing the pydantic
-# error. The codes now travel under their own advertised key and the sanitizer renames it.
+# ------------------------------------------------- exit-reason enum
+# ``reason`` is advertised as free text (no_action's prose field) while ExitAction declares it a
+# CLOSED Literal, so exit codes travel under their own advertised key ``exit_reason`` and the
+# sanitizer renames it.
 
-#: The real 2026-09-10 failing payload: prose ``reason`` beside a thesis, plus the entry-identity
-#: extras the flat schema advertises for every action.
+#: A live failing payload: prose ``reason`` beside a thesis, plus the entry-identity extras the flat
+#: schema advertises for every action.
 EXIT_2026_09_10 = {
     "action": "exit",
     "thesis": (
@@ -489,7 +476,7 @@ EXIT_2026_09_10 = {
 
 
 def test_exit_reason_code_maps_onto_the_contract_literal() -> None:
-    """The 09-10 shape WITH a code parses: the code becomes ``reason`` and the thesis survives."""
+    """With a code the code becomes ``reason`` and the thesis survives."""
     from engine.intelligence.schemas import parse_intraday
 
     model = parse_intraday({**EXIT_2026_09_10, "exit_reason": "risk_event"}, **STAMP)
@@ -503,8 +490,7 @@ def test_exit_reason_code_maps_onto_the_contract_literal() -> None:
 
 
 def test_exit_with_a_code_and_no_reason_key_at_all_parses() -> None:
-    """The steady state the prompt now asks for: code in ``exit_reason``, reasoning in ``thesis``,
-    no ``reason`` key at all. Nothing to displace, so nothing is moved."""
+    """Code in ``exit_reason``, reasoning in ``thesis``, no ``reason`` key: nothing to displace."""
     from engine.intelligence.schemas import parse_intraday
 
     raw = {k: v for k, v in EXIT_2026_09_10.items() if k != "reason"}
@@ -517,10 +503,9 @@ def test_exit_with_a_code_and_no_reason_key_at_all_parses() -> None:
     "override", [{}, {"exit_reason": "horizon_expired"}], ids=["no-exit-reason", "out-of-enum-code"]
 )
 def test_an_exit_without_a_valid_code_dies_on_reason_alone(override) -> None:
-    """DOCUMENTED, not fixed: absent the code, prose in ``reason`` is never guessed into one — the
-    live 09-10 failure, reproduced. A confabulated code is not mapped either, nor does it become a foreign
-    key: it is dropped like any other advertised extra. Either way the payload dies on ``reason`` alone —
-    one literal_error at exit.reason, nothing else."""
+    """Absent a valid code, prose in ``reason`` is never guessed into one, and a confabulated code is
+    dropped like any advertised extra. Either way the payload dies on ``reason`` alone: one
+    literal_error at exit.reason."""
     from engine.intelligence.schemas import parse_intraday
 
     with pytest.raises(ValidationError) as err:
@@ -532,8 +517,7 @@ def test_an_exit_without_a_valid_code_dies_on_reason_alone(override) -> None:
 
 
 def test_displaced_prose_becomes_the_thesis_only_when_there_is_none() -> None:
-    """The code takes ``reason`` over; the prose it evicts is worth keeping only where no thesis
-    would be overwritten. With a thesis present the prose is dropped (asserted above)."""
+    """The prose the code evicts from ``reason`` becomes the thesis only where none would be overwritten."""
     from engine.intelligence.schemas import parse_intraday
 
     no_thesis = {k: v for k, v in EXIT_2026_09_10.items() if k != "thesis"}
@@ -546,8 +530,7 @@ def test_displaced_prose_becomes_the_thesis_only_when_there_is_none() -> None:
 
 
 def test_displaced_prose_that_is_itself_a_code_is_not_promoted_to_thesis() -> None:
-    """A model that answers the codes twice (``reason`` == ``exit_reason``) has written no prose —
-    promoting the bare code into ``thesis`` would manufacture reasoning that does not exist."""
+    """``reason`` == ``exit_reason`` is no prose: promoting the bare code would manufacture reasoning."""
     from engine.intelligence.schemas import parse_intraday
 
     raw = {k: v for k, v in EXIT_2026_09_10.items() if k != "thesis"}
@@ -557,8 +540,7 @@ def test_displaced_prose_that_is_itself_a_code_is_not_promoted_to_thesis() -> No
 
 
 def test_enter_carrying_exit_reason_drops_it_and_parses() -> None:
-    """``exit_reason`` is advertised for every action, so a valid ``enter`` may carry it. For any
-    action but ``exit`` it is a foreign key the existing drop removes — the mapping is exit-only."""
+    """``exit_reason`` is advertised for every action; outside ``exit`` it is dropped (the mapping is exit-only)."""
     from engine.intelligence.schemas import parse_intraday
 
     model = parse_intraday({**RAW_BY_ACTION["enter"], "exit_reason": "risk_event"}, **STAMP)
@@ -569,8 +551,7 @@ def test_enter_carrying_exit_reason_drops_it_and_parses() -> None:
 
 
 def test_no_action_carrying_exit_reason_drops_it_and_keeps_its_prose() -> None:
-    """The riskiest mis-wiring: a no_action's ``reason`` IS its free prose and must never be
-    overwritten by a stray code."""
+    """A no_action's ``reason`` IS its free prose and must never be overwritten by a stray code."""
     from engine.intelligence.schemas import NoActionOutput, parse_intraday
 
     out = parse_intraday(
@@ -586,10 +567,9 @@ def test_no_action_carrying_exit_reason_drops_it_and_keeps_its_prose() -> None:
 
 
 def test_guidance_exit_reason_enum_equals_the_contract_literal() -> None:
-    """The wire enum is DERIVED from ExitAction's Literal, so editing one side alone is impossible;
-    this fails the moment someone retypes either. The five codes are pinned explicitly as well —
-    the sanitizer's rename and the position-event prompt share this vocabulary, so growing it is a
-    three-place decision, not a one-line edit."""
+    """The wire enum is derived from ExitAction's Literal; this fails if either is retyped. The five codes
+    are also pinned: the sanitizer's rename and the position-event prompt share this vocabulary, so
+    growing it is a three-place decision."""
     from typing import get_args
 
     from engine.core.contracts import ExitAction as ContractExitAction
@@ -605,8 +585,7 @@ def test_guidance_exit_reason_enum_equals_the_contract_literal() -> None:
 
 
 def test_exit_reason_mapping_is_logged_and_the_key_is_dropped(caplog) -> None:
-    """The rename must stay VISIBLE (same discipline as guidance_extras_dropped), and the dropped
-    line proves ``exit_reason`` really leaves the payload rather than reaching the union."""
+    """The rename stays visible in the log, and the dropped line proves ``exit_reason`` leaves the payload."""
     import logging
 
     from engine.intelligence.schemas import parse_intraday
@@ -624,7 +603,7 @@ def test_exit_reason_mapping_is_logged_and_the_key_is_dropped(caplog) -> None:
 
 
 def test_exit_without_a_code_logs_no_mapping(caplog) -> None:
-    """No code ⇒ no rename and no log line: the sanitizer is silent on the path it does not touch."""
+    """No code ⇒ no rename and no log line."""
     import logging
 
     from engine.intelligence.schemas import parse_intraday
@@ -637,8 +616,8 @@ def test_exit_without_a_code_logs_no_mapping(caplog) -> None:
 
 
 def test_mapped_exit_survives_the_json_string_path_and_the_prose_clamp() -> None:
-    """The harness hands parse_output raw JSON TEXT, and a displaced prose ``reason`` is subject to
-    the same 600-char thesis clamp as any advertised prose — the rename runs before the clamp."""
+    """The harness hands parse_output raw JSON TEXT, and a displaced prose ``reason`` gets the same
+    600-char thesis clamp: the rename runs before the clamp."""
     from engine.intelligence.schemas import parse_intraday
 
     long_prose = "Holding horizon exceeded. " + ("level lost and breadth hostile " * 30)
