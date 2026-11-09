@@ -1,21 +1,18 @@
 """NSE bhavcopy (UDiFF) ingest — daily job (18:00), best-effort.
 
-Downloads the day's cash-market bhavcopy in the CURRENT UDiFF format/URL scheme (NSE cut over from
-the legacy ``EQ_...bhav.csv.zip`` in 2024 — the [VERIFY]-marked template below is the UDiFF archive
-path) and uses it two ways:
+Downloads the day's cash-market bhavcopy in the UDiFF format/URL scheme (not the legacy
+``EQ_...bhav.csv.zip``) and uses it two ways:
 
 1. **Cross-check input for ``bars_1d``**: where a Kite-official row already exists for
-   (symbol, day) it is CANONICAL (adjusted) — the bhavcopy row only cross-checks it
-   (close/volume drift beyond tolerance is logged + reported, never overwritten). Where no row
-   exists, the bhavcopy row is written with ``src='bhavcopy'`` (fills the daily-bar history the
-   traded-value filter needs even when Kite backfill lags).
-2. **Traded-value universe-filter feed**: the written ``bars_1d`` rows are exactly what
-   ``UniverseBuilder`` medians over (``close × volume``).
+   (symbol, day) it is CANONICAL (adjusted) — the bhavcopy row only cross-checks it (drift beyond
+   tolerance is logged + reported, never overwritten). Where no row exists, the bhavcopy row is
+   written with ``src='bhavcopy'`` (fills the daily-bar history the traded-value filter needs).
+2. **Traded-value universe-filter feed**: the written ``bars_1d`` rows are what ``UniverseBuilder``
+   medians over (``close × volume``).
 
-Failure model: injected ``httpx.AsyncClient``, defensive parsing (UDiFF column names with
-legacy aliases; malformed rows skipped-and-counted), and on ANY failure the job alerts + returns a
-degraded result — ``bars_1d`` keeps yesterday's data and the date-keyed catch-up re-runs the
-missed day. Never raises into the scheduler.
+Failure model: defensive parsing (UDiFF column names with legacy aliases; malformed rows
+skipped-and-counted); on ANY failure the job alerts + returns a degraded result — ``bars_1d`` keeps
+its data and the date-keyed catch-up re-runs the missed day. Never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -38,7 +35,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.bhavcopy")
 
-#: UDiFF cash-market bhavcopy archive URL (current scheme). [VERIFY] — NSE moves these.
+#: UDiFF cash-market bhavcopy archive URL — NSE moves these.
 BHAVCOPY_URL_TEMPLATE = (
     "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
 )
@@ -166,9 +163,7 @@ class BhavcopyJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13): with the watermark fix, the 30-min sweeps genuinely
-        #: re-run a still-failing day, so alerting on EVERY attempt would storm during a long NSE
-        #: outage. Process-lifetime only — a fresh process re-alerts once, which is fine.
+        #: Per-date alert dedup: the 30-min sweeps re-run a still-failing day. Process-lifetime only.
         self._alerted: set[date] = set()
 
     async def run(self, d: date) -> BhavcopyResult:
@@ -183,8 +178,8 @@ class BhavcopyJob:
         except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("bhavcopy_fetch_failed", d=d.isoformat(), url=url, error=reason)
-            if d not in self._alerted:  # dedup: the fixed watermark means 30-min sweeps genuinely
-                await self._alert(d, reason)  # retry a still-failing day — don't storm on every attempt
+            if d not in self._alerted:
+                await self._alert(d, reason)
                 self._alerted.add(d)
             return BhavcopyResult(d=d, ok=False, degraded=True, reason=reason)
 
@@ -210,8 +205,8 @@ class BhavcopyJob:
         """Kite-official rows are canonical (adjusted): cross-check them, never overwrite;
         write bhavcopy rows only where no row exists yet.
 
-        One day-scan read + one batched write — NOT per-symbol round trips: ~2000 single-row
-        store calls cost ~13.5 ms each (≈45 s nightly) vs sub-second batched."""
+        One day-scan read + one batched write — NOT per-symbol round trips (~2000 single-row store
+        calls cost ≈45 s)."""
         existing_by_symbol = {b.symbol: b for b in self._store.get_bars_1d_for_day(d)}
         written = 0
         checked = 0
@@ -231,8 +226,7 @@ class BhavcopyJob:
             else:
                 new_bars.append(bar)
                 written += 1
-                # A duplicate-symbol row later in this batch must cross-check against this one
-                # (the old per-row read-after-write behavior), not double-count as written.
+                # A duplicate-symbol row later in this batch cross-checks against this one, not double-counted.
                 existing_by_symbol[bar.symbol] = bar
         if new_bars:
             self._store.upsert_bars_1d(new_bars)

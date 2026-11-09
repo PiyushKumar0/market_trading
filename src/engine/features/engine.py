@@ -5,10 +5,10 @@ Two pinned surfaces::
     daily_snapshot(d: date) -> None          # writes features_daily rows to DuckDB (nightly job)
     intraday_snapshot(symbol) -> FeatureVector   # from live bars; persisted to feature_snapshots
 
-Determinism contract: both paths are pure functions of (store contents, d/now) — no wall
-clock, no network, no randomness (the only minted value is the snapshot ULID, which is identity, not
-data). The same store contents always produce byte-identical ``features_daily`` rows (canonical
-``features_json``); the feature tests assert exactly that.
+Determinism contract: both paths are pure functions of (store contents, d/now) — no wall clock, no
+network, no randomness (the only minted value is the snapshot ULID, which is identity, not data).
+The same store contents always produce byte-identical ``features_daily`` rows (canonical
+``features_json``).
 
 Feature set v2 (``feature_set_version = 2`` stamped on every row):
 
@@ -18,22 +18,21 @@ Feature set v2 (``feature_set_version = 2`` stamped on every row):
 * **Volume/liquidity:** 20d median traded value (close x volume).
 * **Market context:** NIFTY 50 returns + trend state, India VIX level/delta, universe
   advance-decline, expiry-day flag, results-day flag (``earnings_calendar``), ex-date proximity,
-  surveillance status (read from ``instruments_daily.surveillance``, which no job
-  populates — so ``surveillance``/``surveillance_flagged`` are None/False today; the universe build
-  is the control), ``flagged_instrument_day`` (block deals). Sector "index" returns
-  are the equal-weight mean return of the universe's same-sector constituents (``sector_map``) —
-  a deterministic proxy; there is no sectoral-index bar feed.
-* **Sentiment / catalyst (v2):** decay-weighted ``sentiment_{symbol,sector,theme,market}``
-  from the LATEST ``sentiment_agg`` rows (the digest's own decay-weighted sum) plus
-  per-symbol catalyst fields from TODAY's ``catalyst_watchlist`` —
-  ``on_watchlist``, ``watchlist_grade``, ``catalyst_event_type``, ``catalyst_event_age_h``,
-  ``materiality``, ``catalyst_source_domain_count`` — and ``sentiment_available``. Each half falls
-  back independently to its slice of the PINNED absent-news defaults
-  (:data:`ABSENT_NEWS_DEFAULTS`) when its source is empty: sentiment* = 0 / ``sentiment_available``
-  = False when no digest has ever run; ``on_watchlist`` = False / ``materiality`` = 0 (grade/event
-  fields = None) when today's watchlist has no row for the symbol. An in-distribution "no news"
-  vector, never NaN/missing (chaos case 20). Only ``sentiment_agg`` + ``catalyst_watchlist``
-  are read here — never ``news``/``news_clusters`` directly (single-seam discipline).
+  surveillance status (read from ``instruments_daily.surveillance``, which no job populates — so
+  ``surveillance``/``surveillance_flagged`` are None/False; the universe build is the control),
+  ``flagged_instrument_day`` (block deals). Sector "index" returns are the equal-weight mean return
+  of the universe's same-sector constituents (``sector_map``) — a deterministic proxy; there is no
+  sectoral-index bar feed.
+* **Sentiment / catalyst (v2):** decay-weighted ``sentiment_{symbol,sector,theme,market}`` from the
+  LATEST ``sentiment_agg`` rows plus per-symbol catalyst fields from TODAY's ``catalyst_watchlist``
+  (``on_watchlist``, ``watchlist_grade``, ``catalyst_event_type``, ``catalyst_event_age_h``,
+  ``materiality``, ``catalyst_source_domain_count``) and ``sentiment_available``. Each half falls
+  back independently to its slice of the PINNED absent-news defaults (:data:`ABSENT_NEWS_DEFAULTS`)
+  when its source is empty: sentiment* = 0 / ``sentiment_available`` = False when no digest has ever
+  run; ``on_watchlist`` = False / ``materiality`` = 0 (grade/event fields = None) when today's
+  watchlist has no row for the symbol. An in-distribution "no news" vector, never NaN/missing. Only
+  ``sentiment_agg`` + ``catalyst_watchlist`` are read here — never ``news``/``news_clusters``
+  directly (single-seam discipline).
 * **Microstructure (intraday only):** opening-range stats, VWAP distance, relative volume (both the
   legacy full-day-denominator ``rel_volume`` and the time-of-day-normalized ``rel_volume_tod``),
   ATR(14) 1m, last-30-bar summary.
@@ -42,43 +41,38 @@ Schema stability: every row carries the FULL key set (:data:`DAILY_FEATURE_KEYS`
 :data:`INTRADAY_FEATURE_KEYS`); unavailable values are ``None`` (indicator warm-up), never absent —
 River and the LLM context see a fixed vocabulary.
 
-Intraday read budget (2026-08-26 — the hot-path invariant)
+Intraday read budget (the hot-path invariant)
 ---------------------------------------------------------------------
 ``intraday_snapshot`` runs ON THE SCAN PATH: ``SignalPreScreen._scan`` holds its own lock across
 ``context_provider(bar)``, which mints one snapshot PER BAR PER SYMBOL. Every synchronous store read
-here therefore takes the ``MarketStore`` connection lock while the pre-screen lock is held, and one
-slow query serializes every scanner in the process. Observed live at the 2026-08-26 09:36 open: ~20
-shared-executor threads queued on the pre-screen lock behind a single ``get_catalyst_watchlist``
-call inside this module. The snapshot used to issue ~9 DuckDB statements per bar; it now issues
-ZERO reads in steady state:
+here takes the ``MarketStore`` connection lock while the pre-screen lock is held, so one slow query
+serializes every scanner in the process. A steady-state snapshot therefore issues ZERO reads:
 
 * **day-level news/sector context** (``latest_sentiment_as_of`` + ``sentiment_agg`` + ``theme_map``
-  + ``catalyst_watchlist`` + ``sector_map`` — 6 statements) → ONE combined read per
-  :data:`_SENTIMENT_CACHE_TTL_S`, shared by every symbol and by ``daily_snapshot``, invalidated on
-  day change (:meth:`FeatureEngine._day_context`). The as-of stamp is refreshed BY that read rather
-  than probed separately — a separate freshness check would just reinstate a per-bar statement.
+  + ``catalyst_watchlist`` + ``sector_map``) → ONE combined read per :data:`_SENTIMENT_CACHE_TTL_S`,
+  shared by every symbol and by ``daily_snapshot``, invalidated on day change
+  (:meth:`FeatureEngine._day_context`). The as-of stamp is refreshed BY that read; a separate
+  freshness probe would reinstate a per-bar statement.
 * **per-symbol 20-session baselines** (the ``bars_1d`` window behind ``rel_volume`` and the ranged
-  ``bars_1m`` history behind ``rel_volume_tod``) → those sessions are COMPLETED and therefore
-  immutable for the day, so they are read once per symbol per day and served from memory
-  (:meth:`FeatureEngine._symbol_day` / :meth:`FeatureEngine._tod_curves`). A TTL would be strictly
-  worse here: it would re-read immutable data every minute for every symbol.
+  ``bars_1m`` history behind ``rel_volume_tod``) → COMPLETED sessions are immutable for the day, so
+  they are read once per symbol per day and served from memory (:meth:`FeatureEngine._symbol_day` /
+  :meth:`FeatureEngine._tod_curves`). A TTL would only re-read constants.
 * **today's own 1m bars** are the snapshot's payload and can never be cached — a stale tape would
-  mean a stale ``last_price``/``vwap``. Instead the caller may PASS the series it already holds
-  (``bars=``): ``LiveScanContextProvider`` keeps today's ascending series in memory anyway and used
-  to make this engine re-read the very same rows. Callers that pass nothing (the brk20/ins/cat batch
-  sweep in ``engine.ops.main``) keep the original read — they are not on the per-bar path.
+  mean a stale ``last_price``/``vwap``. The caller may PASS the series it already holds (``bars=``);
+  callers that pass nothing (the brk20/ins/cat batch sweep in ``engine.ops.main``) read it themselves —
+  they are not on the per-bar path.
 
-The one DuckDB statement a steady-state snapshot still issues is the ``feature_snapshots`` INSERT —
-the audit-chain write that IS the snapshot's purpose (writes were never the chokepoint).
+The one statement a steady-state snapshot still issues is the ``feature_snapshots`` INSERT — the
+audit-chain write that IS the snapshot's purpose.
 
 Thread-safety: the caches are read lock-free (a single reference / a ``dict.get``) and refreshed
 under a lock with a double check, because ``intraday_snapshot`` is called from the pre-screen worker
 threads AND from the batch sweep. The two locks are independent and are never nested.
 
-Indicator math is reused verbatim from ``engine.strategy.indicators`` (same module family) so
-live features and the vectorbt backtest sweep cannot diverge. Statistics are floats (never money);
-the expiry-day rule (monthly F&O expiry = last ``expiry_weekday`` of the month, holiday-rolled to
-the previous trading day) defaults to Tuesday per the 2025 NSE expiry-day move [VERIFY].
+Indicator math is reused verbatim from ``engine.strategy.indicators`` so live features and the
+vectorbt backtest sweep cannot diverge. Statistics are floats (never money); the expiry-day rule
+(monthly F&O expiry = last ``expiry_weekday`` of the month, holiday-rolled to the previous trading
+day) defaults to Tuesday.
 """
 
 from __future__ import annotations
@@ -112,10 +106,9 @@ from engine.strategy.indicators import vwap, wilder_atr
 _log = get_logger("engine.features.engine")
 
 #: PINNED absent-news defaults (a news outage falls back to this SAME vector, so non-`cat`
-#: candidate ranking cannot shift — chaos case 20). Values are in-distribution scalars, never
-#: None/NaN. Changing any of these is a contract change, not a tweak. (The catalyst DESCRIPTIVE fields —
-#: watchlist_grade / catalyst_event_type / catalyst_event_age_h / catalyst_source_domain_count —
-#: are not pinned scalars: they default to None like any other warm-up/unavailable feature.)
+#: candidate ranking cannot shift). Values are in-distribution scalars, never None/NaN. Changing
+#: any of these is a contract change, not a tweak. (The catalyst DESCRIPTIVE fields are not pinned
+#: scalars: they default to None like any other warm-up/unavailable feature.)
 ABSENT_NEWS_DEFAULTS: dict[str, float | bool] = {
     "sentiment_symbol": 0.0,
     "sentiment_sector": 0.0,
@@ -140,7 +133,6 @@ DAILY_FEATURE_KEYS: tuple[str, ...] = (
     "atr14_1d", "realized_vol_20d",
     "gap_open_pct", "gap_abs_mean_20d",
     "dist_sma20", "dist_sma50", "dist_sma200",
-    # 2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
     "prox_52wk_high", "prox_20d_high",
     "day_range_pos",
     # volume / liquidity
@@ -174,18 +166,16 @@ INTRADAY_FEATURE_KEYS: tuple[str, ...] = (
 _ANNUALIZATION = math.sqrt(252.0)   # NSE ~252 trading sessions/year (realized-vol convention)
 
 #: How many of the 20 completed sessions must have a usable cumulative volume at the same elapsed
-#: minute before ``rel_volume_tod`` is computed. A "median pace" built from three surviving sessions
-#: is noise wearing a baseline's clothes — below the floor the feature is None, never a guess (warm-up rule). Missing 1m history is ordinary: only the intraday tick watchlist carries minute
-#: bars, so a symbol swept daily can have 20 daily bars and no minute history at all.
+#: minute before ``rel_volume_tod`` is computed; below the floor the feature is None, never a guess.
+#: Missing 1m history is ordinary: only the intraday tick watchlist carries minute bars, so a symbol
+#: swept daily can have 20 daily bars and no minute history at all.
 _REL_VOLUME_TOD_MIN_SESSIONS = 10
 
-#: 2026-08-26: refresh bound, in seconds, for the day-level news/sector context cache — at
-#: most ONE combined store read per this many seconds no matter how many snapshots are minted; every
-#: snapshot in between is served from memory. 60 s of staleness is immaterial to THIS consumer: the
-#: news digest updates the sentiment/watchlist tables a few times a day at most, and the precision
-#: consumer of catalyst context is the analyst path (``engine.intelligence.context``), which reads
-#: the store directly and is unaffected by this cache. Lower it and the per-bar read returns; raise
-#: it and a same-day digest re-run takes longer to reach the feature block.
+#: Refresh bound, in seconds, for the day-level news/sector context cache: at most ONE combined
+#: store read per this many seconds however many snapshots are minted. 60 s of staleness is
+#: immaterial here (the digest updates those tables a few times a day; the analyst path,
+#: ``engine.intelligence.context``, reads the store directly). Lower it and the per-bar read
+#: returns; raise it and a same-day digest re-run takes longer to reach the feature block.
 _SENTIMENT_CACHE_TTL_S = 60.0
 
 
@@ -209,7 +199,7 @@ class _DayContext:
 
     @property
     def sentiment_available(self) -> bool:
-        """Chaos-case-20 gate: True only once a digest has EVER run."""
+        """True only once a digest has EVER run."""
         return self.as_of is not None
 
 
@@ -221,10 +211,9 @@ class _SymbolDayCache:
     change them — a day-scoped cache is correct where a TTL would merely re-read constants.
 
     ``tod`` is the ``rel_volume_tod`` baseline in compact form: per session, the ascending offsets
-    (seconds after that session's 09:15) of its 1m bars and the running cumulative volume at each.
-    Answering "cumulative volume through the same elapsed minute" is then a ``bisect`` per session
-    instead of a ranged DuckDB read per bar. ``array`` rather than ``list`` because this holds ~20
-    sessions x ~375 bars for every symbol on the tick watchlist: 12 bytes/bar instead of ~60.
+    (seconds after that session's 09:15) of its 1m bars and the running cumulative volume at each,
+    so "cumulative volume through the same elapsed minute" is a ``bisect`` per session. ``array``
+    rather than ``list`` for memory (~20 sessions x ~375 bars per tick-watchlist symbol).
     ``None`` = not built yet (a symbol with no tape today never pays for it).
     """
 
@@ -252,10 +241,8 @@ def _dist_sma(closes: list[float], n: int) -> float | None:
 def _prox_high(closes: list[float], highs: list[float], n: int) -> float | None:
     """Fractional proximity of the last close to the max high over the last ``min(n, len(highs))``
     sessions (including today); 1.0 = at the high. Unlike ``_dist_sma`` this never blocks on a
-    lookback exceeding available history — it degrades to whatever window exists (stable-schema
-    contract), so it is None only when there is no price history at all (the same early-return case
-    every other price feature shares in ``_price_features``).
-    2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
+    lookback exceeding available history — it degrades to whatever window exists, so it is None only
+    when there is no price history at all.
     """
     if not highs:
         return None
@@ -310,15 +297,15 @@ class FeatureEngine:
     Parameters
     ----------
     store / clock / calendar:
-        The single-writer :class:`MarketStore`, the platform :class:`Clock` (the ONLY time source), and the :class:`NSECalendar` (session open for intraday anchoring; expiry-day flag).
+        The single-writer :class:`MarketStore`, the platform :class:`Clock` (the ONLY time source), and
+        the :class:`NSECalendar` (session open for intraday anchoring; expiry-day flag).
     index_symbol / vix_symbol:
         Canonical ``bars_1d`` symbols the backfill job persists NIFTY 50 / India VIX under
         (must match ``ops.warmup.WarmupGate`` — risk-gate ``regime_data_ready``).
     opening_range_minutes:
         Opening-range window for the intraday OR stats (default 30 = 09:15-09:45, the strategy anchor).
     expiry_weekday:
-        Monday=0 weekday of the monthly F&O expiry; default 1 (Tuesday) per the 2025 NSE
-        expiry-day migration [VERIFY — flips back to 3/Thursday if NSE reverts].
+        Monday=0 weekday of the monthly F&O expiry; default 1 (Tuesday); 3 (Thursday) if NSE reverts.
     daily_lookback_days:
         Calendar-day span fetched from ``bars_1d`` (400 covers the 200-session DMA plus holidays).
     ex_date_horizon_days:
@@ -352,9 +339,8 @@ class FeatureEngine:
         self._lookback_days = int(daily_lookback_days)
         self._ex_horizon_days = int(ex_date_horizon_days)
         # ---- Hot-path caches (module docstring "Intraday read budget"). Nothing is read at
-        # construction: a FeatureEngine is wired at composition time, long before any worker thread.
-        # The two locks guard unrelated state and are NEVER nested (no lock-order hazard); each is
-        # held across its own store read so concurrent first-touches collapse into ONE read.
+        # construction. The two locks guard unrelated state and are NEVER nested; each is held
+        # across its own store read so concurrent first-touches collapse into ONE read.
         self._day_ctx: _DayContext | None = None
         self._day_ctx_lock = threading.Lock()
         self._symbol_cache: dict[str, _SymbolDayCache] = {}
@@ -385,9 +371,8 @@ class FeatureEngine:
 
         market = self._market_context(d, start, ret1)
         # Sector map + news digest outputs come from the SAME shared day context the intraday path
-        # uses — one read for both halves, and both snapshot surfaces still see one
-        # consistent digest run. This is a nightly job: the TTL is always long expired by the time it
-        # runs, so it reads fresh (and a day-``d`` mismatch invalidates the cache regardless).
+        # uses, so both snapshot surfaces see one consistent digest run. The nightly TTL is always
+        # expired (and a day-``d`` mismatch invalidates the cache regardless), so this reads fresh.
         ctx = self._day_context(d)
         sector_of = ctx.sector_of
         sector_ret1 = _sector_means(sector_of, ret1)
@@ -441,17 +426,12 @@ class FeatureEngine:
         proposals and ledger rows reference. Missing data ⇒ ``None`` values (warm-up),
         never an error; the key set is always :data:`INTRADAY_FEATURE_KEYS`.
 
-        ``bars`` (since 2026-08-26) is today's ascending 1m series for ``symbol``, ending with the
-        bar being scanned. Passing it removes the only per-bar read that could not be cached — the
-        tape IS the payload, so a cached tape would mean a stale ``last_price``/``vwap``. On the scan
-        path :class:`~engine.ops.scan_context.LiveScanContextProvider` already holds exactly this
-        list in memory (it seeds it once per symbol per day and appends every bar), and this engine
-        used to re-read the very same rows from DuckDB while the pre-screen lock was held. The two
-        series are equivalent by construction: ``BarBuilder`` persists a bar BEFORE publishing
-        ``bar.1m`` (``marketdata.bar_builder``), so the store read this replaces returned the same
-        set — passing the list only removes the round trip (and the dependence on that flush order).
-        ``None`` (default) keeps the original read for callers with no series of their own — the
-        brk20/ins/cat batch sweep in ``engine.ops.main``, which is not on the per-bar path.
+        ``bars`` is today's ascending 1m series for ``symbol``, ending with the bar being scanned.
+        Passing it removes the only per-bar read that could not be cached. On the scan path
+        :class:`~engine.ops.scan_context.LiveScanContextProvider` already holds exactly this list;
+        it is equivalent to the store read because ``BarBuilder`` persists a bar BEFORE publishing
+        ``bar.1m``. ``None`` (default) reads the store, for callers with no series of their own — the
+        brk20/ins/cat batch sweep in ``engine.ops.main``.
         """
         now = self._clock.now()
         d = self._clock.today()
@@ -501,7 +481,6 @@ class FeatureEngine:
         out["dist_sma20"] = _dist_sma(closes, 20)
         out["dist_sma50"] = _dist_sma(closes, 50)
         out["dist_sma200"] = _dist_sma(closes, 200)
-        # 2026-09-01 origination review: 52wk-high proximity was absent from the vocabulary (JINDALSAW/movers miss).
         out["prox_52wk_high"] = _prox_high(closes, highs, 252)
         out["prox_20d_high"] = _prox_high(closes, highs, 20)
         rng = highs[-1] - lows[-1]
@@ -568,22 +547,19 @@ class FeatureEngine:
 
         Shared by ``daily_snapshot`` and ``intraday_snapshot`` so both compute from the SAME digest
         run, and TTL-bounded so the per-bar scan path pays for AT MOST one combined store read per
-        :data:`_SENTIMENT_CACHE_TTL_S` (module docstring "Intraday read budget"). Every
-        snapshot in between reads nothing.
+        :data:`_SENTIMENT_CACHE_TTL_S` (module docstring "Intraday read budget").
 
         Invalidation:
 
-        * **day change** — a different ``d`` always refreshes (``catalyst_watchlist`` is day-keyed,
-          and so is the ``sector_map`` as-of), so a session rollover can never serve yesterday's
-          watchlist. This is a single-slot cache: a ``daily_snapshot`` for some OTHER day evicts the
-          live day's entry, which costs one refresh, never a wrong answer.
-        * **TTL** — a digest re-run that lands mid-session is picked up within one TTL. The as-of
-          stamp is refreshed BY the same read; probing it separately would reinstate exactly the
-          per-bar statement this cache exists to remove.
+        * **day change** — a different ``d`` always refreshes (``catalyst_watchlist`` and the
+          ``sector_map`` as-of are day-keyed), so a rollover never serves yesterday's watchlist. A
+          single-slot cache: a ``daily_snapshot`` for some OTHER day evicts the live day's entry,
+          which costs one refresh, never a wrong answer.
+        * **TTL** — a digest re-run that lands mid-session is picked up within one TTL.
 
-        Thread-safe: the fast path reads one reference (atomic, and :class:`_DayContext` is frozen);
-        the refresh is double-checked under :attr:`_day_ctx_lock`, so N threads arriving together on
-        a cold/expired cache produce ONE store read, not N.
+        Thread-safe: the fast path reads one reference (atomic; :class:`_DayContext` is frozen); the
+        refresh is double-checked under :attr:`_day_ctx_lock`, so N threads on a cold/expired cache
+        produce ONE store read.
         """
         ctx = self._day_ctx
         if ctx is not None and ctx.d == d and monotonic() - ctx.fetched_mono < _SENTIMENT_CACHE_TTL_S:
@@ -603,21 +579,22 @@ class FeatureEngine:
             return fresh
 
     def _read_day_context(self, d: date) -> _DayContext:
-        """The ONE combined read behind :meth:`_day_context` (5 store calls / 6 DuckDB statements):
+        """The ONE combined read behind :meth:`_day_context`:
 
-        * ``as_of`` — the LATEST ``sentiment_agg`` run stamp (the digest runs a few times a day at
-          most); ``None`` ⇒ no digest has ever run ⇒ ``sentiment_available`` False.
+        * ``as_of`` — the LATEST ``sentiment_agg`` run stamp; ``None`` ⇒ no digest has ever run ⇒
+          ``sentiment_available`` False.
         * ``sentiment_by_key`` — that run's rows keyed by ``(scope, scope_key)``.
         * ``theme_symbols`` — ``theme_map`` as ``theme -> {symbols}`` for the best-theme lookup.
-        * ``watchlist_by_symbol`` — day ``d``'s ``catalyst_watchlist`` rows keyed by symbol (at most one row per symbol per day — best cluster wins upstream).
+        * ``watchlist_by_symbol`` — day ``d``'s ``catalyst_watchlist`` rows keyed by symbol (at most
+          one row per symbol per day — best cluster wins upstream).
         * ``sector_of`` — the ``sector_map`` snapshot as of ``d``, symbol -> sector.
 
         Only ``sentiment_agg`` / ``theme_map`` / ``catalyst_watchlist`` are read for the news half —
         never ``news``/``news_clusters`` directly (single-seam discipline).
 
-        Raises on a store failure exactly as the per-bar reads it replaces did: the scan path already
-        degrades a snapshot failure to ``features_snapshot_id = None`` and the previous (stale)
-        context is left in place, so the next call simply retries.
+        Raises on a store failure: the scan path degrades a snapshot failure to
+        ``features_snapshot_id = None`` and the previous (stale) context stays in place, so the next
+        call retries.
         """
         as_of = self._store.latest_sentiment_as_of()
         sentiment_by_key = {
@@ -642,13 +619,11 @@ class FeatureEngine:
         """``symbol``'s day-``d`` baselines, read once per symbol per day (:class:`_SymbolDayCache`).
 
         The 20 completed sessions behind ``rel_volume``/``rel_volume_tod`` end strictly BEFORE ``d``,
-        so they cannot change during the session — this is a day cache, not a TTL cache, precisely
-        because a TTL would re-read constants every minute for every symbol.
+        so they cannot change during the session — a day cache, not a TTL cache.
 
-        Bounded by the symbols scanned in one day and dropped wholesale on the first touch of a new
-        day, so it cannot grow across sessions. Thread-safe by the same double-check as
-        :meth:`_day_context`; the lock is held across the read so two threads racing on a symbol's
-        first bar issue ONE ``get_bars_1d``.
+        Dropped wholesale on the first touch of a new day, so it cannot grow across sessions.
+        Thread-safe by the same double-check as :meth:`_day_context`; the lock is held across the
+        read so two threads racing on a symbol's first bar issue ONE ``get_bars_1d``.
         """
         entry = self._symbol_cache.get(symbol)
         if entry is not None and entry.d == d:
@@ -673,15 +648,13 @@ class FeatureEngine:
         """Build (once per symbol per day) the ``rel_volume_tod`` baseline: per session, the ascending
         bar offsets (seconds after that session's 09:15) and the running cumulative volume at each.
 
-        ONE ranged ``get_bars_1m`` spanning the whole 20-session window replaces the per-bar ranged
-        read the feature used to issue — the sessions are completed, so their tape is immutable and a
-        single read serves every bar of today. The window ends at the LAST session's next 09:15
-        (whole sessions) rather than at the current elapsed cutoff, because the cutoff moves every
-        minute and a cutoff-shaped read could not be reused; clipping to each session's own cutoff
-        then happens in memory (:meth:`_rel_volume_tod`), so the arithmetic is unchanged.
+        ONE ranged ``get_bars_1m`` spanning the whole 20-session window serves every bar of today (the
+        sessions are completed, so their tape is immutable). The window ends at the LAST session's
+        next 09:15 (whole sessions), not at the current elapsed cutoff, so the read is reusable;
+        clipping to each session's own cutoff happens in memory (:meth:`_rel_volume_tod`).
 
-        Sessions inside the span that have 1m bars but no ``bars_1d`` row are skipped, exactly as the
-        per-bar version skipped them (they are not baseline sessions).
+        Sessions inside the span that have 1m bars but no ``bars_1d`` row are skipped (not baseline
+        sessions).
         """
         curves = entry.tod
         if curves is not None:
@@ -759,10 +732,8 @@ class FeatureEngine:
             feats["last30_volume"] = sum(volumes[-30:])
 
         # Relative volume: today's cumulative volume vs the 20d median DAILY volume (strictly
-        # before today — day d has no completed daily bar intraday). The 20 sessions this read
-        # yields are ALSO the sessions rel_volume_tod normalizes against — one daily read, not two.
-        # Those sessions are completed and therefore immutable for day d, so the read happens
-        # once per symbol per day and every later bar is served from memory.
+        # before today — day d has no completed daily bar intraday). The same 20 sessions are
+        # the rel_volume_tod baseline; read once per symbol per day, then served from memory.
         entry = self._symbol_day(symbol, d)
         hist = entry.hist
         if bars and len(hist) == 20:
@@ -784,21 +755,17 @@ class FeatureEngine:
         """Time-of-day-normalized relative volume: today's cumulative volume ÷ the MEDIAN cumulative
         volume of the same 20 completed sessions through the SAME elapsed minutes after their open.
 
-        1.0 = a typical participation pace for this point of the session — the number a reader
-        actually means by "relative volume". ``rel_volume`` is kept unchanged beside it for
-        continuity, but its denominator is the median FULL-DAY volume, so it is structurally
-        ~0.02-0.3 for most of the session and reads as "nobody is trading this" on an ordinary tape
-        (the misreading its legend documents and this feature retires).
+        1.0 = a typical participation pace for this point of the session. ``rel_volume`` stays beside
+        it, but its denominator is the median FULL-DAY volume, so it is structurally ~0.02-0.3 for
+        most of the session.
 
         Returns None — never a guess — when the session has not opened yet or fewer than
         :data:`_REL_VOLUME_TOD_MIN_SESSIONS` of the 20 sessions have a usable (>0) cumulative volume
         at the cutoff. Each session's cutoff is its own 09:15 IST + elapsed and is EXCLUSIVE, so the
         bar stamped exactly at the cutoff minute is out of both today's sum and every historical one.
 
-        Cost: ZERO store reads once the day's baseline curve exists — the ranged
-        ``get_bars_1m`` happens ONCE per symbol per day in :meth:`_tod_curves` and each later bar is
-        a ``bisect`` per session over cached prefix sums. It still rides the gate that already guards
-        ``rel_volume``, so a symbol with no bars today never builds the curve at all.
+        Zero store reads once the day's baseline curve exists (:meth:`_tod_curves`). It rides the gate
+        that guards ``rel_volume``, so a symbol with no bars today never builds the curve.
         """
         elapsed = now - session_open
         if elapsed <= timedelta(0):
@@ -848,12 +815,10 @@ def _sentiment_catalyst_features(
 ) -> dict[str, Any]:
     """Sentiment/catalyst block for ONE symbol, from the shared day-level context built by
     :meth:`FeatureEngine._day_context`. Falls back field-by-field to the PINNED
-    :data:`ABSENT_NEWS_DEFAULTS` — the two halves are independent (a symbol with no watchlist row
-    still gets its real sentiment_* values on a day the digest ran, and vice versa is impossible but
-    not assumed): sentiment_* stay 0.0 / ``sentiment_available`` stays False unless a digest has
-    EVER run; ``on_watchlist``/``materiality`` stay False/0.0 (descriptive fields stay None) unless
-    TODAY's ``catalyst_watchlist`` has a row for ``symbol`` (chaos case 20, never NaN/None for the
-    pinned numeric fields).
+    :data:`ABSENT_NEWS_DEFAULTS` — the two halves are independent: sentiment_* stay 0.0 /
+    ``sentiment_available`` stays False unless a digest has EVER run; ``on_watchlist``/``materiality``
+    stay False/0.0 (descriptive fields stay None) unless TODAY's ``catalyst_watchlist`` has a row for
+    ``symbol``. Never NaN/None for the pinned numeric fields.
     """
     out: dict[str, Any] = dict(ABSENT_NEWS_DEFAULTS)
     out["watchlist_grade"] = None

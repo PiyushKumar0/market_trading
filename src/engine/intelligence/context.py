@@ -59,19 +59,19 @@ _log = get_logger("engine.intelligence.context")
 #: How many trailing 1m bars the intraday context carries.
 BAR_TAIL = 30
 
-#: How many trailing COMPLETED daily bars a swing candidate carries (2026-08-17 finding). 20 is the
-#: brk20 lookback itself, so the analyst reads exactly the window the scanner fired on.
+#: How many trailing COMPLETED daily bars a swing candidate carries. 20 is the brk20 lookback itself,
+#: so the analyst reads exactly the window the scanner fired on.
 DAILY_BAR_TAIL = 20
 
 #: Calendar-day lookback for that read. 20 SESSIONS is ~28 calendar days; 45 clears it with room for
-#: a holiday-heavy stretch without dragging in a second month of rows.
+#: a holiday-heavy stretch.
 DAILY_LOOKBACK_DAYS = 45
 
 #: Sessions the core equal-weight return in the regime line compounds over.
 EW_SESSIONS = 20
 
-#: Watchlist columns the catalyst block shows — grade/event/materiality; the v1
-#: price levels are persisted but deliberately not shown. A NULL column is omitted, not rendered null.
+#: Watchlist columns the catalyst block shows; the price levels are persisted but deliberately not
+#: shown. A NULL column is omitted, not rendered null.
 _WATCHLIST_KEYS = (
     "grade", "event_type", "direction", "materiality", "source_domain_count",
     "event_age_sessions",
@@ -93,7 +93,7 @@ def _no_bars_reason(bars: Sequence[Bar] | None) -> str:
 
 def has_scored_headlines(row: Mapping[str, Any]) -> bool:
     """False for a row that scored no cluster — the digest's every-run market marker (value 0.0,
-    ``n_clusters`` 0) is "none", not a neutral reading. A row digested before the measures existed (NULL count) has a value."""
+    ``n_clusters`` 0) is "none", not a neutral reading. A row with a NULL count has a value."""
     return row.get("value") is not None and row.get("n_clusters") != 0
 
 
@@ -108,11 +108,10 @@ def sentiment_rail_note(row: Mapping[str, Any]) -> str:
 
     ``sentiment_agg.value`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
     bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. When the row
-    carries the digest's measures, the note reports the unclipped sum, the cluster count and — since
-    2026-09-04 — the PER-CLUSTER MEAN, which is the number that says whether the flow is extreme or
-    merely wide: on 2026-09-03 the market row read −1.000 from raw −9.48 across 759 clusters, about
-    −0.01 per cluster (neutral), and both the planner and the analyst read the rail as a risk-off
-    regime all day. One function, so the pre-open planner and the analyst context cannot disagree.
+    carries the digest's measures, the note reports the unclipped sum, the cluster count and the
+    PER-CLUSTER MEAN, which says whether the flow is extreme or merely wide (raw −9.48 across 759
+    clusters is −0.01 per cluster, neutral, though the clipped value reads −1.000). One function, so
+    the pre-open planner and the analyst context cannot disagree.
     """
     value = float(row["value"])
     if abs(value) < 0.999:
@@ -260,9 +259,8 @@ class ContextAssembler:
         call, and structurally downstream where an entry from this trigger is dropped. Prompt
         text is not a control — it is the polite half of a rule the gate enforces regardless.
 
-        The exit codes are named here, in VOLATILE, and not in the byte-stable system prompt:
-        they are per-call context for the one trigger that can emit an exit. Before 2026-09-11 they
-        appeared in no prompt at all, so 47 of 47 exits since 09-03 failed validation on attempt 1.
+        The exit codes are named here, in VOLATILE, and not in the byte-stable system prompt: they are
+        per-call context for the one trigger that can emit an exit.
         """
         d = self._clock.today()
         parts = [
@@ -306,8 +304,7 @@ class ContextAssembler:
 
         The planner's STABLE block is the trading-date line and the regime line: the day plan it is
         about to write does not exist yet. ``platform_health`` is the deterministic CURRENT harness
-        state (2026-07-30: without it the planner escalated yesterday's post-mortem into a
-        present-tense outage and declared a no-trade day).
+        state (without it the planner escalates yesterday's post-mortem into a present-tense outage).
         """
         stable = "\n".join(["== DAY CONTEXT (stable) ==", self._date_line(d), self._regime_text(d)])
         parts: list[str] = ["== PRE-OPEN STATE (volatile) =="]
@@ -481,12 +478,10 @@ class ContextAssembler:
     def _strategy_contract_text(self, strategy_id: str) -> str:
         """The candidate's own evaluation frame (:mod:`engine.strategy.contracts`), indented as a block.
 
-        WHY (2026-08-20 funnel autopsy): 63/63 evaluations ended ``no_action`` because ONE intraday
-        day-trade rubric was applied to seven strategies with five different timeframes and three
-        different exit mechanisms — a 20-session insider-crossing hold was declined for being below
-        VWAP at 09:20. The contract states, per leg, what "good" means for THAT leg: timeframe class,
-        exit mechanism, reward basis, evidence status, entry-anchor semantics and the leg's own
-        disqualifier list.
+        WHY: one intraday day-trade rubric applied to strategies with different timeframes and exit
+        mechanisms declines a 20-session hold for being below VWAP at 09:20. The contract states, per
+        leg, what "good" means for THAT leg: timeframe class, exit mechanism, reward basis, evidence
+        status, entry-anchor semantics and the leg's own disqualifier list.
 
         NEVER RAISES. An unregistered ``strategy_id`` renders the explicit UNKNOWN frame and
         warns, because a new scanner shipped without a contract is a deployment defect that must be
@@ -506,18 +501,12 @@ class ContextAssembler:
         """The candidate's frozen feature vector with its as-of stamp, or
         ``unavailable`` — never a fabricated timestamp on absent data.
 
-        2026-08-20: a present ``rel_volume`` carries its DENOMINATOR in the text. The number
-        is cumulative session volume ÷ 20d median FULL-DAY volume with no time-of-day adjustment, so
-        it is structurally tiny early in the session; read as time-adjusted participation it says
-        "nobody is trading this" at 09:20 on a perfectly normal tape, and that misreading was cited
-        in 44 of the 63 all-time analyst declines.
-
-        2026-08-21: the correct number now ships beside it — ``rel_volume_tod``, today's
-        cumulative volume ÷ the 20d median cumulative volume at the SAME elapsed time (1.0 = a
-        typical pace for this time of day). The legend therefore names BOTH keys and points at the
-        one to read; it renders when EITHER is present, because the reader needs the vocabulary
-        whenever a relative-volume number is on the page (``rel_volume_tod`` is None on a symbol
-        without enough 1m history, and the legacy key is what remains).
+        A present ``rel_volume`` carries its DENOMINATOR in the text: it is cumulative session volume
+        ÷ 20d median FULL-DAY volume with no time-of-day adjustment, so it is structurally tiny early
+        in the session and misreads as "nobody is trading this". ``rel_volume_tod`` (cumulative volume
+        ÷ the 20d median cumulative volume at the SAME elapsed time; 1.0 = typical pace) is the one to
+        read. The legend names BOTH keys and renders when EITHER is present, because
+        ``rel_volume_tod`` is None on a symbol without enough 1m history.
         """
         if not snapshot_id:
             return f"{_UNAVAILABLE} (no feature snapshot for this candidate)"
@@ -569,28 +558,20 @@ class ContextAssembler:
         ]
         return "\n".join([header, *lines])
 
-    # ------------------------------------------------- swing daily evidence (2026-08-17 finding)
+    # ------------------------------------------------- swing daily evidence
     def _swing_daily_evidence_text(self, symbol: str, d: date, bars: Sequence[Bar] | None) -> str:
         """Daily-bar evidence for a ``style="swing"`` candidate — the history its rule actually fired on.
 
-        WHY (2026-08-17, live): the analyst declined a 0.93-score brk20 candidate (LGEINDIA) for
-        "cannot be judged on live evidence: bar_count 0, no 1m bars this session". It was right about
-        the bars and wrong about the evidence. ``brk20`` and ``ins`` deliberately sweep the FULL
-        eligible universe while 1m bars exist only for the intraday tick watchlist, so EVERY
-        sub-watchlist swing candidate reached the analyst carrying no evidence whatsoever — a
-        structural no-vote, not a judgement. The daily series those rules are computed on (and
-        ``rsi2``'s RSI(2), and ``mom``'s ranking) exists for the whole universe in ``bars_1d``; it was
-        simply never rendered.
+        ``brk20`` and ``ins`` sweep the FULL eligible universe while 1m bars exist only for the
+        intraday tick watchlist, so a sub-watchlist swing candidate would otherwise reach the analyst
+        with no evidence at all (a structural no-vote). The daily series those rules are computed on
+        (and ``rsi2``'s RSI(2), and ``mom``'s ranking) exists for the whole universe in ``bars_1d``.
 
         The window matches ops/main.py's brk20 sweep: completed sessions ONLY, ending YESTERDAY, never
-        today's forming bar — showing the analyst a different history than the scanner scanned is the
-        one way this block could make decisions worse rather than better.
+        today's forming bar — the analyst must see the history the scanner scanned.
 
-        DELIBERATELY NOT CACHED (do not re-litigate): this is a single ~20-row point query per
-        FORWARDED swing candidate — at most ~12 a day under the prescreen dedupe/caps — on a code path
-        whose very next act is an LLM call costing orders of magnitude more in both latency and money.
-        A cache would buy nothing measurable and would add a staleness surface to evidence whose only
-        job is to be exactly what the scanner saw.
+        DELIBERATELY NOT CACHED: one ~20-row point query per FORWARDED swing candidate, ahead of an LLM
+        call costing orders of magnitude more; a cache would only add a staleness surface.
         """
         lines: list[str] = []
         if bars is not None and not bars:            # a FAILED read is not the structural absence
@@ -601,9 +582,9 @@ class ContextAssembler:
     def _structural_absence_lines(self, symbol: str) -> list[str]:
         """Say WHY the 1m tail is empty for a full-universe swing candidate, in the prompt.
 
-        A bare "unavailable" reads to the model as a data failure, and the correct response to a data
-        failure is to decline — which is precisely what happened live. The absence is a property of
-        the watchlist design, so it is stated as one, next to the evidence that replaces it.
+        A bare "unavailable" reads to the model as a data failure, and the response to a data failure
+        is to decline. The absence is a property of the watchlist design, so it is stated as one, next
+        to the evidence that replaces it.
         """
         return [
             f"  NOTE - STRUCTURAL ABSENCE, NOT A DATA FAILURE: {symbol} is outside the intraday tick",
@@ -704,24 +685,16 @@ class ContextAssembler:
         return as_of, lines
 
     def _sentiment_line(self, label: str, row: Mapping[str, Any] | None) -> str:
-        """One sentiment scope's line, with the RAIL labelled for what it is (2026-08-20).
+        """One sentiment scope's line, with the RAIL labelled for what it is.
 
         ``sentiment_agg`` is a clipped decay-weighted SUM of headline scores, not a mean and not a
-        bounded index: a handful of same-direction headlines reaches ±1.0 and stays there. It railed
-        on 7 of 17 digest days, and the analyst read "-1.000, the floor of the scale" as extreme
-        regime evidence in 46 of the 63 all-time declines. The label states the semantics inline,
-        where the number is, because a legend the model has to remember is a legend it will not use.
+        bounded index: a handful of same-direction headlines reaches ±1.0 and stays there, and the
+        analyst reads "-1.000" as extreme regime evidence. The label states the semantics inline,
+        where the number is. When the row carries ``raw_sum``/``n_clusters``, the rail line reports
+        how far past the clip the flow ran and across how many clusters; a row without measures (NULL)
+        keeps the unmeasured wording — it must not borrow the credibility of a measured one.
 
-        The 2026-08-21 change replaces the guess with the digest's own measurement: when the row carries
-        ``raw_sum``/``n_clusters``, the rail line reports how far past the clip the flow actually ran
-        and how many clusters produced it — "raw -2.31 across 9 clusters" is a fact the model can
-        weigh, where the earlier prose was only a warning it had to take on trust. A row digested
-        BEFORE 2026-08-21 has no measures (NULL), and keeps the earlier wording verbatim: an unmeasured rail
-        must not borrow the credibility of a measured one.
-
-        The note itself is :func:`sentiment_rail_note` (2026-09-04) — shared with the pre-open
-        planner's digest lines, which until then rendered the bare value and read the rail as a
-        regime.
+        The note itself is :func:`sentiment_rail_note`, shared with the pre-open planner's digest lines.
 
         No row means the digest ran and scored no headline for this scope: ``none``, not absence.
         """
@@ -747,13 +720,11 @@ class ContextAssembler:
         """Day H/L, %-from-open, %-from-VWAP, session elapsed minutes — VOLATILE only.
 
         Computed over EVERY bar of the session fetched so far (``bars``, not the display-capped
-        ``BAR_TAIL``), fixing the "session-blind by mid-day" gap: the 30-bar tail alone cannot
-        show a day's high/low once the day has more than 30 minutes on the clock. VWAP reuses
-        :func:`engine.strategy.indicators.vwap` (typical price ``(H+L+C)/3`` weighted by volume) — the
-        same formula ``features.py`` uses for ``vwap_dist``, so this line and the features
-        block cannot silently disagree; price*volume IS computable from the ``Bar`` model (OHLC +
-        volume), so this is a real computation, not a fabrication of unavailable data. Elapsed minutes
-        needs no bars at all and is always rendered (fail-to-zero applies only to the price stats).
+        ``BAR_TAIL``): the 30-bar tail alone cannot show a day's high/low past the first 30 minutes.
+        VWAP reuses :func:`engine.strategy.indicators.vwap` (typical price ``(H+L+C)/3`` weighted by
+        volume), the same formula the feature engine uses for ``vwap_dist``, so the two cannot
+        disagree. Elapsed minutes needs no bars and is always rendered (fail-to-zero applies only to
+        the price stats).
         """
         elapsed_min = max(int((self._clock.now() - self._session_start(d)).total_seconds() // 60), 0)
         if not bars:
@@ -797,8 +768,8 @@ class ContextAssembler:
         return f"day plan age: authored {authored.strftime('%H:%M')} IST, {age_h:.1f}h ago"
 
     def _now_hhmm(self) -> str:
-        """Compact ``HH:MM`` for "as of context-assembly time" stamps (positions has no data-side
-        timestamp of its own, so this — precomputed from Clock, never the model — is the honest one)."""
+        """Compact ``HH:MM`` for "as of context-assembly time" stamps (positions carry no timestamp of
+        their own); precomputed from Clock, never the model."""
         return self._clock.now().strftime("%H:%M")
 
     # ================================================================== small helpers

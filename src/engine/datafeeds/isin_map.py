@@ -1,25 +1,21 @@
 """Symbol → ISIN → BSE scrip-code map → ``symbol_isin`` (utility).
 
 Builds the stable cross-exchange join key (symbols change, ISINs survive renames). Three
-layers, cheapest/most-authoritative first:
+layers, most authoritative first:
 
-1. **NIFTY-constituents ISIN (offline, authoritative).** The universe CSV the repo already caches
-   carries an ``ISIN Code`` column that ``engine.universe.builder.parse_index_constituents_csv``
-   parses-and-DROPS. This module re-reads that cached CSV (download-cache → committed seed ladder;
-   ``builder.py`` is left untouched per the brief) and keeps the ISIN.
+1. **Index-constituents CSV ISIN (offline).** The cached universe CSV carries an ``ISIN Code``
+   column that ``engine.universe.builder.parse_index_constituents_csv`` drops; this module
+   re-reads the CSV (download-cache → committed seed ladder) and keeps it.
 2. **Announcements ``sm_isin`` fallback.** For symbols absent from the CSV, one NSE
-   ``corporate-announcements`` page carries ``symbol`` + ``sm_isin`` (probe-verified) — a best-effort
-   supplement, never load-bearing.
-3. **BSE BULK scrip master via ``ListofScripData/w``** (:data:`BSE_SCRIP_MASTER_URL`) — the whole
-   Active-Equity ISIN→scrip-code list in ONE request, parsed by :func:`parse_scrip_master`. It
-   reproduced all 199 codes the old per-symbol ``PeerSmartSearch`` resolver had found (2026-09-12);
-   an ISIN it lacks is NSE-only or not a live BSE scrip. BSE 404s masquerade as 200 +
-   ``error_Bse.html`` ⇒ fetched through :func:`engine.core.bse_http.bse_get`. The fresh-insider
-   feed reads the same master to build its own scrip→symbol map every run.
+   ``corporate-announcements`` page carries ``symbol`` + ``sm_isin`` — best-effort, never load-bearing.
+3. **BSE bulk scrip master via ``ListofScripData/w``** (:data:`BSE_SCRIP_MASTER_URL`) — the whole
+   Active-Equity ISIN→scrip-code list in ONE request, parsed by :func:`parse_scrip_master`. An ISIN
+   it lacks is NSE-only or not a live BSE scrip. BSE 404s masquerade as 200 + ``error_Bse.html``
+   ⇒ fetched through :func:`engine.core.bse_http.bse_get`. The fresh-insider feed reads the same
+   master to build its own scrip→symbol map every run.
 
-The job runs daily (``isin_map``, before ``filings_shp``, which fetches only mapped symbols): run by
-hand only, the map stayed at the 200 symbols of 2026-07-17 after the universe grew to NIFTY 500.
-Defensive throughout; a failed network layer degrades to fewer mappings, never raises.
+The job runs daily (``isin_map``), before ``filings_shp``, which fetches only mapped symbols.
+A failed network layer degrades to fewer mappings, never raises.
 """
 
 from __future__ import annotations
@@ -44,12 +40,10 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.isin_map")
 
-#: NSE announcements page carrying ``symbol`` + ``sm_isin`` (probe-verified). [VERIFY].
+#: NSE announcements page carrying ``symbol`` + ``sm_isin``.
 NSE_ANNOUNCEMENTS_URL = "https://www.nseindia.com/api/corporate-announcements?index=equities"
 
-#: BSE BULK scrip master — the whole Active-Equity list (``SCRIP_CD`` + ``ISIN_NUMBER``) in ONE
-#: request. Probe-verified 2026-09-12: 5,004 rows / 5,003 distinct ISINs, no ISIN carrying two
-#: different codes.
+#: BSE bulk scrip master — the whole Active-Equity list (``SCRIP_CD`` + ``ISIN_NUMBER``) in ONE request.
 BSE_SCRIP_MASTER_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w"
     "?Group=&Scripcode=&industry=&segment=Equity&status=Active"
@@ -125,12 +119,11 @@ def parse_announcements_isin(payload: Any) -> dict[str, str]:
 
 
 def parse_scrip_master(payload: Any) -> dict[str, str]:
-    """BSE bulk scrip master → ``{isin: bse_scrip_code}`` (defensive; probe-verified field names).
+    """BSE bulk scrip master → ``{isin: bse_scrip_code}`` (defensive).
 
-    The capture is a BARE LIST of scrip dicts (no ``Table`` envelope); the usual wrapper keys are
-    still tolerated in case BSE wraps it later. A row missing either an ISIN or a code is dropped,
-    and the FIRST code seen for an ISIN wins — in the 2026-09-12 capture no ISIN carried two
-    different codes, so the tie-break is a determinism guarantee rather than a real choice.
+    The payload is a BARE LIST of scrip dicts; wrapper keys are tolerated in case BSE wraps it. A row
+    missing an ISIN or a code is dropped; the FIRST code seen for an ISIN wins (determinism only: the
+    master carries no ISIN with two codes).
     """
     rows: list[Any] = payload if isinstance(payload, list) else []
     if isinstance(payload, dict):
@@ -153,8 +146,7 @@ def parse_scrip_master(payload: Any) -> dict[str, str]:
 def load_constituents_isin(settings: Settings) -> dict[str, str]:
     """Read the cached index-constituents CSV (download-cache → committed seed ladder) for ISINs.
 
-    Mirrors ``UniverseBuilder``'s cache/seed paths (``builder.py`` untouched) — both renamed by the owner decision
-    (2026-09-04) when the index became config (NIFTY 500); returns ``{}`` if neither is readable
+    Mirrors ``UniverseBuilder``'s cache/seed paths; returns ``{}`` if neither is readable
     (the caller then relies on the announcements fallback)."""
     cache = settings.resolved_data_dir() / "universe" / "index_cached.csv"
     seed_rel = Path(settings.universe.index_seed_path)
@@ -172,8 +164,8 @@ def load_constituents_isin(settings: Settings) -> dict[str, str]:
 
 def follow_renames(isin_by_symbol: Mapping[str, str], renames: Iterable[SymbolRename]) -> dict[str, str]:
     """``{symbol: isin}`` with each retired symbol replaced by its current one: the index CSV keeps
-    naming a renamed company's old ticker for days (2026-10-23 ICICIPRULI→ICICILIFE). A current symbol
-    the CSV already lists keeps its own ISIN."""
+    naming a renamed company's old ticker for days. A current symbol the CSV already lists keeps its
+    own ISIN."""
     current = {r.old_symbol: r.new_symbol for r in renames}
     out = {symbol: isin for symbol, isin in isin_by_symbol.items() if symbol not in current}
     for old, isin in isin_by_symbol.items():

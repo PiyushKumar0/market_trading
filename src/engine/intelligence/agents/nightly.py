@@ -1,16 +1,15 @@
 """Nightly Post-Trade Reviewer agent definition — SYSTEM prompt, output schema, parser.
 
-DESIGN DEVIATION (architect decision, v1; recorded in ``config/agents.yaml`` next to the
-``nightly_reviewer`` block). The original design specifies this agent as AGENTIC (``max_turns=12``) over a read-only
-MCP toolset (``query_ledger`` / ``query_bars`` / ``query_decisions`` / ``query_news``). v1 ships it as
-a SINGLE-SHOT call over a deterministically pre-assembled context instead: at RECOMMEND-mode volume — a
-handful of recommendations a day and no auto trades — the whole reviewable day fits in one prompt, so
-the tool loop would buy no analytical reach while adding token cost and an unverified SDK MCP surface.
-The agentic shape and its tools land with paper AUTO, when trade volume makes the loop earn its keep.
+DESIGN DEVIATION (recorded in ``config/agents.yaml`` next to the ``nightly_reviewer`` block): the
+design specifies this agent as AGENTIC (``max_turns=12``) over a read-only MCP toolset
+(``query_ledger`` / ``query_bars`` / ``query_decisions`` / ``query_news``). It ships as a SINGLE-SHOT
+call over a deterministically pre-assembled context instead: at RECOMMEND-mode volume the whole
+reviewable day fits in one prompt, so a tool loop would add token cost and an unverified SDK MCP
+surface for no analytical reach. The agentic shape lands with paper AUTO.
 
-The OUTPUT CONTRACT is kept EXACTLY (:class:`~engine.intelligence.schemas.NightlyReview`), so
-that upgrade is a drop-in: only the harness entry point (``run_agentic``) and the context source
-change, never the row shape in ``nightly_reviews`` nor the readers of it (``GET /config/params``).
+The OUTPUT CONTRACT is kept EXACTLY (:class:`~engine.intelligence.schemas.NightlyReview`), so the
+upgrade is a drop-in: only the harness entry point (``run_agentic``) and the context source change,
+never the row shape in ``nightly_reviews`` nor its readers (``GET /config/params``).
 
 Same byte-stability contract as the other agents: the prompt is a module constant with no
 interpolation. The date being reviewed lives in the assembled context, never here.

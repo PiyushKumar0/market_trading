@@ -10,16 +10,16 @@ are auditable in code rather than prose:
 - **Tool allowlisting is explicit and mandatory.** Every call passes an explicit allowed-tools
   list — empty for single-shot agents, the read-only set for the agentic ones — and explicitly
   disables the CLI's built-ins (``tools=[]`` plus a by-name deny list). ``tools_enabled: true`` NEVER
-  means "SDK defaults": a definition with
-  tools enabled and no explicit allowlist is refused at load time (:func:`load_agent_defs`), and an
-  options surface that exposes no tool knob at all is refused at call time. Tests cover both.
-- **Isolation from the owner's Claude Code.** The service runs from the repo root (NSSM
-  AppDirectory) as the owner's own account, so the cwd alone isolates nothing. Isolation is
-  ``setting_sources=[]`` (no CLAUDE.md/settings) + :data:`ISOLATION_ENV` (cwd-keyed auto-memory off,
-  claude.ai connectors off, updater off) + strict MCP (only servers the harness passes itself). An
-  options surface that cannot express these is refused rather than called unconstrained.
-  KNOWN RESIDUAL, not a guarantee: the owner's email still reaches every call as the CLI's
-  ``session_context`` — the stored claude.ai OAuth login carries it and CLI 2.1.288 has no opt-out.
+  means "SDK defaults": a definition with tools enabled and no explicit allowlist is refused at load
+  time (:func:`load_agent_defs`), and an options surface that exposes no tool knob at all is refused
+  at call time.
+- **Isolation from the owner's Claude Code.** The service runs from the repo root as the owner's own
+  account, so the cwd alone isolates nothing. Isolation is ``setting_sources=[]`` (no
+  CLAUDE.md/settings) + :data:`ISOLATION_ENV` (cwd-keyed auto-memory off, claude.ai connectors off,
+  updater off) + strict MCP (only servers the harness passes itself). An options surface that cannot
+  express these is refused rather than called unconstrained. KNOWN RESIDUAL, not a guarantee: the
+  owner's email still reaches every call as the CLI's ``session_context`` (the stored claude.ai OAuth
+  login carries it; the pinned CLI has no opt-out).
 - **Model is always explicit.** ``config/agents.yaml`` names the model; :data:`MODEL_API_IDS` maps
   that name to the API id. An unknown name is a loud load-time error — never a silent SDK default
   (which is Opus on Max plans, 5× Haiku rates).
@@ -27,13 +27,13 @@ are auditable in code rather than prose:
   validation error appended; timeout / 429 / credit / SDK death do not retry. Everything resolves to
   ``AgentResult.Failed`` + an owner alert. Model prose is NEVER salvaged by regex or fence-stripping —
   a non-JSON response is a schema violation, full stop.
-- **Structured output (2026-07-28).** When a ``json_schema`` is sent, the CLI fulfils it by forcing a
+- **Structured output.** When a ``json_schema`` is sent, the CLI fulfils it by forcing a
   ``StructuredOutput`` TOOL call whose *input* is the validated payload; that round-trip counts as a
   second turn, so the turn cap gets +3 exactly when the schema knob went out (the round-trip plus
   room for ~two CLI-side schema retries, see ``_build_options``). The tool input is the
   authoritative answer (it can never be fenced or wrapped in prose), and client-side validation
   remains authoritative on top of it. Thinking depth is the per-agent ``effort`` knob in
-  agents.yaml; thinking is never disabled (the deprecated ``max_thinking_tokens=0`` did not stop it).
+  agents.yaml; thinking is never disabled (``max_thinking_tokens=0`` does not stop it).
 - **No LLM-originated time.** The harness stamps nothing from model output. Temporal stamping
   belongs to the ``validate`` callback the caller supplies (e.g. ``schemas.parse_and_stamp``), which
   overwrites ``valid_until``/ids from ``Clock``.
@@ -81,9 +81,7 @@ MODEL_API_IDS: dict[str, str] = {
     "haiku-4.5": "claude-haiku-4-5",
     "sonnet-4.6": "claude-sonnet-4-6",
     "opus-4.8": "claude-opus-4-8",
-    # Claude 5 family (owner roster migration 2026-08-03 — the unmapped 'sonnet-5' darkened the
-    # whole LLM tier from the 12:33 boot until this entry landed; see load_agent_roster for the
-    # one-bad-def quarantine that keeps a repeat from taking every agent down).
+    # Claude 5 family (see load_agent_roster for the one-bad-def quarantine).
     "sonnet-5": "claude-sonnet-5",
     "opus-5": "claude-opus-5",
     "fable-5": "claude-fable-5",
@@ -96,7 +94,7 @@ MODEL_API_IDS: dict[str, str] = {
 
 # The CLI's built-in tools, denied by name on every call — the second layer behind `tools=[]`
 # (_build_options): "no filesystem, no network, no order surface" is enforced in the options, not
-# assumed from an empty allowlist. Names observed in pinned-CLI 2.1.288 transcripts added 2026-10-11.
+# assumed from an empty allowlist. Names are those observed in the pinned CLI's transcripts.
 BUILTIN_TOOLS: tuple[str, ...] = (
     "Agent",
     "Bash",
@@ -134,9 +132,8 @@ BUILTIN_TOOLS: tuple[str, ...] = (
 )
 
 # Sent as ``options.env`` on every call. The SDK layers it OVER the inherited process env, so a
-# stray value in the service env cannot re-enable either leak. Names verified live on pinned CLI
-# 2.1.288 (2026-10-11): without them each call carried the repo's auto-memory MEMORY.md (~4.7K input
-# tokens) and fetched the account's claude.ai connector list, opening live connections to them.
+# stray value in the service env cannot re-enable either leak. Without them each call carries the
+# repo's auto-memory MEMORY.md and fetches the account's claude.ai connector list.
 ISOLATION_ENV: dict[str, str] = {
     "DISABLE_AUTOUPDATER": "1",                 # the pinned CLI must stay the pinned version
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",     # auto-memory is keyed by cwd; setting_sources skips it
@@ -163,8 +160,7 @@ FailReason = Literal[
 #: Reasons that mean the ACCOUNT is failing, not one agent: every agent runs on the CLI's one stored
 #: claude.ai login, so a dead login fails them all at once. The harness alerts these as ONE account
 #: episode (first failure, then every :data:`ACCOUNT_REPEAT_AFTER`, plus a notice on the first good
-#: call); the job and pipeline alerters skip them. Keyed per agent, the 2026-10-22/23 dead login sent
-#: ~70 owner messages: five agents' 30-minute drips plus the planner, review and pipeline copies.
+#: call); the job and pipeline alerters skip them (keyed per agent they flood the owner).
 ACCOUNT_FAIL_REASONS: frozenset[str] = frozenset({"auth_failed"})
 ACCOUNT_REPEAT_AFTER = timedelta(hours=2)
 
@@ -262,8 +258,8 @@ def load_agent_defs(cfg: dict[str, Any]) -> dict[str, AgentDef]:
         if not isinstance(raw, dict):
             raise ValueError(f"agents.{agent_id}: expected a mapping, got {type(raw).__name__}")
         if not raw.get("enabled", True):
-            # A def the roster deliberately parks (weekly_researcher until online learning). Skipping at
-            # load keeps the allowlist refusal strict for everything that CAN run.
+            # A def the roster deliberately parks (weekly_researcher): skipped so the allowlist
+            # refusal stays strict for everything that CAN run.
             continue
         tools_enabled = bool(raw.get("tools_enabled", False))
         if "allowed_tools" in raw:
@@ -306,10 +302,8 @@ class RosterLoad(BaseModel):
 
 
 def load_agent_roster(cfg: dict[str, Any]) -> RosterLoad:
-    """Per-def tolerant roster load for the COMPOSITION ROOT (2026-08-03 incident: one unmapped
-    model name — ``sonnet-5`` before the 5-family entries existed — made :func:`load_agent_defs`
-    raise and DISABLED the entire LLM tier for two boots, with every LLM job then no-op'ing behind
-    success watermarks).
+    """Per-def tolerant roster load for the COMPOSITION ROOT: one bad def (e.g. an unmapped model
+    name) must not make :func:`load_agent_defs` raise and disable the entire LLM tier.
 
     Each definition validates independently: an invalid one is EXCLUDED and logged loud (the
     allowlist guarantee is preserved — a def that fails validation is not runnable), while the valid
@@ -417,8 +411,7 @@ _OPTION_FIELDS: dict[type, set[str]] = {}
 def _option_fields(cls: type) -> set[str]:
     """Field names the options class exposes (annotations + dataclass/pydantic fields + a probe).
 
-    Same introspection the SDK smoke test uses: the options class has been renamed and
-    re-shaped across SDK releases, so every knob is probed rather than assumed.
+    The options class is re-shaped across SDK releases, so every knob is probed rather than assumed.
     """
     cached = _OPTION_FIELDS.get(cls)
     if cached is not None:
@@ -514,13 +507,12 @@ def _is_result_message(message: Any) -> bool:
 
 
 def _error_result_text(message: Any) -> str | None:
-    """The CLI's own reason when a result message reports ``is_error`` (2026-09-04); else ``None``.
+    """The CLI's own reason when a result message reports ``is_error``; else ``None``.
 
     A usage-limit hit arrives as a result with ``is_error`` set, subtype ``success``, an empty
     ``errors`` list and the reason only in ``result``. The SDK then raises "Claude Code returned an
-    error result: success" — it joins ``errors`` and falls back to the subtype — which is all the log
-    and the audit row carried for the 31 failures of 2026-09-03 12:42–14:32. Read the text here,
-    before the SDK's exception discards it.
+    error result: success" (it joins ``errors`` and falls back to the subtype), so the text is read
+    here, before the SDK's exception discards it.
     """
     if not _is_result_message(message) or not _attr(message, "is_error"):
         return None
@@ -670,8 +662,8 @@ def _classify(exc: BaseException) -> tuple[FailReason, str]:
     """Map an SDK exception to a no-action failure reason (all of which resolve to no-action + alert)."""
     detail = f"{type(exc).__name__}: {exc}"
     lowered = detail.lower()
-    # "session limit"/"usage limit": the subscription's rolling window (2026-09-03 12:42–14:32 —
-    # shared with every Claude Code session on the machine); transient, like a 429.
+    # "session limit"/"usage limit": the subscription's rolling window (shared with every Claude Code
+    # session on the machine); transient, like a 429.
     if (
         "429" in lowered or "overload" in lowered or "rate limit" in lowered
         or "rate_limit" in lowered or "session limit" in lowered or "usage limit" in lowered
@@ -679,9 +671,9 @@ def _classify(exc: BaseException) -> tuple[FailReason, str]:
         return "overloaded", detail
     if "credit" in lowered or "billing" in lowered or "insufficient funds" in lowered:
         return "credit_exhausted", detail
-    # The CLI's stored claude.ai login is dead or revoked (2026-09-14/15 "Not logged in · Please run
-    # /login", 2026-09-25 "401 OAuth access token has been revoked"). Checked AFTER the limit and
-    # billing patterns so a limit message that mentions auth keeps its transient/DG4 handling.
+    # The CLI's stored claude.ai login is dead or revoked ("Not logged in · Please run /login", "401
+    # OAuth access token has been revoked"). Checked AFTER the limit and billing patterns so a limit
+    # message that mentions auth keeps its transient/DG4 handling.
     if _AUTH_FAILED_RE.search(lowered):
         return "auth_failed", detail
     return "sdk_error", detail
@@ -716,9 +708,7 @@ class AgentHarness:
         self._alert = alert
         #: Owner-alert cadence per ``(agent_id, reason)``: the FIRST failure of a kind alerts,
         #: repeats inside the window are logged only, and a successful call closes the episode so the
-        #: next failure is heard again. The no-action behaviour is untouched — every failure still resolves to
-        #: no-action and is still logged; what changes is how many times the owner's phone buzzes for
-        #: one broken thing (an SDK outage used to alert on every call for hours).
+        #: next failure is heard again. Every failure still resolves to no-action and is logged.
         self._alert_episodes = AlertEpisodes()
         #: The ONE episode for an account-wide failure (:data:`ACCOUNT_FAIL_REASONS`), whichever agent
         #: hits it; the first good call by any agent closes it and says so.
@@ -978,10 +968,9 @@ class AgentHarness:
         """Parse the final assistant text as JSON and hand it to the caller's validator.
 
         No prose salvage: a response that MIXES prose with JSON is a schema violation and
-        earns a retry, not a rescue. ONE deterministic unwrap is permitted (2026-07-29): a response
-        that is EXACTLY a single ```-fenced block and nothing else is that JSON in the CLI's
-        habitual framing, not prose — observed live when the structured-output knob silently
-        disengages (union schemas) and the model answers in a bare fenced block. The unwrap is a
+        earns a retry, not a rescue. ONE deterministic unwrap is permitted: a response that is
+        EXACTLY a single ```-fenced block and nothing else is that JSON in the CLI's habitual framing
+        (seen when the structured-output knob silently disengages on union schemas). The unwrap is a
         whole-string match; any surrounding text still fails.
         """
         stripped = text.strip()
@@ -1122,14 +1111,14 @@ class AgentHarness:
                 kwargs[name] = agent_def.max_output_tokens
 
         # Depth via effort, never by disabling thinking: Sonnet 5 thinks under max_thinking_tokens=0
-        # (34/36 sdk transcripts carried thinking blocks, 2026-10-03) and Opus 5.5 rejects disabled.
+        # and Opus 5.5 rejects disabled.
         if agent_def.effort is not None and "effort" in fields:
             kwargs["effort"] = agent_def.effort
 
-        # Explicit allowlist on EVERY call — empty for single-shot. An options surface with
-        # NO tool knob is refused for EVERY shape (2026-07-28 review): an SDK release that renames
-        # the knob would otherwise run single-shot agents with the SDK's DEFAULT built-in toolset
-        # (Bash/file/network) on the box holding the broker credentials — fail closed, never open.
+        # Explicit allowlist on EVERY call — empty for single-shot. An options surface with NO tool
+        # knob is refused for EVERY shape: an SDK release that renames the knob would otherwise run
+        # single-shot agents with the SDK's DEFAULT built-in toolset (Bash/file/network) on the box
+        # holding the broker credentials — fail closed, never open.
         tool_field = _first_field(cls, ("allowed_tools", "tools"))
         if tool_field is not None:
             kwargs[tool_field] = list(agent_def.allowed_tools)
@@ -1139,10 +1128,10 @@ class AgentHarness:
                 "explicit allowlist (empty for single-shot); refusing to call"
             )
         # `allowed_tools` only auto-approves; `tools` is the CLI's built-in base set, and [] removes
-        # every built-in (`--tools ""`). Without it the pinned CLI offered single-shot agents Skill,
-        # ToolSearch, Workflow, Cron*, SendMessage... (sdk transcripts, 2026-10-09). The agentic
-        # set is MCP, which `tools` does not govern; under strict MCP its server must come from the
-        # harness's own options. StructuredOutput survives both (verified 2026-10-11).
+        # every built-in (`--tools ""`); without it the pinned CLI offers single-shot agents Skill,
+        # ToolSearch, Workflow, Cron*, SendMessage... The agentic set is MCP, which `tools` does not
+        # govern; under strict MCP its server must come from the harness's own options.
+        # StructuredOutput survives both.
         if tool_field != "tools" and "tools" in fields:
             kwargs["tools"] = []
         if "disallowed_tools" in fields:
@@ -1162,11 +1151,11 @@ class AgentHarness:
         if max_turns is not None and "max_turns" in fields:
             # The CLI fulfils a sent schema via a StructuredOutput TOOL choreography that consumes
             # turns of its own: the tool round-trip, a CLI-side schema-validation retry when the
-            # payload misses, and a closing text turn after the ack (observed 2026-07-28: a clean run
-            # is 2 turns, one schema retry makes 3 — a 1-turn cap killed every compliant call with
-            # error_max_turns). +3 covers ~two schema retries; under `tools=[]` StructuredOutput is the
-            # only tool offered, so the extra turns cannot be spent on anything else, and exhausting
-            # them still fails loudly.
+            # payload misses, and a closing text turn after the ack (a clean run is 2 turns, one
+            # schema retry makes 3; a 1-turn cap kills every compliant call with error_max_turns).
+            # +3 covers ~two schema retries; under `tools=[]` StructuredOutput is the only tool
+            # offered, so the extra turns cannot be spent on anything else, and exhausting them still
+            # fails loudly.
             kwargs["max_turns"] = max_turns + 3 if schema_sent else max_turns
 
         try:
@@ -1189,9 +1178,8 @@ class AgentHarness:
             return
         await self._governor.record(agent_def.agent_id, agent_def.model, usage)
         if sdk_cost_usd is not None:
-            # Ledger cost stays OURS (standard rates, Decimal) — the SDK's own figure is debug-logged for
-            # comparison only (there is no console figure to reconcile; re-scoped 2026-08-13),
-            # never written to the ledger.
+            # Ledger cost stays OURS (standard rates, Decimal) — the SDK's own figure is debug-logged
+            # for comparison only, never written to the ledger.
             _log.debug(
                 "agent_call_sdk_cost", agent=agent_def.agent_id, sdk_cost_usd=str(sdk_cost_usd)
             )
@@ -1260,12 +1248,10 @@ class AgentHarness:
     ) -> AgentResult:
         """Build the ``Failed`` result and alert the owner ONCE PER EPISODE.
 
-        The failure itself is unchanged — ``agent_call_failed`` is logged by the caller for every
-        single occurrence, and the returned result is identical. What is throttled is the OWNER ALERT:
-        the first failure of a ``(agent, reason)`` alerts, further ones inside
-        :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as suppressed, and any successful call
-        by that agent closes the episode (see :meth:`_run`). A dead SDK used to raise one owner alert
-        per call for as long as it stayed dead, which is how a queue 200 deep gets built.
+        Only the OWNER ALERT is throttled: ``agent_call_failed`` is logged by the caller for every
+        occurrence and the returned result is the same. The first failure of a ``(agent, reason)``
+        alerts, further ones inside :data:`~engine.notify.episodes.REPEAT_AFTER` are logged as
+        suppressed, and any successful call by that agent closes the episode (see :meth:`_run`).
         :data:`ACCOUNT_FAIL_REASONS` go to the one account episode instead, whichever agent hit them.
         """
         result = AgentResult.Failed(
@@ -1353,9 +1339,8 @@ SMOKE_AGENT_DEF = AgentDef(
     timeout_s=30.0,
 )
 
-# Every production agent sends a json_schema, so the smoke call sends one too — the smoke test must exercise
-# the structured-output path the real calls take, not a text-only path nothing else uses
-# (2026-07-28: a schema-less smoke passed while every schema call failed on the untested path).
+# Every production agent sends a json_schema, so the smoke call sends one too — the smoke test must
+# exercise the structured-output path the real calls take, not a text-only path nothing else uses.
 SMOKE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"ok": {"type": "boolean"}},

@@ -16,8 +16,8 @@ TOPIC_BUDGET_STATE = "budget.state"
 
 
 class BudgetStateChanged(BaseModel):
-    #: ``window_key`` is the quota window's start Thursday (ISO date) — the spend figure is
-    #: meaningless without it now that the period is a subscription week, not the calendar month.
+    #: ``window_key`` is the quota window's start Thursday (ISO date); the spend figure is
+    #: meaningless without it.
     old_tier: DegradeTier
     new_tier: DegradeTier
     window_key: str

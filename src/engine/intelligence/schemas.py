@@ -1,7 +1,7 @@
 """Tier-1 ↔ code schemas (the three-tier rule): the action-object union, GateVerdict, Recommendation.
 
-The models themselves now live in :mod:`engine.core.contracts` (the import-graph guard) — this
-module RE-EXPORTS them unchanged and keeps the SDK-facing helpers that only Tier-1 needs.
+The models themselves live in :mod:`engine.core.contracts` (the import-graph guard) — this module
+RE-EXPORTS them unchanged and keeps the SDK-facing helpers that only Tier-1 needs.
 
 These are the ONLY shape in which Tier-1 (Claude) output crosses into the deterministic tiers. The SDK
 call uses :data:`ActionProposal` as its structured-output schema; anything that fails validation
@@ -22,12 +22,11 @@ Three locked conventions:
    re-validating the model after parse — which is exactly what :func:`parse_and_stamp` does. See
    :data:`STRUCTURED_OUTPUT_NOTES`.
 
-   Corollary (2026-08-20): the intraday wire schema is the FLAT merge
-   :func:`intraday_guidance_json_schema`, which advertises EVERY action's fields for EVERY action,
-   while the authoritative union forbids extras on each variant. The two disagree by construction,
-   so :func:`parse_intraday` runs :func:`_sanitize_guidance_extras` first — it drops the
-   ADVERTISED-but-wrong-for-this-action keys and nothing else. Genuinely foreign keys (never
-   advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its teeth.
+   Corollary: the intraday wire schema is the FLAT merge :func:`intraday_guidance_json_schema`,
+   which advertises EVERY action's fields for EVERY action, while the authoritative union forbids
+   extras on each variant. So :func:`parse_intraday` runs :func:`_sanitize_guidance_extras` first —
+   it drops the ADVERTISED-but-wrong-for-this-action keys and nothing else. Genuinely foreign keys
+   (never advertised) still die ``schema_invalid``: ``extra="forbid"`` keeps its teeth.
 """
 
 from __future__ import annotations
@@ -95,9 +94,8 @@ __all__ = [
     "parse_intraday",
 ]
 
-# Notes recorded during the smoke test: structured-output constraints to enforce
-# client-side post-parse if the SDK schema layer rejects them in-schema. parse_and_stamp() re-validates
-# through Pydantic, so these are enforced there regardless of what the wire schema allows.
+# Structured-output constraints enforced client-side post-parse: parse_and_stamp() re-validates
+# through Pydantic regardless of what the wire schema allows.
 STRUCTURED_OUTPUT_NOTES = {
     "decimal_serialization": "strings",
     "additionalProperties": "false (forbid extra keys; Pydantic extra='forbid')",
@@ -110,8 +108,7 @@ STRUCTURED_OUTPUT_NOTES = {
 #: The CLOSED exit reasons, DERIVED from :class:`ExitAction`'s own ``Literal`` — never retyped, so the
 #: wire schema, the sanitizer and the position-event context cannot drift from the contract. The flat
 #: guidance schema advertises them under ``exit_reason`` because ``reason`` there is ``no_action``'s
-#: free prose (2026-09-03..09-10: 47 of 47 first-attempt exits died ``literal_error`` at ``exit.reason``
-#: because the only place the model ever saw these codes was the pydantic error echoed on retry).
+#: free prose (otherwise the model only sees the codes in the pydantic error echoed on retry).
 EXIT_REASON_CODES: tuple[str, ...] = get_args(ExitAction.model_fields["reason"].annotation)
 
 
@@ -165,20 +162,10 @@ class NoActionOutput(BaseModel):
 
     action: Literal["no_action"]
     reason: str = Field(min_length=5)
-    # Guidance-schema compatibility (2026-08-12): the FLAT structured-output schema (the CLI
-    # degrades to text on unions, pinned 2026-07-29) advertises ``thesis``/``confidence`` for EVERY
-    # action, so the model legitimately attaches them when declining — 9 schema_invalid failures on
-    # 2026-08-12 (retries hit the same shape; one terminal). Accepted here, unused downstream;
-    # ``extra="forbid"`` still rejects genuinely foreign fields (structural coherence intact).
-    #
-    # The 2026-08-20 change GENERALISES this half-patch: two accepted fields only ever covered the two
-    # extras seen that day, and the same schema mismatch killed BOTH of the first-ever ``enter``
-    # outputs (ICICIAMC + POLICYBZR brk20, all 3 retries burned on ``extra_forbidden``; 8 of 13
-    # intraday calls failed that way). :func:`_sanitize_guidance_extras` now DROPS every
-    # advertised-but-wrong-for-this-action key before union validation, for every action — so no
-    # further per-model field needs to be added here as the guidance schema grows. These two stay
-    # (dropping is silent on the wire but these are the two the model most often means, and keeping
-    # them costs nothing); everything else the guidance advertises is handled by the sanitizer.
+    # The FLAT guidance schema (the CLI degrades to text on unions) advertises ``thesis``/``confidence``
+    # for EVERY action, so the model legitimately attaches them when declining. Accepted here, unused
+    # downstream; ``extra="forbid"`` still rejects genuinely foreign fields. Every other advertised
+    # key is handled by :func:`_sanitize_guidance_extras`, so no further per-model field is needed.
     confidence: float | None = Field(default=None, ge=0, le=1)
     thesis: str | None = None
 
@@ -201,15 +188,13 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
     """FLAT single-object schema for the runtime's structured-output knob.
 
     The CLI's ``output_format`` silently falls back to plain TEXT mode for any schema containing a
-    ``oneOf``/``anyOf`` union — root-level, wrapped, or de-discriminated (pinned live 2026-07-29:
-    every intraday call answered in fenced prose and died schema_invalid while the flat news/plan
-    schemas engaged the StructuredOutput tool). So the knob gets this flattened merge of the output
-    union — every variant's model-emitted field, ``action`` as the closed enum, only ``action``
+    ``oneOf``/``anyOf`` union — root-level, wrapped, or de-discriminated (every intraday call then
+    answers in fenced prose and dies schema_invalid). So the knob gets this flattened merge of the
+    output union — every variant's model-emitted field, ``action`` as the closed enum, only ``action``
     required — and the DISCRIMINATED union in :func:`parse_intraday` remains the authoritative
     contract. A payload this schema admits but the union rejects still fails client-side and retries
-    under the LLM-failure rule. Platform-stamped fields (proposal_id, valid_until,
-    agent_id, inputs_digest) are deliberately absent: the model has no business emitting them, and
-    the runtime's own schema coaching steers it off any it invents (additionalProperties: false).
+    under the LLM-failure rule. Platform-stamped fields (proposal_id, valid_until, agent_id,
+    inputs_digest) are deliberately absent: the model has no business emitting them.
     """
     return {
         "type": "object",
@@ -219,16 +204,10 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
                 "enum": [*ACTION_MODELS.keys(), "no_action"],
             },
             # ActionBase / NoActionOutput
-            # NO maxLength here — deliberately (2026-09-03). It was advertised for one session
-            # (2026-09-02) as "prevention" and proved net harmful: the runtime enforces the wire
-            # schema on the StructuredOutput tool input and RE-PROMPTS on violation, each bounce
-            # costing a turn, so a verbose thesis that the client-side clamp would truncate for free
-            # instead burned 3-4x output tokens per call and, on 2026-09-03 09:51, exhausted the
-            # 4-turn budget — the FIRST-EVER intraday max-turns sdk_error (terminal: no LLM-failure retry,
-            # candidate re-armed, $0.33 gone). Post-deploy the clamp fired 0 times and
-            # string_too_long vanished: overflow was being intercepted upstream at the worse layer.
-            # The prose note in `numeric_constraints_client_side` stays; the clamp in
-            # _sanitize_guidance_extras is the converging mechanism.
+            # NO maxLength here — deliberately: the runtime enforces the wire schema on the
+            # StructuredOutput tool input and RE-PROMPTS on violation, each bounce costing a turn, so
+            # a verbose thesis burned output tokens and could exhaust the turn budget (a terminal
+            # max-turns sdk_error). The clamp in _sanitize_guidance_extras truncates for free.
             "thesis": {"type": "string"},
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "reason": {"type": "string"},        # no_action free text; an exit's code is exit_reason
@@ -252,7 +231,7 @@ def intraday_guidance_json_schema() -> dict[str, Any]:
             # The exit's CLOSED reason gets its OWN key: ``reason`` above is no_action's free prose and
             # a flat merge cannot be two shapes at once. _sanitize_guidance_extras maps this onto
             # ExitAction.reason before the union validates. A member enum is safe here — only
-            # oneOf/anyOf unions disengage the runtime's structured output (2026-07-29).
+            # oneOf/anyOf unions disengage the runtime's structured output.
             "exit_reason": {"type": "string", "enum": list(EXIT_REASON_CODES)},
             "new_stop": {"type": "string"},
             "new_target": {"type": "string"},
@@ -276,12 +255,11 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     """Drop the guidance-advertised fields THIS action forbids, before the union validates.
 
     The wire schema (:func:`intraday_guidance_json_schema`) is a FLAT merge — it must be, or the CLI
-    degrades to text mode (pinned 2026-07-29) — so it advertises every action's fields for every
-    action. The model therefore legitimately attaches ``reason`` to an ``enter``, or
+    degrades to text mode — so it advertises every action's fields for every action. The model
+    therefore legitimately attaches ``reason`` to an ``enter``, or
     ``tradingsymbol``/``signal_id``/``strategy_id`` to a ``no_action``, and the authoritative
-    discriminated union (``extra="forbid"`` everywhere) rejects it as ``extra_forbidden``. On
-    2026-08-20 that killed both first-ever ``enter`` outputs plus 8 of 13 intraday calls: retries
-    re-emit the same shape because the schema keeps inviting it, so retrying can never converge.
+    discriminated union (``extra="forbid"`` everywhere) rejects it as ``extra_forbidden``. Retries
+    re-emit the same shape because the schema keeps inviting it, so retrying never converges.
 
     What is dropped is EXACTLY ``raw ∩ (advertised − target-model fields)``:
 
@@ -293,26 +271,22 @@ def _sanitize_guidance_extras(raw: dict[str, Any] | str) -> dict[str, Any] | str
     * a missing or unrecognised ``action`` sanitizes NOTHING — the payload is undiscriminatable, so
       it must fail validation as it does today rather than be silently reshaped.
 
-    **Value-shaped reconciliation (2026-09-02, the exit-thesis incident):** the same flat-schema
-    mismatch exists for VALUES — ``thesis``'s 600-char cap lived only in the client-side prose note,
-    so a verbose-but-valid EXIT died ``string_too_long`` on all 3 attempts, twice, losing both
-    refreshed exit recommendations for open positions (retries re-invite the same verbosity, so
-    retrying cannot converge — the same argument exactly). An ADVERTISED ``str`` field overflowing
-    the MATCHED model's own declared ``max_length`` is therefore clamped to that cap (logged
-    ``guidance_prose_clamped``). Truncation is the ONLY reshaping: ``min_length``, enum, numeric and
-    every other constraint still fail exactly as before (too-short prose is deficient content, and
-    silently altering a number or id would corrupt semantics); a field the guidance never
-    advertised, or whose target declares no cap, is untouched.
+    **Value-shaped reconciliation:** the same flat-schema mismatch exists for VALUES — ``thesis``'s
+    600-char cap lives only in the client-side prose note, so a verbose-but-valid EXIT would die
+    ``string_too_long`` on every attempt (retries re-invite the same verbosity). An ADVERTISED ``str``
+    field overflowing the MATCHED model's own declared ``max_length`` is therefore clamped to that cap
+    (logged ``guidance_prose_clamped``). Truncation is the ONLY reshaping: ``min_length``, enum,
+    numeric and every other constraint still fail (too-short prose is deficient content, and silently
+    altering a number or id would corrupt semantics); a field the guidance never advertised, or whose
+    target declares no cap, is untouched.
 
-    **Exit reasons (2026-09-11):** ``reason`` on the wire is ``no_action``'s free prose, but
-    :class:`ExitAction` declares it a CLOSED ``Literal``, so every exit died ``literal_error`` on
-    attempt 1 — 47 of 47 since 2026-09-03, converging only because the harness echoes the pydantic
-    error (the one place the model ever saw the codes), and 10 exits were lost outright before that.
-    The schema now advertises those codes as :data:`EXIT_REASON_CODES` under ``exit_reason``; on an
-    ``exit`` a valid code is MOVED onto ``reason`` (``guidance_exit_reason_mapped``) and the displaced
-    prose becomes the ``thesis`` only when there is none to lose. That is a RENAME of an in-enum
-    value, never an interpretation: an absent or out-of-enum ``exit_reason`` leaves ``reason``
-    untouched and the payload fails exactly as it does today — prose is never guessed into a code.
+    **Exit reasons:** ``reason`` on the wire is ``no_action``'s free prose, but :class:`ExitAction`
+    declares it a CLOSED ``Literal``. The schema advertises those codes as :data:`EXIT_REASON_CODES`
+    under ``exit_reason``; on an ``exit`` a valid code is MOVED onto ``reason``
+    (``guidance_exit_reason_mapped``) and the displaced prose becomes the ``thesis`` only when there
+    is none to lose. That is a RENAME of an in-enum value, never an interpretation: an absent or
+    out-of-enum ``exit_reason`` leaves ``reason`` untouched and the payload fails validation — prose
+    is never guessed into a code.
 
     A ``str`` payload is JSON-decoded first; anything that is not a JSON object (bad JSON, a list, a
     scalar) is returned verbatim so the caller's original validation path produces the original error.

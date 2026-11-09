@@ -1,8 +1,9 @@
 """Feature snapshots + canonical serialization (``feature_snapshots``).
 
 ``FeatureVector`` is the value returned by ``FeatureEngine.intraday_snapshot`` and persisted to the
-DuckDB ``feature_snapshots`` table keyed by ``features_snapshot_id`` (a platform-minted ULID). Proposals and ledger rows reference that id — the snapshot is the frozen "what
-the features looked like at decision time" record for audit/replay.
+DuckDB ``feature_snapshots`` table keyed by ``features_snapshot_id`` (a platform-minted ULID).
+Proposals and ledger rows reference that id — the frozen "what the features looked like at decision
+time" record for audit/replay.
 
 Serialization contract (load-bearing for the determinism tests):
 
@@ -14,9 +15,8 @@ Serialization contract (load-bearing for the determinism tests):
   (features are statistics and normally floats — Decimals appear only if a caller passes a price
   level through unconverted).
 
-``FEATURE_SET_VERSION`` is the stamp written on every ``features_daily`` row and snapshot; it
-bumped 1 -> 2 when the sentiment/catalyst block landed live (trial windows reset per
-version; the N-reset/neutral-fill bump *mechanics* are learning-side, not built).
+``FEATURE_SET_VERSION`` is the stamp written on every ``features_daily`` row and snapshot; trial
+windows reset per version.
 """
 
 from __future__ import annotations
@@ -32,8 +32,7 @@ from ulid import ULID
 
 from engine.marketdata.store import MarketStore
 
-#: Feature-set version stamped on every features_daily row + snapshot. v2: live
-#: sentiment/catalyst block from sentiment_agg + catalyst_watchlist (engine.features.engine).
+#: Feature-set version stamped on every features_daily row + snapshot.
 FEATURE_SET_VERSION = 2
 
 #: The only value types a feature may hold once cleaned (JSON scalars; never NaN).

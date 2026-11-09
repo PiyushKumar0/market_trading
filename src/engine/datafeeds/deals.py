@@ -1,14 +1,14 @@
-"""NSE bulk/block deals → ``flagged_instrument_days`` (settings.jobs.deals_ist — 20:30 since 2026-07-24; best-effort).
+"""NSE bulk/block deals → ``flagged_instrument_days`` (``settings.jobs.deals_ist``; best-effort).
 
-A day with a bulk or block deal in a symbol distorts its volume profile: scanners must suppress
-volume-breakout signals on flagged (symbol, day)s ("fake-volume-breakout suppression", the ``flagged_instrument_days`` table). This job pulls the day's bulk-deal and block-deal lists from the
-NSE historical-deals APIs (date-ranged, so the date-keyed catch-up can re-run any missed
-trading day) and writes one flagged row per (symbol, day, reason).
+A day with a bulk or block deal in a symbol distorts its volume profile: scanners suppress
+volume-breakout signals on flagged (symbol, day)s. This job pulls the day's bulk-deal and block-deal
+lists from the NSE historical-deals APIs (date-ranged, so the date-keyed catch-up can re-run any
+missed trading day) and writes one flagged row per (symbol, day, reason).
 
-Failure model: each source (bulk, block) runs under its OWN guard — one failing never blocks
-the other. A failed source alerts + leaves the table's existing rows in force (reuse yesterday; the
-date-keyed catch-up retries the missed day). Rows whose own trade-date parses to a DIFFERENT day
-are dropped (wrong window — never mis-key a flag). Never raises into the scheduler.
+Failure model: each source (bulk, block) runs under its OWN guard — one failing never blocks the
+other. A failed source alerts and leaves the existing rows in force; the date-keyed catch-up
+retries. Rows whose own trade-date parses to a DIFFERENT day are dropped (never mis-key a flag).
+Never raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -30,12 +30,8 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 _log = get_logger("engine.datafeeds.deals")
 
 #: NSE historical bulk/block-deal API (single-day window ``from=to=d``); cookie/UA-gated like the
-#: other NSE JSON endpoints. MIGRATED 2026-08-18: the original ``/api/historical/bulk-deals`` +
-#: ``/api/historical/block-deals`` routes started returning 503 for EVERY date ~2026-08-13 (probed:
-#: 503 even for dates previously fetched fine, on a session where sibling APIs return 200 — an
-#: NSE-side retirement, not anti-bot). The replacement is one route with an ``optionType``
-#: discriminator; its row shape (``BD_*`` keys, ``{"data": [...]}`` envelope) was already covered
-#: by the ``parse_deals`` aliases, so only the URLs changed.
+#: other NSE JSON endpoints. One route with an ``optionType`` discriminator (the older
+#: ``/api/historical/bulk-deals`` and ``/block-deals`` routes were retired and return 503).
 NSE_BULK_DEALS_URL_TEMPLATE = (
     "https://www.nseindia.com/api/historicalOR/bulk-block-short-deals"
     "?optionType=bulk_deals&from={d:%d-%m-%Y}&to={d:%d-%m-%Y}"
@@ -162,10 +158,8 @@ class DealsJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): keyed on ``d`` regardless of whether the
-        #: alert coincided with ``ok=False`` (both sources down) or ``ok=True`` (one source down) — the
-        #: alert fires on ANY failed source either way, so the dedup guards that call, not the ``ok``
-        #: field. Discarded whenever a run for ``d`` has zero failed sources (re-arms for a later streak).
+        #: Per-date alert dedup, keyed on ``d``: the alert fires on ANY failed source (``ok`` or not).
+        #: Discarded when a run for ``d`` has zero failed sources (re-arms for a later streak).
         self._alerted: set[date] = set()
 
     async def run(self, d: date) -> DealsResult:
@@ -192,7 +186,7 @@ class DealsJob:
         if all_rows:
             written = await self._store.arun(self._store.upsert_flagged_instrument_days, all_rows)
         if failed:
-            if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
+            if d not in self._alerted:
                 await self._alert(d, failed, "; ".join(reasons))
                 self._alerted.add(d)
         else:

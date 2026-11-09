@@ -3,25 +3,23 @@
 No credit-balance API exists, so this ledger IS the platform's only view of LLM spend: every SDK
 result message's billed usage is priced at the standard rates in ``config/agents.yaml``, appended to
 ``budget_ledger``, and the window-to-date total drives the degrade ladder. A tier change publishes on
-``budget.state`` — the dashboard, the owner alert, and the mode-capability mapping all
-read that single signal. The ledger dollar is a governor PROXY: billing is the subscription's weekly
-quota, so there is no console figure to reconcile (re-scoped
-2026-08-13). Systematic under-count (a timed-out call books only the per-turn usage streamed before
-the cutoff, often none, while the subscription bills the whole call) is why the ladder trips well
-below the credit.
+``budget.state`` — the dashboard, the owner alert, and the mode-capability mapping all read that
+single signal. The ledger dollar is a governor PROXY: billing is the subscription's weekly quota, so
+there is no console figure to reconcile. Systematic under-count (a timed-out call books only the
+per-turn usage streamed before the cutoff, often none, while the subscription bills the whole call)
+is why the ladder trips well below the credit.
 
-The budget period is the SUBSCRIPTION's quota week, not the calendar month (owner-directed 2026-09-12):
-the Agent SDK draws on a weekly quota that resets Thursday 14:00 IST, so a month-keyed ladder measured
-the wrong thing in both directions — it let a five-week month look healthy while a single week blew the
-quota, and it latched a per-agent trip for the rest of the month (news_analyst, 08-28 and 09-09, dropped
-the forward cap 48→4 for three weeks). The anchor is ``llm.quota_window`` config; ``_window_key`` /
-``window_bounds`` are its wall-clock arithmetic and are deliberately calendar-BLIND (a Thursday holiday
-still rolls the quota — the NSE calendar only shapes the pace denominator).
+The budget period is the SUBSCRIPTION's quota week, not the calendar month: the Agent SDK draws on a
+weekly quota that resets Thursday 14:00 IST, and a month-keyed ladder both hid a single week blowing
+the quota and latched a per-agent trip for the rest of the month. The anchor is ``llm.quota_window``
+config; ``_window_key`` / ``window_bounds`` are its wall-clock arithmetic and are deliberately
+calendar-BLIND (a Thursday holiday still rolls the quota — the NSE calendar only shapes the pace
+denominator).
 
-Pace is measured over TRADING sessions: counting calendar days would declare a perfectly healthy
-week over-pace every weekend. "No burn on holidays" is emergent — no calls fire — but the denominator
-must agree with that or the pace is nonsense. The two boundary Thursdays are HALF sessions: the morning
-is billed to the window ending at 14:00, the afternoon to the one starting there.
+Pace is measured over TRADING sessions: counting calendar days would declare a healthy week
+over-pace every weekend. The denominator must agree with "no burn on holidays" (no calls fire). The
+two boundary Thursdays are HALF sessions: the morning is billed to the window ending at 14:00, the
+afternoon to the one starting there.
 
 Pay-as-you-go overflow (``llm.overflow_enabled``) is off by default and is NOT a lever here: DG4
 trips at the credit regardless, and enabling overflow is an owner action outside this class.
@@ -59,9 +57,9 @@ CACHE_WRITE_MULT = Decimal("1.25")
 # DG2 row: news-analyst batching coarsens from the normal 30-min cadence to 60 min.
 NEWS_BATCH_CADENCE_MIN = 30
 DEGRADED_NEWS_BATCH_CADENCE_MIN = 60
-# DG1 row: the degraded pre-screen cap is a FRACTION of the configured base, not the old flat 4 —
-# that constant was written when the base was 6 and silently became a 92% cut once the owner raised the
-# base to 48 (2026-08-18). Owner-tunable as ``degrade_ladder.DG1.degraded_forward_cap_frac``.
+# DG1 row: the degraded pre-screen cap is a FRACTION of the configured base, not a flat number (a flat
+# cap silently becomes a huge cut when the base is raised). Owner-tunable as
+# ``degrade_ladder.DG1.degraded_forward_cap_frac``.
 DEFAULT_DEGRADED_FORWARD_CAP_FRAC = Decimal("0.67")
 
 # DG3 row: all intraday LLM calls off + news analyst off. The pre-open planner is intraday-class
@@ -83,7 +81,7 @@ _WEEKDAY_NAMES = {
     "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
     "friday": 4, "saturday": 5, "sunday": 6,
 }
-#: Observed subscription reset (owner 2026-09-12). Only a config file may move it; the defaults exist
+#: Observed subscription reset. Only a config file may move it; the defaults exist
 #: so a config predating ``llm.quota_window`` still keys on the right week rather than on nothing.
 DEFAULT_RESET_WEEKDAY = "thursday"
 DEFAULT_RESET_TIME_IST = "14:00"
@@ -370,9 +368,8 @@ class BudgetGovernor:
         """The PLATFORM tier for ``window`` (default: the live one).
 
         Per-agent spend is deliberately absent: one agent over its own share degrades ITS OWN cadence
-        (:meth:`agent_degraded`) and is hard-stopped at 100% by :meth:`can_invoke`, but it no longer
-        drags the whole platform down a rung (owner-directed 2026-09-12 — the 08-28/09-09 news_analyst
-        trips cut the intraday forward cap for three weeks over spend that was inside the total).
+        (:meth:`agent_degraded`) and is hard-stopped at 100% by :meth:`can_invoke`, but it never
+        drags the whole platform down a rung.
         """
         w = window or self._window()
         spend = self.window_spend(w)
@@ -381,12 +378,9 @@ class BudgetGovernor:
         if spend >= self._dg3_global * self._credit:
             return DegradeTier.DG3
         # An UNMEASURABLE pace (``None`` — see :meth:`pro_rata_to_date`) is skipped, never compared
-        # against: ``spend > 1.25 × 0`` is ``any spend at all``, so the first cent of a window whose
-        # reset Thursday is a holiday — or of any window with no calendar — would trip DG2 (
-        # never over-pace on an unmeasurable pace). The absolute rungs below still bind, so nothing
-        # is weakened; the pace rungs simply wait for the first session to elapse. A non-positive
-        # pace is folded into the same skip: a credit of 0 would otherwise re-open the same trap
-        # through a measurable-but-zero denominator.
+        # against: ``spend > 1.25 × 0`` is "any spend at all" and would trip DG2 on the first cent of
+        # a window. The absolute rungs still bind; the pace rungs wait for the first session. A
+        # non-positive pace is folded into the same skip (a credit of 0 would re-open the trap).
         pace = self.pro_rata_to_date(w)
         if pace is not None and pace <= 0:
             pace = None
@@ -399,9 +393,8 @@ class BudgetGovernor:
     def agent_degraded(self, agent_id: str) -> bool:
         """``agent_id`` is over its own DG1 share of its weekly allocation.
 
-        The per-agent half of the old DG1 rule, decoupled from the platform tier: it throttles only the
-        knobs that agent drives (its forward cap / batch cadence), never everyone else's.
-        An agent with no allocation is never "degraded" — nothing was budgeted to exceed.
+        Decoupled from the platform tier: it throttles only the knobs that agent drives (its forward
+        cap / batch cadence). An agent with no allocation is never "degraded".
         """
         alloc = self._allocations.get(agent_id)
         if alloc is None:
@@ -413,8 +406,7 @@ class BudgetGovernor:
         """Whether ``agent_id`` may make a call now.
 
         The per-agent allocation is a hard window-long stop independent of the ladder: one runaway agent
-        must not be able to spend the other agents' week. The reserve is owner-assignable via ``/budget`` — until that
-        lands it is simply unspent.
+        must not be able to spend the other agents' week. The unallocated reserve is simply unspent.
         """
         tier = self.degrade_tier()
         alloc = self._allocations.get(agent_id)
@@ -433,8 +425,7 @@ class BudgetGovernor:
 
         Full base at DG0 with the intraday analyst inside its share; otherwise a PROPORTIONAL cut to
         ``floor(base × degraded_forward_cap_frac)``, floored at 1 so a degraded platform still forwards
-        something. Proportional because the old flat 4 was written against a base of 6 and turned into a
-        92% cut when the owner raised the base to 48 (2026-08-18); it ran the whole of 09-10 at 4/day.
+        something. Proportional because a flat cap becomes a huge cut when the base is raised.
         """
         base = int(self._agent_cfg("intraday_analyst").get("prescreen_cap_per_day", 6))
         if base <= 0:
@@ -503,10 +494,9 @@ def _parse_anchor(raw: Mapping[str, Any] | None) -> WindowAnchor:
 def _parse_cap_frac(raw: Any) -> Decimal:
     """``degrade_ladder.DG1.degraded_forward_cap_frac`` → a fraction in (0, 1].
 
-    Fail loud like every other knob in this constructor: the neighbouring ``pro_rata_pct`` /
-    ``agent_alloc_pct`` keys ARE percentages, so ``0.67`` typed as ``67`` is the likely edit — and a
-    fraction > 1 would make the degrade ladder RAISE the forward cap above its DG0 base, spending more
-    at every rung that exists to spend less. Nothing downstream re-checks the number.
+    Fail loud: the neighbouring ``pro_rata_pct`` / ``agent_alloc_pct`` keys ARE percentages, so
+    ``0.67`` typed as ``67`` is the likely edit — and a fraction > 1 would RAISE the forward cap above
+    its DG0 base. Nothing downstream re-checks the number.
     """
     try:
         frac = Decimal(str(raw))
@@ -531,10 +521,8 @@ def _window_key(at: datetime, anchor: WindowAnchor) -> str:
     IST first — the key is an IST date and a UTC-stamped caller would otherwise key the wrong week.
     """
     if at.tzinfo is None:
-        # The tz contract is enforced HERE, at the arithmetic, not once per caller: ``astimezone`` on a
-        # naive value silently reads it as SYSTEM-local, so on any non-IST host (CI, a replay box, a
-        # UTC container) the same instant would key a different week through ``window_key`` than
-        # through ``record`` — which rejects it.
+        # Enforced HERE, at the arithmetic: ``astimezone`` on a naive value silently reads it as
+        # SYSTEM-local, so on a non-IST host the same instant would key a different week.
         raise ValueError("budget window arithmetic: `at` must be tz-aware (the quota window is IST)")
     ist = at.astimezone(IST)
     start_date = ist.date() - timedelta(days=(ist.weekday() - anchor.weekday) % 7)
@@ -560,9 +548,8 @@ def _window_bounds(window: str, anchor: WindowAnchor) -> tuple[datetime, datetim
 
 
 def _month_key(at: datetime) -> str:
-    """``budget_ledger.month`` — HISTORY ONLY since 2026-09-12: still written on every row so the
-    pre-weekly ledger keeps one consistent column. No reader is left — the ladder ranges on ``at``,
-    ``ops/nightly_review.py`` slices ``at`` by day, and ``scripts/recommend_gate_evidence.py`` moved its budget block
-    onto the quota window on 2026-09-12 — so the column and ``idx_budget_month`` stay only as history;
-    check those three before assuming a new query may key on it."""
+    """``budget_ledger.month`` — HISTORY ONLY: still written on every row so the column stays
+    consistent. No reader is left — the ladder ranges on ``at``, ``ops/nightly_review.py`` slices
+    ``at`` by day, and ``scripts/recommend_gate_evidence.py`` uses the quota window; check those
+    before assuming a new query may key on it."""
     return at.strftime("%Y-%m")
