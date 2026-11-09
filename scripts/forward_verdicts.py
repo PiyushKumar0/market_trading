@@ -161,11 +161,11 @@ def render_kill(rd: fv.KillReading, cal: NSECalendar) -> list[str]:
             f"    fill rate: {rd.n_filled} of {rd.n_rows} = {_pct(fill_rate)}",
             f"    net T+5 {_stats(rd.net_t5, '%')}", f"    net T+10 {_stats(rd.net_t10, '%')}",
             f"    net T+20 {_stats(rd.net_t20, '%')}", f"    excess T+20 {_stats(rd.excess_t20, '%')}"]
-    if rd.c2 is not None:
+    if rd.regime_gate is not None:
         out += ["    regime-gate arms: blocked (down; raw, pre-cap) vs admitted (post-cap); diagnostic only",
-                f"    regime-gate admitted (post-cap) net T+20 {_stats(rd.c2.admitted, '%')}",
-                f"    regime-gate blocked (down; raw, pre-cap) net T+20 {_stats(rd.c2.blocked, '%')}",
-                f"    regime-gate blocked for another reason, in neither arm: {rd.c2.neither}"]
+                f"    regime-gate admitted (post-cap) net T+20 {_stats(rd.regime_gate.admitted, '%')}",
+                f"    regime-gate blocked (down; raw, pre-cap) net T+20 {_stats(rd.regime_gate.blocked, '%')}",
+                f"    regime-gate blocked for another reason, in neither arm: {rd.regime_gate.neither}"]
     return out
 
 

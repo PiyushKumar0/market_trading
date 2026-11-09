@@ -2,8 +2,8 @@
 """Exit-geometry study (pre-registered 2026-10-07).
 
 Per strategy (brk20 5-session-limit fills, hi52 v2, ins), three arms walked through ``exit_sim`` from the
-research fill: (i) the shipped stop/target re-anchored to the fill, (ii) time only (REFERENCE),
-(iii) a ``fill - 2.5 x ATR14`` catastrophe stop. Family N = 2 per strategy. Evidence only; wires
+research fill: the shipped stop/target re-anchored to the fill, time only (the REFERENCE arm), and
+a ``fill - 2.5 x ATR14`` catastrophe stop. Family N = 2 per strategy. Evidence only; wires
 nothing. Exit codes: 0 ran, 2 refused.
 """
 
@@ -105,7 +105,8 @@ def decide(cpcv: dict[str, dict], medians: dict[str, float | None]) -> dict[str,
         "promotable_arms": [a for a, _ in ranked],
         "outcome": outcome,
         "median_net_t20": medians,
-        "cost_of_stop_pp": {"ii_minus_i": gap(ARM_SHIPPED), "ii_minus_iii": gap(ARM_CATASTROPHE)},
+        "cost_of_stop_pp": {"time_only_minus_shipped": gap(ARM_SHIPPED),
+                            "time_only_minus_catastrophe": gap(ARM_CATASTROPHE)},
     }
 
 
@@ -212,8 +213,8 @@ def render_text(doc: dict[str, Any]) -> str:
                        f"promotable {c['promotable']}")
         d = b["decision"]
         out.append(f"  DECISION: {d['outcome']}  (promotable: {', '.join(d['promotable_arms']) or 'none'}; "
-                   f"cost of stop (ii)-(i) {_num(d['cost_of_stop_pp']['ii_minus_i'])} pp, "
-                   f"(ii)-(iii) {_num(d['cost_of_stop_pp']['ii_minus_iii'])} pp)")
+                   f"cost of stop: time-only minus shipped {_num(d['cost_of_stop_pp']['time_only_minus_shipped'])} pp, "
+                   f"time-only minus catastrophe {_num(d['cost_of_stop_pp']['time_only_minus_catastrophe'])} pp)")
         out.append("  held-out (signals >= " + m["held_out_from"] + ", diagnostic): " + ", ".join(
             f"{a} n={h['n']} med net {_num(h['median_net'])}" for a, h in b["held_out"].items()))
     out += ["", "Every population is a " + rc.SURVIVORSHIP_LABEL + ".",

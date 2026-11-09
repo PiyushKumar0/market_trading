@@ -1018,7 +1018,7 @@ def render_text(doc: dict[str, Any]) -> str:
 
 
 def _console(text: str) -> str:
-    return rc.ascii_text(text.replace("§", "section "))
+    return rc.ascii_text(text)
 
 
 # =============================================================================== CLI

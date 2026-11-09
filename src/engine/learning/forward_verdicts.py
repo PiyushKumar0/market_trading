@@ -136,7 +136,7 @@ class Stats:
 
 
 @dataclass(frozen=True)
-class C2Arms:
+class RegimeGateArms:
     admitted: Stats
     blocked: Stats
     neither: int           # blocked for an undefined regime or a missing index bar: in no regime-gate cohort
@@ -178,7 +178,7 @@ class KillReading:
     net_t10: Stats
     net_t20: Stats
     excess_t20: Stats
-    c2: C2Arms | None      # brk20 only
+    regime_gate: RegimeGateArms | None      # brk20 only
 
 
 @dataclass(frozen=True)
@@ -263,13 +263,13 @@ def kill_reading(
     looks = kill_looks(rows)
     verdict, reason = kill_verdict(looks, registered_from=registered_from)
     holding = next((i for i, lk in enumerate(looks, 1) if not lk.formed), None)
-    c2 = c2_arms(rows, population("rule_blocked")) if rule == "brk20" else None
+    regime_gate = regime_gate_arms(rows, population("rule_blocked")) if rule == "brk20" else None
     return KillReading(
         rule, registered_from, until, as_of, verdict, reason, tuple(looks), holding,
         tuple(look_holders(rows, looks[holding - 1].size)) if holding else (), len(rows),
         sum(1 for r in rows if r.fill_d is not None), dict(Counter(r.status for r in rows)),
         stats(_nets(rows, 5)), stats(_nets(rows, 10)), stats(_nets(rows, 20)),
-        stats([r.excess_t20 for r in rows if r.excess_t20 is not None]), c2,
+        stats([r.excess_t20 for r in rows if r.excess_t20 is not None]), regime_gate,
     )
 
 
@@ -470,8 +470,8 @@ def confidence_buckets(rows: Iterable[SignalRow]) -> list[Bucket]:
     return [Bucket(*k, stats(_nets(groups[k], 20))) for k in order]
 
 
-def c2_arms(rule_rows: Iterable[SignalRow], blocked_rows: Sequence[SignalRow]) -> C2Arms:
+def regime_gate_arms(rule_rows: Iterable[SignalRow], blocked_rows: Sequence[SignalRow]) -> RegimeGateArms:
     """Closed net T+20 of the regime gate's admitted crossings against those it blocked for a down regime; as in the
     regime-filter study, a crossing blocked for any other reason is in neither arm, only counted."""
     down = [r for r in blocked_rows if r.reason == "down"]
-    return C2Arms(stats(_nets(rule_rows, 20)), stats(_nets(down, 20)), len(blocked_rows) - len(down))
+    return RegimeGateArms(stats(_nets(rule_rows, 20)), stats(_nets(down, 20)), len(blocked_rows) - len(down))

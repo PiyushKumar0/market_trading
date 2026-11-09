@@ -47,7 +47,7 @@ _RISK_RANK: dict[RiskState, int] = {
 }
 
 #: The states a cause may latch. ``NORMAL`` is the ABSENCE of causes, never a cause itself — the
-#: ``risk_state_causes`` CHECK constraint (0003_phase2.sql) rejects it at the storage layer too.
+#: ``risk_state_causes`` CHECK constraint rejects it at the storage layer too.
 LATCHING_STATES: tuple[RiskState, ...] = (RiskState.FROZEN, RiskState.CLOSE_ONLY, RiskState.KILLED)
 
 #: Owner pause via ``/pause_entries``. Clears only on the owner's ``/resume_entries``.

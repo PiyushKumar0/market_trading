@@ -191,7 +191,7 @@ def test_floor_knobs_are_structurally_outside_the_learnable_envelope():
 
 
 def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
-    """(a) Regression: the pre-floor candidate is reproduced FIELD-EXACT on a realistic 0.5%/night
+    """Regression: the pre-floor candidate is reproduced FIELD-EXACT on a realistic 0.5%/night
     gap history — R = 3.00 = 3.0% of entry vs a 1.0% floor, so the floor is passed, not dodged."""
     rows = _gapped(_series_with_breakout(), 0.5)
     counts: dict[str, int] = {}
@@ -205,7 +205,7 @@ def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
 
 
 def test_live_2026_08_19_geometries():
-    """(b) The four live geometries that motivated the stop-geometry floor, on a 0.5%/night history ⇒ floor 1.0% of
+    """The four live geometries that motivated the stop-geometry floor, on a 0.5%/night history ⇒ floor 1.0% of
     entry, which lands between the survivor and the three degenerates.
 
     BOSCHLTD-class R ~2.1% of entry ships; MFSL 0.61%, MCX 0.54% and LENSKART 0.17% — three of that
@@ -232,7 +232,7 @@ def test_live_2026_08_19_geometries():
 
 
 def test_floor_unavailable_on_short_history():
-    """(c1) A young listing: 9 session-pairs < gap_min_sessions(10) ⇒ no candidate. Reached with a
+    """A young listing: 9 session-pairs < gap_min_sessions(10) ⇒ no candidate. Reached with a
     short ``lookback_days`` because the rule's own length guard otherwise keeps history >= 22."""
     p = {**P, "lookback_days": 5}
     rows = _gapped(_flat(9) + [DailyRow(high=103.5, close=103.0, volume=2000.0, open=99.05)], 0.1)
@@ -246,7 +246,7 @@ def test_floor_unavailable_on_short_history():
 
 
 def test_floor_unavailable_on_dirty_rows():
-    """(c2) Full-length history, but NaN opens and zero closes interleaved knock 12 of the window's
+    """Full-length history, but NaN opens and zero closes interleaved knock 12 of the window's
     20 pairs out — 8 valid < 10 ⇒ `floor_unavailable`, never a floor computed off the survivors.
     A pair is dropped by EITHER member: a NaN open kills its own pair, a <=0 close kills the pair
     it opens."""

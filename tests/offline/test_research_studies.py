@@ -14,16 +14,16 @@ import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location("mt_backtest_exit_geometry", _ROOT / "scripts" / "backtest_exit_geometry.py")
-c1 = importlib.util.module_from_spec(_spec)
-sys.modules["mt_backtest_exit_geometry"] = c1
-_spec.loader.exec_module(c1)
-rc = c1.rc
+exit_geometry = importlib.util.module_from_spec(_spec)
+sys.modules["mt_backtest_exit_geometry"] = exit_geometry
+_spec.loader.exec_module(exit_geometry)
+rc = exit_geometry.rc
 
 from engine.core.clock import IST  # noqa: E402
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
 from engine.strategy.types import RawLevels  # noqa: E402
 
-SHIPPED, TIME, CAT = c1.ARM_SHIPPED, c1.ARM_TIME, c1.ARM_CATASTROPHE
+SHIPPED, TIME, CAT = exit_geometry.ARM_SHIPPED, exit_geometry.ARM_TIME, exit_geometry.ARM_CATASTROPHE
 
 
 def _weekdays(start: date, n: int) -> list[date]:
@@ -62,7 +62,7 @@ BRK_LEVELS = RawLevels(entry=Decimal("125.00"), stop=Decimal("120.00"), target=D
 ])
 def test_arm_exits(strategy, arm, overrides, horizon, reason, exit_idx, exit_px):
     ev = _event(overrides, levels=BRK_LEVELS)
-    stop, target = c1.arm_levels(arm, strategy, ev)
+    stop, target = exit_geometry.arm_levels(arm, strategy, ev)
     o = rc.walk(ev, stop=stop, target=target, horizon=horizon, cost_pct=Decimal("0.3"), ex_dates=())
     assert (o.status, o.reason, o.exit_d, o.exit_px) == ("exit", reason, ev.series.dates[exit_idx], Decimal(exit_px))
     assert o.net_pct == (Decimal(exit_px) - 100) - Decimal("0.3")
@@ -74,17 +74,18 @@ def test_ex_date_inside_the_hold_voids():
     assert o.status == "void_ca"
 
 
-@pytest.mark.parametrize("prom_i, med_i, prom_iii, med_iii, outcome", [
+@pytest.mark.parametrize("prom_shipped, med_shipped, prom_cat, med_cat, outcome", [
     (True, 1.0, True, 2.0, CAT),
     (True, 1.0, False, 2.0, SHIPPED),
-    (True, 0.0, True, -1.0, c1.NEITHER),       # CPCV passes but median net <= 0
-    (False, 1.0, False, 2.0, c1.NEITHER),
+    (True, 0.0, True, -1.0, exit_geometry.NEITHER),       # CPCV passes but median net <= 0
+    (False, 1.0, False, 2.0, exit_geometry.NEITHER),
 ])
-def test_decision_rule(prom_i, med_i, prom_iii, med_iii, outcome):
-    cpcv = {SHIPPED: {"promotable": prom_i}, CAT: {"promotable": prom_iii}}
-    d = c1.decide(cpcv, {SHIPPED: med_i, TIME: 1.5, CAT: med_iii})
+def test_decision_rule(prom_shipped, med_shipped, prom_cat, med_cat, outcome):
+    cpcv = {SHIPPED: {"promotable": prom_shipped}, CAT: {"promotable": prom_cat}}
+    d = exit_geometry.decide(cpcv, {SHIPPED: med_shipped, TIME: 1.5, CAT: med_cat})
     assert d["outcome"] == outcome
-    assert d["cost_of_stop_pp"] == {"ii_minus_i": round(1.5 - med_i, 4), "ii_minus_iii": round(1.5 - med_iii, 4)}
+    assert d["cost_of_stop_pp"] == {"time_only_minus_shipped": round(1.5 - med_shipped, 4),
+                                    "time_only_minus_catastrophe": round(1.5 - med_cat, 4)}
 
 
 # ----------------------------------------------------------------------------- refusals
@@ -161,13 +162,13 @@ def test_max_symbols_smoke_run(tmp_path, clock, monkeypatch, capsys):
     monkeypatch.setattr(rc, "market_hours_refusal", lambda: None)
     monkeypatch.setattr(rc, "INS_REGISTERED_WINDOW", (DATES[0], END))
     db = _seed(tmp_path, clock)
-    out = tmp_path / "reports" / "c1.json"
-    assert c1.main(["--db", str(db), "--max-symbols", "1", "--end", str(END), "--out", str(out)]) == 0
+    out = tmp_path / "reports" / "exit_geometry.json"
+    assert exit_geometry.main(["--db", str(db), "--max-symbols", "1", "--end", str(END), "--out", str(out)]) == 0
     doc = json.loads(out.read_text(encoding="utf-8"))
-    for name in c1.STRATEGIES:
+    for name in exit_geometry.STRATEGIES:
         block = doc["strategies"][name]
         assert (block["population"]["n_symbols"], block["population"]["n_events"]) == (1, 1)
-        assert all(block["arms"][a][c1.DECISION_HORIZON]["n"] == 1 for a in c1.ARMS)
+        assert all(block["arms"][a][exit_geometry.DECISION_HORIZON]["n"] == 1 for a in exit_geometry.ARMS)
     assert "close(fill+20)" in doc["strategies"]["brk20"]["arms"][TIME]
     assert doc["meta"]["population_is_survivorship_tainted_proxy"] is True
     assert doc["meta"]["registered_population"] is False
@@ -192,11 +193,10 @@ def test_brk20_reference_arm_reproduces_the_registered_baseline():
     gap means the population or the walk drifted from the registered construct.
     """
     reg = json.loads(_REGISTERED.read_text(encoding="utf-8"))
-    # the registered report is kept as written, under its own key for the five-session limit
-    cell = reg["variants"]["V2_limit_at_H20_N5"]["cells"]["all"]["horizons"]["20"]
+    cell = reg["variants"]["limit_5_sessions"]["cells"]["all"]["horizons"]["20"]
     conn = rc.open_snapshot(_SNAPSHOTS[-1])
     try:
-        doc = c1.run(conn, _SNAPSHOTS[-1], date(2026, 8, 31), strategies=("brk20",))
+        doc = exit_geometry.run(conn, _SNAPSHOTS[-1], date(2026, 8, 31), strategies=("brk20",))
     finally:
         conn.close()
     got = doc["strategies"]["brk20"]["arms"][TIME]["close(fill+20)"]

@@ -200,7 +200,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 
 ## 2026-11-03 20:50 — Silent connected feed: respawn fix built, reviewed and deployed (autonomy directive; diagnosis in the 16:20 entry)
 
-- **Change (`4d822db`, built on `wip/feed-respawn`, fast-forwarded onto phase3):**
+- **Change (`4d822db`, built on `wip/feed-respawn`, fast-forwarded onto the working branch):**
   - In session, a DEGRADED feed silent past `ticker.tick_silence_respawn_s` (300 s) respawns the child. Silence is
     timed from the latest of the last tick, the last HEALTHY entry and the session open.
   - At most `ticker.max_tick_silence_respawns` (3) respawns per episode. A tick, or a new session date, starts a new
@@ -337,7 +337,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   - The new `compact_ticks` on copies of 50 real stuck symbol-days: ok, every distinct row kept, 0 mismatches.
   - One independent review (opus): 6 minor findings, 5 fixed, 1 moot after the guard's removal.
 - **Deploy:**
-  - `phase3` fast-forwarded `faaddcd` to `9fe13e1` at 16:58, before the stop: both changed modules are imported at
+  - The working branch fast-forwarded `faaddcd` to `9fe13e1` at 16:58, before the stop: both changed modules are imported at
     boot, and a refused merge would not have stranded the engine down.
   - Stopped 16:58:36–16:58:50, started 16:59:50. Self-test ok (protected stores PASS, nothing frozen).
   - `startup_report` RECOMMEND, `engine_ready` 17:01:13.
@@ -394,7 +394,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 
 - **Deploy:**
   - The engine stopped at 09:06:27, and `data\backups\pre_0018.db` was written.
-  - `phase3` fast-forwarded from `aab0133` to `1ca2dc7`.
+  - The working branch fast-forwarded from `aab0133` to `1ca2dc7`.
   - The engine started at 09:07:42, so it was down for 75 s. The research snapshot was skipped to keep the stop
     short.
 - **Boot:**
@@ -421,7 +421,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 
 ## 2026-10-30 01:50 — Review actions built and validated on `wip/review-actions`: not merged, not deployed (owner: "Implement and validate the planned changes … You can start implementation right now, without waiting for market closure. Trade window has been closed.")
 
-- **Branch:** `wip/review-actions` in the worktree `..\mt_review`, on phase3 `aab0133` (a fast-forward). It covers all 21
+- **Branch:** `wip/review-actions` in the worktree `..\mt_review`, on the working branch at `aab0133` (a fast-forward). It covers all 21
   tasks of the review-actions plan.
 - **How it was built:**
   - Ten file-locality packages. Each was built by an implementer agent and checked by a separate reviewer, with one
@@ -540,7 +540,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **Deploy:**
   - Stopped at 06:59:01; `exit_clean` at 06:59:06.
   - Merged `wip/section3` with `--no-ff`. That gives the merge commit c887080 and keeps the branch hashes cited
-    below; phase3 had gained only the WORKLOG commit bfb17f1. The tree matches the reviewed branch plus the
+    below; the working branch had gained only the WORKLOG commit bfb17f1. The tree matches the reviewed branch plus the
     WORKLOG.
   - Dashboard: 92/92 tests, rebuilt; the new bundle carries the `rejection_storm` label. The old dist is in
     `data\backups\dashboard-dist-pre-section3-20261026`.
@@ -558,7 +558,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 
 ## 2026-10-26 05:10 — The plan's open fixes built on `wip/section3`, reviewed and validated; NOT merged (owner asked for them built, reviewed and validated)
 
-- **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on phase3 3f82c40 (8678428..193457f). Nothing is
+- **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on the working branch at 3f82c40 (8678428..193457f). Nothing is
   merged, pushed or deployed. It touches the paper OMS (`on_reject`), so it waits for owner review.
   - 8678428 DG4: a billing error publishes its tier change on `budget.state`.
   - deaa2dd, fc0b647 `daily_bars`: `BackfillReport.ok` is the watermark verdict. Retryable failures and an

@@ -160,7 +160,7 @@ What matters beyond what CLAUDE.md and the plan already say:
   **Since the dashboard capital change went live (2026-10-17), a dirty `config/limits.yaml` is usually the owner's signed capital change, not an unsigned edit.**
   - Check `scripts/protected_config_status.py` before touching it.
   - Commit it alone (`git commit -- config/limits.yaml`). Never stash, checkout, restore or reset it.
-  - Rebase manager branches on phase3 rather than resetting the live tree.
+  - Rebase manager branches on the working branch rather than resetting the live tree.
   - A revert puts the old bytes under the new signature. The next boot then FREEZES with a flat real book, and KILLS with a real position open.
 - **Data facts that gate analysis:**
   - **Depth:** local `bars_1m` spans 2023-07-17 onward, but NIFTY 50 index 1-minute data only from 2026-07-23 (measured 2026-09-04; older notes citing a 2025-07-10 floor predate that measurement). `bars_1d` is full-market from 2022-07 after the 2026-09-03 archive backfill.

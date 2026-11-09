@@ -14,10 +14,10 @@ strategies:
     summary: 20-day breakout, limit at the broken level with a 5-session fill window
     measured_exit: limit fill within 5 sessions, fixed T+20 hold, no stop
     report: backtest_brk20_2026-09-12.json
-    n: variants.V2_limit_at_H20_N5.cells.all.horizons.20.n
-    hit: variants.V2_limit_at_H20_N5.cells.all.horizons.20.hit_rate_net
-    median_net: variants.V2_limit_at_H20_N5.cells.all.horizons.20.median_net
-    cpcv: variants.V2_limit_at_H20_N5.cpcv.20.fold_pass_fraction
+    n: variants.limit_5_sessions.cells.all.horizons.20.n
+    hit: variants.limit_5_sessions.cells.all.horizons.20.hit_rate_net
+    median_net: variants.limit_5_sessions.cells.all.horizons.20.median_net
+    cpcv: variants.limit_5_sessions.cpcv.20.fold_pass_fraction
     caveat: the shipped stop and target turned it negative (exit-geometry study)
   ins:
     summary: insider net buys of at least Rs 1 crore, T+20 swing

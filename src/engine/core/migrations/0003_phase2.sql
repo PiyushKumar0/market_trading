@@ -1,4 +1,4 @@
--- 0003_phase2.sql — RECOMMEND-mode tables.
+-- RECOMMEND-mode tables.
 -- Same conventions as 0001: timestamps are ISO-8601 tz-aware IST strings produced via core.Clock (never
 -- naive); money is TEXT (Decimal-as-string); JSON payloads stored as TEXT.
 

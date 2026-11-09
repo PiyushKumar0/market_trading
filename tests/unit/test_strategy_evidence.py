@@ -43,7 +43,7 @@ def test_line_renders_exactly(tmp_path):
 
 def test_missing_key_drops_only_its_part(tmp_path):
     (tmp_path / "backtest_brk20_2026-09-12.json").write_text(
-        json.dumps({"variants": {"V2_limit_at_H20_N5": {"cells": {"all": {"horizons": {
+        json.dumps({"variants": {"limit_5_sessions": {"cells": {"all": {"horizons": {
             "20": {"n": 4898, "median_net": 0.9168}}}}}}}), encoding="utf-8")
     assert evidence_line("brk20", tmp_path, _REGISTRY) == (
         "backtest (limit fill within 5 sessions, fixed T+20 hold, no stop): "

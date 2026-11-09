@@ -215,10 +215,8 @@ _shift = tdc._shift
 _f = tdc._f
 
 
-def _ascii(text: str) -> str:
-    """``tdc``'s ASCII fold plus the section sign, which its map does not carry - left alone it
-    reaches the cp1252 console as '?', which reads as a corrupted report rather than a citation."""
-    return tdc._ascii(text.replace("§", "sec."))
+#: The report's ASCII fold for the cp1252 console: ``tdc``'s.
+_ascii = tdc._ascii
 
 #: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every eligibility
 #: criterion and lost only the 200-name tick-watchlist cap). Same constant `brk20` reads.

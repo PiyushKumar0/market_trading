@@ -14,11 +14,11 @@ import pytest
 from engine.learning import forward_verdicts as fv
 from engine.learning.forward_verdicts import (
     Bucket,
-    C2Arms,
     Cell,
     CellLook,
     ExcludedKey,
     Look,
+    RegimeGateArms,
     SignalRow,
     Stats,
 )
@@ -194,12 +194,12 @@ def test_confidence_buckets_split_closed_nets_by_decision():
            Bucket(">=0.75", "enter", Stats(0, None, None, None))]
 
 
-def test_c2_arms_compare_admitted_with_down_blocked_and_count_other_reasons_in_neither():
+def test_regime_gate_arms_compare_admitted_with_down_blocked_and_count_other_reasons_in_neither():
     blocked = [replace(_r(0, construct="rule_blocked", net=-2.0), reason="down"),
                replace(_r(1, construct="rule_blocked", net=5.0), reason="undefined"),
                replace(_r(2, construct="rule_blocked", net=5.0), reason="index_bar_missing")]
-    arms = fv.c2_arms([_r(0, net=1.0), _r(1, status="open")], blocked)
-    assert arms == C2Arms(Stats(1, 1.0, 1.0, 1.0), Stats(1, -2.0, -2.0, 0.0), 2)
+    arms = fv.regime_gate_arms([_r(0, net=1.0), _r(1, status="open")], blocked)
+    assert arms == RegimeGateArms(Stats(1, 1.0, 1.0, 1.0), Stats(1, -2.0, -2.0, 0.0), 2)
 
 
 # ------------------------------------------------------------------ loader and readings
@@ -317,7 +317,7 @@ def test_a_kill_population_ends_at_until_while_outcomes_read_as_of(conn):
         _blocked(conn, _day(i), symbol=symbol, reason="undefined")
     _outcome(conn, _day(0), "A", "rule", "closed", strategy_id="brk20", fill_d=_day(0), exit_d=_day(5), net=1.0)
     reading = fv.kill_reading(conn, "brk20", as_of=_day(9), registered_from=R, until=_day(1))
-    assert (reading.n_rows, reading.statuses, reading.c2.neither) == (1, {"closed": 1}, 1)
+    assert (reading.n_rows, reading.statuses, reading.regime_gate.neither) == (1, {"closed": 1}, 1)
 
 
 def test_other_prompt_or_model_excluded_and_counted(conn):

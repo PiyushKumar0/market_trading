@@ -159,7 +159,7 @@ def _signals(
             "published": analyst.published[sid],
             "rule": {"diagnostic": kill is None, "closed": closed, "median_net_t20": net.median,
                      "hit_rate": net.hit_rate, "median_excess_t20": excess.median},
-            "blocked": {**asdict(kill.c2.blocked), "neither": kill.c2.neither} if kill and kill.c2 else None,
+            "blocked": {**asdict(kill.regime_gate.blocked), "neither": kill.regime_gate.neither} if kill and kill.regime_gate else None,
             "kill_rule": _verdict(kill) if kill else None,
             "analyst": {"enter": decided.get("enter", 0), "decline": decided.get("no_action", 0),
                         "cells": analyst.n_cells[sid], "mean_diff": analyst.per_strategy[sid].mean},

@@ -15,10 +15,10 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
     "mt_backtest_selection_filters", _ROOT / "scripts" / "backtest_selection_filters.py")
-c3 = importlib.util.module_from_spec(_spec)
-sys.modules["mt_backtest_selection_filters"] = c3
-_spec.loader.exec_module(c3)
-c2, rc = c3.rf, c3.rc
+selection_filters = importlib.util.module_from_spec(_spec)
+sys.modules["mt_backtest_selection_filters"] = selection_filters
+_spec.loader.exec_module(selection_filters)
+regime_filter, rc = selection_filters.rf, selection_filters.rc
 
 from engine.core.clock import IST  # noqa: E402
 from engine.marketdata.store import DailyBar, MarketStore  # noqa: E402
@@ -53,7 +53,7 @@ SAWTOOTH = [100.0 + (i % 20) for i in range(80)]   # SMA50 identical 20 sessions
     (None, None),                                                        # no index bar on y
 ])
 def test_regime_predicate(closes, on):
-    assert c2.regime_on(closes) is on
+    assert regime_filter.regime_on(closes) is on
 
 
 def test_live_predicate_agrees_with_c2_regime_on_non_nan_series():
@@ -62,39 +62,39 @@ def test_live_predicate_agrees_with_c2_regime_on_non_nan_series():
     series += [1000.0 + np.cumsum(rng.normal(0.0, 10.0, n)) for n in rng.integers(60, 130, 200)]
     for closes in series:
         live = index_regime(closes.tolist(), date(2026, 6, 16))
-        assert c2.regime_on(closes) is (None if live is None else live.up)
+        assert regime_filter.regime_on(closes) is (None if live is None else live.up)
 
 
 def test_index_closes_are_point_in_time():
     dates = _weekdays(date(2026, 9, 1), 5)
-    idx = _series(c2.INDEX_SYMBOL, dates, [1.0, 2.0, 3.0, 4.0, 5.0])
-    assert c2.closes_through(idx, dates[2]).tolist() == [1.0, 2.0, 3.0]
-    assert c2.closes_through(idx, date(2026, 9, 6)) is None             # Sunday: no bar on y
+    idx = _series(regime_filter.INDEX_SYMBOL, dates, [1.0, 2.0, 3.0, 4.0, 5.0])
+    assert regime_filter.closes_through(idx, dates[2]).tolist() == [1.0, 2.0, 3.0]
+    assert regime_filter.closes_through(idx, date(2026, 9, 6)) is None             # Sunday: no bar on y
 
 
 # ----------------------------------------------------------------------------- selection filters at their boundaries
-def _bars(close, *, high=None, low=None, volume=None, atr=None, index=None) -> c3.Bars:
+def _bars(close, *, high=None, low=None, volume=None, atr=None, index=None) -> selection_filters.Bars:
     c = np.asarray(close, dtype="float64")
-    return c3.Bars(c, c if high is None else high, c if low is None else low,
+    return selection_filters.Bars(c, c if high is None else high, c if low is None else low,
                    np.full(len(c), 1000.0) if volume is None else np.asarray(volume, dtype="float64"),
                    np.full(len(c), 1.0) if atr is None else np.asarray(atr), index)
 
 
-def _rs(stock_end: float, index_end: float | None) -> c3.Bars:
+def _rs(stock_end: float, index_end: float | None) -> selection_filters.Bars:
     c = np.full(64, 105.0)
     c[0], c[-1] = 100.0, stock_end
     idx = None if index_end is None else np.r_[1000.0, np.full(62, 1050.0), index_end]
     return _bars(c, index=idx)
 
 
-def _template(dip: float, spike: float, n: int = 260) -> c3.Bars:
+def _template(dip: float, spike: float, n: int = 260) -> selection_filters.Bars:
     c = np.linspace(97.0, 120.0, n)
     low, high = c.copy(), c.copy()
     low[-100], high[-50] = dip, spike
     return _bars(c, high=high, low=low)
 
 
-def _acc(moves: list[int], vol_up: list[bool]) -> c3.Bars:
+def _acc(moves: list[int], vol_up: list[bool]) -> selection_filters.Bars:
     close = np.r_[100.0, 100.0 + np.cumsum(moves)]
     volume = np.r_[1000.0, 1000.0 + np.cumsum([1 if u else -1 for u in vol_up])]
     return _bars(close, volume=volume)
@@ -104,30 +104,30 @@ ALT = [1, -1] * 12
 
 
 @pytest.mark.parametrize("f, bars, passed", [
-    (c3.rs63, _rs(110.0, 1100.0), False),                                # returns equal: not > 0
-    (c3.rs63, _rs(110.0, 1099.0), True),
-    (c3.rs63, _rs(110.0, None), None),
-    (c3.trend_template, _template(96.0, 160.0), True),                   # close == 1.25 x low == 0.75 x high
-    (c3.trend_template, _template(96.01, 160.0), False),
-    (c3.trend_template, _template(96.0, 160.01), False),
-    (c3.trend_template, _template(96.0, 160.0, n=251), None),
-    (c3.atr_contraction, _bars(np.ones(61), atr=[1.25] * 60 + [1.0]), True),
-    (c3.atr_contraction, _bars(np.ones(61), atr=[1.25] * 60 + [1.0000001]), False),
-    (c3.atr_contraction, _bars(np.ones(61), atr=[np.nan] + [1.25] * 59 + [1.0]), None),
-    (c3.stage2, _bars([100.0] * 169 + [100.01]), True),
-    (c3.stage2, _bars([100.0] * 170), False),                            # close == SMA150, SMA150 flat
-    (c3.stage2, _bars([100.0] * 168 + [100.01]), None),
-    (c3.acc_dist, _acc(ALT + [1], [True] * 25), True),                   # 13 - 12
-    (c3.acc_dist, _acc(ALT + [0], [True] * 25), False),                  # 12 - 12
-    (c3.acc_dist, _acc(ALT + [1], [True] * 24 + [False]), False),        # the up-day on lighter volume
-    (c3.acc_dist, _acc(ALT, [True] * 24), None),
+    (selection_filters.rs63, _rs(110.0, 1100.0), False),                                # returns equal: not > 0
+    (selection_filters.rs63, _rs(110.0, 1099.0), True),
+    (selection_filters.rs63, _rs(110.0, None), None),
+    (selection_filters.trend_template, _template(96.0, 160.0), True),                   # close == 1.25 x low == 0.75 x high
+    (selection_filters.trend_template, _template(96.01, 160.0), False),
+    (selection_filters.trend_template, _template(96.0, 160.01), False),
+    (selection_filters.trend_template, _template(96.0, 160.0, n=251), None),
+    (selection_filters.atr_contraction, _bars(np.ones(61), atr=[1.25] * 60 + [1.0]), True),
+    (selection_filters.atr_contraction, _bars(np.ones(61), atr=[1.25] * 60 + [1.0000001]), False),
+    (selection_filters.atr_contraction, _bars(np.ones(61), atr=[np.nan] + [1.25] * 59 + [1.0]), None),
+    (selection_filters.stage2, _bars([100.0] * 169 + [100.01]), True),
+    (selection_filters.stage2, _bars([100.0] * 170), False),                            # close == SMA150, SMA150 flat
+    (selection_filters.stage2, _bars([100.0] * 168 + [100.01]), None),
+    (selection_filters.acc_dist, _acc(ALT + [1], [True] * 25), True),                   # 13 - 12
+    (selection_filters.acc_dist, _acc(ALT + [0], [True] * 25), False),                  # 12 - 12
+    (selection_filters.acc_dist, _acc(ALT + [1], [True] * 24 + [False]), False),        # the up-day on lighter volume
+    (selection_filters.acc_dist, _acc(ALT, [True] * 24), None),
 ])
 def test_selection_filter_boundaries(f, bars, passed):
     assert f(bars) is passed
 
 
 def test_family_n_is_the_filter_count():
-    assert len(c3.FILTERS) == c3.FAMILY_N
+    assert len(selection_filters.FILTERS) == selection_filters.FAMILY_N
 
 
 # ----------------------------------------------------------------------------- matched cohorts
@@ -138,23 +138,23 @@ def _index_closes(n: int) -> list[float]:
 DATES_120 = _weekdays(date(2026, 3, 2), 120)
 
 
-@pytest.mark.parametrize("mod", [c2, c3])
+@pytest.mark.parametrize("mod", [regime_filter, selection_filters])
 def test_cohorts_split_the_measured_events_never_regenerate(mod, monkeypatch):
     s = _series("SYM", DATES_120, [100.0] * 120)
     events = [rc.Event("SYM", s, i, i + 1, Decimal("100.00"), 1.0) for i in (75, 98, 10)]  # ON, OFF, undefined
     pop = rc.Population("hi52", "synthetic", 1, events, {}, {})
     walked, real = [], rc.walk
     monkeypatch.setattr(rc, "walk", lambda ev, **kw: walked.append(ev) or real(ev, **kw))
-    r = mod.study(pop, _series(c2.INDEX_SYMBOL, DATES_120, _index_closes(120)), CostModel.from_config())
+    r = mod.study(pop, _series(regime_filter.INDEX_SYMBOL, DATES_120, _index_closes(120)), CostModel.from_config())
     assert walked == events
     events_by_cohort = {k: c["events"] for k, c in r["cohorts"].items()}
-    assert events_by_cohort.pop(c2.FULL) == 3
-    if mod is c2:
-        assert events_by_cohort == {c2.ON: 1, c2.OFF: 1} and r["population"]["regime_undefined"] == 1
-        assert r["decision"] == c2.INSUFFICIENT
+    assert events_by_cohort.pop(regime_filter.FULL) == 3
+    if mod is regime_filter:
+        assert events_by_cohort == {regime_filter.ON: 1, regime_filter.OFF: 1} and r["population"]["regime_undefined"] == 1
+        assert r["decision"] == regime_filter.INSUFFICIENT
     else:
-        assert set(events_by_cohort) == set(c3.FILTERS) and max(events_by_cohort.values()) <= 3
-        assert set(r["decision"].values()) == {c2.INSUFFICIENT}
+        assert set(events_by_cohort) == set(selection_filters.FILTERS) and max(events_by_cohort.values()) <= 3
+        assert set(r["decision"].values()) == {regime_filter.INSUFFICIENT}
 
 
 # ----------------------------------------------------------------------------- smoke run
@@ -192,7 +192,7 @@ def _seed(tmp_path: Path, clock) -> Path:
             _daily("BRKA", _brk20_rows()) + _daily("HIA", _hi52_rows())
             + _daily("INSA", [(100, 101, 99, 100, 1000)] * len(DATES))
             + _daily("ZZZ", [(100, 100, 100, 100, 1000)] * len(DATES))
-            + _daily(c2.INDEX_SYMBOL, [(c, c, c, c, 0) for c in range(1000, 1000 + len(DATES))])
+            + _daily(regime_filter.INDEX_SYMBOL, [(c, c, c, c, 0) for c in range(1000, 1000 + len(DATES))])
         )
         store.upsert_universe_daily([
             {"d": d, "symbol": sym, "included": True, "exclusion_reasons": None, "median_traded_value": Decimal("1e8")}
@@ -210,7 +210,7 @@ def _seed(tmp_path: Path, clock) -> Path:
     return db
 
 
-@pytest.mark.parametrize("mod", [c2, c3])
+@pytest.mark.parametrize("mod", [regime_filter, selection_filters])
 def test_max_symbols_smoke_run(mod, tmp_path, clock, monkeypatch, capsys):
     monkeypatch.setattr(rc, "market_hours_refusal", lambda: None)
     monkeypatch.setattr(rc, "INS_REGISTERED_WINDOW", (DATES[0], END))
@@ -221,10 +221,10 @@ def test_max_symbols_smoke_run(mod, tmp_path, clock, monkeypatch, capsys):
     assert list(doc["strategies"]) == list(mod.STRATEGIES)
     for block in doc["strategies"].values():
         assert (block["population"]["n_symbols"], block["population"]["n_events"]) == (1, 1)
-        assert block["cohorts"][c2.FULL]["n"] == 1
-        if mod is c2:                                         # the index rises throughout: every event is ON
-            assert (block["cohorts"][c2.ON]["n"], block["cohorts"][c2.OFF]["n"]) == (1, 0)
-            assert block["decision"] == c2.INSUFFICIENT
+        assert block["cohorts"][regime_filter.FULL]["n"] == 1
+        if mod is regime_filter:                                         # the index rises throughout: every event is ON
+            assert (block["cohorts"][regime_filter.ON]["n"], block["cohorts"][regime_filter.OFF]["n"]) == (1, 0)
+            assert block["decision"] == regime_filter.INSUFFICIENT
     assert doc["meta"]["family_n"] == mod.FAMILY_N and doc["meta"]["registered_population"] is False
     assert out.with_suffix(".md").exists()
     text = capsys.readouterr().out
