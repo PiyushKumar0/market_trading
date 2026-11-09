@@ -61,10 +61,9 @@ DecimalStr = Annotated[
     Decimal,
     BeforeValidator(_to_decimal),
     PlainSerializer(lambda v: str(v), return_type=str, when_used="json"),
-    # LOCK the WIRE schema to "string" in BOTH modes (WithJsonSchema overrides pydantic's default
-    # anyOf[number,string] for a BeforeValidator-annotated Decimal). Without this the exported SDK
-    # structured-output schema would invite the model to emit a JSON number and corrupt a price/tick
-    # (decimal-as-string convention). The validator still accepts str|int|float defensively.
+    # Locks the WIRE schema to "string" in both modes (overrides pydantic's default anyOf[number,string]),
+    # so the SDK schema never invites the model to emit a JSON number. The validator still accepts
+    # str|int|float defensively.
     WithJsonSchema({"type": "string", "description": "decimal price as a string (no float corruption)"}),
 ]
 
@@ -157,7 +156,7 @@ class CostBreakdown(BaseModel):     # from CostModel
     breakeven_pct: DecimalStr
     expected_edge_pct: DecimalStr
     edge_multiple: DecimalStr       # must be ≥ edge_multiple_min [tunable]
-    components: dict[str, DecimalStr]   # brokerage, stt, txn, sebi, stamp, gst, dp, spread (2026-08-13)
+    components: dict[str, DecimalStr]   # brokerage, stt, txn, sebi, stamp, gst, dp, spread
 
 
 class GateVerdict(BaseModel):
@@ -214,14 +213,10 @@ class Recommendation(BaseModel):
 
 
 # ------------------------------------------------------------------- order postback wire
-# 2026-09-10 fix round. WHY this lives in ``core`` and not in
-# ``engine.broker.ticker_supervisor``, where it was defined until now: it is a WIRE CONTRACT, and
-# TWO brokers emit it — the mt-ticker child forwards Kite's ``on_order_update`` payload for live
-# orders, and ``engine.paper.broker.PaperBroker`` publishes the identical shape for simulated ones,
-# so live and paper share ONE OMS parser. Leaving it in ``engine.broker`` forced
-# ``engine.paper`` to import the live-broker package, contradicting the paper tier's "depends on ``core``"
-# and dragging the pykiteconnect import chain into the paper tier. ``ticker_supervisor`` re-exports
-# both names unchanged, so every existing importer keeps working.
+# A WIRE CONTRACT emitted by TWO brokers — the mt-ticker child forwards Kite's ``on_order_update``
+# payload for live orders and ``engine.paper.broker.PaperBroker`` publishes the identical shape — so
+# live and paper share ONE OMS parser. It lives in ``core`` so ``engine.paper`` need not import the
+# live-broker package (and the pykiteconnect chain). ``ticker_supervisor`` re-exports both names.
 
 #: Canonical event bus topic for broker order postbacks — drives the OMS.
 ORDER_UPDATE_TOPIC = "order.update"

@@ -87,8 +87,8 @@ class NSECalendar:
     ) -> None:
         """``include_special=False`` treats every ``special_sessions`` date (muhurat, DR-drill) as a
         closed day, weekday or weekend: is_trading_day is False there, so session(), trade_window(),
-        next/previous_trading_day and add_sessions all skip it. The live engine passes False
-        (2026-10-11 decision); research, scripts and tests keep the default, which counts them."""
+        next/previous_trading_day and add_sessions all skip it. The live engine passes False;
+        research, scripts and tests keep the default, which counts them."""
         self._dir = Path(calendar_dir)
         self._clock = clock
         self._strict = strict

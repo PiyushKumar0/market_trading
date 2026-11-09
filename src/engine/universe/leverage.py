@@ -31,8 +31,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 _log = get_logger("engine.universe.leverage")
 
 #: Kite Connect public equity-margins endpoint (tradingsymbol + ``mis_multiplier``/``mis_margin``
-#: per stock). Parsed live every session since 2026-07-10 (``mis_margins_refreshed``); parsing below is
-#: defensive against both the array form and a ``{"data": [...]}`` wrapper.
+#: per stock). Parsing below is defensive against both the array form and a ``{"data": [...]}`` wrapper.
 KITE_MIS_MARGINS_URL = "https://api.kite.trade/margins/equity"
 
 #: A stock is MIS-eligible iff it appears in the margins file with computed leverage strictly > 1×

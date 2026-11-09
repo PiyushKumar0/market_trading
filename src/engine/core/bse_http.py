@@ -2,20 +2,18 @@
 
 BSE's ``api.bseindia.com/BseIndiaAPI/api/*`` JSON endpoints are the SHP/pledge-history source
 (``SHPQNewFormat/w`` quarter index + ``CorporatesSHPSecuritybeta/w`` detail) and the bulk scrip master
-(``ListofScripData/w``). They gate on a CURRENT browser User-Agent (the default ``python-httpx`` UA and,
-since 2026-09, a stale Chrome version are rejected with 403) and the ``Origin``/``Referer`` site
-headers, but — unlike NSE — carry NO anti-bot cookie priming step.
+(``ListofScripData/w``). They gate on a CURRENT browser User-Agent (the default ``python-httpx`` UA and
+a stale Chrome version are rejected with 403) and the ``Origin``/``Referer`` site headers, but —
+unlike NSE — carry NO anti-bot cookie priming step.
 
-**The documented BSE quirk:** a bad request does NOT 404. It returns HTTP
-**200** that either redirects to ``…/error_Bse.html`` (final URL) or serves that error HTML with a
-200 status. Either way the body is HTML, not JSON. A health check that trusts the status code alone
-is fooled; the ONLY reliable signal is "did the body parse as JSON?" (probe evidence: the guessed
-``ShareholdingPattern/w`` endpoints both returned ``200`` + ``error_Bse.html``). :func:`bse_get`
-therefore treats a 200-whose-final-URL-is-``error_Bse.html`` OR a 200-whose-body-fails-``json.loads``
-as a failure and raises :class:`BseError`, so each feed's outer except-degrade-alert path fires
-exactly as it does for a genuine transport error.
+**The BSE quirk:** a bad request does NOT 404. It returns HTTP **200** that either redirects to
+``…/error_Bse.html`` (final URL) or serves that error HTML with a 200 status; the body is HTML, not
+JSON. The status code is not trustworthy; the ONLY reliable signal is "did the body parse as JSON?".
+:func:`bse_get` treats a 200 whose final URL is ``error_Bse.html`` OR whose body fails ``json.loads``
+as a failure and raises :class:`BseError`, so each feed's except-degrade-alert path fires as for a
+transport error.
 
-Contract (mirrors :mod:`engine.core.nse_http` in shape — this helper only re-raises; the per-feed
+Contract (mirrors :mod:`engine.core.nse_http`; this helper only re-raises, the per-feed
 degrade+alert path is left intact):
   * Any host: bounded exponential-backoff retry on transient failures (timeouts, transport errors,
     5xx). A persistent transient error re-raises the underlying ``httpx`` exception; a persistent
@@ -23,12 +21,9 @@ degrade+alert path is left intact):
   * A 200 that is really the BSE error page (redirect target or non-JSON body) raises
     :class:`BseError` — NOT retried (it is a "no such resource / bad params", not transient).
 
-``_sleep`` is a module-level indirection (defaults to :func:`asyncio.sleep`) so tests can monkeypatch
-it and observe the backoff schedule without actually waiting (same pattern as ``nse_http``).
+``_sleep`` is a module-level indirection so tests can observe the backoff without waiting.
 
-Note the JSON-parse health check is on parse-ABILITY, not shape: any valid JSON passes (a JSON-encoded
-string included); only the ``error_Bse.html`` page (not valid JSON at all) is rejected. The caller
-``json.loads`` the body and checks its shape itself.
+The JSON check is on parse-ABILITY, not shape: any valid JSON passes; the caller checks shape itself.
 """
 
 from __future__ import annotations
@@ -44,8 +39,7 @@ from engine.core.log import get_logger
 _log = get_logger("engine.core.bse_http")
 
 #: Canonical browser-shaped headers for the BSE API host — the single source of truth (each feed
-#: imports THIS; no per-feed copy drifts). BSE rejects the default ``python-httpx`` UA and requires
-#: the site ``Origin``/``Referer`` (probe evidence).
+#: imports THIS). BSE rejects the default ``python-httpx`` UA and requires ``Origin``/``Referer``.
 BSE_HEADERS = {
     "User-Agent": BROWSER_USER_AGENT,
     "Accept": "application/json, text/plain, */*",

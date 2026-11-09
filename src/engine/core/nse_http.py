@@ -2,18 +2,15 @@
 
 NSE's ``www.nseindia.com/api/*`` JSON endpoints mint anti-bot cookies (``nsit``/``nseappid``/
 ``bm_sv``/``ak_bmsc``) only after the homepage ``https://www.nseindia.com/`` has been fetched on the
-same client; without those cookies the edge returns a **deliberately-misleading 404** (not 403), which
-is exactly how ``corp_actions`` failed. The
+same client; without those cookies the edge returns a **deliberately-misleading 404** (not 403). The
 archives host ``nsearchives.nseindia.com`` tarpits the default python-httpx UA and has no anti-bot
-cookie gate, but a slow file-drop can time out with no retry (``bhavcopy``).
+cookie gate, but a slow file-drop can time out.
 
 :func:`nse_get` is the single funnel every best-effort NSE feed (``engine.datafeeds.*`` and
-``engine.universe.surveillance``) fetches through. It lives in ``engine.core`` — the foundation layer
-both consumer packages already import (``engine.core.clock``/``engine.core.log``) — so the module is
-importable from either without introducing a ``universe -> datafeeds`` edge (the import-graph guard,
-``tests/unit/test_import_graph.py``, only forbids ``engine.risk``/``engine.oms`` -> ``engine.intelligence``).
+``engine.universe.surveillance``) fetches through. It lives in ``engine.core`` so either package can
+import it without a ``universe -> datafeeds`` edge.
 
-Contract (per feed's outer try/except degrade+alert path is left intact — this helper only re-raises):
+Contract (each feed's outer try/except degrade+alert path is left intact — this helper only re-raises):
   * ``www.nseindia.com`` host: prime the client's cookie jar once (best-effort homepage GET), then on a
     401/403/404 re-prime once and retry (the anti-bot deception); a second 4xx surfaces via
     ``raise_for_status`` so a genuine 404 is not masked.

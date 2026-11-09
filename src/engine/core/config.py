@@ -64,35 +64,27 @@ class TickerCfg(BaseModel):
     tcp_port: int = 8401
     heartbeat_silence_kill_s: int = 10
     max_instruments_per_conn: int = 3000
-    # In-session tick-silence guard (2026-07-22 tickless-HEALTHY session): the child heartbeats every
-    # 1 s REGARDLESS of ticks, so a feed that delivers NO ticks still reads HEALTHY all day. During
-    # market hours, tick silence beyond this budget (heartbeats still fine) ⇒ a visible DEGRADED state
-    # + owner alert. Off-hours keeps heartbeat-only semantics (no false night alarms).
+    # The child heartbeats every 1 s regardless of ticks, so in market hours tick silence beyond this
+    # (heartbeats fine) ⇒ DEGRADED + owner alert. Off-hours keeps heartbeat-only semantics.
     tick_silence_degrade_s: int = 120
-    # Silent connected feed (2026-11-03): Kite can hold a WebSocket open, answer pings and deliver no
-    # ticks for an hour; only a fresh connection has ever ended one. In session, DEGRADED silence past
-    # this (measured from the later of the last tick and the last HEALTHY entry, so each fresh
-    # connection gets the full budget) ⇒ kill + respawn the child.
+    # Kite can hold a WebSocket open and deliver no ticks; only a fresh connection ends it. In session,
+    # DEGRADED silence past this (from the later of the last tick and the last HEALTHY entry) ⇒ kill + respawn.
     tick_silence_respawn_s: int = 300
-    # Tick-silence respawns per silence episode (a tick or a new session date starts a new one); once
-    # spent, the feed stays DEGRADED and the owner is escalated to ONCE.
+    # Respawns per silence episode (a tick or a new session date starts a new one); once spent, the feed
+    # stays DEGRADED and the owner is escalated to once.
     max_tick_silence_respawns: int = 3
-    # Cadence of the periodic in-session ``feed_stats`` INFO line (ticks/drops/bars since last stat).
+    # Cadence of the periodic in-session ``feed_stats`` INFO line.
     feed_stats_interval_s: int = 300
-    # WARMING-wedge guard (2026-07-23 13:41 sleep/resume incident): the HEALTHY-path heartbeat-silence
-    # kill deliberately skips WARMING (a fresh spawn legitimately has no ticks/heartbeat yet), and
-    # WARMING had NO timeout — so a child that dies/hangs before its first heartbeat (or a system-resume
-    # that froze the machine mid-WARMING) wedged the state machine forever (zero respawns, feed dead).
-    # If WARMING persists this long with no heartbeat ⇒ kill + respawn (also the generic system-resume
-    # recovery: whatever state froze, the timeout fires and respawns).
+    # The heartbeat-silence kill skips WARMING (a fresh spawn has no heartbeat yet), so WARMING needs its
+    # own timeout: no heartbeat this long ⇒ kill + respawn (also recovers a system resume that froze it).
     warming_timeout_s: int = 60
     # Consecutive WARMING-timeout respawns back off exponentially (warming_timeout_s × 2ⁿ) capped here.
     warming_backoff_cap_s: int = 300
-    # After this many consecutive WARMING-timeout respawns without reaching HEALTHY, keep retrying at
-    # the capped backoff but escalate ONCE to the owner (the feed is structurally wedged).
+    # After this many consecutive WARMING-timeout respawns without HEALTHY, keep retrying at the capped
+    # backoff but escalate once to the owner.
     max_wedge_respawns: int = 5
-    # In-session OS keep-awake (Windows): while the NSE session is open, assert SetThreadExecutionState
-    # so the OS does not auto-sleep mid-session and freeze the feed. Opt-out here. Non-Windows: no-op.
+    # Windows: assert SetThreadExecutionState while the NSE session is open so the OS does not sleep and
+    # freeze the feed. Non-Windows: no-op.
     keep_awake_in_session: bool = True
 
 
@@ -117,9 +109,7 @@ class LifecycleCfg(BaseModel):
 
     The heartbeat writer (``ops/heartbeat.py``) and the standalone watchdog (``scripts/watchdog.py``,
     which raises ENGINE_DOWN) read these knobs; ``notify_started`` / ``notify_planned_stop`` gate the
-    ENGINE_STARTED / ENGINE_STOPPED sends (owner chose "notify both", 2026-07-07). Modelled here so
-    the settings.yaml ``lifecycle`` block is honored, not silently dropped by pydantic's default
-    extra-ignore.
+    ENGINE_STARTED / ENGINE_STOPPED sends.
     """
 
     heartbeat_write_s: int = 20
@@ -168,13 +158,10 @@ class DataCfg(BaseModel):
     min_median_traded_value_inr: int = 50_000_000
     backfill_daily_years: int = 2
     backfill_minute_years: int = 1
-    # Batch-universe extended leg (2026-09-01, owner-directed after the JINDALSAW/movers
-    # review): criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance ∩ ₹5cr median)
-    # persisted included=False / exclusion_reasons=['not_in_index'] for BATCH rules, news shadow and
-    # pre-open advisory only — the tick watchlist and the risk gate stay scoped to the configured
-    # index (``universe.index_name``: NIFTY Total Market since owner decision 2026-10-08;
-    # NIFTY 500 under owner decision 2026-09-04 before it). The flag is the rollback: False restores the
-    # earlier universe shape exactly.
+    # Batch-universe extended leg: criteria-passing NON-index symbols (MIS ∩ EQ-master ∩ not-surveillance
+    # ∩ ₹5cr median) persisted included=False / exclusion_reasons=['not_in_index'] for BATCH rules, news
+    # shadow and pre-open advisory only — the tick watchlist and the risk gate stay scoped to
+    # ``universe.index_name``. False = no extended leg.
     batch_universe_enabled: bool = False
     batch_universe_max: int = 600                 # top-N extended by median traded value (sanity cap)
 
@@ -189,15 +176,12 @@ class RssFeedCfg(BaseModel):
 
 
 class NseAnnouncementsCfg(BaseModel):
-    """Exchange-announcements feed (2026-09-04): NSE ``corporate-announcements``.
+    """Exchange-announcements feed: NSE ``corporate-announcements``.
 
-    Its own cadence (the exchange disseminates all day, 300 s is the pinned value) and its own
-    administrative-subject drop list — filings whose SUBJECT is routine compliance carry no event
-    content and would only burn scorer budget. ``drop_subjects`` is owner config exactly like
-    ``NewsCfg.drop_title_patterns``: a case-insensitive SUBSTRING match ("Newspaper Publication"
-    catches NSE's "Copy of Newspaper Publication"), deliberately conservative — a subject that is
-    merely LOW-value stays in, because a wrong drop is silent and permanent (the item never reaches
-    the corpus at all). ``enabled: false`` is the owner's off switch: no fetch, no scheduler job.
+    ``drop_subjects`` is owner config like ``NewsCfg.drop_title_patterns``: a case-insensitive SUBSTRING
+    match ("Newspaper Publication" catches "Copy of Newspaper Publication") on routine-compliance
+    subjects. Deliberately conservative — a merely LOW-value subject stays in, because a wrong drop is
+    silent and permanent. ``enabled: false`` = no fetch, no scheduler job.
     """
 
     enabled: bool = True
@@ -217,20 +201,16 @@ class NewsFeedsCfg(BaseModel):
     """``NewsIngest`` feed set. Headline-level only; bodies are never fetched.
 
     ``rss`` is an open name → feed map: adding/removing a source is a settings.yaml edit (config_audit),
-    not a code change — the 2026-08-04 lesson, when the corpus silently collapsed to ET-only.
-    Moneycontrol RSS was RETIRED 2026-08-04: its whole feed ecosystem has been frozen since ~2024-04
-    (newest pubDate ~832 days old; 391 engine polls inserted zero headlines), which starved the catalyst layer's
-    ``min_source_domains`` corroboration gate. The Livemint markets/companies feeds that replace it
-    were live-verified 2026-08-04 (HTTP 200, 35 items each, newest items minutes old)."""
+    not a code change. The catalyst layer's ``min_source_domains`` gate counts registrable domains, so
+    keep several distinct domains."""
 
     rss: dict[str, RssFeedCfg] = Field(default_factory=lambda: {
         "et": RssFeedCfg(
             url="https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms", poll_s=300),
         "livemint_markets": RssFeedCfg(url="https://www.livemint.com/rss/markets", poll_s=900),
         "livemint_companies": RssFeedCfg(url="https://www.livemint.com/rss/companies", poll_s=900),
-        # 2026-08-05 pool widening: both livemint feeds are ONE registrable domain, so the
-        # corroboration pool was effectively two — three new DOMAINS make "any 2 of 5" clearable
-        # for genuine stories (story-level counting). All three live-verified 2026-08-05.
+        # Both livemint feeds are ONE registrable domain; the extra domains keep "any 2 of N" corroboration
+        # clearable for genuine stories.
         "hbl_markets": RssFeedCfg(
             url="https://www.thehindubusinessline.com/markets/feeder/default.rss", poll_s=900),
         "hbl_companies": RssFeedCfg(
@@ -238,16 +218,14 @@ class NewsFeedsCfg(BaseModel):
         "cnbctv18_market": RssFeedCfg(
             url="https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml", poll_s=900),
         "ndtvprofit": RssFeedCfg(url="https://feeds.feedburner.com/ndtvprofit-latest", poll_s=900),
-        # Business Standard re-enters 2026-09-04 (re-probed live: HTTP 200, 35 items each, newest
-        # 12 / 35 min old) — the 2026-08-05 rejection was a WAF 403 that no longer reproduces.
         "bs_markets": RssFeedCfg(
             url="https://www.business-standard.com/rss/markets-106.rss", poll_s=900),
         "bs_companies": RssFeedCfg(
             url="https://www.business-standard.com/rss/companies-101.rss", poll_s=900),
     })
     gdelt_doc_query: str = "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"
-    #: The exchange itself as a feed (2026-09-04): filings carry ``symbol`` natively, so an
-    #: announcement is resolvable without the alias seed, and NSE counts as one corroborating domain.
+    #: The exchange as a feed: filings carry ``symbol`` natively (no alias seed needed); NSE counts as
+    #: one corroborating domain.
     nse_announcements: NseAnnouncementsCfg = Field(default_factory=NseAnnouncementsCfg)
 
 
@@ -256,55 +234,41 @@ class NewsCfg(BaseModel):
 
     feeds: NewsFeedsCfg = Field(default_factory=NewsFeedsCfg)
     cluster_sim_threshold: float = 0.75   # pinned clustering similarity [tunable, owner]
-    #: Case-insensitive substrings that mark a feed item as an auto-generated live-blog/ticker PAGE
-    #: title, not a news headline — dropped at ingest (2026-08-03 finding: ET's "<Company> Share
-    #: Price Live Updates: ..." template glued up to 27 companies into one cluster and burned scorer
-    #: budget on zero-content titles). Owner-editable like the feed set (config_audit).
+    #: Case-insensitive substrings marking a feed item as an auto-generated live-blog/ticker/roundup
+    #: PAGE title, not a news headline — dropped at ingest. Such titles glue different companies into one
+    #: cluster and burn scorer budget; no per-company catalyst signal is lost. Owner-editable (config_audit).
     drop_title_patterns: list[str] = Field(default_factory=lambda: [
         "share price live updates",
         "stock market live updates",
         "results live updates",
         "share price highlights",
-        # Moneycontrol QUOTE-page titles ("X Share Price , X Stock Price , ..." — verdict row 17):
-        # the comma-spaced template never appears in written prose.
+        # Quote-page titles ("X Share Price , X Stock Price , ..."): the comma-spaced template never
+        # appears in written prose.
         "stock price ,",
-        # Multi-company ROUNDUP titles (2026-08-03 second iteration): breadth commentary, not
-        # company events — and worse, they BRIDGE different companies' clusters (a roundup naming
-        # Adani Ports + Adani Enterprises merges both families' clusters, cross-attributing every
-        # member). No catalyst signal is lost: the catalyst layer wants per-company events, not market wraps.
+        # Multi-company roundups: breadth commentary that BRIDGES different companies' clusters.
         "stocks in news",
         "market wrap",
         "buzzing stocks",
         "top gainers",
         "gainers and losers",
-        # Seed-5 verdict residuals (2026-08-03): more roundup/series templates that bridge clusters.
         "trade spotlight",
         "stocks to buy in 2026",
         " live :",
-        # Seed-6 row 23: ET/MC F&O-desk multi-name series ("F&O Talk: ... says <analyst>").
-        # Matches post-unescape titles (ingest html.unescapes; "F&amp;O Talk" never reaches here).
+        # F&O-desk multi-name series. Matches post-unescape titles (ingest html.unescapes).
         "f&o talk",
-        # Seed-7 row 46 (owner-marked): "X among 4 stocks closing above/below VWAP" screener
-        # series — automated screener output, not news; different companies' editions cluster
-        # together on the shared template.
+        # "X among 4 stocks closing above/below VWAP" screener series.
         "vwap",
-        # 2026-08-05 new-source templates (probed at feed adoption): HBL's liveblog series titles
-        # itself "Stock Market Live:" (no "updates" — the existing pattern misses it), and
-        # CNBC-TV18's "11:11" branded multi-topic digest bridges unrelated companies per item.
+        # HBL liveblog ("Stock Market Live:") and CNBC-TV18's "11:11" multi-topic digest.
         "stock market live",
         "11:11",
-        # HBL's "Q1 Results Highlights: ONGC, BSE, Bharti Airtel, ..." multi-company roundup —
-        # the bridging shape, seen live 2026-08-05 before first ingest. Also drops
-        # single-company "<X> Results Highlights" liveblog wrappers; the plain result article
-        # on the same domain carries the event, so no catalyst signal is lost.
+        # Multi-company "Q1 Results Highlights: ONGC, BSE, ..." roundups; also drops single-company
+        # liveblog wrappers (the plain result article on the same domain carries the event).
         "results highlights",
     ])
     # RSS cadences are per-feed (``feeds.rss[name].poll_s``); only GDELT keeps a top-level knob.
-    gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence — 900→3600 (2026-08-04: 429s
-                                          # persisted at 1800 s and a single fresh probe still 429'd;
-                                          # only the pre-open digest is needed, so hourly costs nothing)
-    request_timeout_s: float = 30.0       # per-fetch HTTP timeout — 10→30 (2026-08-04: 121 GDELT
-                                          # ConnectTimeouts at the old 10 s, ~99% of polls dead)
+    gdelt_poll_s: int = 3600              # GDELT DOC 2.0 poll cadence; it 429s at faster polls and only the
+                                          # pre-open digest needs it
+    request_timeout_s: float = 30.0       # per-fetch HTTP timeout (GDELT times out at 10 s)
     backfill_lookback_h: int = 72         # off-period startup backfill window over RSS lookbacks
     gdelt_backfill_max_days: int = 90     # GDELT DOC ~3-month window — no deeper backfill exists
 
@@ -319,45 +283,36 @@ class CatCfg(BaseModel):
     fanout_weight: float = 0.5            # sector/theme fan-out multiplier
     # No max_event_age_days here: the clusterer window and the digest horizon are both the envelope
     # row cat.max_event_age_days (load_cat_params); a leftover settings key is ignored, not an error.
-    # --- v2 SHADOW scanner knobs (cat v2, 2026-08-18): the `ins` mechanics mirror.
-    # Frozen for the whole shadow window — moving one re-opens multiplicity and restarts the clock.
-    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance and the
-                                          # rule's real exit is TIME; 5 not 6 because the risk-limit
-                                          # overnight_gap_mult arithmetic applies (ins, 08-17; chosen
-                                          # at 2.5x, 2.0x since owner decision 2026-09-24)
-    hold_sessions: int = 20               # = the risk-limit swing max_holding cap — the EXISTING
-                                          # max-holding machinery is the exit path
+    # v2 SHADOW scanner knobs, mirroring `ins`. Frozen for the whole shadow window — moving one
+    # re-opens multiplicity and restarts the clock.
+    stop_pct: float = 5.0                 # disaster stop: sizing needs a risk distance and the rule's real
+                                          # exit is TIME; 5 not 6 because the risk-limit overnight_gap_mult
+                                          # arithmetic applies
+    hold_sessions: int = 20               # = the risk-limit swing max_holding cap, the exit path
     # Deliberately NO expected_edge_pct: `cat` has no validated edge (measuring it IS the shadow), so
     # the cost-gate check fail-closed-rejects every cat candidate. Adding the key is the owner promotion gate.
 
 
 class CatReversalCfg(BaseModel):
-    """``cat_reversal`` SHADOW knobs (2026-08-27) — OWNER-ONLY, deliberately NOT learnable.
+    """``cat_reversal`` SHADOW knobs — OWNER-ONLY, deliberately NOT learnable.
 
-    A SEPARATE block from :class:`CatCfg` on purpose. ``cat`` v2 and ``cat_reversal`` are two
-    experiments with independently pre-registered thresholds and independently running clocks; sharing
-    a ``stop_pct`` would let a future tuning of one silently move the other and invalidate whichever
-    shadow window happened to be open. Frozen for the whole ``cat_reversal`` shadow window.
+    A SEPARATE block from :class:`CatCfg` on purpose: the two experiments have independently
+    pre-registered thresholds and clocks, and a shared ``stop_pct`` would let tuning one silently move
+    the other and invalidate an open shadow window. Frozen for the whole shadow window.
     """
 
-    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance and the
-                                          # rule's real exit is TIME; the risk-limit overnight_gap_mult
-                                          # arithmetic applies to a swing entry (ins, 08-17; chosen
-                                          # at 2.5x, 2.0x since owner decision 2026-09-24)
-    hold_sessions: int = 10               # intended exit if the owner promotion gate ever opens = the longer
-                                          # pre-registered horizon (T+10). INERT during the shadow:
-                                          # nothing is held, because the cost gate rejects every candidate.
+    stop_pct: float = 5.0                 # disaster stop: sizing needs a risk distance and the rule's real
+                                          # exit is TIME; the overnight_gap_mult arithmetic applies
+    hold_sessions: int = 10               # intended exit if the promotion gate ever opens (T+10).
+                                          # INERT during the shadow: the cost gate rejects every candidate.
     # Deliberately NO expected_edge_pct — and, unlike `cat`, the absence is not what enforces it: the
     # strategy is listed in the gate's `no_edge_shadow_strategies`, so the cost gate rejects it whatever target
     # the analyst supplies. Adding an edge here is the owner promotion gate, post-verdict.
 
 
 class FilingsCfg(BaseModel):
-    """Corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable (no new
-    envelope-learnable parameters in stages 1–2). STORED CONFIG ONLY in stage 1: these are read by no
-    decision path yet — event typing and the catalyst wiring are later stages, gated on the
-    filings event study. Modelled here so the settings.yaml ``filings`` block is honored, not silently
-    dropped by pydantic's default extra-ignore (mirrors how ``news``/``cat`` are modelled)."""
+    """Corporate-filings event thresholds — OWNER-ONLY, deliberately NOT learnable. Modelled here so the
+    settings.yaml ``filings`` block is honored, not silently dropped by pydantic's default extra-ignore."""
 
     insider_min_value_inr: int = 10_000_000       # abs ₹ floor for an insider_net_buy event
     insider_min_value_over_adv: float = 0.05      # NOT applied anywhere (planned AND floor)
@@ -367,11 +322,8 @@ class FilingsCfg(BaseModel):
 class InsCfg(BaseModel):
     """``ins`` (insider net-BUY swing) knobs — OWNER-ONLY, deliberately NOT learnable.
 
-    Provenance: on 2026-08-14 the filings event study's insider_net_buy leg was re-run
-    under corrected mechanics
-    (disclosure-date anchoring, next-session-open fills, spread-inclusive CNC costs, the margin floor
-    on the CPCV stage) and it SURVIVED — T+10 +0.7297% / T+20 +1.5797% net, CPCV +0.0359%/day. It is
-    the only recorded edge that did, and the reason this strategy exists.
+    Provenance: the filings event study's insider_net_buy leg survived corrected mechanics
+    (T+10 +0.7297% / T+20 +1.5797% net, CPCV +0.0359%/day) — the reason this strategy exists.
 
     ``stop_pct`` [4-8] and ``hold_sessions`` [10-20] are FUTURE parameter-envelope rows; they stay static
     owner settings here for now (no protected-store churn until the learning phase needs them).
@@ -379,11 +331,10 @@ class InsCfg(BaseModel):
     population, so moving it re-opens multiplicity.
     """
 
-    stop_pct: float = 5.0                 # disaster stop: the per-trade risk sizing needs a risk distance, and the
-                                          # validated design is stopless — this is the deliberate
-                                          # deviation, wide enough to rarely interrupt the T+20 drift
+    stop_pct: float = 5.0                 # disaster stop: sizing needs a risk distance and the validated
+                                          # design is stopless — wide enough to rarely interrupt the drift
     hold_sessions: int = 20               # = the risk-limit swing max_holding cap = the validated T+20
-                                          # horizon; the EXISTING max-holding machinery is the exit
+                                          # horizon; the max-holding machinery is the exit
     threshold_inr: int = 10_000_000       # ₹1cr trailing-10-session open-market net-BUY floor
     expected_edge_pct: float = 1.58       # the validated T+20 NET drift, fed to the cost gate
                                           # (target is None for `ins`, so the edge cannot be derived
@@ -397,40 +348,30 @@ class Hi52Cfg(BaseModel):
     thresholds — stay in ``hi52.DEFAULT_PARAMS`` where the pre-registration froze them; splitting
     them across two files would give the same threshold two homes and one of them would drift.
 
-    Promoted out of shadow 2026-09-12 as a FORWARD TEST with a written kill rule: the v2 backtest is CPCV-promotable but its edge sits in a survivorship-tainted index
-    population, so RECOMMEND mode IS the soak. Demotion = delete the ``hi52.expected_edge_pct`` key
-    from ``settings.yaml`` and re-add the id to ``ops.main.NO_EDGE_SHADOW_STRATEGIES``.
+    Promoted out of shadow as a FORWARD TEST with a written kill rule (the v2 backtest's edge sits in a
+    survivorship-tainted index population), so RECOMMEND mode IS the soak. Demotion = delete the
+    ``hi52.expected_edge_pct`` key from ``settings.yaml`` and re-add the id to
+    ``ops.main.NO_EDGE_SHADOW_STRATEGIES``.
 
-    THE DEFAULT IS ``None``, AND THAT IS THE DEMOTION PATH WORKING (2026-09-12 review). ``cat`` and
-    ``cat_reversal`` enforce their shadow property by having no ``expected_edge_pct`` FIELD at all,
-    so absence means absence; ``hi52`` needs the field (it is promoted) but needs the same property,
-    because the kill criterion's step 2 is "delete the key from ``settings.yaml``" and ANY numeric
-    pydantic default would make that edit a NO-OP — the gate would keep consuming that edge from a
-    number no reader of ``settings.yaml`` can see. ``None`` instead: the composition root
-    (``ops.main._strategy_expected_edge_pct``) registers ``hi52`` in ``strategy_expected_edge_pct``
-    only when the key is present, and a targetless proposal with no registered edge is the gate's
-    ordinary ``_NO_TARGET`` reject (fail-closed).
+    The default is ``None`` on purpose: any numeric default would make deleting the key a NO-OP, the
+    gate consuming an edge no reader of ``settings.yaml`` can see. The composition root
+    (``ops.main._strategy_expected_edge_pct``) registers ``hi52`` only when the key is present, and a
+    targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject (fail-closed).
     """
 
-    #: ``None`` = NOT registered (the pre-promotion and post-demotion state). The live value lives in
-    #: ``settings.yaml`` — one home, owner-visible — with its derivation; the learner never moves it.
+    #: ``None`` = NOT registered. The live value lives in ``settings.yaml`` with its derivation; the
+    #: learner never moves it.
     #:
-    #: DERIVATION (one formula, one home in code: ``engine/strategy/hi52_edge.py``, which
-    #: ``scripts/hi52_forward_verdict.py`` delegates to, so the registered edge and the kill
-    #: criterion's cost floor cannot drift apart)::
+    #: DERIVATION (one formula, one home: ``engine/strategy/hi52_edge.py``, which
+    #: ``scripts/hi52_forward_verdict.py`` delegates to)::
     #:
     #:     edge = measured T+20 median GROSS − CostModel.breakeven_pct(N, "CNC")
     #:     N    = equity × per_trade_risk.swing_position_pct/100
     #:            ÷ (per_trade_risk.overnight_gap_mult × hi52 stop_pct/100)
     #:
-    #: ``N`` is the risk-limit cap on a swing position's notional — implied by the sizing rule, never a
-    #: round number chosen by hand: equity/6 at a 2% swing budget, the 2.0× overnight gap multiplier
-    #: (owner decision 2026-09-24; 2.5× before it) and hi52's 6% stop (≈₹6,667 at the ₹40,000 base,
-    #: ≈₹6,543 at the
-    #: 2026-09-11 equity, ₹6,000 at the ``equity_floor_rung`` — the smallest equity the risk table
-    #: still lets a position be opened at). The floor RISES as the book shrinks, so the registration
-    #: is derived at that worst permitted book: 2.0336 − 0.4982 = 1.5354 ⇒ **1.53**, rounded DOWN
-    #: (before that decision: ₹4,800, 1.47).
+    #: ``N`` is the risk-limit cap on a swing position's notional, never a hand-picked number. The cost
+    #: floor RISES as the book shrinks, so the edge is derived at the worst permitted book
+    #: (``equity_floor_rung``, ₹6,000): 2.0336 − 0.4982 = 1.5354 ⇒ **1.53**, rounded DOWN.
     expected_edge_pct: float | None = None
 
 
@@ -440,25 +381,19 @@ class Brk20Cfg(BaseModel):
     The RULE's parameters (``lookback_days``, ``vol_mult``, ``rr_target``, ``ex_skip_days``) live in
     ``brk20.DEFAULT_PARAMS`` (frozen code defaults: ``envelope.yaml`` has no ``brk20`` rows today;
     the strategy rules list them as future parameter-envelope rows) and the stop-geometry floor lives in
-    ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds neither: it holds the ENTRY
-    MECHANISM the 2026-09-12 pre-registered backtest selected, which is a property of how the level
-    is OFFERED rather than of how it is derived, and the regime gate on origination.
-
-    Modelled here rather than left to pydantic's default extra-ignore for the reason ``FilingsCfg``
-    states: an unmodelled ``brk20:`` block in settings.yaml is silently dropped, and the owner would
-    be reading a knob that governs nothing.
+    ``brk20.FLOOR_PARAMS`` (owner-only by construction). This block holds the ENTRY MECHANISM (how the
+    level is OFFERED, not how it is derived) and the regime gate on origination. Modelled here so the
+    ``brk20:`` block in settings.yaml is not silently dropped.
     """
 
     #: Retest window in TRADING sessions counting ``signal_d``, the session after the crossing: the
     #: level is offered on y+1..y+N (``retest.RestingLevelBook``).
-    #: 5 = the backtest's ``limit_5_sessions``, the variant its pre-registered decision rule
-    #: returned. NEVER learnable: this number IS the registered mechanism — N=1 (what shipped before
-    #: the retest re-arm) and N=3 were both measured and both lost, and every other N was never run at all, so a
-    #: learner moving it would be selecting an entry mechanism no study measured. 0 or less is
-    #: clamped to 1 by the book (a disabled mechanism is a code change, not a silent config value).
+    #: 5 = the pre-registered backtest's ``limit_5_sessions``. NEVER learnable: N=1 and N=3 were measured
+    #: and lost and no other N was run, so a learner moving it would select an unmeasured mechanism.
+    #: 0 or less is clamped to 1 by the book (disabling the mechanism is a code change).
     retest_sessions: int = 5
-    #: Regime gate on brk20 ORIGINATION (``ops.main._brk20_regime_gate``). ``False`` plus a restart is
-    #: the rollback: crossings originate in any regime and none is journalled as blocked.
+    #: Regime gate on brk20 ORIGINATION (``ops.main._brk20_regime_gate``). ``False`` (plus a restart):
+    #: crossings originate in any regime and none is journalled as blocked.
     regime_filter: bool = False
 
 
@@ -466,32 +401,26 @@ class PrescreenCfg(BaseModel):
     """``SignalPreScreen`` caps (owner-tunable). Deduped candidate origination limits;
     the gate/envelope layer owns per-parameter bounds — these are coarse per-day throttles."""
 
-    max_candidates_per_day: int = 48               # signal.candidate publications per trading day
-                                                   # (20→48 2026-08-18, kept = the analyst forward
-                                                   # cap `prescreen_cap_per_day`; shipped value in
-                                                   # settings.yaml — this default is the fallback)
+    max_candidates_per_day: int = 48               # signal.candidate publications per trading day; kept
+                                                   # = the analyst forward cap `prescreen_cap_per_day`
+                                                   # (settings.yaml ships the live value)
     #: Per-strategy publication sub-cap. int = the same cap for every strategy; MAPPING
     #: {strategy_id: cap} = per-strategy values with the reserved key `default` binding any strategy
-    #: without a line of its own (2026-08-13 — owner knob, never learner-movable).
+    #: without a line of its own. Owner knob, never learner-movable.
     max_per_strategy_day: int | dict[str, int] | None = None
     #: Publication/forward admission ORDER: "ranked" = by score (prescreen) and per-strategy score
-    #: quantile (analyst forwarding); "arrival" = the earlier order — the rollback flag, nothing else.
+    #: quantile (analyst forwarding); "arrival" = first come first served.
     admission_mode: str = "ranked"
-    #: Cumulative per-strategy sub-cap tranches by IST time-of-day (owner-directed 2026-09-02, after
-    #: three straight sessions of window-open cap lockout): {strategy: {"HH:MM": cumulative_cap}}.
-    #: Effective cap = min(max_per_strategy_day, released tranche); absent = flat caps (rollback).
+    #: Cumulative per-strategy sub-cap tranches by IST time-of-day: {strategy: {"HH:MM": cumulative_cap}}.
+    #: Effective cap = min(max_per_strategy_day, released tranche); absent = flat caps.
     #: Owner knob, never learner-movable — it decides which candidates get evaluated at all.
     cap_release_schedule: dict[str, dict[str, int]] | None = None
-    #: WHEN the analyst forward queue is drained (2026-08-14): "paced" = one slot per
-    #: ``FORWARD_PACING_MIN`` minutes on a scheduler pulse, so candidates accumulate and the ranking
-    #: above has a population to rank; "immediate" = the pre-2026-08-14 inline drain — rollback only.
+    #: WHEN the analyst forward queue is drained: "paced" = one slot per ``FORWARD_PACING_MIN`` minutes
+    #: on a scheduler pulse, so candidates accumulate for the ranking to rank; "immediate" = inline drain.
     forward_drain_mode: str = "paced"
     #: How much better a later candidate must score to take a full cap's admission slot from an
-    #: unevaluated incumbent of the same strategy (2026-08-27 — owner knob, never learner-movable,
-    #: exactly like ``max_per_strategy_day`` above: it decides which candidates get evaluated
-    #: at all). ``null`` DISABLES displacement, restoring the pre-2026-08-27 "whoever fires first
-    #: keeps the slot all day" behaviour — the rollback flag, nothing else. Shipped value lives in
-    #: settings.yaml with its reasoning; this default is the fallback.
+    #: unevaluated incumbent of the same strategy. Owner knob, never learner-movable. ``null`` DISABLES
+    #: displacement ("whoever fires first keeps the slot all day"). settings.yaml ships the live value.
     displacement_margin: float | None = 0.10
 
 
@@ -525,21 +454,17 @@ class UniverseCfg(BaseModel):
     best-effort-fetched with a seed-file fallback so universe build never depends on an NSE
     page being reachable.
 
-    Owner decision 2026-09-04: the index is NIFTY 500, widened from NIFTY200. The fields are
-    named generically because the index is now CONFIG, not a constant — swapping it is these three
-    keys plus a seed file. ``extra="forbid"`` (deliberately narrower than the rest of this module,
-    which takes pydantic's default ignore) exists for exactly that reason: the retired
-    ``nifty200_source_url`` / ``nifty200_seed_path`` keys got no aliases, and a settings.yaml left
-    on them must fail loudly at boot rather than be silently ignored while the defaults below
-    present a different universe as live.
+    The index is CONFIG, not a constant — swapping it is these keys plus a seed file. ``extra="forbid"``
+    (narrower than the rest of this module) makes a settings.yaml left on retired keys fail loudly at
+    boot rather than be silently ignored while the defaults present a different universe as live.
 
-    Owner decision 2026-10-08: the index is NIFTY Total Market (≈750 = NIFTY 500 + Microcap
-    250), and a second list — the CORE index, NIFTY 500 — marks the evidence population. Legs whose
-    registered edge or frozen shadow verdict was measured on NIFTY 500 (``hi52``, ``ins``, ``cat``,
-    ``cat_reversal``) originate from — and the rec-outcome benchmark averages over — the core subset
-    of the eligible set only (``MarketStore.get_core_eligible_symbols``); ``brk20``, the risk gate and the news/batch
-    layer read the full eligible set. Pointing ``core_index_source_url`` at the same URL as
-    ``index_source_url`` makes every index member core (the shape before 2026-10-08, the rollback line).
+    The index is NIFTY Total Market (≈750 = NIFTY 500 + Microcap 250); a second list — the CORE index,
+    NIFTY 500 — marks the evidence population. Legs whose registered edge or frozen shadow verdict was
+    measured on NIFTY 500 (``hi52``, ``ins``, ``cat``, ``cat_reversal``) originate from — and the
+    rec-outcome benchmark averages over — the core subset of the eligible set only
+    (``MarketStore.get_core_eligible_symbols``); ``brk20``, the risk gate and the news/batch layer read
+    the full eligible set. Pointing ``core_index_source_url`` at ``index_source_url`` makes every
+    member core.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -572,12 +497,12 @@ class JobTimesCfg(BaseModel):
     time_exit_check_ist: time = time(9, 30)     # time exit
     reconcile_ist: time = time(15, 50)
     bhavcopy_ist: time = time(18, 0)
-    corp_actions_ist: time = time(20, 15)       # 18:15→20:15 2026-07-24 (NSE maintenance)
+    corp_actions_ist: time = time(20, 15)       # after NSE's evening maintenance
     earnings_ist: time = time(18, 30)
     rec_outcomes_ist: time = time(18, 30)       # after daily_bars (18:05), whose run it waits for
     signal_outcomes_ist: time = time(18, 40)    # after rec_outcomes, whose EW returns it reads
     weekly_summary_ist: time = time(19, 0)      # after rec_outcomes (18:30)
-    deals_ist: time = time(20, 30)              # flagged_instrument_days; 18:45→20:30 2026-07-24
+    deals_ist: time = time(20, 30)              # flagged_instrument_days
     filings_pit_ist: time = time(18, 35)        # filings_pit (insider trades, date-keyed)
     filings_pit_fresh_ist: time = time(19, 0)   # filings_pit_fresh (BSE fresh insider, date-keyed)
     ins_crossings_ist: time = time(19, 15)      # ins_crossings — MUST stay after filings_pit_fresh
