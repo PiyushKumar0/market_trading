@@ -184,7 +184,7 @@ def test_no_paper_module_may_reach_the_llm_tier_or_the_live_broker(module: str) 
     assert not banned, f"engine.paper.{module} imports {sorted(banned)}"
 
 
-# --------------------------------------------------------------------------- D8: oms / paper closure
+# --------------------------------------------------------------------------- oms / paper closure
 def test_oms_imports_only_core_oms_and_paper() -> None:
     offenders = [
         f"{path.name} imports {imported}"

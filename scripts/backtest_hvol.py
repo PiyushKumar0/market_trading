@@ -183,7 +183,7 @@ EARNINGS_KIND = "results"
 INDEX_ROWS: tuple[str, ...] = ("NIFTY 50", "INDIA VIX")
 DEFAULT_DB_REL = Path("data") / "research" / "market_2026-10-07.duckdb"
 NIFTY500_SEED_REL = Path("config") / "universe" / "nifty500_seed.csv"
-NIFTY500_CORE_CACHE_REL = Path("data") / "universe" / "core_index_cached.csv"     # A1: preferred over the seed
+NIFTY500_CORE_CACHE_REL = Path("data") / "universe" / "core_index_cached.csv"     # preferred over the seed
 TOTAL_MARKET_SEED_REL = Path("config") / "universe" / "niftytotalmarket_seed.csv"
 ETF_AMENDMENT = "amendment 2026-10-09"
 DEFAULT_ETF_LIST_REL = Path("data") / "research" / "nse_etf_list_2026-10-09.csv"
@@ -790,7 +790,7 @@ def run_study(conn, *, db_path: Path, etf: EtfList, notional: Decimal = REFERENC
     series = bb.load_series(conn, rc.FULL_HISTORY_START, date.max, symbols=symbols, max_symbols=max_symbols)
     for name in INDEX_ROWS:
         series.pop(name, None)
-    # A1: removed before features / CrossSection, so the signal population AND every cross-section
+    # removed before features / CrossSection, so the signal population AND every cross-section
     # (benchmark, market-wide volume day, liquidity terciles) are stocks only.
     series, etf_counts = exclude_etfs(series, etf)
     if not series:

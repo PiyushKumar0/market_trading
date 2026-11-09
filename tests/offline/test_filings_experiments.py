@@ -234,7 +234,7 @@ def test_insider_robustness_empty_is_honest(tmp_path, clock):
 
 
 @pytest.mark.needs_heavy_deps
-def test_e1_runs_end_to_end_honest_empty(tmp_path, clock):
+def test_catalyst_orb_runs_end_to_end_honest_empty(tmp_path, clock):
     pytest.importorskip("vectorbt")
     store = _store(tmp_path, clock)
     try:
@@ -266,7 +266,7 @@ def test_e1_runs_end_to_end_honest_empty(tmp_path, clock):
 
 
 @pytest.mark.needs_heavy_deps
-def test_e2_runs_end_to_end_honest_empty(tmp_path, clock):
+def test_rsi2_catalyst_veto_runs_end_to_end_honest_empty(tmp_path, clock):
     pytest.importorskip("vectorbt")
     store = _store(tmp_path, clock)
     try:

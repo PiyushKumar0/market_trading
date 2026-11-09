@@ -207,7 +207,7 @@ class CorpActionsJob:
         try:
             resp = await nse_get(self._http, corp_actions_url(d), timeout=self._timeout)
             rows = parse_corp_actions(json.loads(resp.content))
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("corp_actions_fetch_failed", d=d.isoformat(), error=reason)
             if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day

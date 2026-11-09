@@ -554,7 +554,7 @@ class FeatureEngine:
     def _is_expiry_day(self, d: date) -> bool:
         """Monthly F&O expiry flag: last ``expiry_weekday`` of ``d``'s month, rolled BACK to the
         previous trading day when it is a holiday (NSE convention). Fails closed (False) when the
-        calendar has no data for the month (R6: no calendar, no assumptions)."""
+        calendar has no data for the month (no calendar, no assumptions)."""
         probe = date(d.year, d.month, monthrange(d.year, d.month)[1])
         while probe.weekday() != self._expiry_weekday:
             probe -= timedelta(days=1)

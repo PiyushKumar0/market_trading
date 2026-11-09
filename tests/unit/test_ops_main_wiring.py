@@ -1546,7 +1546,7 @@ def test_the_real_tracker_base_reads_through_the_limits_engine_on_every_call() -
 
 
 def test_an_unverified_limits_table_falls_back_and_says_so_once(caplog) -> None:
-    """R9: IntegrityError ONLY falls back (the boot is FROZEN by the self-test), logged once per process."""
+    """IntegrityError ONLY falls back (the boot is FROZEN by the self-test), logged once per process."""
     limits = _Limits(exc=IntegrityError("limits.yaml hash mismatch"))
     base = opsmain._limits_capital_base(limits)
     with caplog.at_level(logging.WARNING, logger="engine.ops.main"):
@@ -1704,7 +1704,7 @@ def test_the_shipped_retest_window_is_the_variant_the_backtest_selected() -> Non
 async def test_resolve_news_bounded_completes_times_out_and_frees_the_lock() -> None:
     """2026-08-10 boot wedge: a post-clustering await hung 8+ h holding the news chain. The bound
     covers the chain AND lock acquisition; expiry cancels, alerts, frees the lock for the next
-    caller, and returns False — the boot moves on (E5: the chain is never load-bearing)."""
+    caller, and returns False — the boot moves on (the chain is never load-bearing)."""
     import asyncio
 
     from engine.ops.main import resolve_news_bounded
@@ -2888,7 +2888,7 @@ async def test_governor_block_green_stamps_the_watermark_and_is_never_retried(
 async def test_absence_markers_read_the_live_success_watermark(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """T7: the assembler's digest-ran seam and the planner's last-success seam read the catch-up
+    """The assembler's digest-ran seam and the planner's last-success seam read the catch-up
     watermark at call time, and only a SUCCESS counts: a terminal give-up is no digest."""
     built: dict[str, list] = {}
     spy(monkeypatch, "ContextAssembler", built)
@@ -4768,7 +4768,7 @@ async def test_batch_symbols_reach_the_feed_but_never_the_warmup_coverage_set(
 async def test_surveillance_ingest_is_wired_to_open_real_positions(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """A8: the held-position surveillance alert lives in ``SurveillanceIngest.refresh`` so every
+    """The held-position surveillance alert lives in ``SurveillanceIngest.refresh`` so every
     refresh path (08:20 job, catch-up, early hydration, job_universe's first use) runs it; it only
     fires when the engine passes the real-scoped held-positions reader."""
     built: dict[str, list] = {}

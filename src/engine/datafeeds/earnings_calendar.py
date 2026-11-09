@@ -164,7 +164,7 @@ class EarningsCalendarJob:
         try:
             resp = await nse_get(self._http, NSE_EVENT_CALENDAR_URL, timeout=self._timeout)
             rows = parse_event_calendar(json.loads(resp.content))
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("earnings_calendar_fetch_failed", d=d.isoformat(), error=reason)
             if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
@@ -188,7 +188,7 @@ class EarningsCalendarJob:
         try:
             resp = await nse_get(self._http, url, timeout=self._timeout)
             rows = parse_event_calendar(json.loads(resp.content))
-        except Exception as exc:  # noqa: BLE001 - E5: degrade, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning(
                 "earnings_calendar_range_failed", frm=frm.isoformat(), to=to.isoformat(), error=reason

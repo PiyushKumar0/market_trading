@@ -209,7 +209,7 @@ class PlatformOrder(BaseModel):
     trigger_price: Decimal | None = None
     modifications: int = Field(default=0, ge=0)
     reject_reason: str | None = None
-    raw_broker_payload: dict[str, Any] | None = None  # R8: the payload that drove the last transition
+    raw_broker_payload: dict[str, Any] | None = None  # the payload that drove the last transition
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

@@ -297,7 +297,7 @@ class _World:
         assert self.count("recommendations") == 0
 
     def assert_owner_alerted(self, reason: str) -> None:
-        """D7: the owner hears of the failure — the pipeline's "Intraday analyst unavailable" and the
+        """The owner hears of the failure — the pipeline's "Intraday analyst unavailable" and the
         harness's per-call Failed alert, both journalled AND on the phone."""
         msgs = self.owner_messages()
         unavailable = [m for m in msgs if m[1] == "Intraday analyst unavailable"]
@@ -307,7 +307,7 @@ class _World:
         assert any("Intraday analyst unavailable" in t for t in self.phone.sent)
 
     def assert_deterministic_tiers_untouched(self) -> None:
-        """R1: an LLM failure changes nothing in Tier 2/3 — no mode change, no freeze, no kill."""
+        """An LLM failure changes nothing in Tier 2/3 — no mode change, no freeze, no kill."""
         assert self.mode.mode() == Mode.RECOMMEND
         assert self.mode.risk_state() == RiskState.NORMAL
         assert not self.kill.is_killed()
@@ -348,8 +348,8 @@ async def test_llm_timeout_fails_to_no_proposal_and_alerts(world_factory) -> Non
     w = await world_factory(_SDK([5.0, _StructuredMessage(ENTER_JSON)]), timeout_s=0.1)
 
     assert await w.offer(_candidate()) is True           # the analyst WAS reached, then timed out
-    assert w.sdk.calls == 1                              # D7: a timeout never retries
-    assert w.agent_calls() == [(0, "timeout")]           # R8: the failed call is still audited
+    assert w.sdk.calls == 1                              # a timeout never retries
+    assert w.agent_calls() == [(0, "timeout")]           # the failed call is still audited
     w.assert_no_proposal()
     w.assert_owner_alerted("timeout")
     w.assert_deterministic_tiers_untouched()
@@ -443,7 +443,7 @@ async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
     assert w.agent_calls()[-1] == (0, "governor_blocked") and w.sdk.calls == 0
 
 
-# =========================================================================== R1: exits unaffected
+# =========================================================================== exits unaffected
 async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, conn) -> None:
     """Three-tier rule: the ``max_holding`` time-stop is built in Python — with the SDK raising on every call
     AND the ladder at DG4, an aged swing position still gets its gate-approved EXIT recommendation
@@ -482,4 +482,4 @@ async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, co
     "SquareOffScheduler. " + MIS_OUT_OF_PAPER_SCOPE
 ))
 async def test_square_off_unaffected_with_the_llm_dead() -> None:
-    """R1: with the SDK dead / DG4, the scheduled square-off still fires on time."""
+    """With the SDK dead / DG4, the scheduled square-off still fires on time."""

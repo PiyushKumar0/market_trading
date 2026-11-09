@@ -143,7 +143,7 @@ class InsCrossingsJob:
         """Compute ``d``'s NEW crossings and journal them for the next session. Never raises."""
         try:
             return await asyncio.to_thread(self._run_sync, d)
-        except Exception as exc:  # noqa: BLE001 - E5: a filings job never takes down the scheduler
+        except Exception as exc:  # noqa: BLE001 - a filings job never takes down the scheduler
             _log.exception("ins_crossings_failed", d=d.isoformat())
             return InsCrossingsResult(d=d, ok=False, reason=f"{type(exc).__name__}: {exc}")
 

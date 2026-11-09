@@ -258,7 +258,7 @@ async def test_successful_download_writes_cache_then_cache_is_used(tmp_path, sto
 
 
 async def test_total_failure_never_raises_returns_empty_degraded(tmp_path, store, clock):
-    """E5: no download, no cache, no seed ⇒ alert + empty degraded universe, NEVER an exception."""
+    """No download, no cache, no seed ⇒ alert + empty degraded universe, NEVER an exception."""
     settings = make_settings(tmp_path)
     settings.universe.index_seed_path = str(tmp_path / "missing_seed.csv")
     msgs, sink = collect_alerts()
@@ -316,7 +316,7 @@ def test_committed_seed_is_real_and_parses():
     assert len(set(core) - set(index)) <= 25
 
 
-# ------------------------------------------------------ O18: CORE index (2026-10-08)
+# ------------------------------------------------------ CORE index (2026-10-08)
 _CORE_URL = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
 
 
@@ -347,7 +347,7 @@ def _core_setup(tmp_path, store, *, core_csv: str | None):
 
 
 async def test_core_index_stamps_rows_and_scopes_the_core_view(tmp_path, store, clock):
-    """O18: the index seeds eligibility; the core list only MARKS rows. RELIANCE is core, TCS is an
+    """The index seeds eligibility; the core list only MARKS rows. RELIANCE is core, TCS is an
     eligible non-core (microcap-class) name: both stay eligible and gate-approvable, only RELIANCE
     reaches the evidence-bound legs' view. Extended rows are never core."""
     core_csv = "Company Name,Industry,Symbol,Series,ISIN Code\nReliance,Energy,RELIANCE,EQ,\n"
@@ -563,7 +563,7 @@ async def test_extended_leg_cap_and_empty_master_fail_closed(tmp_path, store, cl
         store2.close()
 
 
-# ------------------------------------------------------ O15: NIFTY 500 eligible set (2026-09-04)
+# ------------------------------------------------------ NIFTY 500 eligible set (2026-09-04)
 _WIDE_INDEX_SIZE = 500
 _WIDE_SYMBOLS = [f"SYM{i:03d}" for i in range(_WIDE_INDEX_SIZE)]
 

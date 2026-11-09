@@ -198,7 +198,7 @@ def scan_daily(
     if not math.isfinite(avg_vol) or avg_vol <= 0.0 or y.volume < p["vol_mult"] * avg_vol:
         return None
 
-    # ---- A12: skip when a known ex-date lands inside the calendar horizon.
+    # ---- skip when a known ex-date lands inside the calendar horizon.
     horizon = today + timedelta(days=int(p["ex_skip_days"]))
     if any(today <= xd <= horizon for xd in upcoming_ex_dates):
         return None

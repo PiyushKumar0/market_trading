@@ -180,7 +180,7 @@ class Feed:
         return (self._clock.now() - max(stamps)).total_seconds() if stamps else None
 
 
-_R3_SQL = (
+_PROTECTION_SQL = (
     "SELECT p.position_id, p.state, p.protection_state, p.exit_policy, p.exit_session, "
     "EXISTS (SELECT 1 FROM gtts g WHERE g.position_id = p.position_id AND "
     f"{scope_sql('paper', 'g')} AND g.state = 'active' AND g.qty = p.qty) AS armed, "
@@ -215,7 +215,7 @@ class ProtectionWatch:
     def check(self) -> None:
         self.prints += 1
         for broker_id in sorted(self.watched):
-            row = self._conn.execute(_R3_SQL, (broker_id,)).fetchone()
+            row = self._conn.execute(_PROTECTION_SQL, (broker_id,)).fetchone()
             if row is not None and row["state"] == "CLOSED":
                 self.watched.discard(broker_id)
                 continue
@@ -464,7 +464,7 @@ def test_a_proposal_is_traded_end_to_end_on_paper(runs: dict[str, Outcome]) -> N
     assert on.frames_after_settle == on.report.postbacks > 0      # the digest covers every frame
 
 
-def test_r3_holds_on_every_print_after_a_fill(runs: dict[str, Outcome]) -> None:
+def test_protection_invariant_holds_on_every_print_after_a_fill(runs: dict[str, Outcome]) -> None:
     watch = runs["on"].watch
     assert watch.violations == []
     assert watch.judged.get("OPEN", 0) > 0                           # not vacuous: judged while armed
@@ -484,7 +484,7 @@ def test_the_golden_digest_is_byte_identical_and_pinned(runs: dict[str, Outcome]
     assert runs["on"].report.digest == runs["again"].report.digest == GOLDEN
 
 
-# ------------------------------------------------------------------ D14: a listed strategy (brk20) with no stop
+# ------------------------------------------------------------------ a listed strategy (brk20) with no stop
 def test_a_listed_strategy_is_held_without_a_stop_through_the_day(
     runs: dict[str, Outcome], synthetic_day: SyntheticDay
 ) -> None:

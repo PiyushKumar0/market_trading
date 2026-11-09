@@ -56,7 +56,7 @@ def test_regime_predicate(closes, on):
     assert regime_filter.regime_on(closes) is on
 
 
-def test_live_predicate_agrees_with_c2_regime_on_non_nan_series():
+def test_live_predicate_agrees_with_the_regime_filter_study_on_non_nan_series():
     rng = np.random.default_rng(7)
     series = [np.arange(1000.0, 1070.0), np.arange(1000.0, 1069.0), np.full(70, 1000.0), np.array(SAWTOOTH)]
     series += [1000.0 + np.cumsum(rng.normal(0.0, 10.0, n)) for n in rng.integers(60, 130, 200)]
@@ -205,7 +205,7 @@ def _seed(tmp_path: Path, clock) -> Path:
     finally:
         store.close()
     (tmp_path / "universe").mkdir()
-    # O18: the hi52 population reads the CORE-index cache, not the widened index cache.
+    # the hi52 population reads the CORE-index cache, not the widened index cache.
     (tmp_path / "universe" / "core_index_cached.csv").write_text("Symbol\nHIA\nZZZ\n", encoding="utf-8")
     return db
 

@@ -518,7 +518,7 @@ class FilingsPitJob:
                 windows += 1
             if stats.xbrl_failed and not stats.xbrl_fetched:
                 raise RuntimeError(f"all {stats.xbrl_failed} XBRL fetches failed")
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning(
                 "filings_pit_fetch_failed", d=d.isoformat(), error=reason,

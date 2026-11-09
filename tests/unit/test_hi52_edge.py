@@ -87,7 +87,7 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
         encoding="utf-8",
     )
     derived = fv.registered_edge_pct(limits_path=pinned)
-    assert derived == Decimal("1.53")                                   # O17: 2.0x gap mult
+    assert derived == Decimal("1.53")                                   # 2.0x gap mult
     assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
     # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can
     # buy a candidate a cost-gate pass it did not earn.

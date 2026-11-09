@@ -408,7 +408,7 @@ def test_expiry_flag_exactly_one_day_in_month_end_week(engine):
 
 
 def test_expiry_flag_fails_closed_without_calendar(store, clock, tmp_path):
-    """R6: no calendar data => never claims an expiry day (fail closed, no assumptions)."""
+    """No calendar data => never claims an expiry day (fail closed, no assumptions)."""
     bare = FeatureEngine(store, clock, NSECalendar(tmp_path / "no_calendar", clock))
     assert not any(bare._is_expiry_day(date(2026, 6, x)) for x in range(1, 31))
 

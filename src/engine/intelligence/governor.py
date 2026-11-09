@@ -382,7 +382,7 @@ class BudgetGovernor:
             return DegradeTier.DG3
         # An UNMEASURABLE pace (``None`` — see :meth:`pro_rata_to_date`) is skipped, never compared
         # against: ``spend > 1.25 × 0`` is ``any spend at all``, so the first cent of a window whose
-        # reset Thursday is a holiday — or of any window with no calendar — would trip DG2 (R6:
+        # reset Thursday is a holiday — or of any window with no calendar — would trip DG2 (
         # never over-pace on an unmeasurable pace). The absolute rungs below still bind, so nothing
         # is weakened; the pace rungs simply wait for the first session to elapse. A non-positive
         # pace is folded into the same skip: a credit of 0 would otherwise re-open the same trap

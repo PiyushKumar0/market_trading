@@ -337,7 +337,7 @@ def test_partial_that_completes_the_qty_is_recorded_and_flagged_never_raised() -
 
 
 def test_filled_short_of_recorded_qty_is_recorded_and_flagged_never_raised() -> None:
-    # R5: a fill that already happened must always land; the Reconciler resolves the disagreement.
+    # a fill that already happened must always land; the Reconciler resolves the disagreement.
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     filled, ev = transition(order, OrderState.FILLED, payload={}, at=AT, filled_qty=90)
     assert filled.state is OrderState.FILLED and filled.filled_qty == 90
@@ -704,7 +704,7 @@ def test_amend_records_the_pre_amend_values_on_its_event() -> None:
     assert ev.payload["fields_applied"] == {"qty": 70, "trigger_price": Decimal("99.10")}
 
 
-def test_modify_rejected_restores_the_pre_amend_fields_and_keeps_the_a2_spend() -> None:
+def test_modify_rejected_restores_the_pre_amend_fields_and_keeps_the_modification_spend() -> None:
     order = make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, side="SELL", qty=40,
                        price=None, trigger_price=Decimal("98.50"), broker_order_id="251009000999999")
     pending, ev = amend(order, qty=70, trigger_price=Decimal("99.10"), at=AT)
@@ -993,7 +993,7 @@ def test_amend_below_the_filled_qty_is_refused() -> None:
         amend(order, qty=30, at=AT)
 
 
-def test_amend_counts_against_the_a2_budget_and_stops_at_the_cap() -> None:
+def test_amend_counts_against_the_modification_budget_and_stops_at_the_cap() -> None:
     order = make_order(OrderState.ACKED, modifications=MODIFICATION_CAP)
     with pytest.raises(ModificationCapExceeded):
         amend(order, qty=50, at=AT)

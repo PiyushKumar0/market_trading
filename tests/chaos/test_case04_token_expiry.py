@@ -289,7 +289,7 @@ async def test_the_composed_engine_token_hooks_freeze_prompt_and_clear(tmp_path,
         assert (mode, calendar, clock) == (e.mode, e.calendar, e.clock) and isinstance(kill, KillSwitch)
         with pytest.raises(OrderSurfaceViolation):
             guard("entry")                                        # OFF: openings refused
-        assert guard("risk_reducing") is None                     # R3: never gated
+        assert guard("risk_reducing") is None                     # never gated
 
         await _token_dies_mid_session(SimpleNamespace(kc=kc, kite=e.kite))
         assert e.session.token_valid() is False

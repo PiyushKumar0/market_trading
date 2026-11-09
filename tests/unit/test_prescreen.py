@@ -689,7 +689,7 @@ def test_raw_counter_hydration_is_per_day_never_carried_forward():
 
 
 def test_a_broken_raw_counts_loader_never_costs_a_scan():
-    """D7: a telemetry read that cannot be served degrades to the pre-2026-08-21 behaviour (counting
+    """A telemetry read that cannot be served degrades to the pre-2026-08-21 behaviour (counting
     from zero) — it must never propagate out of the scan path."""
     from datetime import date as _date
 

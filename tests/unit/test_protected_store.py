@@ -71,7 +71,7 @@ def test_non_protected_name_rejected(store):
         store.load_verified("settings.yaml")
 
 
-# --------------------------------------------------------------------- O19: read_verified_bytes + CAS write
+# --------------------------------------------------------------------- read_verified_bytes + CAS write
 NEW_CONTENT = "schema_version: 1\nlimits:\n  max_new_trades_day:\n    count: 4\n"
 
 

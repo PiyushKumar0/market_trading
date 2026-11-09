@@ -158,7 +158,7 @@ class PaperSettings(BaseModel, extra="forbid"):
     seed: int = 20261006
     exit_minutes_before_close: int = 10
     exit_working_timeout_min: int = 5
-    #: D14: paper positions of these strategies open with no stop and no target and exit on time.
+    #: paper positions of these strategies open with no stop and no target and exit on time.
     no_stop_strategies: tuple[str, ...] = ()
 
 
@@ -552,7 +552,7 @@ class UniverseCfg(BaseModel):
     )
     index_seed_path: str = "config/universe/niftytotalmarket_seed.csv"
     core_index_name: str = "NIFTY 500"
-    """O18: the evidence-population index (see the class docstring). Must be a SUBSET of the index
+    """The evidence-population index (see the class docstring). Must be a SUBSET of the index
     above; a core name that is not an index member is simply not eligible."""
     core_index_source_url: str = (
         "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"  # [VERIFIED 2026-09-04]

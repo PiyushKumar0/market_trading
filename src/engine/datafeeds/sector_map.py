@@ -348,7 +348,7 @@ class SectorMapJob:
         """
         try:
             return await self._run(d, universe_symbols)
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise into the scheduler
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise into the scheduler
             reason = f"{type(exc).__name__}: {exc}"
             _log.exception("sector_map_job_failed", d=d.isoformat())
             if d not in self._alerted:  # dedup: don't storm on every retry of a still-failing day
@@ -375,7 +375,7 @@ class SectorMapJob:
                 if not symbols:
                     raise ValueError("constituents CSV parsed to zero symbols")
                 cache[sector] = {"as_of": d.isoformat(), "symbols": symbols}
-            except Exception as exc:  # noqa: BLE001 - E5: per-source degrade, reuse frozen copy
+            except Exception as exc:  # noqa: BLE001 - per-source degrade, reuse frozen copy
                 symbols = [str(s) for s in (cache.get(sector, {}).get("symbols") or [])]
                 _log.warning(
                     "sector_source_failed",
@@ -474,7 +474,7 @@ class SectorMapJob:
     async def _refresh_themes(self) -> tuple[bool, int]:
         try:
             rows = load_theme_seed(self._themes_path)
-        except Exception as exc:  # noqa: BLE001 - E5: theme seed failure never blocks the sector part
+        except Exception as exc:  # noqa: BLE001 - theme seed failure never blocks the sector part
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("theme_seed_unreadable", path=str(self._themes_path), error=reason)
             await self._alert(
@@ -505,7 +505,7 @@ class SectorMapJob:
         """
         try:
             overrides = load_sector_overrides(self._overrides_path)
-        except Exception as exc:  # noqa: BLE001 - E5: override failure never blocks classification
+        except Exception as exc:  # noqa: BLE001 - override failure never blocks classification
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("sector_overrides_unreadable", path=str(self._overrides_path), error=reason)
             await self._alert(
@@ -548,7 +548,7 @@ class SectorMapJob:
                 if not path.exists():
                     continue
                 labels = parse_industry_csv(path.read_text(encoding="utf-8"))
-            except Exception as exc:  # noqa: BLE001 - E5: try the next candidate, never raise
+            except Exception as exc:  # noqa: BLE001 - try the next candidate, never raise
                 _log.warning(
                     "sector_industry_source_unreadable",
                     path=str(path),

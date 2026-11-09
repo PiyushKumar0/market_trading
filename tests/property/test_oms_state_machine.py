@@ -254,7 +254,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         if data is not None:
             history.append(data)
             if order.broker_order_id is None:
-                # A3: the postback beat place_order()'s return. Buffered, never dropped, never
+                # the postback beat place_order()'s return. Buffered, never dropped, never
                 # applied to an order whose broker id the platform does not yet know.
                 buffer.hold(BROKER_ORDER_ID, data, at=at)
                 stats["buffered"] += 1

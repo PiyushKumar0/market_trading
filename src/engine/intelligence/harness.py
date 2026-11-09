@@ -143,7 +143,7 @@ ISOLATION_ENV: dict[str, str] = {
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false",     # skips the per-call connector fetch strict MCP still makes
 }
 
-MAX_SCHEMA_RETRIES = 2      # D7: schema-invalid retries at most twice => at most 3 SDK calls per run
+MAX_SCHEMA_RETRIES = 2      # schema-invalid retries at most twice => at most 3 SDK calls per run
 DEFAULT_TIMEOUT_S = 45.0    # single-shot default; every enabled agent overrides it (agents.yaml timeout_s)
 
 RETRY_TAIL = (
@@ -960,7 +960,7 @@ class AgentHarness:
                 return await self._fail(
                     agent_def, reason, detail, call_id=call_id, usage=usage, raw_text=text, attempts=attempt
                 )
-            # D7: a FRESH query carrying the validation error — never a second pass at parsing prose.
+            # a FRESH query carrying the validation error — never a second pass at parsing prose.
             prompt = f"{base_prompt}\n\n{RETRY_TAIL.format(err=last_error)}"
 
         return await self._fail(
@@ -1081,7 +1081,7 @@ class AgentHarness:
         """
         cls = self._options_class()
         fields = _option_fields(cls)
-        kwargs: dict[str, Any] = {"model": agent_def.api_model, "setting_sources": []}   # D10: always
+        kwargs: dict[str, Any] = {"model": agent_def.api_model, "setting_sources": []}   # always
         if "setting_sources" not in fields:
             raise RuntimeError(
                 f"{cls.__name__} exposes no setting_sources knob — the service must not inherit stray "

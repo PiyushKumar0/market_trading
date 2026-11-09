@@ -290,7 +290,7 @@ class NewsIngest:
         """Run one feed fetch; on ANY failure log + return [] — a feed error never reaches the caller."""
         try:
             return await coro
-        except Exception as exc:  # E5: best-effort feed — degrade to zero headlines, never raise
+        except Exception as exc:  # best-effort feed — degrade to zero headlines, never raise
             _log.warning("news_feed_error", feed=feed, error=f"{type(exc).__name__}: {exc}")
             return []
 

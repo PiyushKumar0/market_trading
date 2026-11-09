@@ -199,7 +199,7 @@ async def test_publish_command_menu_scopes_to_owner_chat(clock) -> None:
 
 @pytest.mark.asyncio
 async def test_publish_command_menu_never_raises_on_api_error(clock) -> None:
-    """R8: a setMyCommands failure at startup must be swallowed, never crash the control plane."""
+    """A setMyCommands failure at startup must be swallowed, never crash the control plane."""
     bot = TelegramBot("dummy-token", owner_chat_id=1, clock=clock)
     await bot._publish_command_menu(_FakeApp(_FakeBot(raises=True)))    # must not raise
 

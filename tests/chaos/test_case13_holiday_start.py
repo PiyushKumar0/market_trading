@@ -138,7 +138,7 @@ def holiday_engine(conn, db_path, tmp_path, monkeypatch):
 
     sdk_smoke_calls: list[str] = []
 
-    async def sdk_smoke() -> str:          # D11: the ONE cheap SDK call the boot makes (Claude SDK edge)
+    async def sdk_smoke() -> str:          # the ONE cheap SDK call the boot makes (Claude SDK edge)
         sdk_smoke_calls.append(clock.now().isoformat())
         return "ok"
 

@@ -296,7 +296,7 @@ def test_dayplan_has_no_no_trade_today():
 
 # --------------------------------------------------------------------------- ClusterScore
 def test_parse_cluster_scores_drops_only_the_bad_cluster():
-    """D7: an out-of-enum event_type costs ONE cluster, never the other 29 in the batch."""
+    """An out-of-enum event_type costs ONE cluster, never the other 29 in the batch."""
     raw = {"scores": [
         _cluster("c1"),
         _cluster("c2", event_type="stock_split_rumour"),      # not in the closed taxonomy

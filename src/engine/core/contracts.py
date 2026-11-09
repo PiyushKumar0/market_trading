@@ -89,7 +89,7 @@ class EnterAction(ActionBase):
     tradingsymbol: str
     exchange: Literal["NSE"]
     side: Literal["BUY", "SELL"]
-    style: Literal["intraday", "swing", "position"]           # O3: intraday=MIS, else CNC
+    style: Literal["intraday", "swing", "position"]           # intraday=MIS, else CNC
     entry_type: Literal["LIMIT", "MARKET"]
     entry_price: DecimalStr | None = None                     # required if LIMIT; gate checks sanity band
     stop_price: DecimalStr                                    # MANDATORY — no stopless proposals exist

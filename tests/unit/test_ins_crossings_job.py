@@ -94,7 +94,7 @@ class _FakeStore:
         return sorted(self.universe + self.non_core)
 
     def get_core_eligible_symbols(self, d: date) -> list[str]:
-        # O18: the CORE (NIFTY 500) subset of the eligible set — the job's population.
+        # the CORE (NIFTY 500) subset of the eligible set — the job's population.
         return sorted(self.universe)
 
     def get_insider_trades(self, *, symbol=None, broadcast_from=None, broadcast_to=None):

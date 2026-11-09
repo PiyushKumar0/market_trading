@@ -925,7 +925,7 @@ class ReplayHarness:
 
                         tod = ts.time()
                         if tod < self._session_open:
-                            pre_open += 1       # A14: no bar, but it carries the auction open
+                            pre_open += 1       # no bar, but it carries the auction open
                         elif tod > self._session_close:
                             post_close += 1     # no bar; counted, never traded
                         else:

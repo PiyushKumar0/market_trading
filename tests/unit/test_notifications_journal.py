@@ -432,7 +432,7 @@ async def test_critical_rows_never_expire(conn, moving, kind, severity):
 
 @pytest.mark.asyncio
 async def test_surveillance_migration_dedupes_across_bot_instances(conn, moving):
-    """A8: ``SurveillanceIngest`` re-raises the held-position alert on every refresh; the journal's
+    """``SurveillanceIngest`` re-raises the held-position alert on every refresh; the journal's
     unique ``dedupe_key`` index is what makes it once per (position, list), across a restart. The
     ``critical`` severity alone keeps it from ever expiring."""
     def msg(status: str) -> CatalogMessage:

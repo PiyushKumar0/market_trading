@@ -911,7 +911,7 @@ def create_app(
     # ----------------------------------------------------------------- paper (POST, single-step)
     @app.post("/paper")
     async def set_paper(body: PaperBody, _: Owner) -> dict[str, Any]:
-        """Paper autopilot ON/OFF, single-step (D8: paper cannot place a real order). ON is refused unless
+        """Paper autopilot ON/OFF, single-step (paper cannot place a real order). ON is refused unless
         the autopilot is built; OFF always applies. Reset stays Telegram two-step."""
         control = app.state.paper_control
         if control is None:

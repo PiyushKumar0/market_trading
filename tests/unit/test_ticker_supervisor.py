@@ -1432,7 +1432,7 @@ def _kinds(notify: _NotifyRec) -> list[MessageKind]:
 
 @pytest.mark.asyncio
 async def test_silent_connected_feed_respawns_once_past_300s_through_the_real_monitor(monkeypatch):
-    """(a) The REAL monitor loop: DEGRADED at 121 s, no respawn at 299 s or 300 s, exactly one
+    """The REAL monitor loop: DEGRADED at 121 s, no respawn at 299 s or 300 s, exactly one
     ``tick_silence`` respawn at 301 s, and the loop returns after it (a fresh monitor takes over)."""
     now = _Now(_at(10, 0, 0))
     clock = Clock(time_source=now)
@@ -1463,7 +1463,7 @@ async def test_silent_connected_feed_respawns_once_past_300s_through_the_real_mo
 
 @pytest.mark.asyncio
 async def test_tick_silence_never_respawns_outside_market_hours(monkeypatch):
-    """(b) DEGRADED left over after the 15:30 close, or on a holiday, never respawns."""
+    """DEGRADED left over after the 15:30 close, or on a holiday, never respawns."""
     sup, now, notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(15, 0, 0))
     sup._state = "DEGRADED"
     now.set(_at(15, 31, 0))                                     # 31 min of silence, but the session is shut
@@ -1479,7 +1479,7 @@ async def test_tick_silence_never_respawns_outside_market_hours(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_each_fresh_connection_gets_the_full_budget_from_its_healthy_entry(monkeypatch):
-    """(c) After a tick-silence respawn the fresh child goes HEALTHY on its first heartbeat and re-enters
+    """After a tick-silence respawn the fresh child goes HEALTHY on its first heartbeat and re-enters
     DEGRADED 120 s later; its own respawn waits a full 300 s from that HEALTHY entry."""
     sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
 
@@ -1501,7 +1501,7 @@ async def test_each_fresh_connection_gets_the_full_budget_from_its_healthy_entry
 
 @pytest.mark.asyncio
 async def test_tick_silence_respawn_times_from_the_later_of_last_tick_and_healthy_entry(monkeypatch):
-    """(c) The respawn clock is the LATER of the last tick and the HEALTHY entry, not
+    """The respawn clock is the LATER of the last tick and the HEALTHY entry, not
     ``_effective_tick_silence_s`` (last tick first): a feed that recovered from STALE at 10:04 with a 10:00
     tick on file has had 120 s of silence at 10:06, not 360 s."""
     sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
@@ -1519,7 +1519,7 @@ async def test_tick_silence_respawn_times_from_the_later_of_last_tick_and_health
 
 @pytest.mark.asyncio
 async def test_three_respawns_then_one_escalation_and_one_degraded_alert(monkeypatch):
-    """(d) The cap: 3 respawns, then none; one ERROR and one ``feed_silent_unrecovered`` notify; and the
+    """The cap: 3 respawns, then none; one ERROR and one ``feed_silent_unrecovered`` notify; and the
     ``feed_degraded`` notify fired once over the episode despite four DEGRADED entries."""
     sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
 
@@ -1547,7 +1547,7 @@ async def test_three_respawns_then_one_escalation_and_one_degraded_alert(monkeyp
 
 @pytest.mark.asyncio
 async def test_a_tick_after_respawns_starts_a_new_episode_with_a_full_cap(monkeypatch):
-    """(e) A tick after two respawns (DEGRADED → HEALTHY via the tick) ends the episode: a later silence
+    """A tick after two respawns (DEGRADED → HEALTHY via the tick) ends the episode: a later silence
     gets a fresh ``feed_degraded`` page and three more respawns before it escalates."""
     sup, now, notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
 
@@ -1567,7 +1567,7 @@ async def test_a_tick_after_respawns_starts_a_new_episode_with_a_full_cap(monkey
 
 @pytest.mark.asyncio
 async def test_a_tick_on_a_heartbeat_promoted_child_also_ends_the_episode(monkeypatch):
-    """(e) The fresh child is HEALTHY (heartbeat-promoted) when its first tick lands, not DEGRADED; that
+    """The fresh child is HEALTHY (heartbeat-promoted) when its first tick lands, not DEGRADED; that
     tick must end the episode too, and the HEALTHY promotion itself must not."""
     sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
 
@@ -1580,7 +1580,7 @@ async def test_a_tick_on_a_heartbeat_promoted_child_also_ends_the_episode(monkey
 
 @pytest.mark.asyncio
 async def test_a_new_session_date_resets_a_spent_cap(monkeypatch):
-    """(f) Capped and escalated yesterday, still DEGRADED at today's open: today's session gets a full
+    """Capped and escalated yesterday, still DEGRADED at today's open: today's session gets a full
     cap, timed from today's 09:15 open (not yesterday's silence), and its own ``feed_degraded`` page."""
     sup, now, notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(14, 0, 0))
     await _drive(sup, now, 1500)
@@ -1600,7 +1600,7 @@ async def test_a_new_session_date_resets_a_spent_cap(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_tick_silence_respawn_whose_spawn_raises_keeps_supervising_and_counts(monkeypatch):
-    """(h) A spawn that raises takes the existing ``_spawn_failed`` path (STALE + a retry task standing in
+    """A spawn that raises takes the existing ``_spawn_failed`` path (STALE + a retry task standing in
     for the monitor) and still spends an attempt."""
     import engine.broker.ticker_supervisor as mod
 
@@ -1626,7 +1626,7 @@ async def test_a_tick_silence_respawn_whose_spawn_raises_keeps_supervising_and_c
 
 @pytest.mark.asyncio
 async def test_a_tick_silence_respawn_without_a_token_stops_and_counts(monkeypatch):
-    """(h) No access token: the existing STOPPED path, no spawn, and the attempt is still spent."""
+    """No access token: the existing STOPPED path, no spawn, and the attempt is still spent."""
     sup, now, _notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
     sup._access_token = None
     sup._state = "DEGRADED"

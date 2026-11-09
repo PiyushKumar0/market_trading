@@ -354,7 +354,7 @@ class FilingsResultsJob:
             parsed = parse_results(json.loads(resp.content))
             results_parsed = len(parsed)
             results_written = await self._store.arun(self._store.upsert_results_filings, parsed)
-        except Exception as exc:  # noqa: BLE001 - E5: per-leg degrade, never raise
+        except Exception as exc:  # noqa: BLE001 - per-leg degrade, never raise
             detail = f"results: {type(exc).__name__}: {exc}"
             _log.warning("filings_results_fetch_failed", d=d.isoformat(), error=detail)
             failed.append("results")
@@ -364,7 +364,7 @@ class FilingsResultsJob:
         try:
             rows = await fetch_integrated_results(self._http, frm, d, timeout=self._timeout)
             integrated_written = await self._store.arun(self._store.upsert_results_filings, rows)
-        except Exception as exc:  # noqa: BLE001 - E5: per-leg degrade, never raise
+        except Exception as exc:  # noqa: BLE001 - per-leg degrade, never raise
             detail = f"integrated: {type(exc).__name__}: {exc}"
             _log.warning("filings_results_fetch_failed", d=d.isoformat(), error=detail)
             failed.append("integrated")

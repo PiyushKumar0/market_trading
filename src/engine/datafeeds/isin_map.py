@@ -210,7 +210,7 @@ class IsinMapJob:
         scrip code because the master could not be read. Never raises."""
         try:
             result = await self._run(symbols)
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.exception("isin_map_build_failed")
             result = IsinMapResult(ok=False, degraded=True, reason=reason)

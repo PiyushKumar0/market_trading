@@ -1095,7 +1095,7 @@ async def compose(
             recommend=settings.recommend,
             strategy_edge_pct=strategy_edges,   # the gate's own object, never a copy
             reports_dir=data_dir / "reports",
-            # D1: None (subsystem disabled or failed to build) ⇒ no paper verdict, no paper order.
+            # None (subsystem disabled or failed to build) ⇒ no paper verdict, no paper order.
             paper_ctx_builder=paper.ctx_builder if paper is not None else None,
             paper_submit=paper.submit if paper is not None else None,
             paper_enabled_fn=paper.entries_open if paper is not None else None,
@@ -1871,7 +1871,7 @@ async def compose(
     session.add_login_hook(early_hydration.on_login)
 
     # --- dashboard API ---
-    # O19: the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges,
+    # the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges,
     # the paper book's mark, and the last stored 1m close for a held symbol neither live cache has
     # priced (after an out-of-session restart both are empty until the next session).
     capital = CapitalChanger(

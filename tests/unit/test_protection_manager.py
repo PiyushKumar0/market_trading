@@ -537,7 +537,7 @@ async def held_and_protected(rig: Rig) -> dict[str, bool]:
 
 
 @pytest.mark.parametrize("seed_", range(12))
-async def test_r3_every_open_position_is_protected_or_exiting_within_n_ticks(conn, bus, make_rig, seed_) -> None:
+async def test_every_open_position_is_protected_or_exiting_within_n_ticks(conn, bus, make_rig, seed_) -> None:
     rng = random.Random(seed_)
     now = Now()
     rig = make_rig(now=now, broker=PaperBroker(Clock(time_source=now), bus.publish, FillModelConfig(), lambda _: TICK,

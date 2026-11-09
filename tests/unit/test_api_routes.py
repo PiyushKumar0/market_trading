@@ -799,16 +799,16 @@ def test_recommendations_latest_delivered_first_with_payload_and_human_action(co
     assert next(rec for rec in recs if rec["rec_id"] == "rec-2")["human_action"] is None
 
 
-def test_recommendations_shape_is_unchanged_by_the_q1_payload_fields(conn, clock) -> None:
+def test_recommendations_shape_is_unchanged_by_the_rec_card_fields(conn, clock) -> None:
     payload = {
-        "rec_id": "rec-q1", "kind": "entry", "instrument": "BHEL", "stop": "418.30", "targets": [],
+        "rec_id": "rec-card", "kind": "entry", "instrument": "BHEL", "stop": "418.30", "targets": [],
         "hold_sessions": 20, "exit_session": None, "exit_kind": "time", "risk_inr": "373.80",
         "gtt_instruction": "after entry fills, place a single-trigger GTT", "evidence": ["x"],
         "registered_edge_pct": "1.53", "reference_entry": "427.90", "reference_stop": "402.25",
     }
     conn.execute(
         "INSERT INTO recommendations (rec_id, payload, delivered_at) VALUES (?, ?, ?)",
-        ("rec-q1", json.dumps(payload), "2026-10-06T10:00:00+05:30"),
+        ("rec-card", json.dumps(payload), "2026-10-06T10:00:00+05:30"),
     )
     [rec] = _client(conn=conn, clock=clock).get("/recommendations", headers=AUTH).json()[
         "recommendations"
@@ -1143,7 +1143,7 @@ def test_capital_routes_need_the_token(tmp_path, conn) -> None:
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 def test_both_capital_routes_are_async(method) -> None:
-    """Ruling R7: a sync route would run in a worker thread, off the loop the ticks run on; both
+    """A sync route would run in a worker thread, off the loop the ticks run on; both
     routes await the changer (GET: the stored-price prefetch)."""
     import inspect
 

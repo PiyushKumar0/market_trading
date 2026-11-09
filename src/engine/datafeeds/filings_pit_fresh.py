@@ -703,7 +703,7 @@ class FilingsPitFreshJob:
                 )
             leg = "bulk_master"
             master = await self._bulk_master()
-        except Exception as exc:  # noqa: BLE001 - E5: degrade to the stored map, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade to the stored map, never raise
             _log.warning(
                 # Not ``..._master_failed``: this guard now also covers the store read and the CSV,
                 # and ``leg`` is what says which one. A name that always said "master" would send
@@ -806,7 +806,7 @@ class FilingsPitFreshJob:
         try:
             resp = await bse_get(self._http, url, timeout=self._timeout)
             return parse_pit_fresh(json.loads(resp.content), scrip_map), None
-        except Exception as exc:  # noqa: BLE001 - E5: degrade this surface, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade this surface, never raise
             detail = f"{type(exc).__name__}: {exc}"
             _log.warning("filings_pit_fresh_fetch_failed", url=url, error=detail)
             return PitFreshParse([], 0, 0, 0, 0), detail

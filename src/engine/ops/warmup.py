@@ -70,7 +70,7 @@ CLASS_REGIME = "regime"
 #: A blocker whose scope prefix matches no class — a synthesized fail-closed sentinel (the
 #: composition root's "unrefreshed" snapshot, the lifecycle's "warmup check failed") or a future
 #: scope whose rendering was not classified here. Coverage that cannot be ATTRIBUTED blocks EVERY
-#: class (R6: what cannot be verified is treated as missing), so a new scope fails safe by default.
+#: class (what cannot be verified is treated as missing), so a new scope fails safe by default.
 CLASS_UNKNOWN = "unknown"
 
 _REAL_CLASSES = (CLASS_INTRADAY, CLASS_DAILY, CLASS_REGIME)

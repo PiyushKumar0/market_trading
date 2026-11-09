@@ -133,7 +133,7 @@ def _rows_for_symbol(
     k = 0
     cum = 0
 
-    # --- pre-open (A14: excluded from bars; the LAST print is the auction open) -------------------
+    # --- pre-open (excluded from bars; the LAST print is the auction open) -------------------
     auction_open = _dec2(base)
     start = datetime.combine(day, time(9, 0), tzinfo=IST)
     for i in range(PRE_OPEN_TICKS):

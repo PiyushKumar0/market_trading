@@ -374,7 +374,7 @@ def test_ew_line_stale_after_missed_evening_is_unavailable(assembler, store, con
 
 
 def test_stable_block_changes_only_when_inputs_advance(assembler, store, conn, calendar):
-    """D8: a corrected close under the same last date leaves the prefix byte-identical; the morning
+    """A corrected close under the same last date leaves the prefix byte-identical; the morning
     catch-up writing the missed EW row moves it once."""
     seed_index(store, calendar, UP)
     seed_ew(conn, calendar, [0.0] * 20, end=date(2026, 6, 15))
@@ -615,7 +615,7 @@ STRUCTURAL_MARKER = "STRUCTURAL ABSENCE, NOT A DATA FAILURE"
 
 
 def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_tail(assembler, store):
-    """(a) The exact live failure: swing candidate, zero 1m bars, full daily history available."""
+    """The exact live failure: swing candidate, zero 1m bars, full daily history available."""
     seed_daily_bars(store, symbol=UNWATCHED)
     v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
     lines = v.splitlines()
@@ -662,7 +662,7 @@ def test_a_failed_1m_read_is_not_labelled_a_structural_absence(assembler, store,
 
 
 def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(assembler, store):
-    """(c) A swing candidate that IS on the tick watchlist: intraday tail AND daily tail, no note."""
+    """A swing candidate that IS on the tick watchlist: intraday tail AND daily tail, no note."""
     seed_bars(store, count=5)
     seed_daily_bars(store, symbol=SYMBOL)
     v = assembler.for_signal(WATCHED_SWING_CANDIDATE, **SIGNAL_KW).volatile_block
@@ -731,7 +731,7 @@ def _intraday_pin_block(assembler, store, conn) -> str:
 
 
 def test_intraday_volatile_block_is_byte_identical_to_pre_change(assembler, store, conn):
-    """(d) The orb path pays nothing for the swing fix — not a byte, not a token, not a query."""
+    """The orb path pays nothing for the swing fix — not a byte, not a token, not a query."""
     assert _intraday_pin_block(assembler, store, conn) == INTRADAY_VOLATILE_PIN
 
 
@@ -752,7 +752,7 @@ def test_structural_wording_never_appears_for_an_intraday_candidate(assembler, s
 
 
 def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
-    """(e) Token cost of the addition, chars/4 convention — reported, and capped so it cannot creep.
+    """Token cost of the addition, chars/4 convention — reported, and capped so it cannot creep.
 
     Measured as the same candidate rendered swing vs intraday; the two blocks differ only by the new
     lines plus the 3-char ``"swing"``/``"intraday"`` literal in the candidate JSON.
@@ -789,7 +789,7 @@ INS_CANDIDATE = SignalCandidate(
 
 
 def test_every_signal_context_carries_its_strategy_contract(assembler, store):
-    """(a) The block exists at all, and sits directly under the candidate line it frames."""
+    """The block exists at all, and sits directly under the candidate line it frames."""
     seed_bars(store)
     v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
     lines = v.splitlines()
@@ -846,7 +846,7 @@ def test_the_nightly_review_reads_back_the_candidate_line(assembler, store):
 
 
 def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):
-    """(b) The 2026-08-19 HCLTECH decline, answered in the context itself.
+    """The 2026-08-19 HCLTECH decline, answered in the context itself.
 
     ``ins`` is the only validated edge; its crossings cluster in drawdowns, so a red tape and a
     below-VWAP price ARE the validated entry population, and its ``target=None`` is design rather
@@ -863,7 +863,7 @@ def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):
 
 
 def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler, store, caplog):
-    """(c) D7: a scanner shipped without a contract costs the call its frame, never the call — and
+    """A scanner shipped without a contract costs the call its frame, never the call — and
     the omission is a WARNING line, because silently thinner prompts are how this class of defect
     survives for weeks."""
     import logging

@@ -426,7 +426,7 @@ class NewsWorld:
         return {r["symbol"]: r for r in self.store.get_catalyst_watchlist(d)}
 
     def assert_not_frozen(self) -> None:
-        """E5: news is never load-bearing — no news failure may FREEZE (or kill) the platform."""
+        """News is never load-bearing — no news failure may FREEZE (or kill) the platform."""
         assert self.mode.risk_state() == RiskState.NORMAL
         assert self.latch.active_causes() == []
         assert not self.kill.is_killed()

@@ -273,7 +273,7 @@ class UniverseBuilder:
         no new entries; risk-reducing paths are elsewhere and unaffected)."""
         try:
             return await self._build(d)
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise into the scheduler
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise into the scheduler
             _log.exception("universe_build_failed", d=d.isoformat())
             await self._alert(
                 title="Universe build failed",
@@ -465,7 +465,7 @@ class UniverseBuilder:
         behavior — never to a failed build."""
         try:
             renames = await self._store.arun(self._store.get_symbol_renames, d)
-        except Exception:  # noqa: BLE001 - E5: an auxiliary read must not fail the build
+        except Exception:  # noqa: BLE001 - an auxiliary read must not fail the build
             _log.exception("symbol_renames_unavailable", d=d.isoformat())
             return {}
         return {r.old_symbol: r for r in renames}
@@ -561,7 +561,7 @@ class UniverseBuilder:
                 raise ValueError(f"downloaded {index_name} CSV parsed to zero symbols")
             self._write_cache(cache_path, resp.text)
             return symbols, "download"
-        except Exception as exc:  # noqa: BLE001 - E5: fall down the ladder, never raise
+        except Exception as exc:  # noqa: BLE001 - fall down the ladder, never raise
             _log.warning(
                 "index_download_failed",
                 index_name=index_name, url=url, error=f"{type(exc).__name__}: {exc}",

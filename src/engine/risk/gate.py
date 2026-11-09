@@ -645,7 +645,7 @@ class RiskGate:
         limit = f"{w.start}-{w.end}" + (f" (MIS entries cut off {cutoff})" if intraday else "")
         led.add(
             "trade_window", ok, f"now={now_t}", limit,
-            "inside the owner-set window" if ok else "outside the owner-set window (R3: exits unaffected)",
+            "inside the owner-set window" if ok else "outside the owner-set window (exits unaffected)",
         )
 
     def _rule_no_trade_windows(
@@ -1619,7 +1619,7 @@ class GateContextBuilder:
         return frozenset(str(r["symbol"]) for r in rows if r["symbol"])
 
     def _paper_committed_capital(self) -> Decimal:
-        """D10: the unfilled remainder of working paper entry orders commits capital (LIMIT at its
+        """The unfilled remainder of working paper entry orders commits capital (LIMIT at its
         price, MARKET at the live mark); the filled part is already a position."""
         total = Decimal(0)
         for r in self._paper_entry_orders(f"o.state NOT IN {TERMINAL_ORDER_STATES_SQL}"):

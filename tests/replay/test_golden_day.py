@@ -238,7 +238,7 @@ def test_pre_open_builds_no_bar_and_open_is_first_session_print(
         assert first.open != synthetic_day.auction_open[symbol]
         assert first.auction_open == synthetic_day.auction_open[symbol]
         assert first.src == "self"
-        # A13: engine up from the open ⇒ the WHOLE cumulative belongs to the 09:15 bar, so its
+        # engine up from the open ⇒ the WHOLE cumulative belongs to the 09:15 bar, so its
         # volume is the cumulative standing at the end of that minute — exactly, not merely "large".
         # A delta-only builder would report (cum_last − cum_first) here and this would fail.
         assert first.volume == synthetic_day.open_bar_volume[symbol]

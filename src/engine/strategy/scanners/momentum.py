@@ -69,7 +69,7 @@ class MomentumScanner(Scanner):
         if rank is None or rank > top_n:
             return []  # NaN momentum is unrankable; below top_n doesn't trade
 
-        # ---- A12: skip when an ex-date lands inside the hold horizon.
+        # ---- skip when an ex-date lands inside the hold horizon.
         today = bar.ts_minute.date()
         horizon = today + timedelta(days=math.ceil(rebalance_days * 7 / 5))
         if any(today <= xd <= horizon for xd in ctx.upcoming_ex_dates):

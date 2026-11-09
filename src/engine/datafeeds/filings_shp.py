@@ -356,7 +356,7 @@ class FilingsShpJob:
         try:
             resp = await nse_get(self._http, NSE_SHP_MASTER_URL, timeout=self._timeout)
             submissions = parse_shp_master(json.loads(resp.content))
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"master: {type(exc).__name__}: {exc}"
             _log.warning("filings_shp_master_failed", error=reason)
             if not self._alerted:  # dedup: don't storm on every retry of a still-failing streak
@@ -412,7 +412,7 @@ class FilingsShpJob:
                     symbol=sub.symbol, qtr_end=sub.qtr_end,
                     broadcast_dt=sub.broadcast_dt, revised=sub.revised,
                 )
-            except Exception as exc:  # noqa: BLE001 - E5: degrade THIS symbol only, never raise
+            except Exception as exc:  # noqa: BLE001 - degrade THIS symbol only, never raise
                 failed += 1
                 _log.warning(
                     "filings_shp_detail_failed", symbol=sub.symbol, error=f"{type(exc).__name__}: {exc}"

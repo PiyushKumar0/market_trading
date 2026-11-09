@@ -525,7 +525,7 @@ def test_mom_rebalance_gating_in_trading_sessions():
 
 
 def test_mom_ex_date_skip_horizon():
-    # A12: horizon = ceil(15 × 7/5) = 21 calendar days from the bar's day, inclusive.
+    # horizon = ceil(15 × 7/5) = 21 calendar days from the bar's day, inclusive.
     scanner = MomentumScanner()
     bar = _swing_bar("100", symbol="AAA")                                   # bar day = 2026-06-17
     assert scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 7, 8)])) == []   # day+21 — inside, skip

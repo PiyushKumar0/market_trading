@@ -114,7 +114,7 @@ FEE_KEYS = ("brokerage", "stt", "txn", "sebi", "stamp", "gst", "dp")
 
 
 @pytest.mark.parametrize("key", sorted(WORKED_EXAMPLES, key=str))
-def test_c3_worked_examples_to_the_paisa(model, key):
+def test_fee_worked_examples_to_the_paisa(model, key):
     """The FEE components stay paisa-exact (contract-note anchor) with spread carried separately."""
     product, notional, n = key
     bd = model.round_trip(notional, product, n_scrips_sell_day=n)
@@ -187,7 +187,7 @@ def test_zero_spread_reproduces_the_spreadless_surface(raw_yaml):
         assert bd.breakeven_pct == fee_breakeven
 
 
-def test_c3_reference_roundtrips_parameterized_from_yaml(model, raw_yaml):
+def test_reference_roundtrips_parameterized_from_yaml(model, raw_yaml):
     """The yaml's own reference_roundtrips block (~21 / ~60 / ~83) reproduces from the model.
 
     The block is FEES-ONLY by construction (see its costs.yaml comment) — it is asserted against

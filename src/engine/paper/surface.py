@@ -50,7 +50,7 @@ class BrokerSurface(Protocol):
 
     # -- orders ------------------------------------------------------------------------------
     async def place_order(self, req: ReqLike, intent: str = "entry") -> str:
-        """Place an order; returns the broker ``order_id`` (R5: the orderbook is the truth)."""
+        """Place an order; returns the broker ``order_id`` (the orderbook is the truth)."""
         ...
 
     async def modify_order(self, order_id: str, req: ReqLike, intent: str = "risk_reducing") -> str:

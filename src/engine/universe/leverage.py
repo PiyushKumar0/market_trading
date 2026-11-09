@@ -162,7 +162,7 @@ class MisLeverageIngest:
             self._current = MisLeverageMap(as_of=now, degraded=False, leverages=leverages)
             _log.info("mis_margins_refreshed", symbols=len(leverages))
             return self._current
-        except Exception as exc:  # noqa: BLE001 - E5: best-effort feed, degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - best-effort feed, degrade + alert, never raise
             _log.warning("mis_margins_fetch_failed", error=f"{type(exc).__name__}: {exc}")
             self._current = self._from_cache(reason=str(exc))
             await self._alert(

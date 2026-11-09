@@ -123,7 +123,7 @@ def _flat(px: float):
 
 
 # --------------------------------------------------------------------------- the failed_breakout morning shapes
-def _f1_price(morning: float, late: float, afternoon: float, squareoff_px: float):
+def _failed_breakout_price(morning: float, late: float, afternoon: float, squareoff_px: float):
     """09:15-09:29 the shared opening range (OR high 100.50), then ``morning`` until 10:30, ``late``
     until 11:00, ``afternoon`` until 15:14, ``squareoff_px`` at 15:15 and 90.00 after it (a price the
     15:15 exit must never reach)."""
@@ -140,7 +140,7 @@ def _f1_price(morning: float, late: float, afternoon: float, squareoff_px: float
     return price
 
 
-FADER_PRICE = _f1_price(101.0, 100.0, 100.0, 98.0)
+FADER_PRICE = _failed_breakout_price(101.0, 100.0, 100.0, 98.0)
 
 #: FAILFADE: the 11:05 bar CLOSES at 101.00 - above the OR high (100.50), and NOT above the session
 #: high (101.00), so it is the FADE-FAILURE exit and not the stop - and the 11:06 bar OPENS at 104.00.
@@ -160,7 +160,7 @@ def _failfade_price(t: time) -> float:
 STOPPOKE_OVERRIDES: dict[time, tuple[float, float, float, float]] = {
     time(11, 3): (100.0, 103.0, 100.0, 100.0),
 }
-STOPPOKE_PRICE = _f1_price(101.0, 100.0, 100.0, 99.0)
+STOPPOKE_PRICE = _failed_breakout_price(101.0, 100.0, 100.0, 99.0)
 
 
 def _latebreak_price(t: time) -> float:
@@ -268,8 +268,8 @@ def _tape() -> list[Bar]:
     bars += _session("FAILFADE", SIGNAL_DAY, _failfade_price, two_x, overrides=FAILFADE_OVERRIDES)
     bars += _session("STOPPOKE", SIGNAL_DAY, STOPPOKE_PRICE, two_x, overrides=STOPPOKE_OVERRIDES)
     bars += _session("THINVOL", SIGNAL_DAY, FADER_PRICE, BASE_VOL)
-    bars += _session("NOBREAK", SIGNAL_DAY, _f1_price(100.0, 100.0, 100.0, 98.0), two_x)
-    bars += _session("STILLUP", SIGNAL_DAY, _f1_price(101.0, 101.0, 101.0, 98.0), two_x)
+    bars += _session("NOBREAK", SIGNAL_DAY, _failed_breakout_price(100.0, 100.0, 100.0, 98.0), two_x)
+    bars += _session("STILLUP", SIGNAL_DAY, _failed_breakout_price(101.0, 101.0, 101.0, 98.0), two_x)
     bars += _session("LATEBREAK", SIGNAL_DAY, _latebreak_price, two_x)
 
     bars += _gapper_session("GAPPER")

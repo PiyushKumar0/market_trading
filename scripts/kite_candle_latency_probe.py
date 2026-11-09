@@ -12,7 +12,7 @@ Run DURING A LIVE SESSION (needs a valid daily access token):
 Method: for each observed minute boundary, poll ``historical_data`` for the just-closed minute on a
 few liquid symbols every ``--poll-s`` seconds until that minute's candle appears (or ``--timeout-s``
 gives up); the sample is the delay from the minute close to first availability. Percentiles land in
-``data/reports/q15_latency.json``. Pacing: with the default 3 symbols and 2 s poll interval the
+``data/reports/kite_candle_latency.json``. Pacing: with the default 3 symbols and 2 s poll interval the
 request rate stays ≤1.5 req/s, inside the ≤3 req/s historical budget — this script must not be
 run concurrently with an engine that is backfilling.
 
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--symbols", nargs="*", default=DEFAULT_SYMBOLS)
     parser.add_argument("--poll-s", type=float, default=2.0, help="poll interval per symbol")
     parser.add_argument("--timeout-s", type=float, default=180.0, help="give up on a minute after this")
-    parser.add_argument("--out", default=str(_REPO_ROOT / "data" / "reports" / "q15_latency.json"))
+    parser.add_argument("--out", default=str(_REPO_ROOT / "data" / "reports" / "kite_candle_latency.json"))
     args = parser.parse_args(argv)
 
     from kiteconnect import KiteConnect  # heavy import deferred; owner tool only

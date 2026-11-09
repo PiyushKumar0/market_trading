@@ -998,7 +998,7 @@ async def test_a_garbled_payload_is_listed_by_id_but_never_ticker_resolved(clock
 
 @pytest.mark.asyncio
 async def test_a_broken_ledger_read_never_takes_down_the_command(clock, conn, msg, monkeypatch):
-    """R8: the resolver is a read-only convenience. A failing read refuses the ticker with a usable
+    """The resolver is a read-only convenience. A failing read refuses the ticker with a usable
     instruction — and still lets a full id through, because that path needs no ledger at all."""
     def _boom(*_args, **_kw):
         raise RuntimeError("database is locked")
@@ -1436,7 +1436,7 @@ def test_recommendation_message_renders_the_full_36_payload(clock):
     headroom_lines = [ln for ln in text.splitlines() if ln.startswith("  • rule_") or "per_trade_risk" in ln]
     assert len(headroom_lines) == 5
     assert "per_trade_risk: 1.4% vs 1.0% — headroom -0.4% (FAILED)" in text
-    # R8: structured payload lives in data, never leaks into the owner's prose.
+    # structured payload lives in data, never leaks into the owner's prose.
     assert message.data["rec_id"] == "rec-1" and message.data["verdict"] == "shrink"
     assert "confidence" not in text and message.data["confidence"] == 0.72
     for leak in ("CheckResult(", "rule_id=", "MessageKind.", "data={", "buttons="):
@@ -1502,7 +1502,7 @@ def test_recommendation_states_both_the_level_and_the_current_price(clock):
 
 
 def test_recommendation_level_and_ltp_are_machine_readable(clock):
-    """R8: the owner reads prose, the audit log reads ``data`` — both prices must survive there."""
+    """The owner reads prose, the audit log reads ``data`` — both prices must survive there."""
     message = catalog.recommendation_message(
         _limit_recommendation(clock), ltp=Decimal("2500.00")
     )
@@ -2044,7 +2044,7 @@ async def test_teardown_app_runs_every_step_despite_failures():
 
 @pytest.mark.asyncio
 async def test_a_send_failure_never_breaks_the_publisher(clock, bus):
-    """R8: alerting must never take down the risk publisher that raised the event."""
+    """Alerting must never take down the risk publisher that raised the event."""
 
     class _ExplodingBot:
         async def send_message(self, chat_id, text, reply_markup=None):

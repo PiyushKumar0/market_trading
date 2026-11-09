@@ -399,4 +399,4 @@ async def test_three_rejects_in_60s_freeze_entries_and_alert() -> None:
     + LIVE_ORDER_PATH_GATED
 ))
 async def test_429_retry_backoff_policy() -> None:
-    """A2: on a 429 the order path retries with backoff — each retry drawing from the rate budget."""
+    """On a 429 the order path retries with backoff — each retry drawing from the rate budget."""

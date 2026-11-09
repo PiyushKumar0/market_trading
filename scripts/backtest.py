@@ -329,7 +329,7 @@ def _run_one(
         f"[{strategy_id}] N={sweep.trial_count_n} {label}={best}"
         f" expectancy={exp} CPCV_pass={frac}/{bar} margin_floor={floor} -> {verdict}"
     )
-    # R2: the verdict line above quotes the floor at the REGISTERED denominator. Print the measured
+    # the verdict line above quotes the floor at the REGISTERED denominator. Print the measured
     # horizon and the floor re-based on it right underneath, so the operator cannot read a pass at a
     # 120-session cap as comfortable without seeing what the median trade was actually held for.
     hold = report.realized_hold

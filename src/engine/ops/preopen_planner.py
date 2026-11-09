@@ -243,7 +243,7 @@ class PreopenPlannerJob:
         return AdvisoryOutcome.RAN
 
     def _guarded(self, build: Callable[[], T], failed: T) -> T:
-        """D7: a failed read renders ``failed`` and never raises into the prompt build."""
+        """A failed read renders ``failed`` and never raises into the prompt build."""
         try:
             return build()
         except Exception as exc:                         # noqa: BLE001 - one input's failure never blocks the plan

@@ -299,7 +299,7 @@ async def test_unknown_feed_key_is_rejected(store, clock):
 
 
 async def test_gdelt_payload_is_headline_level_only(store, clock):
-    """A3r: only title/source_domain/url/published_at survive ingest — no body-ish fields leak."""
+    """Only title/source_domain/url/published_at survive ingest — no body-ish fields leak."""
     ingest, client = _make_ingest(store, clock)
     async with client:
         got = await ingest.poll(feeds=("gdelt",))
@@ -481,7 +481,7 @@ async def test_nse_ann_disabled_makes_no_request(store, clock):
 
 
 async def test_nse_ann_dead_endpoint_degrades_to_zero_headlines(store, clock, instant_backoff):
-    """E5: the announcements endpoint failing contributes nothing and never raises."""
+    """The announcements endpoint failing contributes nothing and never raises."""
     ingest, client = _ann_ingest(store, clock, response=httpx.Response(500))
     async with client:
         got = await ingest.poll(feeds=(NSE_ANN_KEY,))

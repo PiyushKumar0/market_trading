@@ -99,7 +99,7 @@ _ORDER_CALLS = {
 }
 
 
-# --------------------------------------------------------------------------- (0) D8: orders disabled
+# --------------------------------------------------------------------------- (0) orders disabled
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op", sorted(_ORDER_CALLS))
 async def test_orders_disabled_refuses_before_guard_and_limiter(clock, rate_limiter, op) -> None:

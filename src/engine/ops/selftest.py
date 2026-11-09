@@ -273,7 +273,7 @@ class SelfTest:
         return SelfTestCheck(name="secrets_present", status=CheckStatus.PASS)
 
     def _check_anthropic_key_absent(self) -> SelfTestCheck:
-        # D2: a stray ANTHROPIC_API_KEY silently OUTRANKS the OAuth token. Tolerated only if the owner
+        # a stray ANTHROPIC_API_KEY silently OUTRANKS the OAuth token. Tolerated only if the owner
         # deliberately enabled pay-as-you-go overflow (agents.yaml llm.overflow_enabled).
         present = bool(os.environ.get("ANTHROPIC_API_KEY"))
         overflow = False
@@ -535,7 +535,7 @@ class SelfTest:
             return self._stub("sdk_smoke", "harness smoke callable not wired")
         d = self._clock.today()
         if self._calendar is not None and not self._calendar.is_trading_day(d):
-            return self._stub("sdk_smoke", "non-trading day (D11: skipped)")
+            return self._stub("sdk_smoke", "non-trading day (skipped)")
         row = self._conn.execute(
             "SELECT status FROM job_runs WHERE job_id='sdk_smoke' AND run_for_date=?", (d.isoformat(),)
         ).fetchone()

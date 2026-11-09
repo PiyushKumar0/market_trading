@@ -345,7 +345,7 @@ class BarBuilder:
             self._store.stage_tick(tick)
 
         if ts.time() < self._session_open:
-            # A14: pre-open ticks never contaminate bars; the LAST pre-open print is the
+            # pre-open ticks never contaminate bars; the LAST pre-open print is the
             # auction-derived open, stamped on the 09:15 row at finalize.
             self._auction_open[symbol] = tick.ltp
             self._advance(now)

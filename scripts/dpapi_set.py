@@ -54,7 +54,7 @@ _DASHBOARD_TOKEN_NBYTES = 32
 def _validate_key(key: str) -> str:
     """Return ``key`` if it is a known seedable secret, else exit with a helpful message.
 
-    Refuses unknown keys outright (R10: never invent credential-store entries). Gives a targeted
+    Refuses unknown keys outright (never invent credential-store entries). Gives a targeted
     hint for ``kite_access_token`` since it is a real secret but is minted daily, not seeded here.
     """
     if key in SEEDABLE:

@@ -558,7 +558,7 @@ class CapitalChanger:
     async def apply(self, capital_inr: int, expected_current_inr: int) -> dict[str, Any]:
         """Validate, write, re-sign and reload; then announce. Raises :class:`CapitalRefused`.
 
-        Ruling R7: the only ``await`` before ``limits.reload()`` is the price prefetch, before the
+        The only ``await`` before ``limits.reload()`` is the price prefetch, before the
         table is read; from ``_loaded()`` through the reload nothing yields to the loop."""
         stored = await self._stored_marks()
         loaded = self._loaded()

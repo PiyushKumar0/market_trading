@@ -153,7 +153,7 @@ async def test_missing_regime_history_blocks_regime(clock):
 
 @pytest.mark.asyncio
 async def test_non_trading_day_has_no_intraday_requirement():
-    """Sunday start (R6: no session) ⇒ no orb requirement even with zero intraday bars; the daily
+    """Sunday start (no session) ⇒ no orb requirement even with zero intraday bars; the daily
     lookbacks still bind."""
     sunday = Clock(time_source=lambda: datetime(2026, 6, 14, 10, 5, tzinfo=IST))
     store = FakeStore()

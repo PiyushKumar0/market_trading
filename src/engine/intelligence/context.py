@@ -406,7 +406,7 @@ class ContextAssembler:
             if why == "index_bar_missing":
                 prev = self._calendar.previous_trading_day(d)
                 return last, f"index regime: unavailable (no {name} bar for {prev.isoformat()})"
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("index_regime_unavailable", d, exc)
             return "read_failed", "index regime: unavailable (index read failed)"
         if idx is None:
@@ -435,7 +435,7 @@ class ContextAssembler:
                 "ORDER BY d DESC LIMIT ?",
                 (prev.isoformat(), EW_SESSIONS),
             ).fetchall()
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("regime_ew_unavailable", d, exc)
             return "read_failed", f"; core equal-weight {EW_SESSIONS}-session return: unavailable (read failed)"
         last = rows[0][0] if rows else None
@@ -496,7 +496,7 @@ class ContextAssembler:
             body = contracts.contract_text(strategy_id)
             if strategy_id not in contracts.STRATEGY_CONTRACTS:
                 _log.warning("strategy_contract_missing", strategy_id=strategy_id)
-        except Exception as exc:                     # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                     # noqa: BLE001 - never blocks a call
             _log.warning("strategy_contract_render_failed", strategy_id=strategy_id, error=str(exc))
             body = contracts.UNKNOWN_CONTRACT
         indented = "\n".join(f"  {line}" for line in body.splitlines())
@@ -523,7 +523,7 @@ class ContextAssembler:
             return f"{_UNAVAILABLE} (no feature snapshot for this candidate)"
         try:
             row = self._store.get_feature_snapshot(snapshot_id)
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("feature_snapshot_unavailable", self._clock.today(), exc)
             return f"{_UNAVAILABLE} (feature read failed)"
         if row is None:
@@ -553,7 +553,7 @@ class ContextAssembler:
             return self._store.get_bars_1m(
                 symbol, self._session_start(d), self._clock.now() + timedelta(minutes=1)
             )
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("bars_1m_unavailable", d, exc)
             return None
 
@@ -617,7 +617,7 @@ class ContextAssembler:
     def _daily_bars_text(self, symbol: str, d: date) -> str:
         """Trailing completed daily bars, oldest first, one compact line each (mirrors ``_bars_text``).
 
-        D7: a read failure renders ``unavailable`` and warns once — a swing candidate with no daily
+        a read failure renders ``unavailable`` and warns once — a swing candidate with no daily
         history is a thinner call, never a crashed one.
         """
         end = d - timedelta(days=1)                      # completed sessions only (never today)
@@ -631,7 +631,7 @@ class ContextAssembler:
         header = head(end)
         try:
             daily = self._store.get_bars_1d(symbol, start, end)
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             _log.warning("swing_daily_bars_unavailable", symbol=symbol, error=str(exc))
             return f"{header} {_UNAVAILABLE} (daily-bar read failed)"
         tail = daily[-DAILY_BAR_TAIL:]
@@ -675,7 +675,7 @@ class ContextAssembler:
                     for e in entries
                 ]
             ran = bool(rows) or self._digest_ran_fn is None or self._digest_ran_fn(d)
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("catalyst_watchlist_unavailable", d, exc)
             return [f"  watchlist entry: {_UNAVAILABLE} (watchlist read failed)"]
         if not ran:
@@ -692,7 +692,7 @@ class ContextAssembler:
             # digest measured them.
             agg = {(r["scope"], r["scope_key"]): r for r in self._store.get_sentiment_agg(as_of)}
             sector = self._sector_of(symbol, d)
-        except Exception as exc:                         # noqa: BLE001 - D7: never blocks a call
+        except Exception as exc:                         # noqa: BLE001 - never blocks a call
             self._warn_once("sentiment_unavailable", d, exc)
             return None, [f"  sentiment: {_UNAVAILABLE} (sentiment read failed)"]
         lines = [self._sentiment_line(f"symbol {symbol}", agg.get(("symbol", symbol)))]

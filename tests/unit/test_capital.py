@@ -587,7 +587,7 @@ async def test_the_prefetch_is_bounded_and_a_cut_off_symbol_is_unpriced(tmp_path
 
 
 async def test_the_price_prefetch_happens_before_the_table_is_read(tmp_path, conn, monkeypatch):
-    """Ruling R7: the prefetch is the only await before ``limits.reload()``, and it runs before the
+    """The prefetch is the only await before ``limits.reload()``, and it runs before the
     table (or the signed file) is read. Moving it after ``_loaded()`` fails here."""
     loads: list[int] = []
     reads: list[str] = []

@@ -582,7 +582,7 @@ def main(argv: list[str] | None = None) -> int:
     for display, module_name in _SIMPLE_IMPORTS:
         results.check(f"{display} import", _make_import_check(module_name))
 
-    # Minimal-run deps (A4: actually execute, not just import).
+    # Minimal-run deps (actually execute, not just import).
     results.check("duckdb import + trivial query", check_duckdb_run)
     results.check("river import + incremental learn step", check_river_run)
 

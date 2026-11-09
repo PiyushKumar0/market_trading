@@ -263,7 +263,7 @@ def test_floor_unavailable_on_dirty_rows():
 
 
 def test_risk_exactly_at_the_floor_passes():
-    """(d) Boundary: equality passes (the pinned comparison is R < floor ⇒ veto).
+    """Boundary: equality passes (the pinned comparison is R < floor ⇒ veto).
 
     Numbers chosen so the float gap is EXACT in binary — 100.78125/100.0 = 1.0078125 is
     representable, so the division is exact — which is what makes an equality boundary assertable
@@ -282,7 +282,7 @@ def test_risk_exactly_at_the_floor_passes():
 
 
 def test_floor_reads_only_the_last_20_pairs_ending_at_y():
-    """(e) The gap window is the LAST gap_lookback_sessions(20) pairs ENDING AT y, not all history:
+    """The gap window is the LAST gap_lookback_sessions(20) pairs ENDING AT y, not all history:
     the floor must track CURRENT overnight behaviour. (No-lookahead is structural — the API is only
     ever handed completed sessions <= y — so what is testable, and tested here, is the window.)
 
@@ -304,7 +304,7 @@ def test_floor_reads_only_the_last_20_pairs_ending_at_y():
 
 
 def test_accumulator_defaults_to_none_and_scan_stays_pure():
-    """(f) The observability seam is opt-in: with no accumulator the vetoes are silent, the verdicts
+    """The observability seam is opt-in: with no accumulator the vetoes are silent, the verdicts
     are identical, and repeated calls cannot drift (no module-global counter)."""
     vetoed = _breakout_at_risk_pct(0.17)
     passing = _breakout_at_risk_pct(2.1)
@@ -317,7 +317,7 @@ def test_accumulator_defaults_to_none_and_scan_stays_pure():
 
 
 def test_sweep_threads_the_accumulator_and_keeps_its_ordering():
-    """(g) sweep_daily's deterministic ordering is untouched by the new argument, and one accumulator
+    """``sweep_daily``'s deterministic ordering is untouched by the new argument, and one accumulator
     aggregates every symbol's veto classes — the counts ops/main.py logs per run."""
     dirty = _gapped(_series_with_breakout(), 0.5)
     for i in range(2, 8):

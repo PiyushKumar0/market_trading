@@ -180,7 +180,7 @@ class BhavcopyJob:
             bars = parse_bhavcopy_csv(_unwrap_zip(resp.content), d)
             if not bars:
                 raise ValueError("bhavcopy parsed to zero EQ rows")
-        except Exception as exc:  # noqa: BLE001 - E5: degrade + alert, never raise
+        except Exception as exc:  # noqa: BLE001 - degrade + alert, never raise
             reason = f"{type(exc).__name__}: {exc}"
             _log.warning("bhavcopy_fetch_failed", d=d.isoformat(), url=url, error=reason)
             if d not in self._alerted:  # dedup: the fixed watermark means 30-min sweeps genuinely

@@ -360,7 +360,7 @@ async def test_missing_overrides_file_alerts_but_sector_part_proceeds(tmp_path, 
 
 
 async def test_malformed_overrides_file_degrades_gracefully(tmp_path, store, clock):
-    """``overrides`` must be a mapping — a list (or any other malformed schema) is E5: alert, but
+    """``overrides`` must be a mapping — a list (or any other malformed schema) raises an alert, but
     classification proceeds exactly as if there were no overrides configured this run."""
     (tmp_path / "sector_overrides.yaml").write_text("overrides: [not, a, mapping]\n", encoding="utf-8")
     msgs, sink = collect_alerts()

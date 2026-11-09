@@ -97,7 +97,7 @@ def test_double_init_idempotent_and_persistent(tmp_path, clock):
 def test_bar_roundtrip_decimal_fidelity_src_auction_open(store, clock):
     open_915 = clock.combine(clock.today(), time(9, 15))
     bars = [
-        _bar(open_915, auction_open=Decimal("2338.10")),      # A14: auction open on the 09:15 row
+        _bar(open_915, auction_open=Decimal("2338.10")),      # auction open on the 09:15 row
         _bar(open_915 + timedelta(minutes=1), src="kite_official", open=Decimal("2339.05")),
     ]
     assert store.insert_bars_1m(bars) == 2

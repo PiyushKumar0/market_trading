@@ -785,7 +785,7 @@ def test_ins_stop_still_binds_per_trade_risk(gate: RiskGate) -> None:
     assert ok.approved_qty == 50                           # 400 budget / (2.0 x 4.00) = 50
 
 
-def test_ins_measured_edge_is_opt_in_not_a_weakening_of_c3(
+def test_ins_measured_edge_is_opt_in_not_a_weakening_of_the_cost_gate(
     gate_no_registered_edges: RiskGate,
 ) -> None:
     """Without the registration the pre-2026-08-17 behaviour is byte-for-byte intact: a targetless
@@ -828,7 +828,7 @@ def test_ins_measured_edge_still_faces_the_cost_floor(
 def test_a_registered_edge_mapping_changed_after_construction_is_seen(
     limit_table: LimitTable, cost_model: CostModel, gate_clock: Clock
 ) -> None:
-    """O19: the gate keeps the edges map by reference, so a live `StrategyEdges` whose limits
+    """The gate keeps the edges map by reference, so a live `StrategyEdges` whose limits
     table moves (a capital change) re-derives hi52's cap without rebuilding the gate."""
     from engine.strategy.hi52_edge import StrategyEdges
 
@@ -1609,7 +1609,7 @@ def test_gate_universe_membership_is_the_eligible_set_not_the_focus_watchlist() 
 
 
 @pytest.mark.asyncio
-async def test_surveillance_input_is_the_universe_rows_a8_codes(
+async def test_surveillance_input_is_the_universe_rows_surveillance_codes(
     gate: RiskGate, limit_table: LimitTable, gate_clock: Clock
 ) -> None:
     """No job writes ``instruments_daily.surveillance``; the universe build is the authority. The

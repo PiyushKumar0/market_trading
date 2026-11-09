@@ -545,7 +545,7 @@ async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monke
 
 
 async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock, monkeypatch):
-    # E5: the watermark read is INSIDE the guard. An unknown source tag RAISES by design
+    # the watermark read is INSIDE the guard. An unknown source tag RAISES by design
     # (store.latest_insider_broadcast), and a raise that escaped run() would bypass its per-day
     # alert dedup and its degraded result — the owner would never hear the feed stopped.
     async def boom(*_a, **_kw):

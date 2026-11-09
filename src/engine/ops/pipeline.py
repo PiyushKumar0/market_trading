@@ -376,7 +376,7 @@ def _json_payload(obj: Any) -> str:
 
 
 def _product_of(style: str) -> str:
-    """O3: intraday ⇒ MIS, swing/position ⇒ CNC. The one place the mapping is written."""
+    """Intraday ⇒ MIS, swing/position ⇒ CNC. The one place the mapping is written."""
     return "MIS" if style == "intraday" else "CNC"
 
 
@@ -3014,7 +3014,7 @@ class RecommendationPipeline:
         if isinstance(action, NoActionOutput):
             return
         if not isinstance(action, (ExitAction, ModifyStopAction)):
-            # R3: a position event may only yield risk-reducing output. The prompt says so; this is
+            # a position event may only yield risk-reducing output. The prompt says so; this is
             # the structural half of the same rule.
             _log.warning("position_event_illegal_action", action=getattr(action, "action", None),
                          position_id=position["position_id"])

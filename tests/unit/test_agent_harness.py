@@ -397,9 +397,9 @@ async def test_options_carry_model_setting_sources_and_empty_allowlist(defs, gov
                                   json_schema={"type": "object"})
 
     opts = fake.calls[0].options
-    assert opts.model == "claude-sonnet-5-5"       # D4: explicit API id, never an SDK default
-    assert opts.setting_sources == []              # D10: load NOTHING from the filesystem
-    assert opts.allowed_tools == []                # D5: single-shot agents get no tools
+    assert opts.model == "claude-sonnet-5-5"       # explicit API id, never an SDK default
+    assert opts.setting_sources == []              # load NOTHING from the filesystem
+    assert opts.allowed_tools == []                # single-shot agents get no tools
     assert "WebSearch" in opts.disallowed_tools and "Bash" in opts.disallowed_tools
     assert opts.max_output_tokens == 1200
     # The schema knob was sent, so the StructuredOutput tool round-trip gets its extra turn
@@ -501,7 +501,7 @@ async def test_schema_invalid_three_times_fails(defs, gov, clock, conn, alert, a
 
 
 async def test_prose_response_is_never_salvaged(defs, gov, clock, conn) -> None:
-    # D7: an answer that MIXES prose with a fence is a schema violation, not something to regex out.
+    # an answer that MIXES prose with a fence is a schema violation, not something to regex out.
     fenced = f"Here is my answer:\n```json\n{ENTER_JSON}\n```"
     fake = FakeQuery([FakeAssistantMessage(fenced), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake)
@@ -1069,7 +1069,7 @@ async def test_missing_tool_knob_refuses_tools_enabled_agent(defs, gov, clock, c
 
 
 async def test_missing_tool_knob_refuses_single_shot_too(defs, gov, clock, conn) -> None:
-    """2026-07-28 review F10: an options surface with NO tool knob means the SDK's DEFAULT builtin
+    """2026-07-28 review: an options surface with NO tool knob means the SDK's DEFAULT builtin
     toolset would run — refused for EVERY shape (fail closed), not warned past for single-shot."""
     fake = FakeQuery([FakeAssistantMessage(ENTER_JSON), FakeResultMessage(USAGE_SDK)])
     harness = make_harness(defs, gov, clock, conn, fake, options_cls=NoToolOptions)

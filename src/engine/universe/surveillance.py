@@ -221,7 +221,7 @@ class SurveillanceIngest:
         # ``prior`` because the failure branch below binds ``previous`` to one list.
         try:
             prior, prior_as_of = self._previous_snapshot(cache, today)
-        except Exception:  # noqa: BLE001 - E5: wording input only; every list then reads unknown
+        except Exception:  # noqa: BLE001 - wording input only; every list then reads unknown
             _log.exception("surveillance_previous_snapshot_failed")
             prior, prior_as_of = SurveillanceLists(as_of=today), dict.fromkeys(SURVEILLANCE_KEYS)
         results: dict[str, frozenset[str]] = {}
@@ -252,7 +252,7 @@ class SurveillanceIngest:
                     symbols = await coro
                 results[key] = frozenset(symbols)
                 cache[key] = {"as_of": today.isoformat(), "symbols": sorted(symbols)}
-            except Exception as exc:  # noqa: BLE001 - E5: per-source degrade, never raise
+            except Exception as exc:  # noqa: BLE001 - per-source degrade, never raise
                 previous = frozenset(cache.get(key, {}).get("symbols") or [])
                 _log.warning(
                     "surveillance_source_failed",
@@ -292,7 +292,7 @@ class SurveillanceIngest:
             await self._alert(degraded=degraded, unconfirmed=len(unconfirmed))
         try:
             await self._alert_held_listings(lists, prior, prior_as_of, used_as_of)
-        except Exception:  # noqa: BLE001 - E5: a SAFETY_CRITICAL job's refresh never raises
+        except Exception:  # noqa: BLE001 - a SAFETY_CRITICAL job's refresh never raises
             _log.exception("surveillance_migration_check_failed")
         return lists
 

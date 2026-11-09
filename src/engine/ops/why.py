@@ -31,7 +31,7 @@ SECTION_CAP = 400
 _RESULTS_HORIZON_DAYS = 10
 _HISTORY_DAYS = 400          # >= hi52's 252 sessions plus weekend/holiday margin
 _SYMBOL = re.compile(r"[A-Z0-9&-]{1,20}")
-_A8_CODES = frozenset({EXCL_GSM, EXCL_ASM, EXCL_T2T, EXCL_ESM})
+_SURVEILLANCE_CODES = frozenset({EXCL_GSM, EXCL_ASM, EXCL_T2T, EXCL_ESM})
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ async def _surveillance(c: _Ctx) -> str:
     row = next((r for r in rows if r["symbol"] == c.sym), None)
     if row is None:
         return f"surveillance: not listed on {d}"
-    codes = [r for r in row["exclusion_reasons"] or [] if r in _A8_CODES]
+    codes = [r for r in row["exclusion_reasons"] or [] if r in _SURVEILLANCE_CODES]
     return f"surveillance: {', '.join(codes) or 'none'} ({d})"
 
 

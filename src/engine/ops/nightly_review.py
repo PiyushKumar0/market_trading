@@ -575,7 +575,7 @@ def _analyst_evaluations(conn: sqlite3.Connection, day: str) -> int:
 
 # --------------------------------------------------------------------------- analyst stage (2026-08-14)
 def _loads_object(raw: Any) -> dict[str, Any] | None:
-    """JSON text -> dict, or ``None`` for anything that is not a JSON object (D7: a malformed row is
+    """JSON text -> dict, or ``None`` for anything that is not a JSON object (a malformed row is
     COUNTED, never raised — one unreadable analyst output must not cost the owner their review)."""
     try:
         loaded = json.loads(raw or "")

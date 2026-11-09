@@ -182,7 +182,7 @@ class DealsJob:
             try:
                 resp = await nse_get(self._http, url, timeout=self._timeout)
                 all_rows.extend(parse_deals(json.loads(resp.content), d, reason))
-            except Exception as exc:  # noqa: BLE001 - E5: per-source degrade, never raise
+            except Exception as exc:  # noqa: BLE001 - per-source degrade, never raise
                 detail = f"{source}: {type(exc).__name__}: {exc}"
                 _log.warning("deals_fetch_failed", d=d.isoformat(), source=source, error=detail)
                 failed.append(source)

@@ -1672,7 +1672,7 @@ class TelegramBot:
 
         def paper_line(row: Any) -> str:
             exiting = " · EXITING" if row["state"] == "PENDING_EXIT" else ""
-            if row["exit_policy"] == TIME_ONLY_POLICY:     # D14: no GTT exists; an exit failing still shows
+            if row["exit_policy"] == TIME_ONLY_POLICY:     # no GTT exists; an exit failing still shows
                 protection = "no stop (exit test)" + (" · EXIT FAILED" if row["protection_state"] == "PROTECTION_FAILED"
                                                       else "")
             else:

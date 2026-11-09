@@ -543,7 +543,7 @@ def test_non_finite_considerations_read_as_no_value():
 async def test_store_read_failure_degrades_instead_of_propagating(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """E5: the ``symbol_isin`` read is inside the guard too. A locked duckdb file must not turn the
+    """The ``symbol_isin`` read is inside the guard too. A locked duckdb file must not turn the
     run into a bare ``scheduled_job_failed`` with no funnel line at all."""
 
     async def boom():
@@ -608,7 +608,7 @@ async def test_failed_master_is_not_refetched_inside_the_cooldown(
 async def test_constituents_read_that_raises_degrades_instead_of_propagating(
     seeded_store, clock, settings, monkeypatch
 ):
-    """E5: a corrupt universe cache raises shapes ``load_constituents_isin`` does not catch — the
+    """A corrupt universe cache raises shapes ``load_constituents_isin`` does not catch — the
     feed must still ingest off the stored map rather than take the exception into the scheduler."""
 
     def boom(_s):

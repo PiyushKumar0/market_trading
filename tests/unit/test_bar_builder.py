@@ -90,7 +90,7 @@ def feed(bb: BarBuilder, now: _Now, t: Tick) -> None:
     bb.on_tick(t)
 
 
-# ------------------------------------------------------------------ A14: pre-open + auction open
+# ------------------------------------------------------------------ pre-open + auction open
 def test_preopen_dropped_auction_open_stamped_grace_finalization(store, mclock, now):
     bb = BarBuilder(store, mclock)
     feed(bb, now, tick("R", at(9, 6, 59), "100.10", 0))     # pre-open — dropped from bars
@@ -137,7 +137,7 @@ def test_bar_published_on_bus(store, mclock, now, bus):
     assert events[0].volume == 100
 
 
-# ------------------------------------------------------------------ A13: cumulative-volume deltas
+# ------------------------------------------------------------------ cumulative-volume deltas
 def test_cumulative_volume_delta_across_minutes(store, mclock, now):
     bb = BarBuilder(store, mclock)
     feed(bb, now, tick("R", at(9, 15, 10), "100.00", 1000))
@@ -696,7 +696,7 @@ def _health(state: str) -> FeedHealth:
 
 
 async def test_reconnect_snapshot_storm_never_pages_during_the_grace(store, mclock, now, caplog):
-    """(a) The 09-03 shape end to end: grace armed by the HEALTHY transition at 15:40:02, then the
+    """The 09-03 shape end to end: grace armed by the HEALTHY transition at 15:40:02, then the
     14 interleaved snapshot/fresh frames — zero ERROR lines, zero recoveries, zero pages."""
     sent = []
 
@@ -727,7 +727,7 @@ async def test_reconnect_snapshot_storm_never_pages_during_the_grace(store, mclo
 
 
 async def test_the_watchdog_is_live_again_once_the_grace_lapses(store, mclock, now, caplog):
-    """(b) The grace is a delay, not a disable: a genuine 130 s lag one second past
+    """The grace is a delay, not a disable: a genuine 130 s lag one second past
     :data:`LAG_RECONNECT_GRACE_S` opens an episode and pages exactly once."""
     sent = []
 
@@ -756,7 +756,7 @@ async def test_the_watchdog_is_live_again_once_the_grace_lapses(store, mclock, n
 
 
 async def test_a_warming_transition_mid_session_arms_the_grace(store, mclock, now, caplog):
-    """(c) A mid-session respawn publishes WARMING before it publishes HEALTHY, and its snapshot is
+    """A mid-session respawn publishes WARMING before it publishes HEALTHY, and its snapshot is
     the same shape — so WARMING arms the grace too, and lapses on its own 30 s later."""
     sent = []
 
@@ -784,7 +784,7 @@ async def test_a_warming_transition_mid_session_arms_the_grace(store, mclock, no
 
 
 async def test_arming_closes_an_open_episode_quietly(store, mclock, now, caplog):
-    """(d) A reconnect while an episode is already open closes it with the grace reason — not with
+    """A reconnect while an episode is already open closes it with the grace reason — not with
     ``tick_processing_recovered``, which would claim a recovery nothing observed."""
     sent = []
 
@@ -815,7 +815,7 @@ async def test_arming_closes_an_open_episode_quietly(store, mclock, now, caplog)
 
 @pytest.mark.parametrize("state", ["STOPPED", "DEGRADED", "STALE"])
 async def test_a_non_arming_feed_state_leaves_the_watchdog_live(store, mclock, now, caplog, state):
-    """(e) Only WARMING/HEALTHY arm. The other three states the supervisor publishes
+    """Only WARMING/HEALTHY arm. The other three states the supervisor publishes
     (ticker_supervisor.py:260 — the closed ``FeedHealth.state`` set) are ignored, so a DEGRADED or
     STALE feed cannot silence the lag alarm."""
     sent = []
@@ -841,7 +841,7 @@ async def test_a_non_arming_feed_state_leaves_the_watchdog_live(store, mclock, n
 
 
 async def test_an_in_child_reconnect_edge_arms_the_grace_mid_session(store, mclock, now, caplog):
-    """(f) The 2026-09-09 review case: KiteTicker reconnects INSIDE the child (reconnect=True) while
+    """The 2026-09-09 review case: KiteTicker reconnects INSIDE the child (reconnect=True) while
     the child keeps heartbeating, so the supervisor's state never transitions — nothing was published
     and this grace never armed for the commonest reconnect there is.
 

@@ -25,7 +25,7 @@ llm:
   # Auth path: Max-subscription OAuth. A stray ANTHROPIC_API_KEY silently outranks it — the
   # startup self-test asserts it absent unless overflow is deliberately enabled.
   auth_mode: oauth_subscription            # oauth_subscription | api_key (the auth-mode swap seam)
-  setting_sources: []                      # D10: load NOTHING from filesystem CLAUDE.md/settings
+  setting_sources: []                      # load NOTHING from filesystem CLAUDE.md/settings
   # Engine-owned Claude Code CLI, relative to the repo root (2026-10-03): Sonnet 5.5 needs CLI >= 2.1.284,
   # newer than any claude-agent-sdk Windows wheel bundles. Missing file => every call fails closed.
   # Re-pin by copying a newer claude.exe into a new version folder and changing this line.

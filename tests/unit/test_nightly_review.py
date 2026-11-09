@@ -281,7 +281,7 @@ def test_context_renders_the_seeded_day(conn) -> None:
 
 
 def test_context_empty_day_says_so_explicitly(conn) -> None:
-    # D7: a quiet day must be DISTINGUISHABLE from a broken query — explicit "none"/"no trades" lines,
+    # a quiet day must be DISTINGUISHABLE from a broken query — explicit "none"/"no trades" lines,
     # never an empty prompt.
     seed_day(conn)                                  # seeded on D, so EMPTY_DAY must read clean
     text = build_review_context(conn, None, EMPTY_DAY, BOUNDS)
@@ -335,7 +335,7 @@ def test_envelope_bounds_come_from_the_protected_store(conn) -> None:
 
 
 def test_unverifiable_envelope_yields_an_empty_suggestible_set() -> None:
-    # R4: with no VERIFIED envelope there is no legitimate suggestible set — the review still runs
+    # with no VERIFIED envelope there is no legitimate suggestible set — the review still runs
     # (fail to zero), but every suggestion it makes will be dropped.
     store = FakeProtectedStore(error=RuntimeError("envelope.yaml hash mismatch"))
     assert load_envelope_bounds(store) == {}
@@ -449,7 +449,7 @@ async def test_governor_block_makes_no_call_and_writes_no_row(
 async def test_harness_failure_persists_nothing_and_still_tells_the_owner(
     conn, gov, clock, calendar, agent_defs, notify, sent
 ) -> None:
-    # D7: schema-invalid after retries resolves to no review + an owner message. A silent absence
+    # schema-invalid after retries resolves to no review + an owner message. A silent absence
     # would read to the owner as "quiet day" rather than "the reviewer did not run".
     harness = FakeHarness(
         failure=AgentResult.Failed("schema_invalid", "not valid JSON", call_id="CALL-9", attempts=3)
@@ -575,7 +575,7 @@ def test_funnel_summary_splits_unsizeable_from_unforwarded(conn) -> None:
     """2026-08-14: a stopless candidate is journalled BEFORE the pipeline's stopless short-circuit
     (``prescreen_day_slots.unsizeable``), so it must never be counted as a starved/unforwarded
     candidate even though it, too, was never forwarded. WIPRO here scores higher (0.95) than the
-    genuinely-starved TCS (0.85) but must not win ``best_unforwarded_score`` â€” it was never eligible
+    genuinely-starved TCS (0.85) but must not win ``best_unforwarded_score`` — it was never eligible
     for a slot in the first place."""
     conn.execute(
         "INSERT INTO prescreen_day_slots "
