@@ -1,38 +1,33 @@
-"""Post-login recovery — the cold-start RE-TRIGGER (third cold-start-family defect, 2026-07-21).
+"""Post-login recovery — the cold-start RE-TRIGGER.
 
 The every-startup recovery sequence (:meth:`engine.ops.lifecycle.SessionLifecycle.startup`) runs ONCE
 at boot: instruments load, regime + warm-up-gap backfill, warm-up evaluation, and ticker start. The
 owner's normal morning pattern is to bring the engine up (~08:10) and log into Kite LATER. A boot
-BEFORE login is token-less, so those broker-touching steps no-op (the ticker never starts — ZERO live
-1m bars are ever captured — and warm-up stays frozen) and, crucially, NOTHING re-runs them when the
-token finally arrives.
+BEFORE login is token-less, so those broker-touching steps no-op (no ticker, ZERO live 1m bars,
+warm-up frozen) and NOTHING re-runs them when the token finally arrives.
 
-The 2026-07-20 fix (commit 5d34e77) closed the token-MAP half (hydrate / persist / young-listing).
-This module closes the RE-TRIGGER half: :class:`PostLoginRecovery` is registered as a
+:class:`PostLoginRecovery` is registered as a
 :meth:`~engine.broker.session.SessionManager.add_login_hook` callback and fires the moment a token
 becomes valid — from EITHER login path (the LAN ``/kite/callback`` route or the Telegram ``/token``
 fallback both funnel through :meth:`SessionManager.complete_login`). It re-runs, each step GUARDED and
-logged individually (a failure degrades + alerts, never crashes the loop), the four broker-touching
+logged individually (a failure degrades + alerts, never crashes the loop), the broker-touching
 startup steps:
 
-    (a) instruments  — ensure the token map is loaded + persisted (the 5d34e77 ladder: hydrate if
-                       empty, else a live refresh + persist when the pre-login boot only had a stale
-                       hydrated snapshot);
+    (a) instruments  — ensure the token map is loaded + persisted (hydrate if empty, else a live
+                       refresh + persist when the pre-login boot only had a stale hydrated snapshot);
     (b) backfill     — regime daily history (NIFTY 50 / India VIX) + intraday warm-up-gap fill for the
                        watchlist — the SAME calls startup makes, shared via
                        :func:`regime_and_warmup_backfill`;
     (c) warm-up      — re-evaluate the startup warm-up gate and, once the FREEZING classes (REGIME /
-                       unattributable — since 2026-09-17 an INTRADAY or DAILY shortfall is refused
-                       per SYMBOL at the gate instead) are covered, LIFT the warm-up
-                       FROZEN-for-entries through the lifecycle's own gate application
-                       (:meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass);
+                       unattributable; an INTRADAY or DAILY shortfall is refused per SYMBOL at the
+                       gate instead) are covered, LIFT the warm-up FROZEN-for-entries through
+                       :meth:`SessionLifecycle.reapply_warmup_gate` — never a direct risk-state bypass;
     (d) ticker       — start the feed with the subscription tokens — the SAME ticker-resume logic,
                        shared via :func:`resume_ticker`;
-    (e) holdings     — holdings reconcile (2026-09-07). NOT a recovery step: it restores nothing
-                       and gates nothing. It runs here because a fresh token is the first moment the
-                       account can be read at all, and the owner's overnight sells are exactly what
-                       the morning needs to know. Last in the ladder, and its own failures are already
-                       swallowed by the job.
+    (e) holdings     — holdings reconcile. NOT a recovery step: it restores nothing and gates
+                       nothing. It runs here because a fresh token is the first moment the account can
+                       be read, and the owner's overnight sells are what the morning needs to know.
+                       Last in the ladder; its own failures are swallowed by the job.
 
 Idempotent by construction: safe to fire on every login / daily token refresh — each step skips when
 its state is already good and says so in the summary. One ``post_login_recovery`` event is emitted with
@@ -101,8 +96,8 @@ async def hydrate_instruments_at_startup(
       cause. Behaviour then matches today (entries stay FROZEN), but with a named reason in the startup
       report instead of a silent ``unknown_token`` storm.
 
-    Extracted from the composition root so the ladder is unit-testable without booting the engine (and,
-    from 2026-07-21, reused by :class:`PostLoginRecovery` for the post-login re-trigger).
+    Extracted from the composition root so the ladder is unit-testable without booting the engine; also
+    reused by :class:`PostLoginRecovery`.
     """
     if not instruments.is_empty:
         _log.info("instruments_startup_skip", reason="store already populated this process")
@@ -113,14 +108,12 @@ async def hydrate_instruments_at_startup(
         count = instruments.hydrate(rows)
         _log.info("instruments_hydrated", d=d.isoformat(), count=count, indices=instruments.index_count)
         if instruments.index_count == 0:
-            # DEGRADED-snapshot escalation (2026-07-21): a snapshot with ZERO index rows cannot resolve
-            # the regime symbols (NIFTY 50 / INDIA VIX) — regime backfill then fails unknown_token and
-            # warm-up never clears. Observed cause: a taskkill mid-persist TORE the 07-21 day (the index
-            # rows are appended last, so exactly they were lost) and every boot then hydrated the broken
-            # MAX(d) day over the complete prior one. A real Kite dump ALWAYS carries indices, so
-            # index_count==0 is a reliable degradation signal. With a live session, escalate to a full
-            # refresh + persist — healing the stored day in place; without one, warn loudly (the
-            # PostLoginRecovery instruments step re-refreshes the moment the owner logs in).
+            # DEGRADED snapshot: ZERO index rows cannot resolve the regime symbols (NIFTY 50 / INDIA
+            # VIX), so regime backfill fails unknown_token and warm-up never clears (a kill mid-persist
+            # loses the index rows, which are appended last). A real Kite dump ALWAYS carries indices,
+            # so index_count==0 is a reliable signal. With a live session, refresh + persist to heal
+            # the stored day in place; without one, warn (the PostLoginRecovery instruments step
+            # re-refreshes at login).
             if kite is not None and session_valid:
                 count = await instruments.refresh(kite)
                 today = clock.today()
@@ -162,8 +155,8 @@ async def resume_ticker(
 ) -> str:
     """Resume the ticker into WARMING once a valid token exists. Returns an outcome tag.
 
-    Extracted from the composition root so the SAME logic serves both the startup ticker resume and the post-login
-    re-trigger (rather than duplicating the guard). Idempotent: a ticker already running is left alone.
+    Shared by the startup ticker resume and the post-login re-trigger. Idempotent: a ticker already
+    running is left alone.
     Tags: ``skipped_no_token`` | ``already_running`` | ``skipped_no_tokens`` | ``started``.
     """
     token = session.access_token()
@@ -196,15 +189,14 @@ async def regime_and_warmup_backfill(
     """Warm the regime daily history (NIFTY 50 / India VIX — checkpointed, cheap on
     re-runs), repair the watchlist's daily lookback (the warm-up gate's own window — coverage-checked
     per symbol, so a healthy watchlist costs zero Kite requests), and gap-fill today's intraday minute
-    bars for the watchlist from official candles so warm-up never needs live ticks. Extracted so
+    bars for the watchlist from official candles so warm-up never needs live ticks. Shared so
     startup and the post-login re-trigger issue the IDENTICAL calls. Returns bars written per leg
     (``{"regime_daily_bars", "watchlist_daily_gap_bars", "warmup_gap_bars"}``)."""
     today = clock.today()
     session = calendar.session(today)
     # The day-interval end is clamped to YESTERDAY until today's session has closed: an intraday
     # fetch returns today's RUNNING candle, and writing it advances the observed-through checkpoint
-    # so the 18:05 daily_bars job skips the day — freezing a partial snapshot as today's daily bar
-    # forever (2026-07-29: NIFTY 50/VIX closes stuck at the 09:53 boot's LTP until repaired).
+    # so the 18:05 daily_bars job skips the day, freezing a partial snapshot as today's daily bar.
     # Today's FINAL bar is the evening job's business, never an intraday fetch's.
     day_end = today
     if session is not None and clock.now() <= session.close:
@@ -215,9 +207,8 @@ async def regime_and_warmup_backfill(
     )
     written = {"regime_daily_bars": day_report.bars_written, "watchlist_daily_gap_bars": 0, "warmup_gap_bars": 0}
     watch = watchlist_symbols()
-    # 2026-09-15: repair the WATCHLIST's daily lookback too (the gate's exact window) — a boot onto a
-    # universe whose members have bars_1d holes froze the DAILY class with nothing to lift it. Coverage
-    # is checked per symbol from the store first, so a healthy watchlist costs zero Kite requests.
+    # Repair the WATCHLIST's daily lookback too (the gate's exact window): bars_1d holes would
+    # otherwise hold the DAILY class short with nothing to fill them.
     if watch:
         sessions = recent_sessions(calendar, today, daily_lookback_sessions)
         if sessions is None:
@@ -226,9 +217,8 @@ async def regime_and_warmup_backfill(
             daily_report = await backfill.daily_gap(watch, sessions)
             written["watchlist_daily_gap_bars"] = daily_report.bars_written
     if session is not None and watch:
-        # ``confirm_until`` clamped to session.close (2026-09-18): a post-close boot must not mark
-        # every after-hours minute no-trade — the warm-up gate clamps to the close, so those were never
-        # holes. The −2 min keeps a minute Kite has not published yet out of the confirmation.
+        # ``confirm_until`` is clamped to session.close: a post-close boot must not mark every
+        # after-hours minute no-trade. The −2 min keeps a minute Kite has not published yet out.
         gap_report = await backfill.warmup_gap(
             watch, session.open, clock.now(),
             confirm_until=min(session.close, clock.now() - timedelta(minutes=2)),
@@ -258,17 +248,16 @@ class PostLoginRecovery:
     fired fire-and-forget when a token becomes valid. Every step is guarded and logged individually —
     a step that raises marks itself failed and alerts, the others still run, and the loop never crashes.
 
-    :attr:`completed` is the early-hydration handshake (2026-09-09).
-    :meth:`SessionManager._fire_login_hooks` creates ONE TASK PER HOOK, so registration order gives
-    :class:`~engine.ops.early_hydration.EarlyHydration` no ordering against this recovery at all — the
-    two run concurrently. This event is what sequences them: SET in ``__init__`` (an engine that never
-    runs a recovery must not park the chain), CLEARED at the top of :meth:`run` before its first
-    await, and SET again in a ``finally`` — a FAILED recovery releases the chain exactly like a clean
-    one, because the pre-open chain needs no Kite session and a stuck event would cost the digest.
-    DEPTH-COUNTED via ``_in_flight`` (2026-09-09 review): two overlapping logins fire two concurrent
-    ``run()`` tasks, and a bare Event would be SET by whichever finishes FIRST — releasing the chain
-    while the other is still mid-ladder. The event re-sets only once every in-flight ``run()`` has
-    reached its own ``finally``.
+    :attr:`completed` is the early-hydration handshake.
+    :meth:`SessionManager._fire_login_hooks` creates ONE TASK PER HOOK, so
+    :class:`~engine.ops.early_hydration.EarlyHydration` has no ordering against this recovery — the
+    two run concurrently. This event sequences them: SET in ``__init__`` (an engine that never runs a
+    recovery must not park the chain), CLEARED at the top of :meth:`run` before its first await, and
+    SET again in a ``finally`` — a FAILED recovery releases the chain like a clean one, because the
+    pre-open chain needs no Kite session and a stuck event would cost the digest. DEPTH-COUNTED via
+    ``_in_flight``: two overlapping logins fire two concurrent ``run()`` tasks, and a bare Event
+    would be SET by whichever finishes FIRST. The event re-sets only once every in-flight ``run()``
+    has reached its own ``finally``.
     """
 
     def __init__(
@@ -309,13 +298,9 @@ class PostLoginRecovery:
         self._notify = notify
         self._alert = alert
         self._holdings_reconcile = holdings_reconcile
-        #: "This recovery is not running" (early hydration, 2026-09-09 — see the class docstring).
-        #: Starts SET so an engine that never fires a login hook blocks nothing. DEPTH-COUNTED
-        #: (2026-09-09 review): a bare Event is set by whichever ``run()`` finishes FIRST, which would
-        #: release the early-hydration chain while a SECOND overlapping login's recovery is still
-        #: mid-ladder — ``SessionManager._fire_login_hooks`` fires one task per hook per login, so two
-        #: logins landing close together really do overlap. ``_in_flight`` counts concurrent runs; the
-        #: event only sets again once the count returns to zero.
+        #: "This recovery is not running" (early hydration — see the class docstring). Starts SET so
+        #: an engine that never fires a login hook blocks nothing; ``_in_flight`` counts concurrent
+        #: runs and the event only sets again once it returns to zero.
         self.completed = asyncio.Event()
         self.completed.set()
         self._in_flight = 0
@@ -323,11 +308,9 @@ class PostLoginRecovery:
     async def run(self) -> PostLoginRecoveryReport:
         """Fire the guarded four-step recovery and emit the summary. Never raises: this is a login
         hook — a failure degrades + alerts, it must never propagate into the login path or the loop."""
-        # Cleared BEFORE the first await (2026-09-09): the early-hydration hook is a sibling task
-        # dispatched in the same fan-out, so any await here is a chance for it to run and miss the
-        # ladder it depends on. Depth-counted (2026-09-09 review) so a SECOND overlapping ``run()``
-        # does not let the FIRST run's ``finally`` release the chain out from under it — the event is
-        # only re-set once every in-flight run (this one included) has reached its own ``finally``.
+        # Cleared BEFORE the first await: the early-hydration hook is a sibling task from the same
+        # fan-out, so any await here lets it run and miss the ladder it depends on. Depth-counted so
+        # an overlapping ``run()`` cannot release the chain while this one is mid-ladder.
         self._in_flight += 1
         self.completed.clear()
         try:
@@ -373,9 +356,9 @@ class PostLoginRecovery:
 
     # ------------------------------------------------------------------ (a) instruments
     async def _step_instruments(self) -> tuple[str, str]:
-        """Ensure the token map is loaded + persisted (reuse the 5d34e77 ladder): hydrate/refresh when
-        empty; live-refresh + persist when a pre-login boot only had a stale hydrated snapshot and a
-        session now exists; skip when a live dump is already loaded this process."""
+        """Ensure the token map is loaded + persisted: hydrate/refresh when empty; live-refresh +
+        persist when a pre-login boot only had a stale hydrated snapshot and a session now exists;
+        skip when a live dump is already loaded this process."""
         if self._instruments.is_empty:
             source = await hydrate_instruments_at_startup(
                 self._instruments, self._store, self._kite,
@@ -427,10 +410,9 @@ class PostLoginRecovery:
         recorded here as a ``skipped`` step: "could not read the account" is not a recovery failure,
         and marking it one would put a red step in every pre-login-token report.
 
-        ``observed`` is the holdings-journal rows this run actually wrote: ``checked`` on a
-        trading day, 0 on any other (this ladder calls ``run`` unconditionally — only the hourly tick
-        is window-gated) and 0 when the journal write itself failed and was swallowed. Reporting it
-        says whether the "sold outside the ledger" evidence grew, which ``checked`` alone cannot."""
+        ``observed`` is the holdings-journal rows this run wrote: ``checked`` on a trading day, 0 on
+        any other (this ladder is not window-gated) or when the journal write failed. It says whether
+        the "sold outside the ledger" evidence grew, which ``checked`` alone cannot."""
         if self._holdings_reconcile is None:
             return ("skipped", "not_wired")
         result = await self._holdings_reconcile.run()

@@ -44,28 +44,23 @@ AlertCallback = Callable[[str, str], Awaitable[None]]   # (severity, message)
 #: it is the line past which "slow" is no longer a plausible explanation.
 STORE_PING_TIMEOUT_S = 10.0
 
-#: Consecutive stalled pulses before the stall becomes an OWNER-FACING health problem (2026-09-03).
-#: One timed-out ping is an observation (ERROR line + stack dump); the same stall still there a
-#: pulse later is an incident — two pulses means the store has been unreachable for ~60 s.
+#: Consecutive stalled pulses before the stall becomes an OWNER-FACING health problem. One timed-out
+#: ping is an observation (ERROR line + stack dump); the same stall a pulse later is an incident
+#: (~60 s unreachable).
 STORE_STALL_ALARM_PULSES = 2
 
-#: How long an UNCHANGED problem set stays quiet between owner alerts (2026-08-24). The pulse
-#: is 60 s and used to alert on every one of them — 57 identical ``health problems: ['feed_stale']``
-#: messages in a single morning, the bulk of the 203-deep notification backlog that then starved a
-#: fresh owner ack. A CHANGE in the problem set still alerts immediately; this only governs repeats.
+#: How long an UNCHANGED problem set stays quiet between owner alerts. A CHANGE in the problem set
+#: still alerts immediately; this only governs repeats (one alert per 60 s pulse starved owner acks).
 HEALTH_REPEAT_MIN = 30
 
-#: Stack-dump bounds. Deepest ``_STACK_FRAME_LIMIT`` frames per thread, and the whole dump is capped
-#: at ``_STACK_DUMP_MAX_CHARS`` — a ~30-thread process in a deep call tree would otherwise emit a
-#: megabyte-scale log line at exactly the moment the machine is already in trouble.
+#: Stack-dump bounds: deepest ``_STACK_FRAME_LIMIT`` frames per thread, whole dump capped at
+#: ``_STACK_DUMP_MAX_CHARS`` so the dump cannot itself flood the log while the machine is in trouble.
 _STACK_FRAME_LIMIT = 40
 _STACK_DUMP_MAX_CHARS = 60_000
 
-#: While a probe is pending, issue a FRESH one every Nth consecutive pending pulse (2026-08-25). Strict single-flight produced a watchdog that could freeze with the freeze: on 08-25
-#: the first probe never got a worker thread and the pulse then reported ``probe_pending=true,
-#: consecutive=264`` for 4 h 24 min — 264 log lines, all of them repeating the same one observation
-#: made at 09:15. Re-probing every 5th pending pulse (~5 min) costs one thread per five minutes and
-#: buys the one fact the old design could not produce: whether the store is STILL stuck NOW.
+#: While a probe is pending, issue a FRESH one every Nth consecutive pending pulse. Strict
+#: single-flight let the watchdog freeze with the freeze (one stale observation repeated for hours);
+#: re-probing every 5th pulse (~5 min) costs one thread and answers whether the store is STILL stuck NOW.
 _STORE_REPROBE_EVERY = 5
 
 
@@ -86,8 +81,8 @@ class HealthReport(BaseModel):
     wal_size_mb: float | None = None
     problems: list[str] = Field(default_factory=list)
     #: problem -> owner-facing detail line. Rides the ALERT TEXT so a page is diagnosable without a
-    #: shell (2026-09-01 review); never part of the alert-episode identity, which stays the problem
-    #: SET alone — evolving detail (minutes counting up) must not re-trigger an unchanged episode.
+    #: shell; never part of the alert-episode identity (the problem SET alone) — evolving detail
+    #: must not re-trigger an unchanged episode.
     problem_details: dict[str, str] = Field(default_factory=dict)
 
     @property
@@ -131,41 +126,31 @@ class HealthMonitor:
         self._max_skew_s = max_skew_s if max_skew_s is not None else settings.clock.max_skew_s
         self._wal_warn_mb = wal_warn_mb
         self._disk_warn_gb = disk_warn_gb
-        # In-session OS keep-awake (2026-07-23 sleep/resume wedge): the health loop is the always-on
-        # periodic tick, so it is where keep-awake is engaged (session open) / released (session close).
+        # The always-on pulse engages keep-awake at session open and releases it at close.
         self._calendar = calendar
         self._keep_awake = keep_awake
-        # Process-memory telemetry (2026-08-17 unbounded-commit crisis, ~53 GB/18h, one snapshot, no
-        # curve): sampled off the same always-on pulse. self-constructs a real ProcessMemoryReader when
-        # not injected (no-op off-Windows) so this works out of the box without extra main.py wiring.
+        # Process-memory telemetry sampled off the pulse; self-constructs a reader when not injected
+        # (no-op off-Windows).
         self._memory_reader = memory_reader if memory_reader is not None else ProcessMemoryReader()
-        # Cadence: the health pulse is 60s (settings.lifecycle.watchdog_poll_s); logging on every pulse
-        # would add 1440 lines/day to an already-busy stream for a leak that took ~18h to reach crisis.
-        # Every 5th pulse (~5 min) still resolves that timescale (~216 samples over 18h) at 1/5th the
-        # volume. Pulse-counted, not wall-clock, so cadence is deterministic in tests.
+        # Pulse-counted, not wall-clock, so cadence is deterministic in tests (pulse is 60 s).
         self._memory_log_every = memory_log_every
         self._pulse_count = 0
-        # --- store stall watchdog (after the 2026-08-21 14-minute freeze) ---
-        # The health pulse kept beating through the entire freeze while every store-touching path
-        # was wedged, which is exactly what makes it the right host for the probe: it is the one
-        # timer proven to survive the failure it is watching for.
+        # --- store stall watchdog ---
+        # The pulse is the one timer that survives a store-wide wedge, so it hosts the probe.
         self._store = store
         self._store_ping_timeout_s = float(store_ping_timeout_s)
-        #: The probe currently being watched. A pulse that finds it still pending normally starts no
-        #: other one — the pending probe IS evidence — but every ``_STORE_REPROBE_EVERY``th such
-        #: pulse it is ABANDONED for a fresh one, because evidence from 4 hours ago is not evidence
-        #: about now.
+        #: The probe currently being watched. While pending it is evidence and no other is started,
+        #: but every ``_STORE_REPROBE_EVERY``th pending pulse it is ABANDONED for a fresh one (old
+        #: evidence says nothing about now).
         self._store_probe: asyncio.Future | None = None
-        #: Probes abandoned that way and still unfinished. Kept referenced (a dropped pending future
-        #: would surface as a loop warning) and reported as ``abandoned=`` — a rising count is the
-        #: distinctive signature of "worker threads are going in and not coming out".
+        #: Abandoned probes still unfinished. Kept referenced (a dropped pending future would surface
+        #: as a loop warning); a rising ``abandoned=`` count means worker threads go in and never return.
         self._store_abandoned: list[asyncio.Future] = []
         self._store_pending_pulses = 0                  # consecutive pulses that found one pending
         self._store_stall_count = 0                     # consecutive stalled pulses
         self._store_stall_since: datetime | None = None
         self._store_last_ok: datetime | None = None
-        #: One stack dump per STALL EPISODE, not per pulse. Reset by the next successful probe, so a
-        #: second, later freeze dumps again while a 14-minute one does not dump fourteen times.
+        #: One stack dump per STALL EPISODE; reset by the next successful probe.
         self._store_stacks_dumped = False
         # --- problem-set alert episodes ---
         #: The problem set the owner was last alerted about (sorted tuple; () = "all clear"), and when.
@@ -173,26 +158,23 @@ class HealthMonitor:
         #: :data:`HEALTH_REPEAT_MIN` minutes, and announce recovery exactly once.
         self._problem_episode: tuple[str, ...] = ()
         self._problem_alerted_at: datetime | None = None
-        # --- origination liveness (2026-09-01, after the catchup_safety_jobs latch incident) ---
+        # --- origination liveness ---
         self._mode_manager = mode_manager
         self._latch = latch
         self._funnel_probe = funnel_probe
         self._frozen_alarm_after_min = float(frozen_alarm_after_min)
         self._funnel_zero_alarm_after_min = float(funnel_zero_alarm_after_min)
         #: First pulse that observed each alarm's condition — the episode clocks. Reset QUIETLY the
-        #: moment the condition breaks (incl. out-of-session, the 2026-08-26 lag-watchdog lesson).
-        #: Per-process: a restart restarts the clocks, which is correct — the boot just re-verified
-        #: the gates.
+        #: moment the condition breaks (incl. out-of-session). Per-process: a restart restarts them.
         self._frozen_since: datetime | None = None
         self._funnel_zero_since: datetime | None = None
         self._token_valid = token_valid
         self._feed_stopped_alarm_after_min = float(feed_stopped_alarm_after_min)
         self._feed_stopped_since: datetime | None = None
         #: (published-at-last-forward-progress, forwarded) — the funnel stall baseline. `forwarded`
-        #: is day-cumulative and monotonic (pipeline upserts +1 per forward, never resets mid-day),
-        #: so "zero forwarded" alone goes permanently mute after the day's FIRST forward (2026-09-01
-        #: review, blocking): a stall is instead "published grew past the baseline while the forward
-        #: count did not move". None ⇒ re-baseline on the next eligible pulse.
+        #: is day-cumulative and monotonic, so "zero forwarded" alone goes mute after the day's FIRST
+        #: forward: a stall is "published grew past the baseline while the forward count did not
+        #: move". None ⇒ re-baseline on the next eligible pulse.
         self._funnel_baseline: tuple[int, int] | None = None
 
     async def check(self, *, check_skew: bool = True, booting: bool = False) -> HealthReport:
@@ -204,10 +186,9 @@ class HealthMonitor:
             report.feed_state = getattr(fh, "state", "UNKNOWN")
             report.last_tick_age_s = getattr(fh, "last_tick_age_s", None)
             if report.feed_state == "STALE" and self._session_open():
-                # feed-lost-WHILE-RUNNING — a real incident. Out-of-session STALE is
-                # definitional (no ticks exist at night) and spammed an alert per minute from
-                # midnight 2026-07-31 after the date rollover — never an incident. Calendar-less
-                # wiring returns False here, keeping a misconfigured deploy quiet, not noisy.
+                # feed-lost-WHILE-RUNNING — a real incident. Out-of-session STALE is definitional
+                # (no ticks at night), never an incident. Calendar-less wiring returns False here,
+                # keeping a misconfigured deploy quiet, not noisy.
                 report.problems.append("feed_stale")
             # WARMING / STOPPED never raise feed_stale (warming is expected). An armed,
             # in-session STOPPED feed is paged separately: _check_feed_stopped, after its grace.
@@ -240,9 +221,7 @@ class HealthMonitor:
             if report.wal_size_mb > self._wal_warn_mb:
                 report.problems.append("large_wal")  # checkpoint at EOD
 
-        # --- origination liveness (2026-09-01: the catchup_safety_jobs latch froze entries for two
-        #     whole sessions with zero pages — the engine hummed, exits flowed, nothing said "you are
-        #     not originating". These two problems make that silence impossible.) ---
+        # --- origination liveness (a frozen or stalled entry path must never be silent) ---
         try:
             self._check_origination(report)
         except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
@@ -252,19 +231,15 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - a liveness check must never break the pulse it rides
             _log.exception("feed_stopped_watch_failed")
 
-        # --- in-session OS keep-awake (2026-07-23 sleep/resume wedge): while a trading session is open,
-        #     keep the OS awake so it does not auto-sleep mid-session and freeze the tick feed, re-checking
-        #     each pulse that the request is still in force; release at session close. No-op off-Windows /
-        #     when disabled / without a calendar. ---
+        # --- in-session OS keep-awake: stop the OS sleeping mid-session (it freezes the tick feed);
+        #     re-asserted each pulse, released at session close. No-op off-Windows / disabled / no calendar. ---
         if self._keep_awake is not None:
             try:
                 self._keep_awake.update(self._session_open())
             except Exception:  # noqa: BLE001 - keep-awake must never break the pulse it rides
                 _log.exception("keep_awake_update_failed")
 
-        # --- process-memory telemetry (2026-08-17 crisis: no time series existed to diagnose the leak)
-        #     Pure telemetry, not a check: a read failure (already logged DEBUG inside the reader) or any
-        #     unexpected error here must never raise or affect the health verdict. ---
+        # --- process-memory telemetry: not a check; a failure here must never raise or affect the verdict. ---
         try:
             self._pulse_count += 1
             if self._pulse_count % self._memory_log_every == 0:
@@ -279,14 +254,11 @@ class HealthMonitor:
         except Exception:  # noqa: BLE001 - telemetry must never affect the health verdict
             _log.debug("process_memory_log_failed")
 
-        # --- store stall watchdog: make the NEXT freeze diagnose itself. The probe
-        #     can never raise into the pulse (the pulse surviving is the entire premise). A stall
-        #     still there on the STORE_STALL_ALARM_PULSES-th consecutive pulse — or a probe still
-        #     swallowed after a fresh one answered (the probe-anomaly case: the pool is losing
-        #     threads) — is a problem like any other and pages through the episode cadence below.
-        #     In-session only, like feed_stale: the 22:30 compaction legitimately holds the store
-        #     lock for minutes and never runs in session; a night-time wedge surfaces as EOD job
-        #     failures. ---
+        # --- store stall watchdog. The probe can never raise into the pulse (the pulse surviving is the
+        #     premise). A stall on the STORE_STALL_ALARM_PULSES-th consecutive pulse — or a probe still
+        #     swallowed after a fresh one answered (the pool is losing threads) — pages through the
+        #     episode cadence below. In-session only: the 22:30 compaction legitimately holds the store
+        #     lock for minutes; a night-time wedge surfaces as EOD job failures. ---
         try:
             await self._probe_store()
         except Exception:  # noqa: BLE001 - a watchdog that can kill its own host is not a watchdog
@@ -310,29 +282,24 @@ class HealthMonitor:
                   disk_free_gb=report.disk_free_gb, problems=report.problems)
         return report
 
-    # ------------------------------------------------------------- origination liveness (2026-09-01)
+    # ------------------------------------------------------------- origination liveness
     def _check_origination(self, report: HealthReport) -> None:
-        """Two problems that were silent by construction until the 08-31/09-01 latch incident:
+        """Two problems that would otherwise be silent:
 
         * ``entries_frozen_in_session`` — an armed mode (RECOMMEND/AUTO) with ``risk_state != NORMAL``
-          for ``frozen_alarm_after_min`` CONTIGUOUS in-session minutes. The grace exists because a
-          morning boot legitimately holds a warm-up freeze for up to ~20 minutes; a freeze that
-          outlives it is an incident whatever its cause (the active causes ride the log line so the
-          page is diagnosable without a shell).
+          for ``frozen_alarm_after_min`` CONTIGUOUS in-session minutes. The grace covers a morning
+          boot's warm-up freeze (up to ~20 minutes); the active causes ride the log line.
         * ``funnel_zero_in_session`` — NO FORWARD PROGRESS while eligible work keeps arriving:
           today's forward count unchanged for ``funnel_zero_alarm_after_min`` CONTIGUOUS in-session
           minutes while slots published GREW past the last-progress baseline, risk_state IS NORMAL,
           and forward capacity remains under the governor's daily cap (a spent cap is quiet by
-          design, not by fault; an unreadable cap narrows the alarm to the unambiguous
-          zero-forwarded-all-day shape). A frozen state is the first problem's page, not this
-          one's — one incident, one problem. Catches a wedged forward/analyst path that a healthy
-          risk state would otherwise hide, including one that wedges AFTER the day's first forward
-          (the day-cumulative forward counter never returns to zero — 2026-09-01 review).
+          design; an unreadable cap narrows the alarm to the zero-forwarded-all-day shape). A frozen
+          state is the first problem's page, not this one's — one incident, one problem. Catches a
+          wedged forward/analyst path, including one that wedges AFTER the day's first forward.
 
         Both clocks reset QUIETLY whenever their condition breaks — risk recovers, a forward lands,
-        the session closes, the mode disarms (the 2026-08-26 lag-watchdog lesson: alarms evaluate
-        only inside session hours). Unwired ``mode_manager`` ⇒ both checks are inert, matching the
-        calendar-less feed_stale behaviour: a misconfigured deploy stays quiet, not noisy.
+        the session closes, the mode disarms. Unwired ``mode_manager`` ⇒ both checks are inert,
+        matching calendar-less feed_stale: a misconfigured deploy stays quiet, not noisy.
         """
         if self._mode_manager is None:
             return
@@ -372,18 +339,15 @@ class HealthMonitor:
         if base is None or rolled or forwarded != base[1]:
             # (Re)baseline on first look, day rollover, or forward progress. The published-baseline
             # is what "new work since the last forward" is measured against: 0 while nothing has
-            # forwarded today (the 08-31 shape — every published slot counts), else the published
-            # count at progress time (a mid-day restart cannot know which older slots were already
-            # served, so only NEW publications evidence a stall — conservative by construction).
+            # forwarded today (every published slot counts), else the published count at progress
+            # time (a mid-day restart cannot know which older slots were served, so only NEW
+            # publications evidence a stall).
             self._funnel_baseline = (published if forwarded > 0 else 0, forwarded)
             self._funnel_zero_since = None
             return
         # Same day, forward count static. A stall needs BOTH new work beyond the baseline AND
-        # remaining capacity — a day whose budget-governor forward cap is spent goes quiet by design, and an
-        # unreadable cap (None) narrows eligibility to the unambiguous zero-forwarded shape.
-        # cap=None (unreadable) ⇒ only the unambiguous zero-forwarded shape is eligible; a KNOWN cap
-        # is authoritative even at 0 (2026-09-02 review: a deliberate cap=0 full pause used to page
-        # via the forwarded==0 short-circuit — a spent-or-zero cap is quiet by design).
+        # remaining capacity. cap=None (unreadable) ⇒ only the zero-forwarded shape is eligible; a
+        # KNOWN cap is authoritative even at 0 (a spent-or-zero cap is quiet by design).
         capacity_left = (cap is None and forwarded == 0) or (cap is not None and forwarded < cap)
         if published > self._funnel_baseline[0] and capacity_left:
             if self._funnel_zero_since is None:
@@ -400,17 +364,15 @@ class HealthMonitor:
         else:
             self._funnel_zero_since = None
 
-    # ------------------------------------------------------------- stopped feed in session (2026-10-21)
+    # ------------------------------------------------------------- stopped feed in session
     def _check_feed_stopped(self, report: HealthReport, *, booting: bool = False) -> None:
         """``feed_stopped_in_session`` — feed state STOPPED while the engine is armed
         (RECOMMEND/AUTO) and the session is open, for ``feed_stopped_alarm_after_min`` CONTIGUOUS
-        minutes. The health pulse only runs while the engine is UP, so STOPPED here is never
-        "intentionally off": it is no market data (2026-10-21: the ticker never started and health
-        logged ``problems=[]`` all session). The grace covers a late login and most in-session boots;
-        a pulse from the boot-phase ticks (``booting``) says the ticker starts only once startup
-        recovery returns, so the page is not read as a dead ticker. The clock resets QUIETLY on any
-        other state, session close or disarm. Unwired ``mode_manager`` ⇒ inert, like the origination
-        alarms.
+        minutes. The pulse only runs while the engine is UP, so STOPPED here is never "intentionally
+        off": it is no market data. The grace covers a late login and most in-session boots; a pulse
+        from the boot-phase ticks (``booting``) notes that the ticker starts only once startup
+        recovery returns. The clock resets QUIETLY on any other state, session close or disarm.
+        Unwired ``mode_manager`` ⇒ inert, like the origination alarms.
         """
         if self._mode_manager is None:
             return
@@ -440,25 +402,18 @@ class HealthMonitor:
     # ------------------------------------------------------------------ problem-set episodes
     async def _alert_problems(self, problems: list[str],
                               details: Mapping[str, str] | None = None) -> None:
-        """Owner-alert the problem set as an EPISODE, not once per pulse (2026-08-24).
-
-        The pulse runs every 60 s and used to alert on every pulse a problem existed: 57 identical
-        ``health problems: ['feed_stale']`` messages in one morning, which is most of what built the
-        203-deep Telegram outbox that then starved a fresh owner ack. One persistent problem is one
-        thing to know.
+        """Owner-alert the problem set as an EPISODE, not once per 60 s pulse (repeats flood the
+        Telegram outbox and starve owner acks).
 
         The episode's identity is the problem SET (sorted, so a reordered list is not a "change"):
 
-        * **set changes** — a new problem appears, or one clears while others remain: alert now. A
-          change is news by definition, whatever the quiet window says.
+        * **set changes** — a new problem appears, or one clears while others remain: alert now.
         * **set unchanged** — silence until :data:`HEALTH_REPEAT_MIN` minutes have passed, then one
-          reminder, and so on. A real outage keeps nagging; it just stops shouting.
-        * **all clear** — announce recovery ONCE and close the episode, so the owner learns the
-          incident ended without having to infer it from the alerts stopping.
+          reminder, and so on.
+        * **all clear** — announce recovery ONCE and close the episode.
 
-        The check itself is untouched: ``report.problems`` is computed exactly as before and the
-        ``health_check`` log line still fires every pulse. Only the owner-facing cadence changes.
-        State is per-process (a restart re-announces, which is correct: it IS a new situation).
+        Only the owner-facing cadence is gated: ``report.problems`` and the per-pulse ``health_check``
+        log line are unaffected. State is per-process (a restart re-announces: a new situation).
         """
         if self._alert is None:
             return
@@ -483,9 +438,8 @@ class HealthMonitor:
         self._problem_alerted_at = now
         msg = f"health problems: {problems}"
         if details:
-            # Detail rides the MESSAGE only (2026-09-01 review: a page must be diagnosable without a
-            # shell) — episode identity above stays the problem set, so evolving detail (minutes
-            # counting up) never re-triggers an unchanged episode; a reminder just reads fresher.
+            # Detail rides the MESSAGE only; episode identity stays the problem set, so evolving
+            # detail never re-triggers an unchanged episode.
             extras = [f"{p}: {details[p]}" for p in problems if p in details]
             if extras:
                 msg += " — " + "; ".join(extras)
@@ -497,24 +451,20 @@ class HealthMonitor:
 
         Three outcomes, and the difference between them is the diagnosis:
 
-        * **the previous probe is STILL PENDING** — normally no new probe is started. A ping that
-          has not returned since the last pulse is the finding, and issuing one per pulse would
-          queue a thread per minute behind the same seized resource. But every
+        * **the previous probe is STILL PENDING** — normally no new probe is started (one per pulse
+          would queue a thread per minute behind the same seized resource). But every
           ``_STORE_REPROBE_EVERY``th consecutive pending pulse the old probe is ABANDONED and a
-          fresh one issued: a probe pending since 09:15 says nothing about 13:39, and on
-          2026-08-25 that is exactly what the pulse spent 4.4 h saying — 264 identical lines, no
-          new information, while the actual fault (a starved thread pool, not a seized lock) was
-          invisible because it could only have been seen by a probe that got a worker.
+          fresh one issued: a stale pending probe says nothing about now, and a starved thread pool
+          is only visible to a probe that got a worker.
         * **this probe times out** — the store is stalled. A timed-out probe is left RUNNING on
-          purpose: when it eventually returns it proves how long the seizure lasted, and until then
-          it keeps the pending branch above truthful.
-        * **the probe RAISES** — the store answered, with an error. That is a different animal
-          entirely (a closed connection, a DuckDB error) and is logged as such, not as a stall.
+          purpose: when it returns it proves how long the seizure lasted, and until then it keeps
+          the pending branch truthful.
+        * **the probe RAISES** — the store answered, with an error (closed connection, DuckDB
+          error): logged as such, not as a stall.
 
-        A fresh probe that SUCCEEDS while older ones still hang is its own diagnosis: the store is
-        reachable and something is holding threads. That is ``store_probe_anomaly`` (see
-        :meth:`_note_store_ok`) and it counts as recovered — the engine can work again, which is
-        the question this watchdog exists to answer.
+        A fresh probe that SUCCEEDS while older ones still hang is ``store_probe_anomaly`` (see
+        :meth:`_note_store_ok`): the store is reachable, something is holding threads, and it counts
+        as recovered.
         """
         if self._store is None:
             return
@@ -543,7 +493,7 @@ class HealthMonitor:
         except Exception as exc:  # noqa: BLE001 - answering with an error is not stalling
             self._store_probe = None
             # ...and it ENDS a stall episode: the lock was free. Symmetric with _note_store_ok, or
-            # a raise after a stall would carry that stall's count forever (2026-09-03 review).
+            # a raise after a stall would carry that stall's count forever.
             self._store_stall_count = 0
             self._store_stall_since = None
             self._store_stacks_dumped = False
@@ -572,10 +522,8 @@ class HealthMonitor:
     def _note_store_ok(self, now: datetime) -> None:
         abandoned = self._outstanding_abandoned()
         if abandoned:
-            # A fresh ping answered while N earlier ones are STILL hanging. Both facts matter and
-            # neither alone is the story: the store is usable again (so: recovered), and something
-            # swallowed N worker threads that never came back (so: not fine). This is the line the
-            # 08-25 morning could not produce.
+            # A fresh ping answered while N earlier ones are STILL hanging: the store is usable
+            # again, but something swallowed N worker threads that never came back.
             _log.info(
                 "store_probe_anomaly",
                 abandoned=abandoned,
@@ -607,14 +555,10 @@ class HealthMonitor:
         return None if then is None else round((now - then).total_seconds(), 3)
 
     def _dump_thread_stacks(self) -> None:
-        """Every thread's stack, once per stall episode, as ONE ``store_stall_stacks`` event.
-
-        This is the line that would have ended the 2026-08-21 post-mortem in a minute instead of
-        leaving two live hypotheses: whichever thread is holding the store's ``RLock`` (or sitting
-        in a wedged socket read) is named here, with the call path that put it there. Bounded on
-        both axes (see the module constants) so the dump cannot itself become the incident, and
-        wrapped whole — a diagnostic that fails must degrade to a warning, never to an exception on
-        the pulse.
+        """Every thread's stack, once per stall episode, as ONE ``store_stall_stacks`` event: names
+        whichever thread holds the store's ``RLock`` (or sits in a wedged socket read). Bounded on
+        both axes (see the module constants) and wrapped whole — a failing diagnostic degrades to a
+        warning, never an exception on the pulse.
         """
         try:
             names = {t.ident: t.name for t in threading.enumerate()}

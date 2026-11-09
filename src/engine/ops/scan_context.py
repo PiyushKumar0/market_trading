@@ -2,88 +2,75 @@
 seam that lets the scanners run off the live ``bar.1m`` stream.
 
 ``SignalPreScreen`` calls ``context_provider(bar) -> ScanContext`` once per bar and hands the result
-to every enabled scanner (scanners are pure — all I/O lives here, see ``scanners.base``). Until now contexts were
-only built offline (backtest frames); this provider is the live one.
+to every enabled scanner (scanners are pure — all I/O lives here, see ``scanners.base``).
 
 Threading
------------------------------------
+---------
 ``SignalPreScreen.handle_bar`` offloads ``_scan`` — and therefore every call into this provider — to
 a worker thread via ``asyncio.to_thread``, so **synchronous DuckDB reads here are correct and the
 event loop is never blocked**. No asyncio in this module; the ``MarketStore.a*`` wrappers are for
 loop-side callers. The pre-screen holds its own lock across ``_scan``, so provider calls are already
-serialized: this class is deliberately NOT internally synchronized (a second lock would be dead
-weight). Wiring it anywhere that can call it concurrently is a caller error.
+serialized: this class is deliberately NOT internally synchronized. Wiring it anywhere that can call
+it concurrently is a caller error.
 
 Read budget (the hot-path invariant)
------------------------------------------
-The event path must not do per-bar N+1 DuckDB reads. Everything that is constant for a day is built
-ONCE into a day-scoped cache, rebuilt only when the bar's date changes:
+------------------------------------
+The event path must not do per-bar N+1 DuckDB reads. Everything constant for a day is built ONCE
+into a day-scoped cache, rebuilt only when the bar's date changes:
 
 * ``daily_bars`` per symbol (completed sessions through the PRIOR day) — one ``get_bars_1d`` per
   symbol per day; a symbol first seen mid-day is loaded lazily, once, then cached.
 * index (``NIFTY 50``) daily closes — one read per day.
 * the PRIOR session's ``flagged_instrument_days`` symbol set — one read per day (the deals job
-  writes a day's rows at 20:30 of that day, so a day's own flags are unknowable intraday; reading
-  ``d`` here was structurally empty — fixed 2026-08-18).
+  writes a day's rows at 20:30 of that day, so a day's own flags are unknowable intraday).
 * upcoming corp-action ex-dates for ALL symbols — one ``get_corp_actions`` range read per day,
-  bucketed by symbol (never one read per symbol).
+  bucketed by symbol.
 * ``momentum_by_symbol`` — computed from the SAME cached daily closes (``indicators.momentum``), so a
   symbol joining the cache costs no extra read.
 * ``trade_window`` / ``session_open`` — pure ``NSECalendar`` lookups, cached with the day.
 
-Per bar the provider therefore does at most: zero store reads (steady state), plus the intraday seed
-on a symbol's first bar of the day, plus whatever ``FeatureEngine.intraday_snapshot`` costs — which,
-since 2026-08-26, is also zero reads in steady state. That last clause used to be the leak:
-``intraday_snapshot`` re-read today's 1m bars, the whole ``sector_map`` and the four catalyst digest
-tables on EVERY bar, each taking the store's connection lock while the pre-screen held its own —
-~20 worker threads were observed queued behind one ``get_catalyst_watchlist`` at the 09:36 open. The
-provider now hands the FeatureEngine the today's-bars series it already keeps in memory (see
+Per bar the provider does at most: zero store reads (steady state), plus the intraday seed on a
+symbol's first bar of the day, plus ``FeatureEngine.intraday_snapshot`` — also zero reads in steady
+state because the provider hands it the today's-bars series it already holds (see
 :meth:`LiveScanContextProvider._snapshot_id`); the rest is cached inside ``engine.features.engine``.
+A per-bar re-read there would queue worker threads on the store's connection lock.
 
 Intraday bars
 -------------
 ``ScanContext.intraday_bars`` must be today's session bars ascending WITH the scanned bar last. The
 provider keeps an in-memory per-symbol list and appends each incoming bar. On a symbol's FIRST bar of
-the day it seeds that list from ``store.get_bars_1m(symbol, session_open, bar.ts_minute)`` — a
-mid-session start (restart + gap backfill) then still yields a complete list rather than an
-orb range that begins wherever the process happened to come up. Redelivery is tolerated: a bar with
-the same ``ts_minute`` REPLACES the last element (a late-tick amendment rewrites a bar),
-and a bar older than the last one is IGNORED (a stale/out-of-order delivery must not corrupt the
-ascending series). An ignored bar leaves ``intraday_bars[-1] != bar``, which every intraday scanner
-already treats as fail-to-zero.
+the day it seeds that list from ``store.get_bars_1m(symbol, session_open, bar.ts_minute)``, so a
+mid-session start (restart + gap backfill) yields a complete list rather than an orb range that
+begins wherever the process came up. Redelivery is tolerated: a bar with the same ``ts_minute``
+REPLACES the last element (a late-tick amendment), and a bar older than the last one is IGNORED (it
+must not corrupt the ascending series). An ignored bar leaves ``intraday_bars[-1] != bar``, which
+every intraday scanner already treats as fail-to-zero.
 
-``mom`` rebalance-day state (resolved 2026-08-13)
----------------------------------------------------------------
-``mom_sessions_since_rebalance`` used to be hard-coded ``None`` ("never rebalanced ⇒ due now" on
-EVERY day), a live/backtest cadence mismatch against the sweep's fixed ``rebalance_days``-session
-turnover. The provider now persists the last-rebalanced trading day in ``mom_rebalance_state``
-(migration 0006, one row, singleton pattern) and reports the real trading-session count — see
-:meth:`LiveScanContextProvider._resolve_mom_rebalance`. ``None`` is still the correct value for the
-genuine "never rebalanced" bootstrap case (fresh install / no ``conn`` wired); the scanner already
-treats ``None`` and "due" identically (``engine.strategy.scanners.momentum``).
+``mom`` rebalance-day state
+---------------------------
+The provider persists the last-rebalanced trading day in ``mom_rebalance_state`` (migration 0006,
+one row, singleton pattern) and reports the real trading-session count as
+``mom_sessions_since_rebalance`` (matching the sweep's fixed ``rebalance_days``-session turnover) —
+see :meth:`LiveScanContextProvider._resolve_mom_rebalance`. ``None`` is the value for the genuine
+"never rebalanced" bootstrap case (fresh install / no ``conn`` wired); the scanner treats ``None``
+and "due" identically (``engine.strategy.scanners.momentum``).
 
-Trade-window staleness (fixed 2026-08-18)
------------------------------------------
-``trade_window`` is day-cached like everything else above, but unlike the rest of the cache it is a
-CONTROL-PLANE value the owner can change mid-session (``/trade_window``, ``POST /config/trade_window``). The cache is per PROCESS per date, so before this fix an owner change was invisible to
-every scanner until the next restart or day rollover. Observed live 2026-08-18: the cache was built
-09:52:06 holding 10:00–10:30, the owner moved the window to 10:10–15:30 at 09:57:52, and ``orb``
-(which intersects ``ctx.trade_window`` at :meth:`~engine.strategy.scanners.orb.OrbScanner.scan`)
-went on firing from 10:00:05 against the window that no longer existed — exhausting its entire
-6-slot day sub-cap nine minutes before the real window opened, and refusing a score-1.0 KOTAKBANK
-to do it.
+Trade-window staleness
+----------------------
+``trade_window`` is day-cached, but unlike the rest of the cache it is a CONTROL-PLANE value the
+owner can change mid-session (``/trade_window``, ``POST /config/trade_window``); the cache is per
+PROCESS per date, so without a refresh an owner change is invisible to every scanner (``orb``
+intersects ``ctx.trade_window``) until restart or day rollover.
 
-:meth:`LiveScanContextProvider.invalidate_trade_window` is the fix, wired in ``engine.ops.main`` to
-the ``trade_window.changed`` bus event that :class:`~engine.risk.mode.ModeManager` has always
-published (the event existed; only telegram and the API relay listened). It refreshes ONE field
-rather than dropping the cache — a full rebuild would re-run the index/flagged/ex-date reads and the
-watchlist-wide momentum preload (up to ``universe_max_watchlist`` symbols) on the event-loop's
-worker, which is precisely the per-bar read budget this cache exists to protect. This is the one piece of cross-thread state in the class (the flag is
-set on the event loop, consumed on the pre-screen worker thread), hence the :class:`threading.Event`
-where nothing else here is synchronized.
+:meth:`LiveScanContextProvider.invalidate_trade_window`, wired in ``engine.ops.main`` to the
+``trade_window.changed`` bus event that :class:`~engine.risk.mode.ModeManager` publishes, refreshes
+ONE field rather than dropping the cache — a full rebuild would re-run the index/flagged/ex-date
+reads and the watchlist-wide momentum preload on the worker, which is the per-bar read budget this
+cache protects. This is the one piece of cross-thread state in the class (the flag is set on the
+event loop, consumed on the pre-screen worker thread), hence the :class:`threading.Event`.
 
-Known v1 gaps (deliberate, documented — not silent)
----------------------------------------------------
+Known v1 gap
+------------
 * Without ``momentum_universe`` (a provider built for tests/dev), ``momentum_by_symbol`` spans only
   the symbols CACHED SO FAR today, so early bars rank against a partial cross-section. Production
   wiring (``engine.ops.main``) passes the ``universe_daily`` watchlist closure, which preloads the
@@ -111,17 +98,14 @@ from engine.strategy.types import ScanContext
 
 _log = get_logger("engine.ops.scan_context")
 
-#: Calendar-day look-ahead for ``upcoming_ex_dates``. NOT ~10 sessions: the ``mom`` scanner
-#: applies its OWN skip horizon of ``ceil(rebalance_days x 7/5)`` calendar days, which reaches 28 at
-#: the parameter envelope's ``rebalance_days`` upper bound of 20. Supplying fewer ex-dates than the scanner filters on
-#: would silently defeat the scanner's ex-date skip; supplying more is free (the scanner discards the surplus).
+#: Calendar-day look-ahead for ``upcoming_ex_dates``. The ``mom`` scanner applies its OWN skip
+#: horizon of ``ceil(rebalance_days x 7/5)`` calendar days (28 at the envelope's upper bound of 20).
+#: Fewer ex-dates than the scanner filters on would silently defeat its ex-date skip; more is free.
 DEFAULT_EX_HORIZON_DAYS = 28
 
 #: ``mom.rebalance_days`` default (envelope.yaml: min 10 / max 20 / default 15; matches
-#: ``MomentumScanner.DEFAULT_PARAMS``) — the cadence this provider uses to decide when a rebalance-
-#: due day advances the persisted marker. MUST match the live ``MomentumScanner``'s
-#: configured ``rebalance_days``: today both default to 15 and ``engine.ops.main`` wires no envelope
-#: override into ``build_enabled_scanners`` yet, so they cannot drift in production; a future
+#: ``MomentumScanner.DEFAULT_PARAMS``) — the cadence deciding when a rebalance-due day advances the
+#: persisted marker. MUST match the live ``MomentumScanner``'s ``rebalance_days``; a future
 #: per-strategy envelope override would need to pass the same value here.
 DEFAULT_MOM_REBALANCE_DAYS = 15
 
@@ -178,9 +162,8 @@ class LiveScanContextProvider:
         ``None`` (default) = purely lazy.
     conn:
         Optional state-DB connection for the ``mom`` rebalance-day marker
-        (``mom_rebalance_state``, migration 0006). ``None`` (default) degrades to the earlier
-        behaviour — ``mom_sessions_since_rebalance`` is always ``None`` ("due now") and nothing is
-        persisted — so a caller that has not wired a connection yet is unaffected, never broken.
+        (``mom_rebalance_state``, migration 0006). ``None`` (default) ⇒
+        ``mom_sessions_since_rebalance`` is always ``None`` ("due now") and nothing is persisted.
     mom_rebalance_days:
         The cadence (trading sessions) this provider uses to decide a rebalance is due and advance
         the persisted marker (see :data:`DEFAULT_MOM_REBALANCE_DAYS`). MUST match the live
@@ -225,12 +208,10 @@ class LiveScanContextProvider:
         else:
             static = list(momentum_universe) if momentum_universe else []
             self._momentum_universe_fn = (lambda: static) if static else None
-        # Built lazily on the first __call__ — NO store read happens at construction (a provider is
-        # wired at composition time, long before the worker thread exists).
+        # Built lazily on the first __call__ — NO store read at construction (composition time).
         self._cache: _DayCache | None = None
         #: Set from the event loop by :meth:`invalidate_trade_window`, consumed on the pre-screen
-        #: worker thread by :meth:`_day` (module docstring "Trade-window staleness"). The only
-        #: cross-thread state in this class.
+        #: worker thread by :meth:`_day` (module docstring "Trade-window staleness").
         self._window_dirty = threading.Event()
 
     # ------------------------------------------------------------------ ContextProvider surface
@@ -241,8 +222,7 @@ class LiveScanContextProvider:
         daily = day.daily_bars.get(symbol)
         if daily is None:
             daily = self._load_daily(day, symbol)
-        # Bound once and handed to BOTH consumers: the FeatureEngine gets the series we
-        # already hold instead of re-reading the identical rows from DuckDB on the pre-screen lock.
+        # Bound once and handed to BOTH consumers (the FeatureEngine must not re-read it).
         intraday = self._intraday(day, bar)
         return ScanContext(
             intraday_bars=intraday,
@@ -261,13 +241,12 @@ class LiveScanContextProvider:
 
     # ------------------------------------------------------------------ owner window changes
     def invalidate_trade_window(self) -> None:
-        """Mark the cached ``trade_window`` stale; the next :meth:`_day` re-reads it (2026-08-18).
+        """Mark the cached ``trade_window`` stale; the next :meth:`_day` re-reads it.
 
         Wired to the ``trade_window.changed`` bus topic in ``engine.ops.main``. Deliberately does NOT
-        touch the cache here: this runs on the event loop while the pre-screen worker thread may be
-        mid-``__call__``, and every other field is built under the "provider calls are serialized by
-        the pre-screen's lock" assumption this module documents. Setting a flag is the only mutation
-        that is safe from either thread; the refresh itself happens on the worker, in :meth:`_day`.
+        touch the cache: this runs on the event loop while the pre-screen worker thread may be
+        mid-``__call__``. Setting a flag is the only mutation safe from either thread; the refresh
+        happens on the worker, in :meth:`_day`.
 
         Idempotent, and safe before the first ``__call__`` (no cache yet ⇒ the first build reads the
         new value anyway).
@@ -301,10 +280,8 @@ class LiveScanContextProvider:
         except ValueError:
             window = None           # not a trading day — same meaning as in _build_day
         except Exception as exc:  # noqa: BLE001 - an UNEXPECTED read failure must not eat the event
-            # (2026-08-18 review): the flag is already cleared, so swallowing this would drop the
-            # owner's change until the NEXT change or restart. Re-arm the flag (the next bar
-            # retries) and keep the last-known window — one bad SQLite read degrades to a
-            # one-bar-late refresh, never to a silently stale session.
+            # The flag is already cleared, so swallowing this would drop the owner's change until the
+            # NEXT change or restart. Re-arm it (the next bar retries) and keep the last-known window.
             self._window_dirty.set()
             _log.warning("scan_context_window_refresh_failed", d=cache.d.isoformat(),
                          error=f"{type(exc).__name__}: {exc}")
@@ -330,10 +307,8 @@ class LiveScanContextProvider:
         daily_end = d - timedelta(days=1)
         daily_start = d - timedelta(days=self._lookback_days)
         index_closes = [b.close for b in self._store.get_bars_1d(self._index_symbol, daily_start, daily_end)]
-        # PRIOR session's bulk/block-deal flags, not day ``d``'s (2026-08-18 fix): the deals job
-        # writes ``d``'s rows at 20:30 of ``d`` itself, so an intraday read of ``d`` was structurally
-        # empty and the orb suppression had never fired live. "A deal on the last completed
-        # session" is the only knowable — and therefore the intended — live meaning.
+        # PRIOR session's bulk/block-deal flags, not day ``d``'s: the deals job writes ``d``'s rows at
+        # 20:30 of ``d``, so an intraday read of ``d`` is structurally empty.
         try:
             flagged_day: date | None = self._calendar.previous_trading_day(d)
         except ValueError:       # no prior session resolvable (calendar hole) — no flags, no error
@@ -396,20 +371,19 @@ class LiveScanContextProvider:
     def _resolve_mom_rebalance(self, d: date) -> int | None:
         """Trading sessions since the last ``mom`` rebalance, or ``None`` if never rebalanced — both
         read as "due now" by :class:`~engine.strategy.scanners.momentum.MomentumScanner` (module
-        docstring). Persists the day's cadence decision to ``mom_rebalance_state`` (migration 0006):
-        a DUE day (``since >= mom_rebalance_days``), or the never-rebalanced bootstrap, stamps ``d``
-        as the new reference point — matching the sweep's fixed-cadence indexing
-        (``valid_positions[::rebalance_days]``, ``engine.learning.sweep``), where a rebalance is a
-        calendar/session event and not conditioned on whether a candidate actually cleared ``top_n``
-        that day. No ``conn`` wired ⇒ degrades to ``None`` (always due), never raises:
-        persistence is additive, not a hard dependency of the scan path.
+        docstring). Persists the day's cadence decision to ``mom_rebalance_state``: a DUE day
+        (``since >= mom_rebalance_days``), or the never-rebalanced bootstrap, stamps ``d`` as the new
+        reference point — matching the sweep's fixed-cadence indexing
+        (``valid_positions[::rebalance_days]``, ``engine.learning.sweep``): a rebalance is a
+        session event, not conditioned on a candidate clearing ``top_n``. No ``conn`` wired ⇒
+        ``None`` (always due), never raises: persistence is not a hard dependency of the scan path.
         """
         if self._conn is None:
             return None
         last_d = self._read_last_rebalance_d()
         if last_d is None:
             self._write_last_rebalance_d(d)
-            return None                              # never rebalanced ⇒ due now (pre-existing semantics)
+            return None                              # never rebalanced ⇒ due now
         since = self._sessions_between(last_d, d)
         if since >= self._mom_rebalance_days:
             self._write_last_rebalance_d(d)           # today becomes the new reference point
@@ -483,9 +457,8 @@ class LiveScanContextProvider:
         (the candidate loses its feature link) and NEVER raises: a FeatureEngine problem must not take
         the whole scan path down mid-session.
 
-        ``bars`` is the same today's-session series this provider just built for the context.
-        The FeatureEngine used to re-read it from DuckDB per bar, inside the pre-screen lock — see
-        ``FeatureEngine.intraday_snapshot``'s ``bars`` parameter for why the two are equivalent."""
+        ``bars`` is the same today's-session series just built for the context, so the FeatureEngine
+        need not re-read it — see ``FeatureEngine.intraday_snapshot``'s ``bars`` parameter."""
         try:
             return self._features.intraday_snapshot(symbol, bars=bars).features_snapshot_id
         except Exception as exc:  # noqa: BLE001 - fail to None, never propagate into the scan path

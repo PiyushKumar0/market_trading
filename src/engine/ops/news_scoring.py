@@ -16,59 +16,44 @@ origination surface is decided here, in Python, never by the model:
   watchlist — `cat` originates nothing. No alert is raised here: the digest owns the ``CATALYST_*``
   alerts, and a scoring gap that never reaches the digest is not an owner-visible condition.
 
-Spec ambiguities resolved here (documented for the integrator):
+Decisions:
 
-- The 30-minute age trigger is read from :meth:`BudgetGovernor.news_batch_cadence_min` rather than
-  hard-coded, so the DG2 row ("news-analyst batching coarsens 30 → 60 min") is actually load-
-  bearing instead of decorative. It returns the default of 30 unless the platform is
-  at DG2+ or the news analyst is over its own share (per-agent degrade, 2026-09-12), when it returns 60.
+- The 30-minute age trigger is read from :meth:`BudgetGovernor.news_batch_cadence_min` (30 by
+  default; 60 at DG2+ or when the news analyst is over its own share), not hard-coded.
 - The market-hours leg of the time gate requires a trading day; the 19:00–22:00 sweep does not.
   Weekend/holiday news is eligible for the next session's digest (`cat.max_event_age_days` counts
-  SESSIONS), so refusing to score it on a Sunday evening would only shove the whole weekend queue
-  into the pre-open batch it is supposed to keep small.
-- ``sectors``/``themes`` are intersected against the cluster's PERSISTED resolver columns, not against
-  a fresh ``resolve()`` of the headline: the persisted tags are what the digest's fan-out will
-  actually consume, and alias/theme-map state may have drifted since the resolver ran.
-- ``entities`` is persisted as the RESOLVER's matched-alias output (a superset of the resolver's value,
-  since ``extra_texts`` can only add matches) — the column keeps its existing meaning rather than
-  becoming a dump of model prose. The model's UNMATCHED strings are logged to
-  ``unresolved_entities`` (reason ``no_match``): those are precisely the weekly alias-suggestion
-  inputs wanted from this seam.
-- A missing ``news_analyst`` entry in the roster is a construction-time error, not a runtime skip: a
-  parked agent means the job should not have been wired at all.
+  SESSIONS), so refusing to score it would shove the weekend queue into the pre-open batch.
+- ``sectors``/``themes`` are intersected against the cluster's PERSISTED resolver columns, not a
+  fresh ``resolve()``: the persisted tags are what the digest's fan-out consumes, and alias/theme-map
+  state may have drifted.
+- ``entities`` is persisted as the RESOLVER's matched-alias output (``extra_texts`` can only add
+  matches), not model prose. The model's UNMATCHED strings are logged to ``unresolved_entities``
+  (reason ``no_match``): the weekly alias-suggestion inputs.
+- A missing ``news_analyst`` roster entry is a construction-time error, not a runtime skip.
 
-**Chain-lock discipline (2026-09-09).** The caller may hand ``run_batch`` the
-``news_chain_lock`` that serialises the ``news_clusters`` read-modify-write against the per-feed
-polls. The lock is held for the STORE HOPS ONLY — the initial queue read and each chunk's write-back
-— never across the model call: held around the whole batch it also spanned one LLM await per chunk,
-and the polls (whose resolve deadline covers lock ACQUISITION) queued behind it (14
-``news_resolve_timeout`` on 2026-09-07, nine within one second). Shortening the hold reintroduces the
-interleaving the lock existed to prevent, so the write-back is always CONDITIONAL: under the same
-hold the FULL unscored rows are re-read and each score is applied to the CURRENT row, never to the
-pre-LLM snapshot. Since the upsert overwrites every non-key column, that is what makes a poll merge
-landing during the model call (``source_domains``, ``first_seen``/``last_seen``, ``representative``,
-``symbols``/``sectors``/``themes``) SURVIVE the write-back rather than be silently reverted; an id
-that left the queue meanwhile — merged away, or scored by another batch — is skipped rather than
-re-created as a zombie row / clobbered with an older score (drops are logged). ``lock=None`` is not a
-distinct code path (2026-09-23): the only production caller always passes ``news_chain_lock``, so the
-job now owns a private ``asyncio.Lock()`` for that run when the caller passes none, and the
-conditional re-read/write-back above always applies — a caller with nothing to serialise against
-still gets the safety, just against no rival.
+**Chain-lock discipline.** The caller may hand ``run_batch`` the ``news_chain_lock`` that serialises
+the ``news_clusters`` read-modify-write against the per-feed polls. The lock is held for the STORE
+HOPS ONLY — the initial queue read and each chunk's write-back — NEVER across the model call: the
+polls' resolve deadline covers lock ACQUISITION, so a hold spanning an LLM await makes them time out.
+Because the hold is short, the write-back is always CONDITIONAL: under the same hold the FULL
+unscored rows are re-read and each score is applied to the CURRENT row, never the pre-LLM snapshot.
+The upsert overwrites every non-key column, so this is what lets a poll merge landing during the
+model call (``source_domains``, ``first_seen``/``last_seen``, ``representative``,
+``symbols``/``sectors``/``themes``) SURVIVE; an id that left the queue meanwhile (merged away, or
+scored by another batch) is skipped rather than re-created as a zombie row or clobbered (drops are
+logged). ``lock=None`` is not a distinct code path: the job owns a private ``asyncio.Lock()`` for
+that run, so the conditional write-back always applies.
 
-**Accepted residual.** Chunks 2..N are still prompted from the BATCH's initial snapshot (the queue is
-read once, before the first chunk), so a poll merge that lands mid-batch — after its chunk's context
-was already built, before that chunk's write-back — yields a score computed without the merged
-headline. This is not a regression from the 2026-09-09 change: the whole-batch-hold predecessor had
-the identical property (a merge landing after the model saw the prompt is never re-scored; only a
-merge landing before write-back can be reverted, and CONDITIONAL write-back is precisely what stops
-that). The write-back's stale-skip count (surfaced as ``stale`` on ``news_scoring_batch`` and folded
-into ``remaining`` on ``news_scoring_chunk_failed``) makes this interleaving visible rather than
-silently absorbed into an over-counted queue.
+**Accepted residual.** Chunks 2..N are prompted from the BATCH's initial snapshot (the queue is read
+once), so a poll merge landing after a chunk's context was built yields a score computed without the
+merged headline; only a merge landing before write-back could be reverted, and the CONDITIONAL
+write-back stops that. The stale-skip count (``stale`` on ``news_scoring_batch``, folded into
+``remaining`` on ``news_scoring_chunk_failed``) makes the interleaving visible.
 
-The batch is also SINGLE-FLIGHTED on a lock the job owns (``_run_lock``): the chain's forced pre-open
-batch and the 300 s scoring tick are distinct scheduler jobs, and with the chain lock no longer
-spanning the model call they would otherwise read the same queue and bill the same clusters twice. A
-queued batch waits rather than skipping — see :meth:`NewsScoringJob.run_batch`.
+The batch is SINGLE-FLIGHTED on a lock the job owns (``_run_lock``): the chain's forced pre-open
+batch and the 300 s scoring tick are distinct scheduler jobs that would otherwise read the same
+queue and bill the same clusters twice. A queued batch waits rather than skipping — see
+:meth:`NewsScoringJob.run_batch`.
 """
 
 from __future__ import annotations
@@ -168,8 +153,7 @@ class NewsScoringJob:
         self._governor = governor
         self._clock = clock
         self._calendar = calendar
-        # SINGLE-FLIGHT (2026-09-09): see run_batch. Owned by the job, not the caller — the two
-        # callers are different scheduler jobs and share nothing else.
+        # SINGLE-FLIGHT: see run_batch. Owned by the job, not the caller (two distinct scheduler jobs).
         self._run_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ run
@@ -179,27 +163,22 @@ class NewsScoringJob:
         """Score the queued clusters. ``force`` is the PRE-OPEN batch: it ignores both the
         time gate and the ≥8/30-min trigger and scores everything unscored.
 
-        ``lock`` is the caller's news-chain lock (2026-09-09): taken for the queue read and for each
-        chunk's write-back, NEVER across the model call — see the module docstring. ``None`` (no
-        production caller passes this) makes the job own a private lock for this run instead — the
-        conditional re-read/write-back always applies either way (2026-09-23).
+        ``lock`` is the caller's news-chain lock: taken for the queue read and for each chunk's
+        write-back, NEVER across the model call — see the module docstring. ``None`` makes the job
+        own a private lock for this run; the conditional re-read/write-back applies either way.
 
-        The whole body runs under the job's own ``_run_lock`` (2026-09-09): the chain's forced
-        pre-open batch and the 300 s ``scoring_tick`` are DISTINCT scheduler jobs, and now that the
-        chain lock is released across the model call nothing else keeps them apart — both would read
-        the same unscored queue and send the same clusters to the model twice. It WAITS rather than
-        skips: a batch queued behind another re-reads a queue the first one emptied and returns in a
-        single store read, whereas skipping would silently drop the tick's legitimate work whenever a
-        pre-open batch happened to be in flight (and a skip is indistinguishable from a scoring gap
-        downstream). Held OUTSIDE ``lock``, never inside: the chain lock's holders never take this
-        one, so the nesting order cannot cycle."""
+        The whole body runs under the job's own ``_run_lock``: the chain's forced pre-open batch and
+        the 300 s ``scoring_tick`` are DISTINCT scheduler jobs and nothing else keeps them apart.
+        It WAITS rather than skips: a batch queued behind another re-reads a queue the first one
+        emptied and returns in one store read, whereas a skip would drop the tick's legitimate work
+        (indistinguishable from a scoring gap downstream). Held OUTSIDE ``lock``, never inside: the
+        chain lock's holders never take this one, so the nesting order cannot cycle."""
         async with self._run_lock:
             return await self._run_batch(force=force, lock=lock)
 
     async def _run_batch(self, *, force: bool, lock: asyncio.Lock | None) -> ScoringResult:
         """One batch, already single-flighted by :meth:`run_batch`. ``lock`` is the caller's chain
-        lock; a caller with none (2026-09-23: none in production) still gets one, owned privately for
-        this run, so the conditional write-back's safety is unconditional from the job's own view."""
+        lock; a caller with none gets a private one for this run."""
         now = self._clock.now()
         if not force and not self._in_scoring_window(now):
             return ScoringResult(skipped_reason=SKIP_OUTSIDE_WINDOWS)
@@ -238,8 +217,7 @@ class NewsScoringJob:
             context = self._assembler.for_news_batch(
                 [_prompt_row(c) for c in chunk], theme_vocabulary
             )
-            # OUTSIDE the lock (2026-09-09): one await per chunk, and the per-feed polls' resolve
-            # deadline covers lock acquisition — see the module docstring's 09-07 timeouts.
+            # OUTSIDE the lock: the polls' resolve deadline covers lock acquisition (module docstring).
             result = await self._harness.run_single_shot(
                 self._def,
                 context,
@@ -249,9 +227,8 @@ class NewsScoringJob:
             )
             if not result.ok:
                 # Stop at the first failed chunk: the remaining clusters stay queued for the next
-                # cadence rather than being re-sent inside a run that is already failing. Stale
-                # ids (merged/rescored away at an earlier chunk's write-back) are subtracted too: they
-                # already left the queue, so counting them as still-queued overstates this log's number.
+                # cadence rather than being re-sent inside a run that is already failing. Stale ids
+                # already left the queue, so they are subtracted from ``remaining``.
                 _log.warning(
                     "news_scoring_chunk_failed",
                     reason=result.reason,
@@ -301,18 +278,15 @@ class NewsScoringJob:
     ) -> tuple[int, int]:
         """Persist one chunk's scores, matched by ``cluster_id``. Returns ``(written, stale)``: the
         rows written and how many sent ids had already left the queue by write-back time (merged away
-        or scored by a rival batch) — the caller accumulates ``stale`` so its logs don't count an id
-        that is no longer queued as still-remaining (see ``_run_batch``'s ``stale_total``).
+        or scored by a rival batch) — the caller accumulates it so its logs don't count such an id as
+        still-remaining (``_run_batch``'s ``stale_total``).
 
-        Called under the (always-present, 2026-09-23) chain lock: re-reads the FULL unscored rows
-        under that SAME hold (2026-09-09) and, for each id we actually sent, applies the score
-        columns onto the CURRENT cluster — never onto the pre-LLM snapshot. Two things ride on that:
-        an id no longer in the queue (a poll merged it away, or another batch scored it) is skipped
-        rather than resurrected as a zombie row / clobbered with an older score, and — because the
-        upsert overwrites every non-key column — a merge that landed during the model call
-        (``source_domains``, ``first_seen``/``last_seen``, ``representative``,
-        ``symbols``/``sectors``/``themes``) SURVIVES instead of being reverted. The chunk snapshot is
-        kept only as the "this id was sent" membership test. Volumes are tiny; the extra read is free.
+        Called under the chain lock: re-reads the FULL unscored rows under that SAME hold and, for
+        each id we sent, applies the score columns onto the CURRENT cluster — never the pre-LLM
+        snapshot. An id no longer in the queue is skipped rather than resurrected as a zombie row or
+        clobbered with an older score, and — the upsert overwrites every non-key column — a merge that
+        landed during the model call SURVIVES instead of being reverted. The chunk snapshot is only
+        the "this id was sent" membership test.
         """
         sent = {c.cluster_id: c for c in chunk}
         live = {
@@ -328,9 +302,8 @@ class NewsScoringJob:
                 # let the model create a cluster. Ignored, but never silently.
                 _log.warning("news_score_unknown_cluster", cluster_id=score.cluster_id)
                 continue
-            # The row the score is applied to is the FRESH re-read (the snapshot only ever answers
-            # "did we send this id"); everything below — the resolve input, the symbol union, the
-            # sector/theme intersection — therefore reads the CURRENT cluster columns.
+            # The score applies to the FRESH re-read, so the resolve input, symbol union and
+            # sector/theme intersection below read the CURRENT cluster columns.
             cluster = live.get(score.cluster_id)
             if cluster is None:
                 stale.append(score.cluster_id)
@@ -380,8 +353,7 @@ class NewsScoringJob:
         """Log the model's UNMATCHED entity strings for the weekly alias-suggestion loop.
 
         Only ``no_match`` entries whose text is one of this score's strings are logged: an ambiguous
-        alias found in the representative headline was already recorded by the resolver, and re-logging it
-        on every scoring run would bury the genuinely new suggestions in duplicates.
+        alias in the headline was already recorded by the resolver; re-logging would bury new ones.
         """
         emitted = set(score.entities)
         for entry in resolved.unresolved:

@@ -1,37 +1,31 @@
 """Session lifecycle: the every-startup recovery + catch-up sequence, and the shutdown guard.
 
-The engine is up only during active periods and may be deliberately stopped in between. The
-defining invariant: **every startup is a full recovery** — scheduled or manual, after a clean stop or a
-crash, after a gap of minutes or days — and the platform never breaks because it was off. Capital
-protection is broker-resident throughout, so being off is safe.
+Invariant: **every startup is a full recovery** — scheduled or manual, after a clean stop or a
+crash, after minutes or days off. Capital protection is broker-resident, so being off is safe.
 
-Shape of the startup sequence (steps that are OMS/broker-side are injected hooks; the live order path is not built):
+Startup sequence (OMS/broker-side steps are injected hooks; the live order path is not built):
 
 0. **Lifecycle boot:** read the prior ``engine_lifecycle`` row. Prior ``state ∈ {RUNNING,
-   STOPPING}`` with the prior pid ALIVE ⇒ **refuse to start** (:class:`SingleInstanceError` — another
-   instance owns the single-writer stores); prior pid dead ⇒ crash/interrupted-shutdown, the
-   startup report leads with a crash-recovered notice. Then atomically commit ``state='RUNNING'`` +
-   fresh ``last_alive_at``/``pid``/``started_at`` (the fresh ``last_alive_at`` IS the watchdog re-arm
-   clear — its debounce predicate is ``last_down_alert_at < last_alive_at``), start the
-   dedicated-thread :class:`~engine.ops.heartbeat.HeartbeatWriter`, and emit ``ENGINE_STARTED`` —
-   all before step 1. Fast unclean boots inside ``lifecycle.crashloop_window_s`` coalesce into a
-   single ``ENGINE_CRASHLOOP`` alert instead of a page per respawn.
+   STOPPING}`` with the prior pid ALIVE ⇒ **refuse to start** (:class:`SingleInstanceError`); prior
+   pid dead ⇒ crash/interrupted shutdown, the startup report leads with a crash-recovered notice.
+   Then atomically commit ``state='RUNNING'`` + fresh ``last_alive_at``/``pid``/``started_at`` (the
+   fresh ``last_alive_at`` IS the watchdog re-arm clear — its debounce predicate is
+   ``last_down_alert_at < last_alive_at``), start the dedicated-thread
+   :class:`~engine.ops.heartbeat.HeartbeatWriter`, emit ``ENGINE_STARTED`` — all before step 1.
+   Fast unclean boots inside ``lifecycle.crashloop_window_s`` coalesce into one ``ENGINE_CRASHLOOP``.
 1. Read sticky kill / mode / trade-window state + run the startup self-test.
 2. Reconcile vs broker = truth — injected hook, TODO(live AUTO).
 3. Overdue-MIS startup square-off — injected hook, TODO(live AUTO).
-4. Data-gap backfill (bars + NIFTY50/India-VIX history, the risk gate's ``regime_data_ready``) — injected hook;
-   the integrator wires ``BackfillJob.warmup_gap``.
-5. Missed-job catch-up — :class:`engine.ops.jobs.CatchUpRunner` (per-job ``job_runs`` watermarks,
-   step 5 classes); safety-critical failures ⇒ FROZEN-for-entries.
-6. Cold-start warm-up gate (``warmup_ready``/``regime_data_ready``) — the injected
-   :class:`~engine.ops.warmup.WarmupGate` answers; this class applies the consequence PER COVERAGE
-   CLASS (2026-09-13) and PER SYMBOL (2026-09-17): only a REGIME shortfall (NIFTY 50 / India VIX —
-   every candidate depends on them) or an UNATTRIBUTABLE blocker is FROZEN via the risk-state setter
-   + ``WARMUP_FROZEN`` alert; an INTRADAY or DAILY shortfall is logged and left to the per-candidate
+4. Data-gap backfill (bars + NIFTY50/India-VIX history, the risk gate's ``regime_data_ready``) — injected hook.
+5. Missed-job catch-up — :class:`engine.ops.jobs.CatchUpRunner` (per-job ``job_runs`` watermarks);
+   safety-critical failures ⇒ FROZEN-for-entries.
+6. Cold-start warm-up gate — the injected :class:`~engine.ops.warmup.WarmupGate` answers; this class
+   applies the consequence PER COVERAGE CLASS: only a REGIME shortfall (NIFTY 50 / India VIX — every
+   candidate depends on them) or an UNATTRIBUTABLE blocker is FROZEN via the risk-state setter +
+   ``WARMUP_FROZEN`` alert; an INTRADAY or DAILY shortfall is logged and left to the per-candidate
    rules (risk gate + pre-screen), which refuse only the SYMBOLS that are short. Never trade on thin
    data — and never take the book down for one symbol's coverage hole.
-7. Re-arm schedules + resume the ticker (WARMING — feed-stale alarms suppressed) and send
-   the startup/recovery report.
+7. Re-arm schedules + resume the ticker (WARMING — feed-stale alarms suppressed), send the report.
 
 Clean stop: ``STOPPING`` FIRST (draws the planned-vs-crash line) → shutdown-guard hooks
 (cancel entries / flatten MIS / verify CNC PROTECTED / backup — live-AUTO seams) → ``STOPPED`` commit
@@ -94,25 +88,19 @@ CRASHLOOP_MIN_BOOTS = 3
 _UNATTRIBUTED_BLOCKER = "warmup not ready — no blocker rendered"
 
 
-#: The only two GLOBAL warm-up conditions (owner-directed 2026-09-17). REGIME
-#: is NIFTY 50 / India VIX daily history — every candidate of every class depends on the market
-#: context built from it, so there is no per-symbol answer to give. UNKNOWN is a blocker nobody could
-#: attribute: what cannot be verified is treated as missing, for the whole book.
+#: The only two GLOBAL warm-up conditions. REGIME is NIFTY 50 / India VIX daily history — every
+#: candidate of every class depends on the market context built from it, so there is no per-symbol
+#: answer. UNKNOWN is a blocker nobody could attribute: unverifiable is treated as missing, book-wide.
 _FREEZING_CLASSES = (CLASS_REGIME, CLASS_UNKNOWN)
 
 
 def _freezes_entries(blockers: Sequence[str]) -> bool:
-    """Does this shortfall drive the GLOBAL FROZEN-for-entries (narrowed 2026-09-13,
-    narrowed again 2026-09-17)? True ONLY for the REGIME class and for a blocker whose class cannot
-    be told from its rendering (unattributable coverage freezes).
+    """Does this shortfall drive the GLOBAL FROZEN-for-entries? True ONLY for the REGIME class and
+    for a blocker whose class cannot be told from its rendering (unattributable coverage freezes).
 
-    Rationale for the 2026-09-17 narrowing: since 2026-09-13 an INTRADAY shortfall was already
-    refused PER CANDIDATE rather than freezing, and DAILY now gets the identical treatment
-    (per-symbol refusal at the gate), so only the two genuinely GLOBAL conditions set the global
-    FROZEN cause. One symbol's daily hole must not take the book down — on 2026-09-15 a single
-    ``rsi2/trend/mom:OLAELEC daily bars 193/200`` held the global ``warmup_ready`` FROZEN cause for
-    ~12 hours. A market-wide daily hole (the nightly ``daily_bars`` job failed) still refuses every
-    swing/position candidate per symbol at the gate AND pages the owner through the per-class
+    INTRADAY and DAILY shortfalls are refused per symbol at the gate instead: one symbol's hole must
+    not take the book down. A market-wide daily hole (the nightly ``daily_bars`` job failed) still
+    refuses every swing/position candidate per symbol AND pages the owner through the per-class
     transition notice (``engine.ops.main._log_class_transition``).
 
     False ⇒ the shortfall is intraday and/or daily, per-symbol, and the risk state is not this
@@ -157,9 +145,8 @@ class StartupReport(BaseModel):
     warmup_blockers: list[str] = Field(default_factory=list)
     warmup_young_excluded: list[str] = Field(default_factory=list)  # young listings off the lookback gate
     #: Warm-up COVERAGE CLASSES short at boot, sorted (``intraday``/``daily``/``regime``/``unknown``).
-    #: Only regime/unknown freeze entries (2026-09-17); the field says which class was short whether
-    #: or not it froze, so "entries are open with intraday or daily coverage short for some symbols"
-    #: is never silent.
+    #: Only regime/unknown freeze entries; the field names a short class whether or not it froze, so
+    #: open entries with some symbols' coverage short are never silent.
     warmup_classes_short: list[str] = Field(default_factory=list)
     deferred_steps: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -170,9 +157,8 @@ class WarmupReapply(BaseModel):
 
     ``outcome`` is one of ``deferred`` (no gate wired), ``frozen`` (a freezing class — REGIME or an
     unattributable blocker — still short, re-frozen), ``ready_<why>`` (every class covered), or
-    ``short_<why>`` (2026-09-17, renamed from ``intraday_short_<why>``: the freezing classes are
-    covered and the freeze is resolved, with a NON-FREEZING class — intraday and/or daily — still
-    short, whose shortfall keeps being refused per symbol at the gate). ``why`` ∈ {``lifted`` (freeze
+    ``short_<why>`` (the freezing classes are covered and the freeze is resolved, with a NON-FREEZING
+    class — intraday and/or daily — still short, refused per symbol at the gate). ``why`` ∈ {``lifted`` (freeze
     cleared), ``already_normal``, ``kill_held``, ``latched`` (CLOSE_ONLY/KILLED — owner re-arm only),
     ``other_freeze`` (a non-warm-up precondition still stands)}.
 
@@ -272,9 +258,8 @@ class SessionLifecycle:
         self._boot_clock_skewed = False
 
     async def _freeze(self, cause: str, detail: str) -> None:
-        """FROZEN-for-entries through the cause ledger when wired (single-writer discipline —
-        2026-07-28 review: a direct write is invisible to ``clear_cause`` re-arms and to the lift
-        path); the direct setter remains only for latch-less construction (older tests)."""
+        """FROZEN-for-entries through the cause ledger when wired (a direct write is invisible to
+        ``clear_cause`` re-arms and to the lift path); the direct setter is for latch-less construction."""
         if self._latch is not None:
             await self._latch.set_cause(cause, RiskState.FROZEN, detail, Actor.RISK_GATE)
         else:
@@ -285,15 +270,11 @@ class SessionLifecycle:
         # 0) Process-lifecycle boot: crash detection → atomic RUNNING commit →
         #    heartbeat thread → ENGINE_STARTED, all BEFORE the recovery body.
         #
-        #    PRIMARY vs SECONDARY (2026-07-21 double-run): the real mutual exclusion is now the
-        #    OS-level ``engine.ops.single_instance.InstanceLock``, acquired in the composition root
-        #    (``engine.ops.main.run``) BEFORE any shared resource is touched (sqlite / DuckDB / :8400 /
-        #    Telegram) — a kernel file lock, released on ANY process death. This ``engine_lifecycle``
-        #    check STAYS as the SECONDARY, belt-and-suspenders guard: it drives crash-recovered
-        #    detection (``crash_recovered`` below) and carries the pid-alive semantics the file lock has
-        #    no need for. On its own it is only a TOCTOU read (two boots can both pass it, and an
-        #    instance that wedges before this commit is invisible to it) — which is precisely why the
-        #    file lock is now primary and this remains defence in depth. No behaviour change here.
+        #    The PRIMARY mutual exclusion is the OS-level ``engine.ops.single_instance.InstanceLock``,
+        #    acquired in the composition root (``engine.ops.main.run``) before any shared resource is
+        #    touched. This ``engine_lifecycle`` check is the SECONDARY guard: it drives
+        #    ``crash_recovered`` detection, but alone it is only a TOCTOU read (two boots can both
+        #    pass it, and an instance that wedges before the commit is invisible to it).
         prior = self._read_prior()
         prior_state = prior["state"] if prior else None
         prior_pid = int(prior["pid"]) if prior and prior["pid"] else None
@@ -363,10 +344,9 @@ class SessionLifecycle:
                 await self._kill.trigger("protected_store_integrity_live_book", actor=Actor.RISK_GATE, flatten=True)
                 report.killed = True
         elif self._latch is not None and not self._kill.is_killed():
-            # Inverse of the freeze above, same rule as the step-5 catch-up clear: every protected
-            # store just verified against its signed digest IS this cause's predicate, so an owner
-            # reseed after a failed one recovers on the next boot instead of needing a DB edit. The
-            # live-book kill is untouched: only /kill_reset ends a kill.
+            # Inverse of the freeze above: every protected store verified against its signed digest IS
+            # this cause's predicate, so an owner reseed recovers on the next boot. The live-book
+            # kill is untouched: only /kill_reset ends a kill.
             await self._latch.clear_cause("protected_store_integrity", Actor.RISK_GATE)
 
         # Other FROZEN-implying causes (secrets/clock/window/token) ⇒ FROZEN entries until cleared.
@@ -391,12 +371,10 @@ class SessionLifecycle:
             if not self._kill.is_killed():
                 await self._freeze("catchup_safety_jobs", ",".join(result.frozen_reasons))
         elif self._latch is not None and not self._kill.is_killed():
-            # Inverse of the freeze above (2026-09-01: the cause had a set site but no clear site,
-            # so one transient boot failure kept entries FROZEN for two full sessions after the
-            # catch-up had recovered). A clean pass IS the re-verification of exactly this cause's
-            # predicate — same clear-only-what-was-re-verified rule as _maybe_lift_warmup_freeze;
-            # clear_cause is an idempotent no-op when the cause is not latched, and cause-scoped,
-            # so any other standing freeze (owner_pause, floor rung, warm-up) keeps the state.
+            # Inverse of the freeze above: a clean pass IS the re-verification of exactly this cause's
+            # predicate (clear only what was re-verified, as in _maybe_lift_warmup_freeze);
+            # clear_cause is an idempotent, cause-scoped no-op when not latched, so any other
+            # standing freeze (owner_pause, floor rung, warm-up) keeps the state.
             await self._latch.clear_cause("catchup_safety_jobs", Actor.RISK_GATE)
 
         # 6) Cold-start warm-up gate (risk-gate warmup_ready + regime_data_ready).
@@ -594,18 +572,15 @@ class SessionLifecycle:
         reason holds; the reopen once coverage is met is the post-login re-trigger's job
         (:meth:`reapply_warmup_gate`).
 
-        2026-09-13 change, narrowed 2026-09-17: only the REGIME class and
-        an UNATTRIBUTABLE blocker freeze entries. An INTRADAY shortfall — one symbol's minute hole
-        (2026-09-16 13:36 PTCIL), a market-wide one-bar gap after a reconnect — and a DAILY one
-        (2026-09-15 OLAELEC) are now logged and left to the per-candidate rules, which refuse only
-        the SYMBOLS that are short."""
+        Only the REGIME class and an UNATTRIBUTABLE blocker freeze entries; an INTRADAY or DAILY
+        shortfall is logged and left to the per-candidate rules, which refuse only the SYMBOLS that
+        are short."""
         if self._warmup_gate is None:
             report.deferred_steps.append("warmup_gate")
             _log.info("startup_step_deferred", step="warmup_gate")
             return
         status = await self._warmup_gate_status()
-        # Young listings excluded from the lookback gate are surfaced whether or not the gate is ready
-        # (an exclusion is never silent), so capture them before the ready-path early return.
+        # Young-listing exclusions are never silent: capture before the ready-path early return.
         report.warmup_young_excluded = list(getattr(status, "young_excluded", []) or [])
         if status is not None and status.ready:
             report.notes.append("warmup_ready")
@@ -617,10 +592,8 @@ class SessionLifecycle:
             report.frozen_reasons.append("warmup_ready")
             await self._freeze_for_warmup(blockers)
             return
-        # INTRADAY and/or DAILY only: no risk-state consequence and no WARMUP_FROZEN page (nothing
-        # froze), but never silent — ``warmup_classes_short`` rides the OWNER's STARTUP_REPORT body
-        # (see :meth:`_emit_report`), not only this log, because a session trading on incomplete
-        # coverage with `frozen: none` is exactly the silence to avoid.
+        # INTRADAY and/or DAILY only: no risk-state consequence and no WARMUP_FROZEN page, but never
+        # silent — ``warmup_classes_short`` rides the owner's STARTUP_REPORT body (:meth:`_emit_report`).
         # The gate and the pre-screen refuse the SHORT SYMBOLS' candidates one by one.
         for cls in (CLASS_INTRADAY, CLASS_DAILY):
             if cls in report.warmup_classes_short:
@@ -650,9 +623,8 @@ class SessionLifecycle:
             before = self._mode.risk_state()
             await self._freeze("warmup_ready", "warmup_ready")
             froze = before != RiskState.FROZEN and self._mode.risk_state() == RiskState.FROZEN
-        # The class summary leads the alert (its own field, never smuggled into ``blockers``): which
-        # coverage class froze entries is the first thing the owner needs, and an intraday line riding
-        # along in the same freeze must not read as the cause.
+        # The class summary leads the alert (its own field, not in ``blockers``) so an intraday line
+        # riding along in the same freeze does not read as the cause.
         await self._notify_safe(
             catalog.warmup_frozen(blockers=blockers, classes=sorted(classify_blockers(blockers))),
             "warmup_frozen",
@@ -660,13 +632,12 @@ class SessionLifecycle:
         return froze
 
     async def reapply_warmup_gate(self) -> WarmupReapply:
-        """Post-login re-evaluation of the step-6 warm-up gate — the RE-TRIGGER half of the
-        cold-start-family fix. Uses the SAME injected :class:`~engine.ops.warmup.WarmupGate` and the
-        SAME risk-state seam as startup (never a direct bypass): FREEZE while a FREEZING class
-        (regime / unattributable) is still short, and LIFT the warm-up FROZEN-for-entries once those
-        classes are covered — conservatively (see :meth:`_maybe_lift_warmup_freeze`), and since
-        2026-09-13/2026-09-17 even with the INTRADAY or DAILY class still short. Called by
-        :class:`~engine.ops.post_login.PostLoginRecovery`."""
+        """Post-login re-evaluation of the step-6 warm-up gate (the cold-start RE-TRIGGER). Uses the
+        SAME injected :class:`~engine.ops.warmup.WarmupGate` and risk-state seam as startup: FREEZE
+        while a FREEZING class (regime / unattributable) is still short, and LIFT the warm-up
+        FROZEN-for-entries once those are covered — conservatively (see
+        :meth:`_maybe_lift_warmup_freeze`), even with the INTRADAY or DAILY class still short.
+        Called by :class:`~engine.ops.post_login.PostLoginRecovery`."""
         if self._warmup_gate is None:
             _log.info("warmup_reapply_deferred", reason="no warmup gate wired")
             return WarmupReapply(ready=False, outcome="deferred")
@@ -675,10 +646,8 @@ class SessionLifecycle:
         ready = bool(status is not None and status.ready)
         blockers = [] if ready else _rendered_blockers(status)
         classes = sorted(classify_blockers(blockers))
-        # 2026-09-13/2026-09-17: the LIFT is owed to the freezing classes alone — one symbol's
-        # intraday hole (09-04 11:09, 09-09 14:47, 09-16 13:36) or daily hole (09-15 OLAELEC) must
-        # not hold the whole book frozen for the rest of the session. The short blockers still ride
-        # the result, so post-login detail keeps naming them.
+        # The LIFT is owed to the freezing classes alone; the short blockers still ride the result,
+        # so post-login detail keeps naming them.
         if ready or not _freezes_entries(blockers):
             lifted, why = await self._maybe_lift_warmup_freeze()
             outcome = f"ready_{why}" if ready else f"short_{why}"
@@ -715,9 +684,8 @@ class SessionLifecycle:
             return False, "other_freeze"
         if self._latch is not None:
             # Clear ONLY the causes this lifecycle owns and has just re-verified; the ledger resolves
-            # the rest — an owner_pause, rejection-storm, floor rung or daily-loss cause that is still
-            # active keeps the state (2026-07-28 review: the previous direct NORMAL write erased any
-            # standing cause, defeating /pause_entries and a floor rung the selftest itself applied).
+            # the rest — a still-active owner_pause, rejection-storm, floor rung or daily-loss cause
+            # keeps the state (a direct NORMAL write would erase them).
             await self._latch.clear_cause("warmup_ready", Actor.RISK_GATE)
             await self._latch.clear_cause("startup_selftest", Actor.RISK_GATE)
             after = self._mode.risk_state()
@@ -766,9 +734,8 @@ class SessionLifecycle:
             needs_login=report.needs_login, integrity_ok=report.integrity_ok,
             crash_recovered=report.crash_recovered, prior_state=report.prior_state,
             frozen_reasons=report.frozen_reasons, deferred_steps=report.deferred_steps,
-            # 2026-09-13: an INTRADAY-only shortfall adds NO ``frozen:`` reason and sends no
-            # WARMUP_FROZEN page, so without this line the owner's only boot-time notice that the
-            # session runs on incomplete minute coverage would be a structured log they never see.
+            # A non-freezing shortfall adds no ``frozen:`` reason and no WARMUP_FROZEN page; this is
+            # the owner's only boot-time notice of incomplete coverage.
             warmup_classes_short=report.warmup_classes_short,
             warmup_blockers=report.warmup_blockers,
         )
