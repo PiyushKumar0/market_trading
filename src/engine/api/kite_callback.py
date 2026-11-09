@@ -1,32 +1,22 @@
 """Kite daily-login callback route.
 
-The ONE unauthenticated HTTP surface in the platform. It exposes a single route::
+The ONE unauthenticated HTTP surface: ``GET /kite/callback?request_token=...`` completes the daily Kite
+login and does nothing else. Kite redirects the owner's phone browser (same LAN) to the registered URL
+``http://<pc-lan-ip>:8400/kite/callback``; the route hands ``request_token`` to
+:meth:`SessionManager.complete_login` (checksum exchange, token stored via ``Secrets``/DPAPI).
 
-    GET /kite/callback?request_token=...
+**Why unauthenticated is safe:**
 
-which completes the daily Kite Connect login and does NOTHING else. After the owner taps the
-login link on their phone and clears Kite's TOTP screen, Kite redirects the phone's browser to the
-registered redirect URL ``http://<pc-lan-ip>:8400/kite/callback`` (the phone is on the same LAN),
-appending ``request_token`` (and informational ``status``/``action``) as query parameters. This route
-hands that ``request_token`` to :meth:`SessionManager.complete_login`, which performs the checksum
-exchange and stores the resulting access token via ``Secrets`` (DPAPI).
+* It can only complete a login: no code path from here to the OMS, the risk gate, or any read view.
+* The ``request_token`` is single-use and seconds-lived (invalidated on the checksum exchange), so a replay
+  buys nothing.
+* The dashboard binds LAN-only (``:8400``); every other route requires the bearer token.
+* A bad/foreign token is rejected by the checksum exchange and surfaced as HTTP 400.
 
-**Why it is safe to leave unauthenticated:**
+**Fallback:** if the phone is off-LAN, the owner copies the ``request_token`` from the address bar and sends
+``/token <value>`` on Telegram; the 400 page repeats that hint.
 
-* It can *only complete a login*. It never reads platform/book state and never originates an order —
-  there is no code path from here to the OMS, the risk gate, or any read view.
-* The ``request_token`` is single-use and seconds-lived: Kite invalidates it on the checksum exchange,
-  so a replay (or a stale value lingering in a browser history / proxy log) buys an attacker nothing.
-* The dashboard binds LAN-only (``:8400``); this token transits the owner's own Wi-Fi (TLS/Tailscale is
-  the documented upgrade path). Every other route requires the bearer token.
-* The worst an unauthenticated caller can do is submit a bad/foreign ``request_token``, which the
-  checksum exchange rejects — surfaced here as an HTTP 400 with a manual-paste fallback hint.
-
-**Fallback:** if the phone is off-LAN (so the redirect can't reach the PC), the owner
-copies the ``request_token`` out of the browser address bar and sends ``/token <value>`` on Telegram.
-The 400 page returned on failure repeats that hint.
-
-This route is deliberately the *only* member of ``engine.api`` exempt from bearer auth.
+This is deliberately the *only* ``engine.api`` route exempt from bearer auth.
 """
 
 from __future__ import annotations
@@ -73,19 +63,10 @@ def _failure_html(detail: str) -> str:
 
 
 def build_kite_callback_router(session_manager, clock) -> APIRouter:
-    """Build the unauthenticated ``GET /kite/callback`` router.
+    """Build the unauthenticated ``GET /kite/callback`` router (mounted without the bearer dependency).
 
-    Args:
-        session_manager: a ``SessionManager``; only ``complete_login`` is used here. Its
-            ``complete_login(request_token)`` is awaited and raises on failure (checksum mismatch,
-            expired/foreign token, provider error) rather than returning a flag.
-        clock: the platform ``Clock`` (the single sanctioned "now"). Held for symmetry with the rest of
-            ``engine.api`` and to stamp the IST instant of a completed login in the success log; this
-            route makes no trading-relevant time decision of its own.
-
-    Returns:
-        An ``APIRouter`` with exactly one route, mounted by the app *without* the bearer-auth
-        dependency that guards every other route.
+    ``session_manager.complete_login(request_token)`` is awaited and raises on failure rather than
+    returning a flag. ``clock`` only stamps the completed-login log line.
     """
     router = APIRouter(tags=["kite-login"])
 
@@ -104,13 +85,8 @@ def build_kite_callback_router(session_manager, clock) -> APIRouter:
             description="Provider-supplied action hint (informational).",
         ),
     ) -> HTMLResponse:
-        """Complete the daily Kite login and return a tiny phone-friendly page.
-
-        On success: HTTP 200 with "Login complete — you can close this tab".
-        On any failure: HTTP 400 with the manual-paste (`/token`) fallback hint.
-        """
-        # Guard the provider redirect shape: a missing/blank request_token is the common
-        # "owner opened the URL directly / Kite returned an error" case — treat as a 400, not a 500.
+        """Complete the daily Kite login: 200 on success, 400 with the `/token` fallback hint on any failure."""
+        # A missing/blank request_token (URL opened directly, or Kite returned an error) is a 400, not a 500.
         if not request_token or not request_token.strip():
             _log.warning(
                 "kite_callback.missing_token",

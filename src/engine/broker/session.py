@@ -13,25 +13,19 @@ Device-flow (the sanctioned path)
 3. :meth:`complete_login` performs the checksum exchange (SHA-256 of
    ``api_key + request_token + api_secret`` — done for us by ``kc.generate_session``), extracts the
    ``access_token``, persists it via :class:`Secrets` (DPAPI), and confirms on Telegram.
-4. Fallbacks: off-LAN, the owner copies the ``request_token`` from the browser address
-   bar and sends ``/token <value>`` on Telegram — both routes land in :meth:`complete_login`. PC-side login in any browser works identically.
+4. Fallbacks: off-LAN, the owner copies the ``request_token`` from the address bar and sends
+   ``/token <value>`` on Telegram; both land in :meth:`complete_login`.
 
-Token validity is tracked behaviourally, NOT off a hard clock: we keep a ``_last_success``
-stamp (set on a successful login) and a ``_rejected`` flag (set by :meth:`on_token_rejected` when a
-live call comes back 403/TokenException). :meth:`token_valid` returns "token present and not rejected"
-so a token the broker still honours past a nominal expiry stays usable, and one the broker rejects
-*before* the nominal expiry is treated as dead immediately (fail toward freezing entries).
+Token validity is behavioural, NOT a hard clock: ``_rejected`` is set by :meth:`on_token_rejected` when a
+live call comes back 403/TokenException, and :meth:`token_valid` is "token present and not rejected", so a
+token the broker still honours past a nominal expiry stays usable and a rejected one is dead at once (fail
+toward freezing entries). Because a boot on yesterday's expired token would otherwise read as valid,
+:meth:`verify_token` probes it live ONCE at startup (``kc.profile()``) so ``token_valid`` is truthful before
+hydrate/warm-up run — WITHOUT firing the mid-day invalidation hook (the boot self-test's
+needs_login/login-prompt path owns owner comms then).
 
-Validity is now behavioural AND probed live ONCE at startup (:meth:`verify_token`, added after the
-2026-07-21 cold-start lockout): a boot on yesterday's expired token had ``_rejected=False`` and a
-token present, so behavioural :meth:`token_valid` answered True and the engine ground the warm-up
-backfill on a dead token before any live call surfaced the rejection. The startup probe calls
-``kc.profile()`` and marks the token rejected (or confirms it live) so ``token_valid`` is truthful
-before hydrate/warm-up run — WITHOUT firing the mid-day invalidation hook (the boot self-test's
-needs_login/login-prompt path owns owner comms at that stage).
-
-Dependencies: ``core`` only (Secrets, Clock, log). pykiteconnect's ``KiteConnect`` is sync
-``requests``-based, so the network exchange runs in a thread executor to avoid blocking the loop.
+Dependencies: ``core`` only. ``KiteConnect`` is sync ``requests``-based, so network calls run in a thread
+executor.
 """
 
 from __future__ import annotations
@@ -49,17 +43,14 @@ from engine.core.secrets import KITE_ACCESS_TOKEN, KITE_API_KEY, KITE_API_SECRET
 
 _log = get_logger("engine.broker.session")
 
-# Async hook invoked when the session is invalidated mid-day (:meth:`on_token_rejected`). The caller
-# (wiring layer) sets it to a coroutine that publishes a risk/feed event so the gate freezes entries
-# and the owner is alerted. Kept as an injectable hook — not a hard EventBus dependency — so the
-# constructor signature stays the mandated one and ``broker`` need not import ``risk``.
+# Async hook fired on mid-day invalidation (:meth:`on_token_rejected`): the wiring layer publishes a
+# risk/feed event so the gate freezes entries and the owner is alerted. Injected so ``broker`` need not
+# import ``risk``.
 InvalidationHook = Callable[[], Awaitable[None]]
 
-# Async hook invoked when the session transitions to a VALID token via :meth:`complete_login` — the
-# convergence point of BOTH login paths (the LAN ``/kite/callback`` route and the Telegram ``/token``
-# fallback both land there). The wiring layer registers the post-login recovery here so
-# a boot BEFORE the daily login (token-less ⇒ ticker never started, warm-up frozen forever) is
-# RE-TRIGGERED the instant a token arrives. Fired fire-and-forget (see :meth:`_fire_login_hooks`).
+# Async hook fired when :meth:`complete_login` mints a valid token (both login paths land there): the wiring
+# layer registers the post-login recovery so a boot before the daily login re-arms the instant a token
+# arrives. Fire-and-forget (see :meth:`_fire_login_hooks`).
 LoginHook = Callable[[], Awaitable[None]]
 
 
@@ -83,12 +74,10 @@ class SessionManager:
         # Behavioural validity state (NOT a hard clock — see module docstring).
         self._access_token: str | None = secrets.get_optional(KITE_ACCESS_TOKEN)
         self._rejected: bool = False
-        #: Dedup flag for the MID-DAY circuit breaker ONLY — set by :meth:`on_token_rejected` when it
-        #: actually fires ``_on_invalidated``, cleared by :meth:`complete_login`. Split out of
-        #: ``_rejected`` after the 2026-08-20 suppression incident: the boot probe also sets
-        #: ``_rejected`` (deliberately silently), which used to make the first GENUINE live rejection
-        #: of the day look like a duplicate and swallow the owner's only alert. ``_rejected`` keeps
-        #: its behavioural-validity meaning for every other consumer (:meth:`token_valid`).
+        #: Dedup flag for the MID-DAY circuit breaker ONLY — set when :meth:`on_token_rejected` fires
+        #: ``_on_invalidated``, cleared by :meth:`complete_login`. Separate from ``_rejected`` because the
+        #: boot probe also sets ``_rejected`` (silently); deduping on it would swallow the first genuine
+        #: live rejection's alert.
         self._breaker_fired: bool = False
         self._last_success: datetime | None = None
 
@@ -107,9 +96,7 @@ class SessionManager:
         self._on_invalidated = hook
 
     def add_login_hook(self, hook: LoginHook) -> None:
-        """Register a coroutine fired (fire-and-forget) whenever :meth:`complete_login` mints a valid
-        token — BOTH login paths land there. The wiring layer registers the
-        post-login recovery so a boot before the daily login re-arms the moment the owner logs in."""
+        """Register a coroutine fired (fire-and-forget) whenever :meth:`complete_login` mints a valid token."""
         self._login_hooks.append(hook)
 
     # -- login flow -----------------------------------------------------------------------------
@@ -117,21 +104,17 @@ class SessionManager:
     def login_url(self) -> str:
         """Return the Kite login URL the owner taps to start the daily flow.
 
-        Kite appends ``?request_token=...&action=login&status=success`` to the app's configured
-        redirect on success; the redirect itself is configured in the Kite developer console, not
-        passed here — ``KiteConnect.login_url()`` only needs the api_key. ``redirect_path`` is stored
-        but read by nothing: the callback route is fixed at ``/kite/callback`` (api/kite_callback.py).
+        The redirect is configured in the Kite developer console; ``login_url()`` only needs the api_key.
+        ``redirect_path`` is stored but read by nothing: the callback route is fixed at ``/kite/callback``.
         """
         return self._connect().login_url()
 
     async def complete_login(self, request_token: str) -> None:
-        """Exchange ``request_token`` for an access token and persist it.
+        """Exchange ``request_token`` for an access token (in a thread executor) and persist it.
 
-        Runs ``kc.generate_session(request_token, api_secret=...)`` in a thread executor (the
-        underlying call is blocking ``requests`` I/O). On success: extracts ``access_token``, stores
-        it via ``secrets.set(KITE_ACCESS_TOKEN, token)`` (DPAPI), arms it on the KiteConnect
-        instance, clears ``_rejected`` AND the circuit breaker's ``_breaker_fired`` dedup (so a token
-        that dies again later in the day re-alerts the owner), and stamps ``_last_success``.
+        Stores it via ``secrets.set`` (DPAPI), arms it on the KiteConnect instance, clears ``_rejected`` AND
+        ``_breaker_fired`` (so a token that dies again later in the day re-alerts the owner), stamps
+        ``_last_success``, then fires the login hooks.
         """
         api_secret = self._secrets.get(KITE_API_SECRET)
         kc = self._connect()
@@ -151,19 +134,15 @@ class SessionManager:
         self._breaker_fired = False   # a fresh token re-arms the mid-day breaker's one-shot alert
         self._last_success = self._clock.now()
         _log.info("session_live", at=self._last_success.isoformat())
-        # RE-TRIGGER: a token just became valid — fire the post-login recovery hooks. Both login
-        # paths reach here, so this is the single place that catches "the token is now good".
         self._fire_login_hooks()
 
     def _fire_login_hooks(self) -> None:
-        """Fire every registered post-login hook fire-and-forget.
+        """Fire every post-login hook as a task on the running loop (like :meth:`EventBus.publish`).
 
-        Deliberately unlike :meth:`on_token_rejected` (which awaits its hook inline): the recovery a
-        login hook runs — instruments / backfill / warm-up / ticker — can take seconds to minutes, and
-        the login HTTP callback (the owner's phone) plus the Telegram ``/token`` command must return at
-        once. So this mirrors :meth:`EventBus.publish` semantics — schedule each hook as a task on the
-        running loop. A hook that raises is isolated + logged; it can never affect the login result or a
-        sibling hook. Tasks are held in ``_login_tasks`` so the loop cannot GC a recovery mid-flight."""
+        Unlike :meth:`on_token_rejected` this does not await: recovery (instruments / backfill / warm-up /
+        ticker) can take minutes and the login callback and ``/token`` command must return at once. A hook
+        that raises is logged and affects neither the login result nor a sibling hook. Tasks are held in
+        ``_login_tasks`` so the loop cannot GC a recovery mid-flight."""
         if not self._login_hooks:
             return
         try:
@@ -189,32 +168,20 @@ class SessionManager:
     async def verify_token(self) -> str:
         """Live-probe the persisted access token against the broker once at startup.
 
-        Behavioural :meth:`token_valid` cannot tell a still-honoured token from an expired one that
-        no live call has yet hit — the 2026-07-21 lockout (a boot on yesterday's token passed the
-        self-test and ground the warm-up backfill on a dead token). This probe closes that gap by
-        making one authenticated ``kc.profile()`` call. Returns a tag:
+        One authenticated ``kc.profile()`` call (default executor). Returns a tag:
 
         * ``"no_api_key"`` — no ``KITE_API_KEY`` seeded yet (fresh install); nothing to probe.
         * ``"absent"`` — api_key present but no access token loaded (pre-login boot).
-        * ``"rejected"`` — the broker returned :class:`TokenException`: sets ``_rejected`` so
-          :meth:`token_valid` is now False. Deliberately does NOT fire the ``_on_invalidated`` hook
-          — at boot the self-test's needs_login / login-prompt path owns owner comms; that hook is
-          for MID-DAY invalidation (freeze + alert) only. It also no longer SUPPRESSES that hook:
-          the breaker dedups on its own ``_breaker_fired`` flag, which this probe never touches
-          (2026-08-20 incident — a boot-probe rejection silently swallowed the 11:26:40 live
-          rejection's critical "entries FROZEN" alert, leaving the owner with zero notification).
-        * ``"inconclusive"`` — any other error (network/DNS/5xx): cannot verify is NOT the same as
-          invalid, so ALL state is left untouched and the circuit breaker catches a truly dead
-          token on the first real call.
+        * ``"rejected"`` — :class:`TokenException`: sets ``_rejected`` so :meth:`token_valid` is False.
+          Deliberately does NOT fire ``_on_invalidated`` (mid-day freeze + alert only; at boot the
+          self-test's login-prompt path owns owner comms) and never touches ``_breaker_fired``, so it
+          cannot suppress a later genuine live rejection's alert.
+        * ``"inconclusive"`` — any other error (network/DNS/5xx): cannot verify is NOT invalid, so ALL
+          state is left untouched and the circuit breaker catches a dead token on the first real call.
         * ``"valid"`` — profile succeeded: :meth:`mark_success` stamps freshness.
-        * ``"superseded"`` — a :meth:`complete_login` replaced the token while the probe was in
-          flight, so the verdict (on whichever token the request carried) is discarded and all state
-          is left to the login. The callback route binds before this probe runs, so a boot-time login
-          can land mid-probe: on 2026-10-21 the old token's rejection arrived after the 09:07:21
-          login, marked the fresh token dead, and post-login recovery skipped the ticker all session.
-
-        ``kc.profile()`` is sync ``requests`` I/O (pykiteconnect), so it runs in the default executor
-        — the same pattern as :meth:`complete_login`.
+        * ``"superseded"`` — a :meth:`complete_login` replaced the token while the probe was in flight
+          (the callback route binds before this probe runs): the verdict is discarded, else an old
+          token's rejection would mark the fresh token dead.
         """
         if not self._secrets.has(KITE_API_KEY):
             return "no_api_key"
@@ -261,23 +228,14 @@ class SessionManager:
     async def on_token_rejected(self, token: str | None) -> None:
         """Mid-day invalidation: a live call returned 403/TokenException.
 
-        ``token`` is the access token the failing request was sent with. A rejection of a token that
-        is no longer the session's current one (a re-login landed while the call was in flight) is
-        ignored entirely — the same superseded rule as :meth:`verify_token`, mirroring the
-        2026-10-21 probe incident where an old token's rejection marked the fresh token dead.
+        ``token`` is the access token the failing request was sent with; a rejection of a token that is no
+        longer current (a re-login landed mid-call) is ignored, the same superseded rule as
+        :meth:`verify_token`.
 
-        Marks the token invalid and fires the invalidation hook (which publishes a risk/feed event);
-        the caller freezes entries and alerts the owner. Idempotent — repeated 403s in a burst only
-        fire the hook the first time so we don't spam the owner.
-
-        The dedup is ``_breaker_fired`` — this method's OWN flag — not ``_rejected``. Until
-        2026-08-20 it gated on ``_rejected``, which :meth:`verify_token`'s boot probe also sets
-        (deliberately silently): a boot on a dead token therefore made the day's FIRST genuine live
-        rejection look like a burst duplicate. That is exactly what happened at 11:26:40 on
-        2026-08-20 — the live TokenException produced ZERO owner notifications because the breaker's
-        critical "entries FROZEN" alert + login prompt were deduped against a boot probe hours
-        earlier. A boot-probe rejection now costs at most ONE redundant alert (the same deliberate
-        redundancy posture as the 08:40 token_check job); silence costs a frozen, unexplained day.
+        Marks the token invalid and fires the invalidation hook (freeze entries + alert the owner).
+        Idempotent: a burst of 403s fires the hook once. The dedup is ``_breaker_fired``, not ``_rejected``
+        (which the boot probe also sets): a boot-probe rejection costs at most one redundant alert, whereas
+        deduping against it would leave a frozen, unexplained day.
         """
         if token != self._access_token:
             _log.warning("token_rejected_superseded")
@@ -309,9 +267,7 @@ class SessionManager:
 
     def api_key(self) -> str | None:
         """The configured Kite api_key, or None when not seeded. The ticker child needs it for the
-        WEBSOCKET URL: an empty api_key produced a permanent 400-BadRequest upgrade-reject loop
-        (2026-07-23 — the root cause of zero live ticks ever captured; REST was unaffected because
-        the KiteClient carries its own KiteConnect-bound key)."""
+        WEBSOCKET URL: an empty api_key is a permanent 400 upgrade-reject loop (REST is unaffected)."""
         return self._secrets.get(KITE_API_KEY) if self._secrets.has(KITE_API_KEY) else None
 
     # -- internals ------------------------------------------------------------------------------
@@ -326,10 +282,8 @@ class SessionManager:
 
     # -- scripted-TOTP auto-login (owner-accepted policy violation, default OFF) -----------------
     #
-    # A scripted-TOTP headless auto-login would remove the daily manual tap, but it violates
-    # Kite's terms (automating the credential entry) and stores TOTP seed material. The owner has
-    # accepted this trade-off ONLY behind an explicit config flag that defaults OFF. This is left as a
-    # clearly-marked stub on purpose — it is NOT implemented.
+    # Violates Kite's terms (automated credential entry) and stores TOTP seed material; the owner accepts
+    # it ONLY behind an explicit config flag defaulting OFF. Deliberately NOT implemented.
     #
     #   async def _scripted_totp_login(self) -> None:
     #       raise NotImplementedError(

@@ -1,74 +1,54 @@
 """Ticker subprocess supervisor.
 
-``TickerSupervisor`` owns the **mt-ticker** Twisted child process (``ticker/main.py``) and the
-localhost TCP link it ships data on. The Twisted reactor cannot be restarted in-process, so it forces
-the ticker into a *separate process*: when the feed has to be respawned (heartbeat silence, KiteTicker
-death), the supervisor kills and re-launches a fresh child rather than trying to restart a reactor inside
-the engine. This module is the only thing that spawns / terminates that child and the single owner of its
-health signal.
+``TickerSupervisor`` owns the **mt-ticker** Twisted child process (``ticker/main.py``) and the localhost TCP
+link it ships data on. The Twisted reactor cannot be restarted in-process, so the ticker is a separate
+process and a feed respawn kills and re-launches the child. This module is the only thing that spawns /
+terminates it and the single owner of its health signal.
 
 Data path:
-    KiteTicker → mt-ticker child → length-prefixed msgpack frames on 127.0.0.1:<tcp_port> → here.
-The child forwards both **ticks** and **order updates** (``type:"order"``) on the same socket, plus a
-**heartbeat** frame every 1 s. Because order updates drive the OMS state machine, a fabricated frame must
-not be able to inject a phantom fill — hence the trust boundary below.
+    KiteTicker → mt-ticker child → length-prefixed msgpack frames on 127.0.0.1:<tcp_port> → here
+(tick → :class:`~engine.core.types.Tick` → ``bus.publish("tick", …)``; order → ``order.update``; heartbeat
+→ health). Ticks, order updates and a 1 s heartbeat share one socket. Order updates drive the OMS state
+machine, so a fabricated frame must not be able to inject a phantom fill — hence the trust boundary.
 
 Trust boundary:
-    * the TCP socket binds ``127.0.0.1`` only (loopback, not routable);
-    * a per-spawn **shared-secret handshake** — a fresh random secret is generated for each spawn and
-      handed to the child out-of-band (env/stdin), and the child must echo it on its first frame before
-      any tick/order frame is accepted;
-    * a **parent-PID check** — the child verifies it is still owned by this engine process and exits if
-      orphaned, and the supervisor closes the child's stdin on stop so an orphaned child dies on its own.
+    * the TCP socket binds ``127.0.0.1`` only;
+    * a per-spawn **shared-secret handshake**: a fresh random secret handed to the child out-of-band
+      (env/stdin), which must echo it on its first frame before any tick/order frame is accepted;
+    * a **parent-PID check**: the child exits if orphaned, and the supervisor closes the child's stdin on
+      stop so an orphaned child dies on its own.
 
 Health / stale-data guard:
     ``health()`` reports a :class:`FeedHealth` whose ``state`` drives the risk gate's ``stale_data_guard``:
         * ``STOPPED``  — no child running.
         * ``WARMING``  — child just spawned / reconnecting + warm-up backfilling; the HEALTHY-path
-          heartbeat-silence kill is **suppressed** to avoid false alarms on a fresh
-          startup, distinct from feed-lost-while-running. The suppression is **bounded**: WARMING with
-          no heartbeat past ``settings.ticker.warming_timeout_s`` ⇒ kill + respawn with capped
-          exponential backoff (2026-07-23 13:41 sleep/resume wedge — an unbounded WARMING froze the
-          state machine forever). This is also the generic system-resume recovery: after a resume,
-          whatever state the machine froze in, either the HEALTHY-path stale kill or this WARMING
-          timeout fires and respawns.
-        * ``HEALTHY``  — FRAMES arriving within the silence budget (see below: a tick counts).
-        * ``STALE``    — frame silence exceeded ``settings.ticker.heartbeat_silence_kill_s`` (10 s)
-          while *running* (not WARMING) ⇒ the supervisor kills + respawns the child and publishes a
-          ``feed.health`` transition to ``STALE``. STALE is **recoverable**: the very next
-          frame off the wire restores HEALTHY.
+          heartbeat-silence kill is **suppressed** on a fresh start. The suppression is **bounded**: WARMING
+          with no heartbeat past ``settings.ticker.warming_timeout_s`` ⇒ kill + respawn with capped
+          exponential backoff, else the state machine could freeze forever. This is also the generic
+          system-resume recovery: whatever state the machine froze in, the HEALTHY-path stale kill or this
+          WARMING timeout fires and respawns.
+        * ``HEALTHY``  — FRAMES arriving within the silence budget (a tick counts).
+        * ``STALE``    — frame silence exceeded ``settings.ticker.heartbeat_silence_kill_s`` (10 s) while
+          *running* (not WARMING) ⇒ kill + respawn and publish a ``feed.health`` transition to ``STALE``.
+          Recoverable: the very next frame restores HEALTHY.
 
-Liveness truth (2026-08-25 — the recurring false-STALE wedge):
+Liveness truth:
     Liveness is ``_last_frame_at``, stamped on **every** frame in :meth:`_handle_frame` — tick, order,
-    heartbeat, even an undecodable one. Bytes off the wire ARE the proof the child is alive; the 1 s
-    heartbeat frame is a *supplement* for a quiet tape, not the sole evidence. Stamping the dedicated
-    heartbeat alone produced three multi-hour false-STALE wedges (08-20, 08-24 10:01, 08-25 11:28)
-    while 46k ticks/5 min kept flowing and every bar kept being written.
-
-    Two further guards close that loop:
-      * **Loop-starvation discount.** The monitor is a task on the same event loop as the frame
-        reader. When a long synchronous stretch elsewhere in the engine blocks the loop (08-24: the
-        feature engine blocked it ~30 s per minute; ``ticks_flushed`` went silent then flooded 3,124
-        ticks at once), NOTHING is read — so a wall-clock "silence" measured across that stretch is
-        evidence about the ENGINE, not about the child. The monitor accumulates its own wake-up
-        overshoot (``loop_starved_s``, reset whenever a frame lands) and subtracts it before judging.
-        Ages themselves stay on the wall clock; only the verdict is discounted.
-      * **The kill is real.** :meth:`_respawn` used to self-deadlock (see its docstring), so the
-        advertised kill-after-10 s never happened — the log said ``ticker_respawn`` and then nothing
-        for 40 min / 2 h 14 min / 4 h 53 min. Fixed; genuine silence now actually restarts the child.
+    heartbeat, even an undecodable one. Bytes off the wire ARE the proof the child is alive; the heartbeat
+    is a *supplement* for a quiet tape. Stamping the heartbeat alone produced multi-hour false-STALE wedges
+    while ticks kept flowing and bars kept being written. Two further guards:
+      * **Loop-starvation discount.** The monitor shares the event loop with the frame reader. A long
+        synchronous stretch elsewhere in the engine blocks the loop, so NOTHING is read and a wall-clock
+        "silence" across it is evidence about the ENGINE, not the child. The monitor accumulates its own
+        wake-up overshoot (``loop_starved_s``, reset whenever a frame lands) and subtracts it before
+        judging. Ages stay on the wall clock; only the verdict is discounted.
+      * **The kill is real.** :meth:`_respawn` must never self-deadlock (see its docstring): a deadlock
+        there silently turns "kill after 10 s" into no restart at all.
 
 Subscription set:
-    universe watchlist + held symbols + **NIFTY 50 index** + **India VIX** tokens — the index/VIX feed
-    powers market-context features and the stale-data guard; advance-decline is derived from
-    the universe ticks. Changes go over a **control frame** on the live TCP link via
-    :meth:`update_subscriptions`, not a respawn.
-
-Scope: real subprocess spawn/terminate (``asyncio.create_subprocess_exec``), per-spawn
-secret + stdin orphan-protection, a real :meth:`health` computed from ``clock.now()``, AND the real
-framing: the loopback ``asyncio`` server, the handshake validation, length-prefixed msgpack
-frame parsing (tick → :class:`~engine.core.types.Tick` → ``bus.publish("tick", …)``; order →
-``order.update``; heartbeat → health), the ``subscribe`` control frame, and the stdin credentials
-frame.
+    universe watchlist + held symbols + **NIFTY 50 index** + **India VIX** tokens (the index/VIX feed powers
+    market-context features and the stale-data guard). Changes go over a **control frame** on the live TCP
+    link via :meth:`update_subscriptions`, not a respawn.
 """
 
 from __future__ import annotations
@@ -91,10 +71,8 @@ from engine.core.calendar import NSECalendar
 from engine.core.clock import IST, Clock
 from engine.core.config import Settings
 
-# 2026-09-10: the order-postback wire contract moved to
-# ``engine.core.contracts`` because TWO brokers emit it (this supervisor for live orders,
-# ``engine.paper.broker`` for simulated ones) and ``engine.paper`` depends on ``core`` alone.
-# Re-exported here under the SAME names so every existing importer is unaffected.
+# The order-postback wire contract lives in ``engine.core.contracts`` (the paper broker emits it too and
+# depends on ``core`` alone); re-exported here under the same names.
 from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.eventbus import EventBus
 from engine.core.log import get_logger
@@ -116,38 +94,30 @@ _LEN_PREFIX = struct.Struct(">I")
 #: Wire-protocol version we accept from the child's ``hello`` (ticker/main.py ``_PROTOCOL_VERSION``).
 PROTOCOL_VERSION = 1
 
-#: Floor for a believable ``exchange_timestamp`` (2026-08-20 investigation). A tick whose wire field
-#: is a zeroed/absent broker value arrives as Unix epoch 0 — kiteconnect turns it into
-#: ``datetime.fromtimestamp(0)``, the child ISO-serializes it, and it used to sail through every
-#: layer (the Tick validator only checks tz-awareness) into a ``date=1970-01-01`` tick partition;
-#: 103 such rows accumulated before they were quarantined by hand. That is a zeroed field, not a
-#: timestamp, so anything below this is dropped — via its OWN ``implausible_timestamp`` path
-#: (2026-08-21), distinct from a genuinely MISSING timestamp, with a single WARNING and no
-#: exception traceback (pre-market ~16 not-yet-traded instruments send this on every resubscribe).
-#: The floor is far below any real data (this platform's ticks start 2026-08) and far above epoch,
-#: so it can only catch garbage.
+#: Floor for a believable ``exchange_timestamp``. A zeroed/absent broker value arrives as Unix epoch 0
+#: (kiteconnect → ``datetime.fromtimestamp(0)``) and would otherwise pass every layer (the Tick validator
+#: only checks tz-awareness) into a ``date=1970-01-01`` tick partition. Anything below this is dropped via
+#: its OWN ``implausible_timestamp`` path, distinct from a MISSING timestamp, with one WARNING and no
+#: traceback (pre-market, not-yet-traded instruments send this on every resubscribe). Far below any real
+#: data and far above epoch, so it only catches garbage.
 _MIN_PLAUSIBLE_EXCHANGE_TS = datetime(2020, 1, 1, 0, 0, tzinfo=IST)
 
-#: Monitor-cycle overshoot below which a late wake-up is just scheduler jitter, not starvation.
-#: ``asyncio.sleep(1.0)`` on a loaded loop routinely lands a few hundred ms late; only
-#: overshoot beyond this floor is credited against an observed frame silence. Deliberately well under
-#: ``heartbeat_silence_kill_s`` (10 s) so ordinary jitter can never accumulate into a free pass.
+#: Monitor-cycle overshoot below which a late wake-up is scheduler jitter, not starvation; only overshoot
+#: beyond this is credited against a frame silence. Well under ``heartbeat_silence_kill_s`` (10 s) so jitter
+#: can never accumulate into a free pass.
 _MONITOR_OVERSHOOT_FLOOR_S = 0.5
 
-#: Cap on ``server.wait_closed()`` during read-loop teardown. Under CPython ≥3.12 that call
-#: waits for every accepted connection to drop, so an unbounded await there hangs the whole respawn
-#: behind a child that has not exited yet. Callers terminate the child first, so this only ever fires
-#: for a child that ignored both SIGTERM and SIGKILL — and it logs when it does.
+#: Cap on ``server.wait_closed()`` during read-loop teardown. On CPython ≥3.12 it waits for every accepted
+#: connection to drop, so an unbounded await hangs the respawn behind a child that has not exited. Callers
+#: terminate the child first, so this only fires for a child that ignored SIGTERM and SIGKILL (and logs).
 _SERVER_CLOSE_TIMEOUT_S = 5.0
 
 
 class _ImplausibleTimestamp(ValueError):
-    """A wire ``exchange_timestamp`` below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` (epoch-0 zeroed
-    field) — NOT a missing one. Raised by :func:`_wire_timestamp`, propagated verbatim by
-    :func:`parse_tick_frame`, and caught in :meth:`TickerSupervisor._parse_tick` BEFORE the
-    generic parse-error handler so this working-as-designed drop gets its own reason/counter
-    (``implausible_timestamp``) and skips the ERROR-level traceback — the WARNING already fired
-    inside :func:`_wire_timestamp` (2026-08-21)."""
+    """A wire ``exchange_timestamp`` below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` (epoch-0 zeroed field), NOT a
+    missing one. Caught in :meth:`TickerSupervisor._parse_tick` BEFORE the generic parse-error handler so
+    this expected drop gets its own reason/counter (``implausible_timestamp``) and no ERROR traceback; the
+    WARNING already fired in :func:`_wire_timestamp`."""
 
 
 def _wire_decimal(value: Any) -> Decimal | None:
@@ -160,12 +130,9 @@ def _wire_decimal(value: Any) -> Decimal | None:
 def _wire_timestamp(value: Any, symbol: str | None = None) -> datetime | None:
     """A wire ISO-8601 NAIVE-IST timestamp → tz-aware IST ``datetime``.
 
-    ticker/main.py forwards KiteTicker's naive IST wall time as an ISO string; we attach
-    ``Asia/Kolkata`` here. A tz-aware value (defensive) is converted, not re-stamped.
-
-    A value older than :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` raises :class:`_ImplausibleTimestamp`
-    (own drop path) — see that constant: an epoch-0 wire field is not a timestamp, it is a
-    zeroed field, not a MISSING one. A genuinely missing/empty value still returns None.
+    We attach ``Asia/Kolkata`` to KiteTicker's naive IST wall time; a tz-aware value is converted, not
+    re-stamped. A value below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` raises :class:`_ImplausibleTimestamp`;
+    a missing/empty value returns None.
     """
     if value is None or value == "":
         return None
@@ -182,14 +149,11 @@ def _wire_timestamp(value: Any, symbol: str | None = None) -> datetime | None:
 def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
     """Parse one PINNED wire tick frame (ticker/main.py ``_frame_tick``) into a core ``Tick``.
 
-    The exact mirror of the child's serializer: prices arrive as decimal strings and re-wrap to
-    ``Decimal`` exactly; ``volume_traded`` is the broker's CUMULATIVE day volume, verbatim;
-    ``exchange_timestamp`` is naive-IST ISO and becomes tz-aware IST. ``tradingsymbol`` is resolved
-    by the caller (the wire carries only the instrument token). Raises ``ValueError`` on a frame
-    missing its load-bearing fields; raises :class:`_ImplausibleTimestamp` (a ``ValueError``
-    subclass, propagated verbatim from :func:`_wire_timestamp`) when ``exchange_timestamp`` is
-    below :data:`_MIN_PLAUSIBLE_EXCHANGE_TS` (epoch-0) — its OWN drop path, distinct from a missing
-    field. Either way the caller drops that single tick and never crashes the read loop.
+    The exact mirror of the child's serializer: prices re-wrap to ``Decimal`` exactly; ``volume_traded`` is
+    the CUMULATIVE day volume, verbatim; ``tradingsymbol`` is resolved by the caller (the wire carries only
+    the token). Raises ``ValueError`` on a frame missing a load-bearing field, and
+    :class:`_ImplausibleTimestamp` (a ``ValueError`` subclass, its OWN drop path) on an epoch-0 timestamp.
+    Either way the caller drops that single tick and never crashes the read loop.
     """
     ltp = _wire_decimal(frame.get("last_price"))
     if ltp is None:
@@ -219,13 +183,11 @@ def parse_tick_frame(frame: dict[str, Any], tradingsymbol: str) -> Tick:
         ask=_wire_decimal(sell[0].get("price")) if sell else None,
     )
 
-# WIRE CONTRACT (single source of truth — ticker/main.py implements exactly this):
-#   * TOPOLOGY: the ENGINE is the TCP SERVER — it listens on 127.0.0.1:<tcp_port> (loopback-only)
-#     and the child is the CLIENT that connects on spawn (ticker/main.py: reactor.connectTCP). The engine
-#     runs an asyncio server here (asyncio.start_server) that accepts the child's connection.
+# WIRE CONTRACT (ticker/main.py implements exactly this):
+#   * TOPOLOGY: the ENGINE is the TCP SERVER (asyncio.start_server on 127.0.0.1:<tcp_port>); the child is
+#     the CLIENT that connects on spawn.
 #   * SECRETS CHANNEL: shared_secret + parent_pid travel via ENV (below); the Kite api_key + access_token
-#     travel via STDIN as the first framed line (never env, never a routable frame — so they never
-#     land in the process table). The child reads that one-time credentials line before connecting KiteTicker.
+#     travel via STDIN as the first framed line, never env, so they never land in the process table.
 #: Env var carrying the per-spawn shared secret to the child (handshake).
 _ENV_SHARED_SECRET = "MT_TICKER_SHARED_SECRET"
 #: Env var carrying the parent PID so the child can detect orphaning.
@@ -241,20 +203,17 @@ class FeedHealth(BaseModel):
     Attributes
     ----------
     last_tick_age_s:
-        Seconds since the last tick frame, or ``None`` if no tick has been seen yet (e.g. WARMING /
-        STOPPED). The risk gate's per-symbol max-tick-age check reads this alongside per-symbol ages.
+        Seconds since the last tick frame, or ``None`` if none seen yet.
     heartbeat_age_s:
-        Seconds since the last 1 s heartbeat frame, or ``None`` if none seen. Diagnostic only — the kill decision reads ``last_frame_age_s`` (a tick proves liveness just as well).
+        Seconds since the last heartbeat frame, or ``None``. Diagnostic only — the kill reads
+        ``last_frame_age_s``.
     last_frame_age_s:
-        Seconds since ANY frame (tick / order / heartbeat) was read off the link, or ``None`` if none
-        seen. **This** is the liveness signal: silence beyond ``heartbeat_silence_kill_s`` (10 s)
-        while running ⇒ kill + respawn.
+        Seconds since ANY frame (tick / order / heartbeat), or ``None``. **This** is the liveness signal:
+        silence beyond ``heartbeat_silence_kill_s`` (10 s) while running ⇒ kill + respawn.
     state:
-        One of ``{"STOPPED", "WARMING", "HEALTHY", "DEGRADED", "STALE"}``. ``WARMING`` suppresses false
-        feed-stale alarms on startup. ``DEGRADED`` is the in-session tick-silence state (2026-07-22
-        tickless-HEALTHY session): heartbeats are fine but NO ticks are arriving during market hours, so
-        no self-built bars are being written — a visible, alerting state distinct from HEALTHY, that
-        recovers to HEALTHY the moment ticks resume.
+        One of ``{"STOPPED", "WARMING", "HEALTHY", "DEGRADED", "STALE"}``. ``DEGRADED`` is the in-session
+        tick-silence state: heartbeats are fine but NO ticks arrive during market hours, so no bars are
+        written. Alerting, distinct from HEALTHY, and recovers to HEALTHY the moment ticks resume.
     """
 
     last_tick_age_s: float | None = None
@@ -269,29 +228,23 @@ class TickerSupervisor:
     Parameters
     ----------
     settings:
-        Provides ``ticker.tcp_host`` / ``ticker.tcp_port`` / ``ticker.heartbeat_silence_kill_s`` /
-        ``ticker.max_instruments_per_conn`` (the cap).
+        ``ticker.tcp_host`` / ``tcp_port`` / ``heartbeat_silence_kill_s`` / ``max_instruments_per_conn``.
     clock:
-        The single source of "now" — every age in :meth:`health` is derived from ``clock.now()``
-        (never a bare ``datetime.now()``).
+        The single source of "now"; every age in :meth:`health` derives from it.
     bus:
-        Event bus for ``feed.health`` transitions and the parsed ``tick`` / ``order.update``
-        streams. May be ``None`` in bare harnesses/tests — publishing is then skipped.
+        Event bus for ``feed.health``, ``tick`` and ``order.update``. ``None`` in bare harnesses skips
+        publishing.
     symbol_for_token:
-        Resolver from instrument token → tradingsymbol (the wire carries only the token; the core
-        ``Tick`` requires the symbol). The composition root wires ``InstrumentStore``. A tick whose
-        token cannot be resolved is dropped (logged once per token) — downstream consumers are
-        keyed by symbol, so an unresolvable tick is unusable.
+        Token → tradingsymbol resolver (the wire carries only the token; wired to ``InstrumentStore``). A tick
+        whose token cannot be resolved is dropped (logged once per token).
     api_key:
-        Kite api_key handed to the child over stdin together with the access token (never
-        env, never a routable frame).
+        Kite api_key handed to the child over stdin with the access token (never env).
     calendar:
-        NSE calendar for the in-session tick-silence guard: the guard only fires during market
-        hours. ``None`` disables the guard (bare harness) — the feed then keeps heartbeat-only health.
+        NSE calendar gating the in-session tick-silence guard to market hours. ``None`` disables the guard
+        (bare harness): the feed keeps heartbeat-only health.
     notify:
-        Async owner-notification sink for the once-per-episode HEALTHY→DEGRADED alert and the
-        tick-silence respawn escalation. Best-effort;
-        ``None`` skips the owner notify (the WARNING log + ``feed.health`` transition still fire).
+        Async, best-effort owner sink for the once-per-episode HEALTHY→DEGRADED alert and the tick-silence
+        respawn escalation. ``None`` skips it (the WARNING log + ``feed.health`` transition still fire).
     """
 
     def __init__(
@@ -310,9 +263,7 @@ class TickerSupervisor:
         self._bus = bus
         self._symbol_for_token = symbol_for_token
         self._api_key = api_key
-        # Calendar + notify power the in-session tick-silence guard: market-hours gating +
-        # the one-shot owner alert on HEALTHY→DEGRADED. ``None`` (bare harnesses/tests) disables the
-        # guard — a feed with no calendar cannot know it is in-session, so it keeps HEALTHY semantics.
+        # No calendar ⇒ cannot know it is in-session ⇒ the tick-silence guard is off (HEALTHY semantics).
         self._calendar = calendar
         self._notify = notify
 
@@ -330,27 +281,24 @@ class TickerSupervisor:
         # --- supervision / read-loop tasks ---
         self._read_task: asyncio.Task[None] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
-        # Drain tasks for the child's stdout/stderr. Un-drained (the 2026-07-22 defect) the child's OWN
-        # diagnostics — including the reason a feed goes tickless — are discarded, and a full pipe buffer
-        # eventually WEDGES the child mid-write. Fail toward visibility: pump both into the engine log.
+        # Drain tasks for the child's stdout/stderr: un-drained, its diagnostics are lost and a full pipe
+        # buffer wedges the child mid-write. Both are pumped into the engine log.
         self._output_tasks: list[asyncio.Task[None]] = []
 
         # --- health signal (timestamps as tz-aware IST via clock.now()) ---
         self._state: str = "STOPPED"
         self._last_tick_at = None  # type: ignore[var-annotated]
         self._last_heartbeat_at = None  # type: ignore[var-annotated]
-        # THE liveness stamp: refreshed by EVERY frame on the frame path, so it can never be
-        # starved separately from the data it guards. ``_last_heartbeat_at`` is now diagnostic only.
+        # THE liveness stamp: refreshed by EVERY frame. ``_last_heartbeat_at`` is diagnostic only.
         self._last_frame_at = None  # type: ignore[var-annotated]
-        # In-child reconnect trackers (2026-09-09) — see :meth:`_handle_frame`.
-        # ``_last_connect_seq`` is THE signal: the child's per-connect counter off the heartbeat
-        # frame, a CHANGE of which is a reconnect. ``_last_ws_connected`` is the fallback for a
-        # heartbeat that carries no ``connect_seq``. ``None`` on both = nothing reported yet by this
-        # spawn; both are cleared per spawn by :meth:`_reset_spawn_stamps`.
+        # In-child reconnect trackers (see :meth:`_handle_frame`). ``_last_connect_seq`` is THE signal: a
+        # CHANGE of the child's per-connect counter is a reconnect. ``_last_ws_connected`` is the fallback for
+        # a heartbeat with no ``connect_seq``. ``None`` = nothing reported yet by this spawn; both are
+        # cleared per spawn by :meth:`_reset_spawn_stamps`.
         self._last_connect_seq: int | None = None
         self._last_ws_connected: bool | None = None
-        # The child's OWN age since its last Kite tick, off the heartbeat. Diagnostic only, never a
-        # decision input: small while the supervisor sees silence names a forwarding fault, not Kite.
+        # The child's OWN age since its last Kite tick, off the heartbeat. Diagnostic only: small while the
+        # supervisor sees silence names a forwarding fault, not Kite.
         self._child_tick_age_s: float | None = None
         self._started_at = None  # type: ignore[var-annotated]
         self._healthy_since = None  # type: ignore[var-annotated]  # entry into HEALTHY (tick-silence ref)
@@ -359,16 +307,16 @@ class TickerSupervisor:
         self._silence_logged = False        # ticker_heartbeat_silence fired for the current episode
         self._starvation_logged = False     # kill discounted as loop starvation, this episode
 
-        # --- WARMING-wedge backoff (2026-07-23 13:41 sleep/resume). Consecutive WARMING-timeout
-        #     respawns that never reach HEALTHY; drives the capped exponential backoff and the
-        #     one-shot owner escalation. Both reset on a successful WARMING->HEALTHY promotion. ---
+        # --- WARMING-wedge backoff: consecutive WARMING-timeout respawns that never reach HEALTHY; drives
+        #     the capped exponential backoff and the one-shot owner escalation. Reset on a WARMING->HEALTHY
+        #     promotion. ---
         self._wedge_respawns = 0
         self._wedge_escalated = False
-        #: Consecutive respawns whose spawn raised (2026-10-12); reset by a spawn that returns.
+        #: Consecutive respawns whose spawn raised; reset by a spawn that returns.
         self._spawn_failures = 0
 
-        # --- tick-silence episode (2026-11-03 silent connected feed). NOT per-spawn state: the cap
-        #     counts the respawns this episode makes, so a respawn must not clear it. A tick clears it
+        # --- tick-silence episode (silent connected feed). NOT per-spawn state: the cap counts the
+        #     respawns this episode makes, so a respawn must not clear it. A tick clears it
         #     (_handle_frame); a new session date replaces it (_open_silence_episode). ``None`` date =
         #     no episode open. ---
         self._silence_episode_date: date | None = None
@@ -388,14 +336,11 @@ class TickerSupervisor:
     async def start(self, tokens: list[int], access_token: str) -> None:
         """Spawn ``ticker/main.py`` as a child and enter the WARMING state.
 
-        The subscription ``tokens`` (universe watchlist + held symbols + NIFTY 50 + India VIX) and the
-        Kite ``access_token`` are handed to the child; the access token + the per-spawn shared secret
-        cross the trust boundary out-of-band (env + stdin), never as a routable frame.
+        The access token + per-spawn shared secret cross the trust boundary out-of-band (env + stdin).
         """
         if not self._api_key:
-            # Fail LOUD, never dial: an empty api_key in the WS URL is a guaranteed 400-BadRequest
-            # upgrade-reject loop (2026-07-23 root cause — the child reconnected forever while the
-            # heartbeat kept the feed looking HEALTHY; zero ticks were ever captured).
+            # Fail LOUD, never dial: an empty api_key in the WS URL is a permanent 400 upgrade-reject loop
+            # that the heartbeat would hide behind a HEALTHY-looking feed.
             _log.error("ticker_start_refused_no_api_key")
             return
         async with self._lock:
@@ -415,9 +360,8 @@ class TickerSupervisor:
     async def update_subscriptions(self, tokens: list[int]) -> None:
         """Update the live subscription set via a control frame on the TCP link (no respawn).
 
-        Writes a length-prefixed msgpack ``{"type":"subscribe","tokens":[…]}`` frame; the child
-        diffs the set, (un)subscribes, and re-asserts FULL mode (ticker/main.py). The set is capped
-        at ``settings.ticker.max_instruments_per_conn`` (≤3,000/conn).
+        Writes a ``{"type":"subscribe","tokens":[…]}`` frame; the child diffs the set and re-asserts FULL
+        mode. Over ``settings.ticker.max_instruments_per_conn`` (≤3,000/conn) only warns.
         """
         cap = self._settings.ticker.max_instruments_per_conn
         if len(tokens) > cap:
@@ -445,12 +389,9 @@ class TickerSupervisor:
     async def stop(self) -> None:
         """Stop the child: close stdin (orphan protection) then terminate.
 
-        Teardown order carries the same constraint as :meth:`_respawn`, plus one of its own:
-
-        1. the **monitor** first — it must not respawn the child we are about to kill;
-        2. the **child** next — its exit closes the link, which is what lets a cancelled
-           :meth:`_read_loop`'s ``server.wait_closed()`` return at all under CPython ≥3.12;
-        3. the **read loop** last, so it is not leaked.
+        Teardown order, as in :meth:`_respawn`: the **monitor** first (it must not respawn the child we are
+        about to kill); the **child** next (its exit closes the link, which lets a cancelled
+        :meth:`_read_loop`'s ``server.wait_closed()`` return on CPython ≥3.12); the **read loop** last.
         """
         async with self._lock:
             await self._cancel_monitor_task()
@@ -483,24 +424,20 @@ class TickerSupervisor:
     # ------------------------------------------------------------------ spawn / terminate (real)
 
     def _ticker_entrypoint(self) -> Path:
-        """Resolve ``ticker/main.py`` — the separate Twisted program at the REPO ROOT.
-
-        ``ticker/`` deliberately lives outside ``src/engine`` (it must never import ``engine.*``): src/engine/broker/ticker_supervisor.py → parents[3] == the repo root.
-        """
+        """Resolve ``ticker/main.py`` at the REPO ROOT (outside ``src/engine``: it must never import ``engine.*``)."""
         repo_root = Path(__file__).resolve().parents[3]
         return repo_root / "ticker" / "main.py"
 
     async def _spawn_child(self) -> None:
         """Launch a fresh child with a new per-spawn secret; arm the read + monitor loops.
 
-        The reactor cannot restart in-process, so every (re)spawn is a brand-new OS process. A new
-        shared secret per spawn means a frame minted against a previous child's secret is rejected.
+        Every (re)spawn is a brand-new OS process with a new shared secret, so a frame minted against a
+        previous child's secret is rejected.
         """
         self._shared_secret = _secrets.token_hex(32)
         entrypoint = self._ticker_entrypoint()
 
-        # The ENGINE is the TCP server (WIRE CONTRACT at module top): bind the loopback listener
-        # BEFORE spawning the child, or the child's immediate connect would be refused.
+        # Bind the loopback listener BEFORE spawning the child, or its immediate connect is refused.
         self._read_task = asyncio.create_task(self._read_loop(), name="ticker-read-loop")
         await self._wait_server_ready()
 
@@ -510,8 +447,6 @@ class TickerSupervisor:
             _ENV_TCP_HOST: self._settings.ticker.tcp_host,
             _ENV_TCP_PORT: str(self._settings.ticker.tcp_port),
         }
-        # Inherit the parent environment (PATH, credential-manager access; no OAuth token is injected
-        # into it) and overlay the handshake/loopback vars.
         full_env = {**_os_environ(), **env}
 
         self._proc = await asyncio.create_subprocess_exec(
@@ -523,10 +458,9 @@ class TickerSupervisor:
             env=full_env,
         )
 
-        # Drain stdout+stderr into the engine log IMMEDIATELY (before the handshake — the child logs to
-        # stderr while it reads its stdin credentials and connects KiteTicker). Un-drained, those pipes
-        # (a) hide the child's own explanation of a tickless/dead feed and (b) fill their OS buffer and
-        # wedge the child on its next stderr write. Both are the 2026-07-22 defect's blind spot.
+        # Drain stdout+stderr IMMEDIATELY, before the handshake (the child logs to stderr while it reads
+        # credentials): un-drained, the pipes hide the child's own explanation of a dead feed and fill up,
+        # wedging the child on its next write.
         self._output_tasks = [
             asyncio.create_task(
                 self._drain_child_stream(self._proc.stderr, "stderr", "warning"),
@@ -538,8 +472,6 @@ class TickerSupervisor:
             ),
         ]
 
-        # The access token crosses the trust boundary on stdin (not env, not a frame) so it never lands
-        # in the process table; this hands the token + initial subscription set here.
         await self._send_startup_handshake()
 
         self._reset_spawn_stamps()
@@ -558,16 +490,11 @@ class TickerSupervisor:
     def _reset_spawn_stamps(self) -> None:
         """Clear every per-spawn stamp so a fresh child is judged only on ITS OWN evidence.
 
-        Named + extracted from :meth:`_spawn_child` (2026-09-09) because this is exactly the kind of
-        block a later field quietly forgets to join — and the two in-child reconnect trackers are
-        that kind of field. A new child has produced no frames yet, so the liveness/tick/heartbeat
-        stamps go to ``None``; ``_started_at`` re-stamps so every WARMING episode is timed afresh.
-
-        The reconnect trackers reset for a sharper reason: a fresh child restarts ``connect_seq`` at
-        1 and its link state is unknown again, so its FIRST heartbeat is a SPAWN — whose
-        WARMING→HEALTHY promotion already publishes — not a reconnect. Carrying the dead child's
-        values across would read that first frame as a seq CHANGE (or as the False→True edge left
-        over from the old link) and publish a phantom reconnect on top of the respawn's own event.
+        A new child has produced no frames, so the liveness/tick/heartbeat stamps go to ``None`` and
+        ``_started_at`` re-stamps so each WARMING episode is timed afresh. The reconnect trackers must reset
+        too: a fresh child restarts ``connect_seq`` at 1, so its FIRST heartbeat is a spawn (whose
+        WARMING→HEALTHY promotion already publishes), not a reconnect; carrying the dead child's values
+        across would publish a phantom reconnect on top of it. Any new per-spawn field belongs here.
         """
         self._started_at = self._clock.now()
         self._last_tick_at = None
@@ -581,11 +508,9 @@ class TickerSupervisor:
     async def _send_startup_handshake(self) -> None:
         """Deliver the credentials + initial subscriptions to the child over stdin.
 
-        One length-prefixed msgpack frame ``{"api_key", "access_token", "tokens"}`` — the SECRETS
-        CHANNEL of the wire contract: never env, never a routable frame, so credentials never land
-        in the process table. The child reads it before connecting KiteTicker
-        (ticker/main.py ``_read_stdin_credentials``). Stdin then stays OPEN as the liveness signal
-        (closing it is the orphan-protection kill) — the child ignores further stdin bytes.
+        One length-prefixed msgpack frame ``{"api_key", "access_token", "tokens"}`` (the wire contract's
+        SECRETS CHANNEL; ticker/main.py ``_read_stdin_credentials``). Stdin then stays OPEN: closing it is
+        the orphan-protection kill.
         """
         proc = self._proc
         if proc is None or proc.stdin is None:
@@ -603,16 +528,12 @@ class TickerSupervisor:
             await proc.stdin.drain()
         except (ConnectionError, RuntimeError) as exc:  # pragma: no cover - child died mid-spawn
             _log.warning("ticker_stdin_handshake_failed", error=str(exc))
-        # Leave stdin OPEN (do NOT close) so the child stays adopted (orphan protection).
 
     async def _drain_child_stream(self, stream: Any, name: str, level: str) -> None:
-        """Pump one child pipe (stdout/stderr) line-by-line into the engine log until EOF.
+        """Pump one child pipe line-by-line into the engine log until EOF.
 
-        This is the 2026-07-22 fix: the supervisor captured the child's stderr into a PIPE nothing ever
-        read, so the child's own diagnostics (KiteTicker connect/close/reconnect/noreconnect, the reason
-        a feed went tickless) were discarded AND a full pipe buffer would eventually wedge the child on
-        its next write. Child stderr is its error channel ⇒ WARNING; stdout is unexpected ⇒ INFO. Never
-        raises out — a drain failure must never take down supervision.
+        Child stderr is its error channel ⇒ WARNING; stdout is unexpected ⇒ INFO. Never raises out: a drain
+        failure must never take down supervision.
         """
         if stream is None:
             return
@@ -631,9 +552,8 @@ class TickerSupervisor:
             _log.exception("ticker_child_stream_drain_error", stream=name)
 
     async def _cancel_output_tasks(self) -> None:
-        """Cancel + await the stdout/stderr drain tasks (idempotent). The child is already dead by the
-        time this runs, so the pipes are at EOF; this is leak-cleanup for a killed/wedged child whose
-        streams never closed."""
+        """Cancel + await the stdout/stderr drain tasks (idempotent); leak-cleanup for a killed/wedged child
+        whose streams never closed."""
         tasks = self._output_tasks
         self._output_tasks = []
         for task in tasks:
@@ -663,9 +583,8 @@ class TickerSupervisor:
                 pass
 
         # 2) Graceful terminate, then hard kill if it ignores us (a wedged reactor must still die).
-        #    Windows can deny TerminateProcess (PermissionError while the child is still active; CreateProcess
-        #    was denied in Modern Standby on 2026-10-12). Stdin is already closed, so the child exits on its
-        #    own (orphan protection); a denial is logged, never raised into a respawn or stop().
+        #    Windows can deny TerminateProcess (e.g. in Modern Standby). Stdin is already closed, so the
+        #    child exits on its own; a denial is logged, never raised into a respawn or stop().
         try:
             proc.terminate()
         except ProcessLookupError:  # pragma: no cover - exited between checks
@@ -691,7 +610,6 @@ class TickerSupervisor:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except TimeoutError:  # pragma: no cover - OS-level wedge
                 _log.error("ticker_kill_timeout", pid=proc.pid)
-        # The child is dead ⇒ its stdout/stderr are at EOF; reap the drain tasks (leak-cleanup).
         await self._cancel_output_tasks()
 
     # ------------------------------------------------------------------ read loop (the loopback server)
@@ -713,20 +631,15 @@ class TickerSupervisor:
         _log.error("ticker_server_bind_timeout", timeout_s=timeout_s)
 
     async def _read_loop(self) -> None:
-        """The loopback TCP server owning the child's data link (WIRE CONTRACT at module top).
+        """The loopback TCP server owning the child's data link (WIRE CONTRACT at module top); frames are
+        handled in :meth:`_handle_child_connection`. Cancellation (stop/respawn) closes the listener so a
+        respawn can rebind the port.
 
-        The ENGINE is the server: ``asyncio.start_server`` on ``127.0.0.1:<tcp_port>`` accepts the
-        child's inbound connection (the child is the client, ``reactor.connectTCP``). Frame parsing
-        and dispatch live in :meth:`_handle_child_connection`. Cancellation (stop/respawn) closes
-        the listener so a respawn can rebind the port.
-
-        The cleanup wait is BOUNDED. ``server.close()`` releases the listening socket
-        synchronously — that alone is what a rebind needs — but ``server.wait_closed()`` under
-        CPython ≥3.12 additionally blocks until every accepted connection has dropped. Awaiting it
-        unbounded inside a ``finally`` that runs during cancellation is how this task became an
-        un-cancellable hang (:meth:`_respawn` docstring). Callers now terminate the child first, so
-        the wait normally returns in milliseconds; the timeout is the backstop for a child that will
-        not let go, and it is logged rather than swallowed.
+        The cleanup wait is BOUNDED. ``server.close()`` releases the socket synchronously (all a rebind
+        needs), but ``server.wait_closed()`` on CPython ≥3.12 also blocks until every accepted connection
+        drops; awaiting it unbounded in a ``finally`` during cancellation makes this task an un-cancellable
+        hang (:meth:`_respawn` docstring). Callers terminate the child first, so the wait is normally
+        instant; the timeout is the logged backstop for a child that will not let go.
         """
         server = await asyncio.start_server(
             self._handle_child_connection,
@@ -742,9 +655,8 @@ class TickerSupervisor:
             await asyncio.Event().wait()  # serve until cancelled (stop/respawn)
         finally:
             self._server = None
-            # Close the link, not just forget it: server.close() keeps accepted connections, so a child
-            # that outlived its terminate (denied in Modern Standby) would keep stamping liveness for the
-            # next spawn. Its handler sees EOF and exits; for a dead child the link is already at EOF.
+            # Close the link, not just forget it: server.close() keeps accepted connections, so a child that
+            # outlived its terminate would keep stamping liveness for the next spawn.
             writer, self._child_writer = self._child_writer, None
             if writer is not None:
                 with contextlib.suppress(Exception):
@@ -764,10 +676,8 @@ class TickerSupervisor:
     ) -> None:
         """Authenticate one inbound child connection and pump its frames.
 
-        The FIRST frame must be a ``hello`` echoing this spawn's shared secret — else the
-        connection is dropped before any tick/order frame is honoured (a fabricated local frame
-        must not be able to inject a phantom fill; loopback bind + per-spawn secret + REST
-        reconciliation backstop).
+        The FIRST frame must be a ``hello`` echoing this spawn's shared secret, else the connection is
+        dropped before any tick/order frame is honoured.
         """
         peer = writer.get_extra_info("peername")
         try:
@@ -830,49 +740,33 @@ class TickerSupervisor:
     async def _handle_frame(self, frame: dict[str, Any]) -> None:
         """Dispatch one authenticated frame by ``type`` (WIRE CONTRACT at module top).
 
-        This is also the ONLY place liveness is stamped. Every frame — tick, order,
-        heartbeat, even an undecodable one that :meth:`_read_frame` reduced to ``{}`` — is proof the
-        child is alive and the link is carrying bytes, so it refreshes ``_last_frame_at`` before any
-        type dispatch. Putting the stamp here (rather than on the heartbeat branch alone) means
-        liveness CANNOT be starved separately from the data it guards: whatever stalls the frame path
-        stalls both, and whatever revives it revives both.
+        This is also the ONLY place liveness is stamped. Every frame — tick, order, heartbeat, even an
+        undecodable one that :meth:`_read_frame` reduced to ``{}`` — refreshes ``_last_frame_at`` before
+        dispatch, so liveness cannot be starved separately from the data it guards.
 
-        **In-child reconnect signal (2026-09-09).** KiteTicker reconnects INSIDE
-        the child (``reconnect=True``; ``ticker/main.py`` :meth:`~TickerApp._on_connect` re-subscribes
-        and re-asserts FULL mode, so Kite re-delivers its connect-time snapshot of last-trade stamps)
-        while the child keeps heartbeating. No supervisor state transition happens, so nothing was
-        published and ``BarBuilder``'s reconnect grace never armed — the 2026-09-03 lag flap recurs
-        for every in-child reconnect, including inside the watched 15:30–15:45 buffer.
+        **In-child reconnect signal.** KiteTicker reconnects INSIDE the child while it keeps heartbeating,
+        so no supervisor state transition happens and ``BarBuilder``'s reconnect grace would never arm; Kite
+        then re-delivers its connect-time snapshot of last-trade stamps, which reads as lag. The signal is
+        ``connect_seq``, the child's per-connect counter, shipped on a heartbeat emitted BEFORE
+        ``ws.subscribe`` so it precedes the snapshot ticks in the same ordered pipe. A CHANGE republishes
+        health exactly once — not its FIRST value of a spawn (that frame is the spawn's own
+        WARMING→HEALTHY publish) and not per heartbeat (that would spam the bus and hold the grace open).
 
-        The signal is ``connect_seq``: the child's per-connect counter, bumped at the TOP of
-        ``_on_connect`` and shipped on a heartbeat emitted THERE, before ``ws.subscribe`` — so it
-        precedes the snapshot ticks in the same ordered pipe rather than trailing them by up to a
-        full 1 s beat. A CHANGE of that value republishes health exactly once. Not the FIRST value of
-        a spawn (that frame is the spawn's own WARMING→HEALTHY publish), and not per heartbeat (that
-        would spam the bus and hold the grace open forever).
+        ``ws_connected``'s False→True edge is only the FALLBACK for a heartbeat with no ``connect_seq``: it
+        is observable no earlier than the next 1 s beat (too late for the snapshot) and a sub-second drop
+        shows no edge at all.
 
-        ``ws_connected``'s False→True edge remains as the FALLBACK, for a heartbeat carrying no
-        ``connect_seq`` at all. It is only a fallback because it is strictly weaker on two counts the
-        2026-09-09 review named: it is observable no earlier than the next 1 s heartbeat (too late —
-        Kite's snapshot lands ~50 ms after the re-subscribe), and a reconnect that never produced a
-        ``ws_connected=False`` heartbeat (sub-second drop; an ``on_error`` path with no ``on_close``)
-        shows no edge whatsoever.
-
-        **One frame, at most one publish.** :meth:`_mark_alive` may already have published a
-        STALE→HEALTHY recovery for this very frame, and the reconnect heartbeat that ends a silence
-        is exactly the frame where both fire — hence the ``published`` ledger threaded through here.
-        The state machine, its thresholds and the kill logic are deliberately untouched: this only
-        republishes what ``health()`` already says.
+        **One frame, at most one publish.** :meth:`_mark_alive` may already have published a STALE→HEALTHY
+        recovery for this very frame (the reconnect heartbeat that ends a silence), hence the ``published``
+        ledger. This only republishes what ``health()`` already says; the state machine and kill logic are
+        untouched.
         """
         published = await self._mark_alive()
         ftype = frame.get("type")
         if ftype == "heartbeat":
             self._last_heartbeat_at = self._clock.now()
-            # Pinned field names on the heartbeat frame: ``connect_seq`` (primary) and
-            # ``ws_connected`` (fallback) — ``ticker/main.py`` :meth:`~TickerApp._send_heartbeat`,
-            # both listed in that module's "heartbeat" wire-schema entry. Either being absent
-            # (older/degenerate frame) leaves its tracked value alone: absence is not a reconnect and
-            # not a disconnect, and treating it as one would fabricate an edge out of nothing.
+            # ``connect_seq`` (primary) / ``ws_connected`` (fallback): an absent field leaves its tracked
+            # value alone — absence is neither a reconnect nor a disconnect.
             connect_seq = frame.get("connect_seq")
             ws_connected = frame.get("ws_connected")
             seq_reconnect = (
@@ -890,8 +784,8 @@ class TickerSupervisor:
                 child_age = frame["last_tick_age_s"]
                 self._child_tick_age_s = float(child_age) if isinstance(child_age, int | float) else None
             if self._state == "WARMING":
-                # First heartbeat proves the link + child are live: promote WARMING → HEALTHY.
-                # The warm-up ENTRY gate (ops.warmup) is separate — this is feed health only.
+                # The first heartbeat proves link + child are live (feed health only; the warm-up ENTRY
+                # gate in ops.warmup is separate).
                 self._set_state("HEALTHY")
                 await self._publish_health()
                 published = True
@@ -913,10 +807,9 @@ class TickerSupervisor:
                 # fresh child is usually HEALTHY (heartbeat-promoted) when its first tick lands.
                 self._reset_silence_episode()
             if self._state == "WARMING":
-                # Same principle as the liveness stamp: a TICK is at least as good a proof
-                # of life as a heartbeat, so it promotes out of warm-up too. Otherwise a child whose
-                # heartbeat LoopingCall never started — but whose ticks flow perfectly — would sit in
-                # WARMING being respawned every warming_timeout_s forever, discarding a working feed.
+                # A TICK proves life as well as a heartbeat, so it promotes out of warm-up too; else a
+                # child whose heartbeat never started but whose ticks flow would be respawned every
+                # warming_timeout_s, discarding a working feed.
                 self._set_state("HEALTHY")
                 await self._publish_health()
             elif self._state == "DEGRADED":
@@ -938,21 +831,13 @@ class TickerSupervisor:
     async def _mark_alive(self) -> bool:
         """Refresh liveness from an arriving frame and recover a STALE feed.
 
-        Returns **whether it published** a ``feed.health`` event for this frame, so
-        :meth:`_handle_frame` can honour one-publish-per-frame: the frame that ends a silence is
-        usually the reconnect heartbeat, i.e. the one frame where this recovery and the in-child
-        reconnect signal both fire (2026-09-09).
+        Returns **whether it published** a ``feed.health`` event, so :meth:`_handle_frame` can honour
+        one-publish-per-frame (the frame that ends a silence is usually the reconnect heartbeat).
 
-        Called from :meth:`_handle_frame` for every frame. Two jobs:
-
-        1. Stamp ``_last_frame_at`` — the age the monitor's kill decision reads.
-        2. **Recover.** STALE used to be a one-way door: only the heartbeat branch could promote, and
-           only out of WARMING, so a feed that went STALE while the child was fine stayed STALE until
-           something respawned it. On 08-24 and 08-25 that respawn was itself deadlocked, so STALE
-           held for 40 min / 2 h 14 min with ~46,000 ticks per 5 min still flowing through this very
-           method. Recovery must not depend on a reconnect that will never come: frames are present,
-           therefore the feed is healthy, therefore say so — and publish it, because the
-           stale-data guard can FREEZE entries off this state.
+        Called for every frame. Two jobs: stamp ``_last_frame_at`` (the age the kill decision reads), and
+        **recover** STALE → HEALTHY. Recovery must not depend on a reconnect that may never come: frames are
+        present, so the feed is healthy, and it is published because the stale-data guard can FREEZE entries
+        off this state.
         """
         self._last_frame_at = self._clock.now()
         if self._state == "STALE":
@@ -978,9 +863,7 @@ class TickerSupervisor:
         try:
             return parse_tick_frame(frame, symbol)
         except _ImplausibleTimestamp:
-            # Working-as-designed drop (epoch-0 zeroed field, e.g. a not-yet-traded instrument's
-            # pre-market resubscribe snapshot) — own reason/counter, no ERROR traceback: the
-            # WARNING already fired inside _wire_timestamp (2026-08-21).
+            # Expected drop: own reason/counter, no ERROR traceback (the WARNING fired in _wire_timestamp).
             self._drop("implausible_timestamp")
             return None
         except Exception:  # noqa: BLE001 - malformed frame is dropped, never crashes the read loop
@@ -991,21 +874,17 @@ class TickerSupervisor:
     async def _monitor_loop(self) -> None:
         """Frame-silence watchdog: kill + respawn on >``heartbeat_silence_kill_s``.
 
-        Runs while a child is alive. Each tick it re-derives the health state from ``clock.now()``; when
-        the feed goes STALE while *running* (not WARMING — the warm-up suppression) it triggers a respawn and
-        publishes the ``feed.health`` STALE transition. WARMING is no longer exempt from ALL timeouts:
-        an unbounded WARMING is itself a wedge (2026-07-23), so ``_check_warming_timeout`` bounds it.
-        Also reaps an unexpectedly dead child.
+        Runs while a child is alive. Each cycle it re-derives health from ``clock.now()``; STALE while
+        *running* (not WARMING) triggers a respawn and publishes the STALE transition. WARMING is bounded by
+        ``_check_warming_timeout`` (an unbounded WARMING is itself a wedge). Also reaps an unexpectedly dead
+        child.
 
-        The loop-starvation discount. This coroutine and the frame reader share one event
-        loop. A long synchronous stretch anywhere in the engine blocks BOTH — the reader stops
-        stamping liveness and this loop stops observing — yet the wall clock keeps running, so on the
-        late wake-up the silence looks like a dead child. It is not: the child's frames are queued in
-        TCP and land in a burst moments later (08-24: no ``ticks_flushed`` for ~34 s, then 3,124 ticks
-        in one flush, with ``store_stalled seconds_since_last_success=900.154`` naming the same
-        starvation). So the loop measures its OWN wake-up overshoot, accumulates it while liveness is
-        un-refreshed, and subtracts it before pulling the trigger. Ages stay on the wall clock;
-        only the verdict is discounted, and the discount is logged.
+        Loop-starvation discount: this coroutine and the frame reader share one event loop, so a long
+        synchronous stretch blocks BOTH while the wall clock runs, and on the late wake-up the silence looks
+        like a dead child although its frames are queued in TCP and land in a burst moments later. The loop
+        measures its OWN wake-up overshoot, accumulates it while liveness is un-refreshed, and subtracts it
+        before pulling the trigger. Ages stay on the wall clock; only the verdict is discounted, and the
+        discount is logged.
         """
         kill_after = float(self._settings.ticker.heartbeat_silence_kill_s)
         tick_silence_budget = float(self._settings.ticker.tick_silence_degrade_s)
@@ -1027,7 +906,7 @@ class TickerSupervisor:
                 overshoot = (now - last_cycle_at).total_seconds() - 1.0
                 last_cycle_at = now
                 if self._last_frame_at != last_frame_seen:
-                    # A frame landed since the last cycle: liveness is fresh, so is the measurement.
+                    # A frame landed: liveness is fresh, so is the measurement.
                     last_frame_seen = self._last_frame_at
                     starved_s = 0.0
                     self._starvation_logged = False
@@ -1046,13 +925,10 @@ class TickerSupervisor:
 
                 heartbeat_age = self._heartbeat_age_s()
                 if self._state == "WARMING":
-                    # The HEALTHY-path heartbeat-silence kill below is suppressed during warm-up (a
-                    # fresh spawn legitimately has no ticks/heartbeat yet) — promotion to HEALTHY
-                    # happens on the first heartbeat in the read loop. But WARMING must NOT be
-                    # unbounded: a child that dies/hangs before its first heartbeat, or a system-resume
-                    # that froze the machine mid-WARMING (2026-07-23 13:41), would otherwise wedge here
-                    # forever (zero respawns, feed dead). Bound it with a timeout + capped backoff; a
-                    # respawn returns (``_spawn_child`` installs a fresh monitor task).
+                    # The silence kill below is suppressed during warm-up (a fresh spawn has no frames yet),
+                    # but WARMING must not be unbounded: a child that dies/hangs before its first
+                    # heartbeat, or a system resume mid-WARMING, would wedge here forever. Bound it with a
+                    # timeout + capped backoff; a respawn returns (``_spawn_child`` installs a fresh monitor).
                     if await self._check_warming_timeout(warming_timeout, warming_cap, max_wedge):
                         return
                     continue
@@ -1060,9 +936,8 @@ class TickerSupervisor:
                 silence = self._liveness_age_s()
                 if silence is not None and silence > kill_after:
                     if silence - starved_s <= kill_after:
-                        # Not the child's silence — ours. Say so honestly (once per episode) and let
-                        # the queued frames land; a genuinely dead child stays silent and the next
-                        # un-starved cycle fires for real.
+                        # Our silence, not the child's: log once per episode and let the queued frames
+                        # land; a genuinely dead child fires on the next un-starved cycle.
                         if not self._starvation_logged:
                             self._starvation_logged = True
                             _log.warning(
@@ -1083,17 +958,14 @@ class TickerSupervisor:
                         )
                     self._set_state("STALE")
                     await self._publish_health()  # STALE transition for the stale-data guard
-                    # The kill_after contract, honoured: the SAME restart machinery the child's own
-                    # ``tcp_connection_lost``/exit takes (``_respawn`` → terminate + fresh spawn).
                     await self._respawn(reason="heartbeat_silence")
                     return
 
-                # Heartbeats fine, but is the FEED actually delivering ticks? A child heartbeats every
-                # 1 s regardless of ticks, so a tickless feed used to read HEALTHY all session (the
-                # 2026-07-22 defect). During market hours, tick silence past the budget ⇒ DEGRADED.
+                # Heartbeats are fine, but is the FEED delivering ticks? The child heartbeats regardless, so
+                # in market hours tick silence past the budget ⇒ DEGRADED.
                 await self._check_tick_silence(tick_silence_budget)
-                # A connected-but-silent feed heartbeats fine, so the kill above never fires for it, and
-                # only a fresh connection has ever ended one (2026-11-03). A respawn returns, as above.
+                # A connected-but-silent feed heartbeats fine, so the kill above never fires for it; only a
+                # fresh connection ends one. A respawn returns, as above.
                 if await self._check_tick_silence_respawn(tick_silence_respawn, max_silence_respawns):
                     return
         except asyncio.CancelledError:  # pragma: no cover - normal on stop
@@ -1102,15 +974,13 @@ class TickerSupervisor:
     async def _check_tick_silence(self, budget_s: float) -> None:
         """In-session tick-silence guard — called each monitor tick.
 
-        HEALTHY + inside market hours + effective tick age past ``budget_s`` ⇒ transition to the visible
-        DEGRADED state (a tickless feed must NEVER present HEALTHY through a session again), emit a
-        WARNING, publish the ``feed.health`` transition, and fire the owner notify. Off-hours or any
-        non-HEALTHY state: no-op (heartbeat-only semantics — no false night alarms). Recovery to
-        HEALTHY happens on the next tick in :meth:`_handle_frame`.
+        HEALTHY + inside market hours + effective tick age past ``budget_s`` ⇒ DEGRADED (a tickless feed must
+        never present HEALTHY in session), with a WARNING, a ``feed.health`` publish and the owner notify.
+        Off-hours or any non-HEALTHY state: no-op. Recovery to HEALTHY is on the next tick in
+        :meth:`_handle_frame`.
 
-        The notify is one-shot per silence EPISODE, not per entry: each tick-silence respawn's fresh
-        child goes HEALTHY on its first heartbeat and re-enters DEGRADED here 120 s later, and that
-        re-entry must not page again. The WARNING and the publish still fire on every entry.
+        The notify is one-shot per silence EPISODE, not per entry: each respawn's fresh child re-enters
+        DEGRADED later and must not page again. The WARNING and the publish fire on every entry.
         """
         if self._state != "HEALTHY":
             return
@@ -1137,16 +1007,16 @@ class TickerSupervisor:
             await self._notify_degraded(silence, budget_s)
 
     async def _check_tick_silence_respawn(self, respawn_after_s: float, max_respawns: int) -> bool:
-        """Silent-connected-feed respawn (2026-11-03) — called each monitor tick after the DEGRADED guard.
+        """Silent-connected-feed respawn — called each monitor cycle after the DEGRADED guard.
 
-        In session, DEGRADED silence past ``respawn_after_s`` ⇒ kill + respawn the child, at most
-        ``max_respawns`` times per episode; then escalate ONCE and stay DEGRADED. Returns ``True`` when a
-        respawn ran so the monitor loop returns (``_spawn_child`` installs a fresh monitor task).
+        In session, DEGRADED silence past ``respawn_after_s`` ⇒ kill + respawn, at most ``max_respawns``
+        times per episode; then escalate ONCE and stay DEGRADED. Returns ``True`` when a respawn ran (the
+        monitor loop then returns; ``_spawn_child`` installs a fresh monitor task).
 
-        Silence runs from the LATEST of the last tick, the last HEALTHY entry and the session open —
-        not :meth:`_effective_tick_silence_s`, which prefers an old tick over a newer HEALTHY entry. Each
-        fresh connection therefore gets the full budget, and a feed left DEGRADED overnight gets it from
-        today's open rather than respawning at 09:15:01 on yesterday's silence.
+        Silence runs from the LATEST of the last tick, the last HEALTHY entry and the session open — not
+        :meth:`_effective_tick_silence_s`, which prefers an old tick over a newer HEALTHY entry. Each fresh
+        connection therefore gets the full budget, and a feed left DEGRADED overnight is timed from today's
+        open, not yesterday's silence.
         """
         if self._state != "DEGRADED":
             return False
@@ -1163,7 +1033,7 @@ class TickerSupervisor:
         if silence <= respawn_after_s:
             return False
         if self._silence_respawns < max_respawns:
-            # Counted before the respawn runs: one that raises (or finds no token) still spends an attempt.
+            # Counted before the respawn: one that raises (or finds no token) still spends an attempt.
             self._silence_respawns += 1
             _log.warning(
                 "ticker_tick_silence_respawn",
@@ -1191,10 +1061,9 @@ class TickerSupervisor:
     def _open_silence_episode(self, session: Session, now: datetime) -> None:
         """Open the silence episode for ``now``'s session unless one is already open for it.
 
-        An episode left over from an earlier session date is replaced, not continued: a feed capped
-        at yesterday's close and still silent at today's open gets a full cap and a fresh alert.
-        ``since`` is the tick-silence reference clamped to the session open, so the escalation never
-        reports yesterday's last tick as today's silence."""
+        An episode from an earlier session date is replaced, not continued (a fresh cap and alert each
+        day). ``since`` is clamped to the session open, so escalation never reports yesterday's last tick
+        as today's silence."""
         today = now.date()
         if self._silence_episode_date == today:
             return
@@ -1223,17 +1092,15 @@ class TickerSupervisor:
     async def _check_warming_timeout(
         self, timeout_s: float, cap_s: float, max_respawns: int
     ) -> bool:
-        """WARMING-wedge guard (2026-07-23 13:41 sleep/resume) — called each monitor tick while WARMING.
+        """WARMING-wedge guard — called each monitor cycle while WARMING.
 
-        If no heartbeat has arrived within the backoff-scaled timeout, the child is wedged (dead/hung
-        before its first heartbeat, or the machine froze mid-WARMING on OS sleep): kill + respawn.
-        Returns ``True`` when a respawn was triggered so the monitor loop returns (``_spawn_child``
-        installs a fresh monitor task); ``False`` (no-op) while still inside the budget.
+        No heartbeat within the backoff-scaled timeout means the child is wedged (dead/hung, or the machine
+        slept mid-WARMING): kill + respawn. Returns ``True`` when a respawn ran (the monitor loop then
+        returns), ``False`` while inside the budget.
 
-        Consecutive wedge-respawns that never reach HEALTHY back off exponentially
-        (``timeout_s × 2ⁿ``) capped at ``cap_s``, and past ``max_respawns`` escalate ONCE to the owner
-        (the feed is structurally down — dead child / no network / rejected token). A successful
-        WARMING→HEALTHY promotion resets the counter + escalation flag (see :meth:`_set_state`).
+        Consecutive wedge-respawns back off exponentially (``timeout_s × 2ⁿ``) capped at ``cap_s``; past
+        ``max_respawns`` escalate ONCE to the owner. A WARMING→HEALTHY promotion resets the counter and flag
+        (see :meth:`_set_state`).
         """
         age = self._warming_age_s()
         effective = _backoff(timeout_s, self._wedge_respawns, cap_s)
@@ -1246,12 +1113,11 @@ class TickerSupervisor:
             timeout_s=round(effective, 1),
             wedge_respawns=self._wedge_respawns,
         )
-        # One-shot owner escalation once the feed has failed to come up max_respawns times in a row.
         if self._wedge_respawns >= max_respawns and not self._wedge_escalated:
             self._wedge_escalated = True
             await self._notify_wedged(self._wedge_respawns, age)
-        # A wedged feed is a real feed-lost incident: publish STALE (fail toward visibility — the
-        # stale-data guard can FREEZE entries) before the respawn re-enters WARMING.
+        # A wedged feed is a feed-lost incident: publish STALE (the stale-data guard can FREEZE entries)
+        # before the respawn re-enters WARMING.
         self._set_state("STALE")
         await self._publish_health()  # STALE transition for the stale-data guard
         await self._respawn(reason="warming_timeout")
@@ -1281,10 +1147,8 @@ class TickerSupervisor:
         return session if session.open <= now <= session.close else None
 
     def _effective_tick_silence_s(self) -> float | None:
-        """Seconds since the last tick — or, if NO tick has EVER been seen, since we entered HEALTHY.
-
-        The 'never a single tick' case is exactly the 2026-07-22 outage, so it MUST count toward the
-        silence budget rather than being excused as 'no tick yet' (which is what left it HEALTHY)."""
+        """Seconds since the last tick — or, if NO tick has EVER been seen, since we entered HEALTHY
+        (a never-ticking feed MUST count toward the silence budget, not be excused as 'no tick yet')."""
         ref = self._last_tick_at or self._healthy_since
         if ref is None:
             return None
@@ -1320,23 +1184,17 @@ class TickerSupervisor:
     async def _respawn(self, *, reason: str) -> None:
         """Kill the current child and launch a fresh one (the reactor cannot restart in-process).
 
-        Called from the monitor loop. The old read loop is still cancelled before
-        :meth:`_spawn_child` overwrites ``self._read_task`` (otherwise the parked read task runs
-        forever), but it is cancelled **after** the child is terminated — see below. The monitor task
-        is NOT cancelled here: the caller *is* the monitor task and returns immediately after this
-        awaits, and ``_spawn_child`` installs a fresh monitor task (cancelling self would abort the
-        respawn mid-flight).
+        Called from the monitor loop. The old read loop is cancelled before :meth:`_spawn_child` overwrites
+        ``self._read_task``, but **after** the child is terminated. The monitor task is NOT cancelled here:
+        the caller *is* the monitor task and returns right after, and ``_spawn_child`` installs a fresh one
+        (cancelling self would abort the respawn mid-flight).
 
-        ORDER IS LOAD-BEARING (the bug that made ``kill_after_s`` a lie). Cancelling the
-        read task first self-deadlocked: :meth:`_read_loop`'s ``finally`` awaits
-        ``server.wait_closed()``, and since CPython 3.12 (this engine runs 3.12.13) that call waits
-        for the server to close *and* every accepted connection to drop — including the live child
-        link, whose handler only exits when the child goes away. The thing that makes the child go
-        away is ``_terminate_child()``, two lines below, behind the same ``self._lock``. So the
-        supervisor logged ``ticker_respawn`` and then froze: 40 min on 08-24 10:01, 2 h 14 min on
-        08-25 11:28, 4 h 53 min on 08-25 03:37 — every wedge ending at the exact moment an unrelated
-        ``ticker_link_closed`` finally released ``wait_closed()``. Terminating first breaks the
-        cycle at the source; :meth:`_read_loop` also bounds the wait as a second line of defence.
+        ORDER IS LOAD-BEARING. Cancelling the read task first self-deadlocks: :meth:`_read_loop`'s
+        ``finally`` awaits ``server.wait_closed()``, which on CPython ≥3.12 waits for every accepted
+        connection to drop, including the live child link, whose handler only exits when the child goes
+        away — and ``_terminate_child()`` is what makes it go away, behind the same ``self._lock``. The
+        supervisor would log ``ticker_respawn`` and then freeze for hours. Terminating first breaks the
+        cycle; :meth:`_read_loop` also bounds the wait as a second line of defence.
         """
         async with self._lock:
             _log.warning("ticker_respawn", reason=reason)
@@ -1355,7 +1213,7 @@ class TickerSupervisor:
 
     def _spawn_failure_logged(self, where: str, exc: Exception) -> float:
         """Count a failed (re)spawn and log it; returns the retry delay. Call it inside the ``except`` so
-        the first failure of a streak keeps its traceback (the 10-12 root cause was read off one)."""
+        the first failure of a streak keeps its traceback."""
         self._spawn_failures += 1
         cfg = self._settings.ticker
         delay = _backoff(float(cfg.warming_timeout_s), self._spawn_failures - 1, float(cfg.warming_backoff_cap_s))
@@ -1367,12 +1225,11 @@ class TickerSupervisor:
         return delay
 
     async def _spawn_failed(self, delay_s: float) -> None:
-        """A (re)spawn that raised leaves no child and no monitor task. On 2026-10-12 20:12 CreateProcess was
-        denied in Modern Standby (WinError 5) and supervision ended silently: no ticker until the 02:24
-        stop, feed health still HEALTHY. Now the feed goes STALE (the stale-data guard, and in session its
-        page, see it), the half-made spawn is cleaned up, and a retry task stands in for the monitor
-        (``stop()`` cancels it), backing off like a WARMING wedge. A cancellation during the cleanup
-        propagates without arming a retry."""
+        """A (re)spawn that raised leaves no child and no monitor task (CreateProcess can be denied in
+        Modern Standby), which must not end supervision silently with feed health still HEALTHY. The feed
+        goes STALE (the stale-data guard, and in session its page, see it), the half-made spawn is cleaned
+        up, and a retry task stands in for the monitor (``stop()`` cancels it), backing off like a WARMING
+        wedge. A cancellation during the cleanup propagates without arming a retry."""
         self._set_state("STALE")
         try:
             await self._terminate_child()
@@ -1399,11 +1256,8 @@ class TickerSupervisor:
                 pass
 
     async def _cancel_monitor_task(self) -> None:
-        """Cancel and await only the monitor loop (idempotent). Used by :meth:`stop`, NEVER from
-        inside the monitor loop itself — that is what :meth:`_cancel_read_task` is for.
-
-        Split out of the old ``_cancel_supervision``: teardown now interleaves a
-        ``_terminate_child()`` between the two cancels, so they cannot be done in one sweep."""
+        """Cancel and await only the monitor loop (idempotent). Used by :meth:`stop`, NEVER from inside the
+        monitor loop itself. Teardown interleaves ``_terminate_child()`` between the two cancels."""
         task = self._monitor_task
         self._monitor_task = None
         if task is not None and not task.done():
@@ -1424,8 +1278,7 @@ class TickerSupervisor:
         """Seconds since ANY frame arrived — the signal the kill decision reads.
 
         ``None`` before the first frame of this spawn (WARMING owns that window via
-        :meth:`_warming_age_s`). A tick is as good a proof of life as a heartbeat, so the two can no
-        longer disagree: this is stamped once, on the frame path, in :meth:`_mark_alive`."""
+        :meth:`_warming_age_s`); stamped once, in :meth:`_mark_alive`."""
         if self._last_frame_at is None:
             return None
         return (self._clock.now() - self._last_frame_at).total_seconds()
@@ -1433,9 +1286,8 @@ class TickerSupervisor:
     def _warming_age_s(self) -> float | None:
         """Seconds this spawn has been WARMING with no heartbeat yet — the WARMING-wedge clock.
 
-        Reference is the last heartbeat if one somehow arrived without promoting (defensive; in WARMING
-        the first heartbeat promotes to HEALTHY), else this spawn's ``_started_at``. ``None`` before the
-        first spawn. Each (re)spawn resets ``_started_at``, so every WARMING episode is timed afresh."""
+        Reference is the last heartbeat if one arrived without promoting (defensive), else this spawn's
+        ``_started_at``. ``None`` before the first spawn."""
         ref = self._last_heartbeat_at or self._started_at
         if ref is None:
             return None
@@ -1445,11 +1297,10 @@ class TickerSupervisor:
         if state != self._state:
             _log.info("feed_health_transition", frm=self._state, to=state)
         if state == "HEALTHY" and self._state != "HEALTHY":
-            # Reference instant for the tick-silence budget when NO tick has been seen yet (the
-            # 2026-07-22 'never a single tick' case must still count as silence).
+            # Reference instant for the tick-silence budget when NO tick has been seen yet.
             self._healthy_since = self._clock.now()
-            # A successful (re)connect clears the WARMING-wedge backoff + one-shot escalation: the next
-            # wedge episode starts fresh at the base timeout and can escalate again (2026-07-23).
+            # A successful (re)connect clears the WARMING-wedge backoff + escalation: the next wedge
+            # starts at the base timeout and can escalate again.
             self._wedge_respawns = 0
             self._wedge_escalated = False
             # A new silence/starvation episode may log again once the feed has been healthy.
@@ -1465,8 +1316,7 @@ class TickerSupervisor:
 
 
 # --------------------------------------------------------------------------- tiny stdlib indirections
-# Wrapped so the rest of the module reads cleanly and so tests can monkeypatch the process identity /
-# environment without importing ``os`` at call sites.
+# Wrapped so tests can monkeypatch the process identity / environment.
 
 def _backoff(base_s: float, n: int, cap_s: float) -> float:
     """``base_s × 2ⁿ`` capped at ``cap_s``; the exponent is bounded so a days-long streak cannot overflow
@@ -1477,10 +1327,8 @@ def _backoff(base_s: float, n: int, cap_s: float) -> float:
 async def _monitor_sleep(seconds: float) -> None:
     """One :meth:`TickerSupervisor._monitor_loop` cycle delay.
 
-    A module-level indirection for the same reason as :func:`_current_pid` below: it gives a test a
-    seam. The watchdog logic is *about* wall-clock time versus the loop's own scheduling lag,
-    which is untestable if a cycle really has to take a second — a test patches this to advance the
-    fake clock (by exactly 1 s, or by 30 s to simulate a starved loop) and returns immediately.
+    A test seam: the watchdog is *about* wall-clock time versus scheduling lag, so a test patches this to
+    advance the fake clock (1 s, or 30 s to simulate a starved loop) and return immediately.
     """
     await asyncio.sleep(seconds)
 

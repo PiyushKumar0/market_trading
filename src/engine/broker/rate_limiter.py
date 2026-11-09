@@ -1,31 +1,23 @@
 """Client-side order/quote/historical rate limiting (``order_rate``).
 
-This module is the SINGLE order-API chokepoint. Every call into Kite REST is paced through
-:class:`RateLimiter`, which keeps the platform ``<=10`` order-operations-per-second **by construction**
-and well under the broker's 5,000-orders/day ceiling. Because the order bucket sustains only
-1 call/s (~<=390 calls even on a fully saturated day), self-learning never crosses into the
-algo-registration regime.
+The SINGLE order-API chokepoint: every Kite REST call is paced through :class:`RateLimiter`, which keeps the
+platform ``<=10`` order-operations-per-second by construction and far under the broker's 5,000-orders/day
+ceiling (the 1 call/s order bucket allows ~390 calls on a saturated day).
 
 Design (load-bearing safety):
-  * Per-endpoint-class token buckets. The order bucket counts ``place + modify + cancel`` against
-    one **shared, conservative** budget — strictly stricter than the per-API-key reading of the broker
-    docs, kept deliberately.
-  * The order budget is **split by intent**:
-      - ``intent="entry"``  — entry-related place/modify/cancel calls are hard-capped at
-        ``entry_calls_per_day`` (default 70/day, [tunable]). Once the cap is hit, :meth:`acquire`
-        raises :class:`EntryBudgetExhausted`. A warning is logged at 80% of the budget.
-      - ``intent="risk_reducing"`` — protective placement/tighten, exits, square-off and kill-flatten.
-        These are PACED behind the same 1/s bucket but **UNCAPPED and never budget-rejected**: a
-        churny entry day must never be able to starve a kill-flatten / square-off / exit. There is
-        deliberately **no** single "100/day total" cap; the only hard ceiling is the broker's
-        5,000/day limit, made unreachable by the 1/s pace.
-      - ``intent="read"`` — non-placing calls on the order class (orders, positions, holdings,
-        margins, gtts). PACED behind the same bucket but never capped and never counted, so
-        orderbook/GTT polling cannot spend the entry budget.
+  * Per-endpoint-class token buckets. The order bucket counts ``place + modify + cancel`` against one
+    shared, conservative budget — stricter than the per-API-key reading of the broker docs, kept deliberately.
+  * The order budget is split by intent:
+      - ``intent="entry"`` — hard-capped at ``entry_calls_per_day`` (default 70/day, [tunable]); at the cap
+        :meth:`acquire` raises :class:`EntryBudgetExhausted`. A warning is logged at 80%.
+      - ``intent="risk_reducing"`` — protective placement/tighten, exits, square-off, kill-flatten. PACED
+        behind the same 1/s bucket but UNCAPPED and never budget-rejected: a churny entry day must never
+        starve a flatten. There is deliberately no single "total per day" cap.
+      - ``intent="read"`` — non-placing order-class calls (orders, positions, holdings, margins, gtts).
+        Paced, never capped, never counted, so polling cannot spend the entry budget.
 
-Pure-Python + asyncio only (no third-party deps) so the whole limiter is unit-testable at the bare
-test tier. ``clock.now()`` (the single sanctioned "now") drives both daily-reset detection and
-the monotonic bucket-refill timing.
+Pure-Python + asyncio only, so it is unit-testable at the bare test tier. ``clock.now()`` drives both
+daily-reset detection and bucket-refill timing.
 """
 
 from __future__ import annotations
@@ -41,12 +33,10 @@ from engine.core.log import get_logger
 _log = get_logger("engine.broker.rate_limiter")
 
 # --- ``order_rate`` token-bucket constants -------------------------------------------------
-# Per-endpoint-class sustained refill rates (requests per second) and burst depths. Each number is the
-# pinned value; do not "tune" these in code — the order budget split is owner-set
-# via the constructor (``[tunable]``), but the per-second pacing here is a safety invariant.
+# Per-endpoint-class sustained refill rates (requests/s) and burst depths. The per-second pacing is a
+# safety invariant, not a knob; only the entry budget is owner-tunable via the constructor.
 
-# quote: Kite quote/LTP/OHLC endpoints — 1 req/s (conservative; "within 3 req/s" is historical,
-# quotes are paced tighter at 1/s here as the conservative shared reading).
+# quote: Kite quote/LTP/OHLC — 1 req/s (tighter than the documented 3 req/s, deliberately).
 _QUOTE_RATE_PER_S = 1.0
 _QUOTE_BURST = 1
 
@@ -54,13 +44,12 @@ _QUOTE_BURST = 1
 _HISTORICAL_RATE_PER_S = 3.0
 _HISTORICAL_BURST = 3
 
-# orders: place + modify + cancel counted together (shared budget) — 1 order-API call/s sustained with
-# burst 2. 1/s keeps the platform <=10 OPS
-# by construction; burst 2 absorbs a place-then-protective-SL-M pair without stalling.
+# orders: place + modify + cancel share one bucket — 1 call/s keeps the platform <=10 OPS by construction;
+# burst 2 absorbs a place-then-protective-SL-M pair without stalling.
 _ORDERS_RATE_PER_S = 1.0
 _ORDERS_BURST = 2
 
-# Entry budget: hard cap on entry-intent order calls per day (70/day, [tunable]). Alert (log warning) at 80% of this budget.
+# Entry budget: hard cap on entry-intent order calls per day ([tunable]); warning at 80% of it.
 _DEFAULT_ENTRY_CALLS_PER_DAY = 70
 _ENTRY_BUDGET_ALERT_FRACTION = 0.80
 
@@ -196,19 +185,11 @@ class RateLimiter:
     ) -> None:
         """Block (paced, never busy-looping) until one token is available, then consume it.
 
-        For ``endpoint_class == "orders"`` the call is additionally accounted against the
-        ``order_rate`` intent split:
-
-          * ``intent="entry"`` is hard-capped at ``entry_calls_per_day``; once the cap is hit this
-            raises :class:`EntryBudgetExhausted` (checked **before** pacing, so an exhausted entry
-            budget rejects immediately rather than after an unnecessary sleep). A warning is logged the
-            first time usage reaches 80% of the budget.
-          * ``intent="risk_reducing"`` is uncapped and **never** rejected on budget — it is only
-            paced behind the 1/s order bucket so a churny entry day can never starve a flatten.
-          * ``intent="read"`` is pacing-only: no cap check and no counter (``orders_today`` excludes
-            it). ``KiteClient`` passes it for every non-placing call.
-
-        ``intent`` is ignored for ``"quote"``/``"historical"`` (it only governs the order budget split).
+        For ``"orders"`` the call is also accounted by intent: ``"entry"`` raises
+        :class:`EntryBudgetExhausted` at the daily cap (checked **before** pacing, so it rejects without a
+        sleep); ``"risk_reducing"`` is never rejected on budget; ``"read"`` is pacing-only (no cap check, no
+        counter; ``KiteClient`` passes it for every non-placing call). ``intent`` is ignored for
+        ``"quote"``/``"historical"``.
         """
         self._maybe_rollover()
 

@@ -1,25 +1,20 @@
 """FastAPI LAN dashboard API + Kite login callback.
 
-The owner I/O surface over read-only views of risk / OMS / learning / intelligence state. This module
-is the composition point for the HTTP/WS surface; it NEVER originates orders — owner commands route
-through ``ModeManager`` / ``KillSwitch`` / ``OrderManager`` interfaces.
+The owner I/O surface over read-only views of risk / OMS / learning / intelligence state. It NEVER
+originates orders: owner commands route through ``ModeManager`` / ``KillSwitch`` / ``OrderManager``.
 
 Security model:
-- EVERY route is behind a ``Authorization: Bearer <token>`` check against ``Secrets[DASHBOARD_TOKEN]``,
-  EXCEPT the unauthenticated ``GET /kite/callback`` (Kite redirects the browser there with a
-  ``request_token`` to complete the daily login; it cannot carry our bearer header).
-- The bind address (LAN ``settings.api.host:port``, default ``0.0.0.0:8400``) is the caller's concern
-  (uvicorn); this module only constructs the ``FastAPI`` app.
+- EVERY route is behind ``Authorization: Bearer <token>`` against ``Secrets[DASHBOARD_TOKEN]``, EXCEPT the
+  unauthenticated ``GET /kite/callback`` (Kite's redirect cannot carry our bearer header).
+- The bind address (LAN ``settings.api.host:port``, default ``0.0.0.0:8400``) is uvicorn's concern; this
+  module only constructs the ``FastAPI`` app.
 
-The initial scope shipped REAL wiring + REAL auth with shape-correct read-route placeholders. The current scope
-wires the read routes to real SQLite state + the risk/intelligence collaborators
-(``conn``/``store``/``exposure``/``governor``/``limits_engine``, all OPTIONAL keyword args on
-:func:`create_app`) and lands ``POST /mode``/``POST /kill`` as real SINGLE-step owner actions (the
-bearer token itself is the owner authentication). Every collaborator degrades to its
-stub response shape when left ``None`` — composition (``engine.ops``) wires them for real. ``POST /mode
-AUTO`` and ``POST /kill/reset`` still require the owner TWO-STEP pattern, which has no dashboard path
-yet (Telegram-only) — they answer 409, not a stub. ``POST /paper`` turns the paper
-autopilot ON/OFF single-step (bearer); ``/paper reset`` stays a Telegram two-step.
+Read routes read real SQLite state + the risk/intelligence collaborators (``conn``/``store``/``exposure``/
+``governor``/``limits_engine``, all OPTIONAL keyword args on :func:`create_app`); each degrades to its
+stub response shape when its collaborator is ``None``. ``POST /mode`` / ``POST /kill`` are SINGLE-step
+owner actions (the bearer token is the owner authentication). ``POST /mode AUTO`` and ``POST /kill/reset``
+require the owner TWO-STEP pattern, which has no dashboard path (Telegram-only): they answer 409.
+``POST /paper`` turns the paper autopilot ON/OFF single-step; ``/paper reset`` stays a Telegram two-step.
 """
 
 from __future__ import annotations
@@ -59,57 +54,50 @@ _log = get_logger("engine.api.app")
 # ``web/dist`` is the hand-written notifications page (/notifications-ui), not a build target.
 _DASHBOARD_DIST_DIRNAME = "dist"
 
-#: The protected-store name for the learnable-parameter envelope, matching ``limits.py``'s
-#: module-level ``LIMITS_FILE`` convention.
+#: The protected-store name for the learnable-parameter envelope (like ``limits.py``'s ``LIMITS_FILE``).
 ENVELOPE_FILE = "envelope.yaml"
 
 #: ``catalyst_guard.digest_stale_max_h`` fallback for the READ-ONLY freshness label on
-#: ``GET /news/watchlist``, used only when ``limits_engine`` is unwired. Mirrors the pinned fallback in
-#: ``engine.datafeeds.news_pipeline`` (duplicated rather than imported: this API module must not drag
-#: the whole news pipeline into its import graph for one number, and nothing here can license a trade).
+#: ``GET /news/watchlist`` when ``limits_engine`` is unwired. Mirrors ``engine.datafeeds.news_pipeline``'s
+#: fallback, duplicated so this module does not import the news pipeline for one number.
 _DIGEST_STALE_MAX_H_FALLBACK = 20
 
-#: Bus topics relayed onto every connected ``/ws/live`` socket. Tick fan-out is not built yet.
+#: Bus topics relayed onto every connected ``/ws/live`` socket. Tick fan-out is not built.
 _WS_RELAY_TOPICS = (TOPIC_MODE_CHANGED, TOPIC_RISK_STATE, TOPIC_KILL_STATE, TOPIC_TRADE_WINDOW, TOPIC_BUDGET_STATE)
 
-#: Keepalive ping cadence for a live ``/ws/live`` socket (LAN dashboard / proxies see it as alive).
+#: Keepalive ping cadence for a live ``/ws/live`` socket.
 _WS_PING_INTERVAL_S = 15
 
-#: ``POST /db/query`` row cap: the default an owner gets, and the ceiling a request may ask for
-#: Enforced with ``fetchmany(max_rows + 1)`` on the result STREAM — the extra row IS the
-#: ``truncated`` flag — so an unbounded scan is answered without materializing it in this process.
+#: ``POST /db/query`` row cap: the default, and the ceiling a request may ask for. Enforced with
+#: ``fetchmany(max_rows + 1)`` on the result STREAM (the extra row IS the ``truncated`` flag), so an
+#: unbounded scan is never materialized in this process.
 _DB_QUERY_MAX_ROWS_DEFAULT = 10_000
 _DB_QUERY_MAX_ROWS_LIMIT = 100_000
 
-#: ``POST /db/query`` interrupt deadline in seconds: the default, and the longest an owner may ask
-#: for. Past it the query is interrupted at its own connection and answered 504 — this is a
-#: trading process first, and an ad-hoc read never holds a worker thread indefinitely.
+#: ``POST /db/query`` interrupt deadline (seconds): the default, and the longest an owner may ask for. Past
+#: it the query is interrupted at its own connection and answered 504: an ad-hoc read must never hold a
+#: worker thread of a trading process indefinitely.
 _DB_QUERY_TIMEOUT_S_DEFAULT = 5.0
 _DB_QUERY_TIMEOUT_S_LIMIT = 60.0
 
-#: DuckDB statement types ``POST /db/query`` accepts. Read-only is decided by the PARSER's statement
-#: TYPE, never by inspecting the SQL text. DuckDB 1.5 types ``SHOW``/``DESCRIBE``/
-#: ``SUMMARIZE``/``VALUES``/``FROM x``/read-only ``PRAGMA``s as SELECT, and everything that can mutate
-#: data, instance settings or the filesystem as its own type (INSERT/UPDATE/DELETE/CREATE/COPY/SET/
-#: ATTACH/CALL/PRAGMA/…), so SELECT + EXPLAIN is the whole read-only surface — EXPLAIN is enumerated
-#: because a query plan is exactly what an owner debugging a slow read asks for next.
+#: DuckDB statement types ``POST /db/query`` accepts. Read-only is decided by the PARSER's statement TYPE,
+#: never by inspecting the SQL text. DuckDB types ``SHOW``/``DESCRIBE``/``SUMMARIZE``/``VALUES``/``FROM x``/
+#: read-only ``PRAGMA``s as SELECT and everything that can mutate data, settings or the filesystem as its
+#: own type, so SELECT + EXPLAIN (a query plan, enumerated on purpose) is the whole read-only surface.
 _DB_QUERY_ALLOWED_STATEMENTS = frozenset({duckdb.StatementType.SELECT, duckdb.StatementType.EXPLAIN})
 
-#: SQLite authorizer actions ``POST /db/query`` permits — sqlite's equivalent of DuckDB statement
-#: typing: sqlite asks per action while preparing, and everything outside this set is DENIED
-#: before a byte is read, so INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the file.
-#: SQLITE_RECURSIVE (2026-08-19 review): WITH RECURSIVE is a read shape (walking order_events
-#: chains); the action authorizes recursion only, no write capability — allowed.
+#: SQLite authorizer actions ``POST /db/query`` permits (sqlite's equivalent of DuckDB statement typing):
+#: everything outside this set is DENIED while preparing, before a byte is read, so
+#: INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the file. SQLITE_RECURSIVE is allowed: WITH RECURSIVE
+#: is a read shape (walking order_events chains) and the action carries no write capability.
 _DB_QUERY_SQLITE_ALLOWED_ACTIONS = frozenset(
     {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE}
 )
 
-#: ``POST /db/query`` log-line outcome per HTTP status (every query is logged, including the
-#: ones that never ran).
+#: ``POST /db/query`` log-line outcome per HTTP status (every query is logged, even ones that never ran).
 _DB_QUERY_OUTCOMES = {400: "rejected", 503: "unavailable", 504: "timeout"}
 
-#: Prefix of the owner's SQL carried into the log line: enough to identify the query, bounded so a
-#: pasted 50 KB statement cannot flood the log.
+#: Prefix of the owner's SQL carried into the log line, bounded so a pasted statement cannot flood it.
 _DB_QUERY_LOG_SQL_CHARS = 200
 
 
@@ -158,10 +146,9 @@ class KillBody(BaseModel):
 
 
 class DbQueryBody(BaseModel):
-    """Owner ad-hoc read payload for ``POST /db/query`` (owner-directed 2026-08-19).
+    """Owner ad-hoc read payload for ``POST /db/query``.
 
-    ``max_rows``/``timeout_s`` are BOUNDED here rather than clamped silently: an owner who asks for
-    more than the ceiling gets a 422 naming it, not a truncated answer they did not ask for."""
+    ``max_rows``/``timeout_s`` are BOUNDED, not silently clamped: asking above the ceiling gets a 422."""
 
     db: Literal["market", "state"]
     sql: str
@@ -173,10 +160,8 @@ class DbQueryBody(BaseModel):
 class WSHub:
     """Tracks connected ``/ws/live`` sockets and fans a JSON frame out to all of them.
 
-    Tick fan-out (held + watch instruments) is not built yet — this hub only relays the risk/mode/kill/
-    trade-window/budget state-change events the bus already publishes. A socket that fails a
-    send (client gone) is dropped rather than raising into the publisher (mirrors ``EventBus``'s
-    isolate-a-bad-handler stance).
+    Relays only the risk/mode/kill/trade-window/budget events the bus publishes (no tick fan-out). A
+    socket that fails a send is dropped rather than raising into the publisher.
     """
 
     def __init__(self, clock: Any = None) -> None:
@@ -226,20 +211,15 @@ def create_app(
 ) -> FastAPI:
     """Construct the dashboard ``FastAPI`` app.
 
-    All dependencies are injected by the composition root (``engine.ops``) so the app is testable and
-    holds no module-level singletons. ``secrets`` supplies the bearer token; ``mode_manager``
-    backs the trade-window read/write path. ``conn``/``store``/``exposure``/``governor``/
-    ``limits_engine`` back the read/write routes (proposals/verdicts/positions/orders/config
-    audit/envelope params/risk headroom/budget) — every one is OPTIONAL and each route degrades to its
-    stub response shape when its own collaborator is ``None`` (duck-typed calls; no isinstance
-    checks), so this factory stays usable before composition wires the real objects. The caller binds it
-    to ``settings.api.host:port`` via uvicorn — this factory does not start a server.
+    All dependencies are injected by the composition root (``engine.ops``); no module-level singletons.
+    ``secrets`` supplies the bearer token. Every collaborator is OPTIONAL and each route degrades to its
+    stub response shape when its own is ``None`` (duck-typed, no isinstance checks). This factory does
+    not start a server.
     """
     settings: Settings = load_settings()
     secrets = secrets or Secrets()
 
     app = FastAPI(title="market_trading dashboard", version="0", docs_url=None, redoc_url=None, openapi_url=None)
-    # Stash injected collaborators on app.state for handlers / future phases (no globals).
     app.state.session_manager = session_manager
     app.state.mode_manager = mode_manager
     app.state.kill_switch = kill_switch
@@ -261,9 +241,8 @@ def create_app(
 
     @app.exception_handler(IntegrityError)
     async def _protected_config_unverified(_request: Request, exc: IntegrityError) -> JSONResponse:
-        """An unverified protected store (edited without a reseed; the boot is FROZEN on it) is an
-        answer, not a 500, on every route that reads it (/risk/headroom, /risk/rearm, /config/params).
-        Nothing falls back to a stale table: the integrity check keeps raising, this only words the refusal."""
+        """An unverified protected store (edited without a reseed) is a 503 answer, not a 500, on every route
+        that reads it. Nothing falls back to a stale table; this only words the refusal."""
         _log.warning("api_protected_config_unverified", error=str(exc))
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -271,20 +250,16 @@ def create_app(
         )
 
     # ----------------------------------------------------------------- unauthenticated: Kite login
-    # MUST be mounted WITHOUT the bearer dependency: Kite redirects the owner's browser here with a
-    # ``request_token`` to complete the daily login, and that redirect cannot carry our bearer header.
+    # MUST be mounted WITHOUT the bearer dependency (Kite's redirect cannot carry our bearer header).
     app.include_router(build_kite_callback_router(session_manager, clock))
 
     # ----------------------------------------------------------------- WS relay subscriptions
-    # Subscribe the hub to every canonical state-change topic so a connected dashboard sees mode/risk/
-    # kill/trade-window/budget changes live. Tick fan-out is not built yet (deliberately not faked here).
     if bus is not None:
         for topic in _WS_RELAY_TOPICS:
             bus.subscribe(topic, _make_ws_relay_handler(app.state.ws_hub, topic))
 
     # ----------------------------------------------------------------- read routes (bearer-auth)
-    # Each reads live SQLite/collaborator state and degrades to an empty, shape-correct payload when
-    # its collaborator is absent (None). Every one is gated by ``Owner``.
+    # Each degrades to an empty, shape-correct payload when its collaborator is None. All gated by ``Owner``.
     @app.get("/positions")
     async def positions(_: Owner) -> dict[str, Any]:
         """All-origin positions (platform/external/recommended), OPEN first, + ``as_of``."""
@@ -300,7 +275,7 @@ def create_app(
 
     @app.get("/orders")
     async def orders(_: Owner) -> dict[str, Any]:
-        """Latest 100 orders, most recent first (live working-order state is not built yet)."""
+        """Latest 100 orders, most recent first."""
         conn = app.state.conn
         if conn is None:
             return {"orders": []}
@@ -311,8 +286,8 @@ def create_app(
 
     @app.get("/decisions")
     async def decisions(_: Owner) -> dict[str, Any]:
-        """Latest 100 Tier-1 action proposals LEFT JOIN their verdict (provenance-chain audit view).
-        One row per proposal: the real verdict, and the paper verdict beside it."""
+        """Latest 100 action proposals LEFT JOIN their verdict (provenance audit): one row per proposal, the
+        real verdict and the paper verdict beside it."""
         conn = app.state.conn
         if conn is None:
             return {"decisions": []}
@@ -361,12 +336,8 @@ def create_app(
 
     @app.get("/recommendations")
     async def recommendations(_: Owner) -> dict[str, Any]:
-        """Latest 100 RECOMMEND-mode recommendations, most recently delivered first.
-
-        ``/decisions`` is the proposal→verdict PROVENANCE view and carries no ``Recommendation``
-        payload; the dashboard's recommendation panel needs the delivered artifact itself (thesis,
-        entry zone, stop/targets, gate verdict, ``manual_checklist``) plus the owner's ``human_action``
-        (taken | expired | dismissed | closed), which only this table holds."""
+        """Latest 100 RECOMMEND-mode recommendations, most recently delivered first, with the owner's
+        ``human_action`` (taken | expired | dismissed | closed), which only this table holds."""
         conn = app.state.conn
         if conn is None:
             return {"recommendations": []}
@@ -401,8 +372,7 @@ def create_app(
         control, conn = app.state.paper_control, app.state.conn
         if control is None or conn is None:
             return {"enabled": False}
-        # The live base: history shown at today's starting capital. Unwired or unverified
-        # limits keep each snapshot's own stored base.
+        # History is shown at today's capital base; unwired/unverified limits keep each snapshot's own.
         capital_base = None
         if app.state.limits_engine is not None:
             try:
@@ -416,8 +386,8 @@ def create_app(
 
     @app.get("/verdicts")
     async def verdicts(_: Owner) -> dict[str, Any]:
-        """Latest 100 gate-verdict payloads, most recently evaluated first. One row per
-        proposal: the real verdict, and the paper verdict beside it."""
+        """Latest 100 gate-verdict payloads, most recently evaluated first: the real verdict and the paper
+        verdict beside it."""
         conn = app.state.conn
         if conn is None:
             return {"verdicts": []}
@@ -482,8 +452,8 @@ def create_app(
 
     @app.post("/risk/rearm")
     async def risk_rearm(_: Owner) -> dict[str, Any]:
-        """Owner re-arm of floor stops, single-step like ``POST /mode``: it clears only the rungs
-        equity is back above, so it can never relax a floor that is still breached."""
+        """Owner re-arm of floor stops, single-step: clears only the rungs equity is back above, so it never
+        relaxes a floor that is still breached."""
         exposure, limits_engine, latch = app.state.exposure, app.state.limits_engine, app.state.latch
         if exposure is None or limits_engine is None or latch is None:
             return JSONResponse(
@@ -495,13 +465,12 @@ def create_app(
 
     @app.get("/budget")
     async def budget(_: Owner) -> dict[str, Any]:
-        """SDK-call budget governor state for the live quota WEEK: the window's bounds, its
-        spend per agent against the weekly allocations, the degrade tier, and the forward cap the tier
-        is currently imposing (the one number the owner otherwise has to infer from the tier).
+        """SDK-call budget governor state for the live quota WEEK: window bounds, spend per agent against the
+        weekly allocations, the degrade tier and the forward cap it imposes.
 
-        The per-agent split spans the UNION of the allocated agents and the ones that actually billed
-        this window, so the rows always add up to ``window_spend_usd``: an agent with spend but no
-        allocation (``sdk_smoke``) would otherwise sit inside the headline and nowhere in the split."""
+        The per-agent split spans the UNION of allocated and actually-billing agents, so the rows always add
+        up to ``window_spend_usd`` (an agent with spend but no allocation would otherwise hide in the
+        headline)."""
         governor = app.state.governor
         if governor is None:
             return {"budget": {}, "degrade_tier": None}
@@ -527,14 +496,12 @@ def create_app(
 
     @app.get("/news/watchlist")
     async def news_watchlist(_: Owner) -> dict[str, Any]:
-        """Today's catalyst watchlist — ``originating`` vs ``context`` rows with their event type,
-        materiality and the retired v1 levels (served as stored, not displayed) — plus the digest freshness the `cat` fail-safe ladder
-        keys off. READ-ONLY: this route mirrors the freshness label, it never gates anything.
+        """Today's catalyst watchlist (``originating`` vs ``context`` rows) plus the digest freshness the
+        `cat` fail-safe ladder keys off. READ-ONLY: it mirrors the freshness label and gates nothing.
 
-        Duck-typed like every other read route: rows come off ``store`` when it exposes the news-layer
-        readers, and ``digest_stale_max_h`` off ``limits_engine``'s hash-verified ``catalyst_guard``
-        block. An unwired store / clock degrades to the empty shape with ``status: null`` — an
-        UNKNOWN freshness is never reported as one of the three real ``digest_status`` values."""
+        Rows come off ``store`` when it exposes the news-layer readers; ``digest_stale_max_h`` off
+        ``limits_engine``'s ``catalyst_guard``. An unwired store / clock degrades to the empty shape with
+        ``status: null``: UNKNOWN freshness is never reported as one of the real ``digest_status`` values."""
         store = app.state.market_store if app.state.market_store is not None else app.state.store
         clock = app.state.clock
         get_watchlist = getattr(store, "get_catalyst_watchlist", None)
@@ -555,7 +522,7 @@ def create_app(
 
     @app.get("/learning/status")
     async def learning_status(_: Owner) -> dict[str, Any]:
-        """Live envelope_state values + param_sets counts by status (champ/chall UI is not built yet)."""
+        """Live envelope_state values + param_sets counts by status."""
         conn = app.state.conn
         if conn is None:
             return {"learning": {}}
@@ -574,7 +541,7 @@ def create_app(
 
     @app.get("/config/audit")
     async def config_audit(_: Owner) -> dict[str, Any]:
-        """Latest 100 ``config_audit`` rows, most recent first (NEW route; owner-change trail)."""
+        """Latest 100 ``config_audit`` rows, most recent first (the owner-change trail)."""
         conn = app.state.conn
         if conn is None:
             return {"config_audit": []}
@@ -594,18 +561,14 @@ def create_app(
 
     @app.get("/notifications")
     async def notifications(_: Owner, d: str | None = None) -> dict[str, Any]:
-        """One IST day of owner notifications, CHRONOLOGICAL (owner-directed 2026-08-21).
+        """One IST day of owner notifications, CHRONOLOGICAL (the day's transcript, unlike newest-first
+        ``/orders``).
 
-        Reads the ``notifications`` journal every ``TelegramBot.send`` writes to (migration 0011) —
-        the same rows the retry outbox drains, so the page can never show a "delivered" the wire never
-        saw. Ascending on purpose: this is the day's transcript, read top-to-bottom, not a
-        newest-first feed like ``/orders``.
-
-        ``d`` defaults to today off the app's clock. The day is a ``created_at`` RANGE rather than a
-        ``substr``/``LIKE`` match so the ``idx_notifications_created_at`` index is usable — every
-        timestamp is IST-stamped by :class:`~engine.core.clock.Clock`, and ISO-8601 with a fixed
-        ``+05:30`` offset sorts lexicographically, so the range IS the day. Read-only, on a
-        per-request cursor that is always closed."""
+        Reads the ``notifications`` journal ``TelegramBot.send`` writes (the rows the retry outbox drains,
+        so it never shows a "delivered" the wire never saw). ``d`` defaults to today. The day is a
+        ``created_at`` RANGE, not ``substr``/``LIKE``, so ``idx_notifications_created_at`` is usable:
+        timestamps carry a fixed ``+05:30`` offset, which sorts lexicographically. Per-request cursor,
+        always closed."""
         clock = app.state.clock
         raw = d if d else (clock.today().isoformat() if clock is not None else None)
         if raw is None:
@@ -633,21 +596,18 @@ def create_app(
     # ----------------------------------------------------------------- ad-hoc DB read (POST)
     @app.post("/db/query")
     async def db_query(body: DbQueryBody, _: Owner) -> dict[str, Any]:
-        """Owner ad-hoc SELECT over the live databases (owner-directed 2026-08-19). Motivated by the
-        2026-08-18 incidents: DuckDB's one-writer-PROCESS model made read-only questions cost engine
-        STOPS (three in one day, one of them mid-session), so the process that already HOLDS the
-        database answers them instead.
+        """Owner ad-hoc SELECT over the live databases, answered by the process that already HOLDS them
+        (DuckDB's one-writer-PROCESS model otherwise makes read-only questions cost engine stops).
 
-        Read-only is decided by STATEMENT TYPE, never by inspecting the SQL text: ``market`` takes
-        DuckDB's parser verdict (:data:`_DB_QUERY_ALLOWED_STATEMENTS`), ``state`` runs under SQLite's
-        authorizer (:data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS`) on a ``mode=ro`` connection —
-        INSERT/COPY/SET/ATTACH/DDL and multi-statement bodies are 400, so instance-global settings and
-        the filesystem write path are unreachable from here. Both dbs execute on a worker thread
-        against a PER-REQUEST cursor/connection (never the loop — the heartbeat invariant; never a
-        shared cursor), under the row cap and an interrupt deadline (504).
+        Read-only is decided by STATEMENT TYPE, never by inspecting the SQL text: ``market`` takes DuckDB's
+        parser verdict (:data:`_DB_QUERY_ALLOWED_STATEMENTS`), ``state`` runs under SQLite's authorizer
+        (:data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS`) on a ``mode=ro`` connection. INSERT/COPY/SET/ATTACH/DDL
+        and multi-statement bodies are 400. Both dbs execute on a worker thread (never the loop: the
+        heartbeat invariant) against a PER-REQUEST cursor/connection, under the row cap and an interrupt
+        deadline (504).
 
-        Accepted residual (owner-directed): a genuine SELECT can still read local files through
-        DuckDB's ``read_*`` table functions — the single-owner bearer token IS the boundary."""
+        Accepted residual (owner-directed): a genuine SELECT can still read local files through DuckDB's
+        ``read_*`` table functions; the single-owner bearer token IS the boundary."""
         started = time.perf_counter()
         try:
             if not body.sql.strip():
@@ -701,9 +661,8 @@ def create_app(
 
     @app.post("/config/trade_window")
     async def set_trade_window(body: TradeWindowBody, _: Owner) -> dict[str, Any]:
-        """Owner SINGLE-step trade-window setter: validate → persist sticky → audit → publish →
-        apply. Bearer auth IS the owner authentication, so the call is made as ``Actor.OWNER``;
-        ``ModeManager.set_trade_window`` does the validation + ``config_audit`` write + alert publish."""
+        """Owner SINGLE-step trade-window setter, made as ``Actor.OWNER`` (bearer auth is the owner
+        authentication); ``ModeManager.set_trade_window`` validates, audits and publishes."""
         mm = app.state.mode_manager
         if mm is None:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "mode manager unavailable")
@@ -712,12 +671,11 @@ def create_app(
             start, end, Actor.OWNER, squareoff_buffer_min=body.squareoff_buffer_min
         )
         if not ok:
-            # Validation failed (e.g. start>=end, empty MIS sub-window, outside session) — value unchanged.
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid trade window (rejected, unchanged)")
         _log.warning("trade_window_set_via_api", start=body.start, end=body.end)
         return {"ok": True}
 
-    # ----------------------------------------------------------------- capital (owner's dashboard capital change, design 2026-10-16)
+    # ----------------------------------------------------------------- capital (owner's dashboard capital change)
     def _capital_unwired() -> JSONResponse:
         return JSONResponse(status_code=status.HTTP_501_NOT_IMPLEMENTED,
                             content={"ok": False, "note": "capital change not wired"})
@@ -736,9 +694,9 @@ def create_app(
 
     @app.post("/config/capital")
     async def set_capital(body: CapitalBody, _: Owner) -> Any:
-        """Owner capital change. ``async def`` on purpose: ``apply`` runs the verified read
-        through the limits reload with no await, which only holds on the event loop; a sync route would
-        run it in a worker thread, interleaved with the ticks."""
+        """Owner capital change. ``async def`` on purpose: ``apply`` runs the verified read through the
+        limits reload with no await, which only holds on the event loop (a sync route would interleave it
+        with ticks in a worker thread)."""
         capital = app.state.capital
         if capital is None:
             return _capital_unwired()
@@ -753,9 +711,8 @@ def create_app(
     # ----------------------------------------------------------------- params (GET + POST)
     @app.get("/config/params")
     async def get_params(_: Owner) -> dict[str, Any]:
-        """Live ``envelope_state`` values + ``envelope.yaml`` bounds (when ``store`` wired) +
-        ``analyst_confidence_min`` (when ``limits_engine`` wired and set) + the latest nightly-reviewer
-        SUGGESTED values — the platform SUGGESTS, the owner SETS."""
+        """Live ``envelope_state`` values + ``envelope.yaml`` bounds + ``analyst_confidence_min`` + the latest
+        nightly-reviewer SUGGESTED values (the platform SUGGESTS, the owner SETS)."""
         conn = app.state.conn
         if conn is None:
             return {"params": {}, "suggestions": []}
@@ -800,10 +757,9 @@ def create_app(
 
     @app.post("/config/params")
     async def set_params(body: ParamBody, _: Owner) -> dict[str, Any]:
-        """Owner applies ONE envelope tunable — every change audited to ``config_audit``. The
-        platform never self-applies a suggestion; only this owner-authenticated path SETS.
-        ``analyst_confidence_min`` is owner-only via the PROTECTED ``limits.yaml`` flow, not this route
-        rejected 409 regardless of wiring. Unknown name / out-of-[min,max] value => 422."""
+        """Owner applies ONE envelope tunable, audited to ``config_audit``; the platform never self-applies
+        a suggestion. ``analyst_confidence_min`` is owner-only via the PROTECTED ``limits.yaml`` flow and is
+        rejected 409 here regardless of wiring. Unknown name / out-of-[min,max] value => 422."""
         if body.name == "analyst_confidence_min":
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
@@ -857,16 +813,14 @@ def create_app(
     # ----------------------------------------------------------------- mode (POST, two-step)
     @app.post("/mode")
     async def set_mode(body: ModeBody, _: Owner) -> dict[str, Any]:
-        """Owner mode change. OFF/RECOMMEND are SINGLE-step (the bearer token itself IS the owner
-        authentication) — ``ModeManager.request_transition`` applies them directly as
-        ``Actor.OWNER``. →AUTO requires a TWO-STEP owner confirmation that has no dashboard
-        path (Telegram ``/mode AUTO`` + ``/confirm`` only) — rejected 409, not a stub."""
+        """Owner mode change. OFF/RECOMMEND are SINGLE-step, applied as ``Actor.OWNER``. →AUTO needs a
+        TWO-STEP confirmation with no dashboard path (Telegram ``/mode AUTO`` + ``/confirm``): 409."""
         try:
             target = Mode(body.mode)
         except ValueError:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"unknown mode {body.mode!r}")
         if target == Mode.AUTO:
-            # Business rule, independent of wiring (mirrors /kill/reset and analyst_confidence_min).
+            # Business rule, independent of wiring.
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={"ok": False, "note": "two-step via Telegram /mode AUTO + /confirm"},
@@ -883,9 +837,7 @@ def create_app(
     # ----------------------------------------------------------------- kill (POST, two-step)
     @app.post("/kill")
     async def kill(_: Owner, body: KillBody = KillBody()) -> dict[str, Any]:
-        """Engage the kill switch — SINGLE-step trigger (fast), owner-authenticated via bearer.
-        ``KillSwitch.trigger`` persists KILLED before acting; the OMS flatten sequence is
-        part of the order machinery (not built yet) and runs via its own injected callback when wired."""
+        """Engage the kill switch: SINGLE-step and fast. ``KillSwitch.trigger`` persists KILLED before acting."""
         ks = app.state.kill_switch
         if ks is None:
             return JSONResponse(
@@ -898,8 +850,8 @@ def create_app(
 
     @app.post("/kill/reset")
     async def kill_reset(_: Owner) -> dict[str, Any]:
-        """Reset the kill switch — owner TWO-STEP authenticated flow. No dashboard two-step
-        exists (Telegram ``/kill_reset`` + ``/confirm`` only) — always 409, not a stub."""
+        """Kill reset is an owner TWO-STEP flow with no dashboard path (Telegram ``/kill_reset`` +
+        ``/confirm``): always 409."""
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
@@ -932,13 +884,11 @@ def create_app(
     # ----------------------------------------------------------------- WS live stream
     @app.websocket("/ws/live")
     async def ws_live(websocket: WebSocket) -> None:
-        """Live risk/mode/kill/trade-window/budget state stream: the socket is registered on
-        ``app.state.ws_hub`` and receives ``{kind, payload, at}`` frames relayed off the bus, plus a
-        keepalive ping every 15s. Tick fan-out (held + watch instruments) is not built yet — not faked here.
+        """Live risk/mode/kill/trade-window/budget state stream: ``{kind, payload, at}`` frames relayed off
+        the bus via ``app.state.ws_hub``, plus a keepalive ping every 15s (no tick fan-out).
 
-        NOTE: the bearer check is enforced manually here (WS handshakes can't use the HTTP ``Depends``
-        bearer dependency the same way) — the token may arrive as the ``Authorization`` header or a
-        ``token`` query param."""
+        The bearer check is manual here (the HTTP ``Depends`` does not apply to a WS handshake): the token
+        may arrive as the ``Authorization`` header or a ``token`` query param."""
         if not _ws_authorized(websocket, secrets):
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
@@ -970,11 +920,9 @@ def create_app(
 def _decision_subjects(conn: Any, proposals: list[dict[str, Any]]) -> list[str | None]:
     """The human subject of each stored ``ActionProposal``, positionally aligned with ``proposals``.
 
-    Only ``enter`` names its instrument; ``exit`` / ``modify-*`` carry a ``position_id`` and ``cancel``
-    an ``order_id`` (``engine.core.contracts``), which is what the decision log used to print for the
-    owner's own positions (reported 2026-09-02). Resolved here rather than in the dashboard:
-    ``/positions`` is unbounded today but need not stay so, and the provenance view should carry its
-    subject. An id whose row is gone stays visible as the id — never blank."""
+    Only ``enter`` names its instrument; ``exit`` / ``modify-*`` carry a ``position_id`` and ``cancel`` an
+    ``order_id`` (``engine.core.contracts``), resolved here so the provenance view carries its own
+    subject. An id whose row is gone stays visible as the id, never blank."""
 
     def _str(p: dict[str, Any], key: str) -> str:
         value = p.get(key)
@@ -1009,12 +957,10 @@ def _decision_subjects(conn: Any, proposals: list[dict[str, Any]]) -> list[str |
 async def _require_owner(request: Request) -> None:
     """Enforce ``Authorization: Bearer <DASHBOARD_TOKEN>`` on every protected route.
 
-    MODULE-LEVEL by design: with ``from __future__ import annotations`` the ``_: Owner`` route
-    annotations are strings, and FastAPI resolves them against the route function's MODULE globals — a
-    dependency alias defined inside ``create_app`` would be unresolvable (FastAPI would then treat the
-    param as a query field and every route would 422 instead of authenticating). The ``Secrets`` come
-    off ``request.app.state`` (set by ``create_app``). A missing/garbled token store fails CLOSED (401),
-    never open (see ``_token_matches``)."""
+    MODULE-LEVEL by design: with ``from __future__ import annotations`` the ``_: Owner`` annotations are
+    strings resolved against the route function's MODULE globals; an alias defined inside ``create_app``
+    would be unresolvable and FastAPI would treat the param as a query field (every route 422s instead of
+    authenticating). A missing/garbled token store fails CLOSED (401) (see ``_token_matches``)."""
     secrets: Secrets = request.app.state.secrets
     token = _extract_bearer(request.headers.get("authorization"))
     if token is None or not _token_matches(secrets, token):
@@ -1058,13 +1004,11 @@ def _ws_authorized(websocket: WebSocket, secrets: Secrets) -> bool:
 
 
 def _make_ws_relay_handler(hub: WSHub, topic: str) -> Any:
-    """Bind ``topic`` by value (default-arg trick) so every subscribed handler broadcasts under its
-    OWN topic name, not whichever topic the enclosing loop last iterated to.
+    """Bind ``topic`` by value so every handler broadcasts under its OWN topic, not the loop's last one.
 
-    The broadcast is FIRE-AND-FORGET (2026-07-28 review): ``KillSwitch.trigger`` and the mode/risk
-    setters ``apublish`` their events — i.e. they AWAIT every subscribed handler — so an awaited
-    broadcast would let one stalled dashboard socket wedge the KILL sequence. A dropped frame costs
-    a dashboard refresh; a wedged kill path costs capital."""
+    The broadcast is FIRE-AND-FORGET: ``KillSwitch.trigger`` and the mode/risk setters ``apublish`` (AWAIT
+    every subscribed handler), so an awaited broadcast would let one stalled dashboard socket wedge the
+    KILL sequence. A dropped frame costs a dashboard refresh; a wedged kill path costs capital."""
 
     async def _handler(event: Any) -> None:
         payload = event.model_dump(mode="json") if hasattr(event, "model_dump") else event
@@ -1081,8 +1025,8 @@ def _log_ws_relay_result(task: "asyncio.Task[Any]") -> None:
 
 
 async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
-    """Ping frame every 15s so LAN clients/proxies see the socket as alive. A failed send
-    (client already gone) just ends the task — the connection's own receive loop handles cleanup."""
+    """Ping frame every 15s so LAN clients/proxies see the socket as alive. A failed send just ends the
+    task; the connection's own receive loop handles cleanup."""
     while True:
         await asyncio.sleep(_WS_PING_INTERVAL_S)
         try:
@@ -1093,12 +1037,12 @@ async def _ws_keepalive(hub: WSHub, websocket: WebSocket) -> None:
 
 # --------------------------------------------------------------------------- helpers
 def _jsonable(value: Any) -> Any:
-    """Render one store row value for the wire. Store rows are DuckDB-native, so prices arrive as
-    ``Decimal`` and days/timestamps as ``date``/``datetime``: Decimals cross as STRINGS (decimal-as-string — FastAPI's default encoder would coerce them to float and corrupt a level).
+    """Render one store row value for the wire. Decimals cross as STRINGS (FastAPI's default encoder would
+    float them and corrupt a level); dates/datetimes as ISO-8601.
 
-    ``bytes``/``dict`` are handled for ``POST /db/query``, which returns whatever column the owner
-    asked for: FastAPI's encoder UTF-8-decodes bytes (a 500 on any real BLOB — ``agent_calls.context_gz``
-    is gzip) and never looks inside a STRUCT for the Decimals it would then float."""
+    ``bytes``/``dict`` are handled for ``POST /db/query``, which returns whatever column the owner asked
+    for: FastAPI UTF-8-decodes bytes (a 500 on any real BLOB, e.g. gzip ``agent_calls.context_gz``) and
+    never looks inside a STRUCT for the Decimals it would then float."""
     from datetime import date as _date
     from decimal import Decimal as _Decimal
 
@@ -1119,14 +1063,11 @@ def _jsonable(value: Any) -> Any:
 async def _db_query_market(app_state: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Validate + run one owner SELECT on a PER-REQUEST cursor of the LIVE ``MarketStore`` connection.
 
-    ``con.cursor()`` is a fresh DuckDB connection onto the SAME instance: it sees every committed row
-    the engine has written, contends for none of the store's write lock, and its ``interrupt()`` cancels
-    only its own query (verified 2026-08-19 — the parent connection's in-flight work completes
-    untouched). Riding the store INSTANCE is forced rather than preferred: the store layout gives exactly one
-    process ``market.duckdb`` and DuckDB's file lock refuses a second ``connect()``. The store is
-    duck-typed off ``market_store`` then ``store``, exactly like ``/news/watchlist``; its connection
-    accessor is private because there is no public one and widening the store API is not this
-    endpoint's business."""
+    ``con.cursor()`` is a fresh DuckDB connection onto the SAME instance: it sees every committed row,
+    contends for none of the store's write lock, and its ``interrupt()`` cancels only its own query.
+    Riding the store INSTANCE is forced: DuckDB's file lock refuses a second ``connect()`` from another
+    process. The store is duck-typed off ``market_store`` then ``store``, like ``/news/watchlist``; its
+    connection accessor is private because there is no public one."""
     store = app_state.market_store if app_state.market_store is not None else app_state.store
     require_con = getattr(store, "_require_con", None)
     if require_con is None:
@@ -1144,9 +1085,8 @@ async def _db_query_market(app_state: Any, body: DbQueryBody) -> tuple[list[str]
 
 
 def _reject_non_read_duckdb(cursor: Any, sql: str) -> None:
-    """400 anything that is not EXACTLY ONE read-only DuckDB statement, by asking the PARSER for the
-    statement TYPE. Text inspection is not a mechanism here — it cannot see through comments,
-    quoting or CTEs, and DuckDB already exposes the parser's own verdict."""
+    """400 anything that is not EXACTLY ONE read-only DuckDB statement, by the PARSER's statement TYPE
+    (text inspection cannot see through comments, quoting or CTEs)."""
     try:
         statements = cursor.extract_statements(sql)
     except duckdb.Error as exc:  # a parse failure is the owner's typo, not a server fault
@@ -1167,10 +1107,8 @@ def _reject_non_read_duckdb(cursor: Any, sql: str) -> None:
 def _run_duckdb(cursor: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Execute the validated statement on a worker thread under an interrupt deadline.
 
-    ``fetchmany(max_rows + 1)`` — never ``fetchall`` — enforces the cap on the RESULT STREAM: the one
-    extra row IS the ``truncated`` flag, so an unbounded scan answers without landing in this process's
-    heap. The timer fires ``interrupt()`` on this request's own cursor, so a slow owner query cannot
-    take anything else down with it."""
+    ``fetchmany(max_rows + 1)``, never ``fetchall``: the cap applies on the RESULT STREAM and the extra row
+    IS the ``truncated`` flag. The timer ``interrupt()``s this request's own cursor only."""
     deadline = threading.Timer(body.timeout_s, cursor.interrupt)
     deadline.start()
     try:
@@ -1191,8 +1129,8 @@ def _run_duckdb(cursor: Any, body: DbQueryBody) -> tuple[list[str], list[list[An
 async def _db_query_state(conn: Any, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Validate + run one owner SELECT on a PER-REQUEST read-only SQLite connection (worker thread).
 
-    The file comes off the app's OWN connection (``PRAGMA database_list``), never ``settings``, so this
-    surface can never answer from a different database than the engine is running on."""
+    The file comes off the app's OWN connection (``PRAGMA database_list``), never ``settings``, so it can
+    never answer from a different database than the engine runs on."""
     if conn is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "state db unavailable")
     if not sqlite3.complete_statement(_semicolon_terminated(body.sql)):
@@ -1220,14 +1158,14 @@ def _state_db_uri_path(conn: Any) -> str:
 def _run_sqlite(db_uri_path: str, body: DbQueryBody) -> tuple[list[str], list[list[Any]], bool]:
     """Execute the owner statement on a fresh ``mode=ro`` connection under an interrupt deadline.
 
-    Three independent read-only guarantees, none of them text inspection: the connection is
-    opened READ-ONLY (a WAL reader — the engine keeps writing throughout), the authorizer DENIES every
-    action outside :data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS` while sqlite prepares the statement, and
-    sqlite3 itself refuses more than one statement per ``execute``. All three answer 400.
+    Three independent read-only guarantees, none of them text inspection: the connection is READ-ONLY (a
+    WAL reader; the engine keeps writing), the authorizer DENIES every action outside
+    :data:`_DB_QUERY_SQLITE_ALLOWED_ACTIONS` while preparing, and sqlite3 refuses more than one statement
+    per ``execute``. All three answer 400.
 
-    ``check_same_thread=False`` because the deadline timer touches the connection from its own thread.
-    The deadline is FLAGGED rather than sniffed out of the message: sqlite3 reports an interrupt as a
-    plain ``OperationalError('interrupted')``, indistinguishable by type from a real SQL error."""
+    ``check_same_thread=False`` because the deadline timer touches the connection from its own thread. The
+    deadline is FLAGGED, not sniffed from the message: sqlite3 reports an interrupt as a plain
+    ``OperationalError('interrupted')``, indistinguishable by type from a real SQL error."""
     con = sqlite3.connect(f"file:{db_uri_path}?mode=ro", uri=True, check_same_thread=False)
     con.row_factory = None  # plain tuples — the wire shape is rows-as-lists, not rows-as-objects
     con.set_authorizer(_db_query_sqlite_authorizer)
@@ -1256,9 +1194,8 @@ def _run_sqlite(db_uri_path: str, body: DbQueryBody) -> tuple[list[str], list[li
 
 
 def _db_query_sqlite_authorizer(action: int, *_args: Any) -> int:
-    """SQLite's per-action gate for ``POST /db/query`` — sqlite's equivalent of DuckDB statement typing.
-    Everything outside the read set is DENIED as the statement is prepared, so
-    INSERT/UPDATE/DELETE/ATTACH/PRAGMA/DDL never reach the (already read-only) file."""
+    """SQLite's per-action gate for ``POST /db/query``: anything outside the read set is DENIED as the
+    statement is prepared."""
     return sqlite3.SQLITE_OK if action in _DB_QUERY_SQLITE_ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
 
@@ -1280,8 +1217,7 @@ def _log_db_query(
     truncated: bool | None = None,
     detail: str | None = None,
 ) -> None:
-    """One INFO line per owner query, run or rejected — the audit trail for a surface
-    that can read any row in either database."""
+    """One INFO line per owner query, run or rejected: the audit trail for a surface that reads any row."""
     _log.info(
         "db_query",
         db=body.db,
@@ -1297,10 +1233,10 @@ def _log_db_query(
 def _digest_block(
     as_of: Any, age_h: float | None, stale_max_h: int | None, rows: list[Any] | None = None
 ) -> dict[str, Any]:
-    """The ``/news/watchlist`` freshness sub-object, mirroring ``CatalystDigestJob.digest_status``:
-    no ``sentiment_agg`` stamp at all ⇒ ``missing`` (or ``stale`` when day ``d`` HAS watchlist rows —
-    an age that cannot be established is never "fresh"); otherwise ``stale`` past
-    ``catalyst_guard.digest_stale_max_h``. ``status`` is ``None`` only when the store is unwired."""
+    """The ``/news/watchlist`` freshness sub-object, mirroring ``CatalystDigestJob.digest_status``: no
+    ``sentiment_agg`` stamp ⇒ ``missing`` (``stale`` when day ``d`` HAS watchlist rows: an age that cannot
+    be established is never "fresh"); otherwise ``stale`` past ``catalyst_guard.digest_stale_max_h``.
+    ``status`` is ``None`` only when the store is unwired."""
     if stale_max_h is None:
         return {"as_of": None, "age_h": None, "stale_max_h": None, "status": None}
     if as_of is None:
@@ -1316,9 +1252,9 @@ def _digest_block(
 
 
 def _day_bounds(value: str) -> tuple[str, str]:
-    """``'2026-08-21'`` → ``('2026-08-21', '2026-08-22')``, the half-open range one IST day of
-    ISO-8601 ``created_at`` strings falls in. Raises ``ValueError`` on anything that is not an ISO
-    date, which the caller answers 422 — a malformed ``?d=`` must never silently return "no rows"."""
+    """``'2026-08-21'`` → ``('2026-08-21', '2026-08-22')``, the half-open range of one IST day of ISO-8601
+    ``created_at`` strings. ``ValueError`` on a non-ISO date (the caller answers 422: a malformed ``?d=``
+    must never silently return "no rows")."""
     from datetime import date as _date
     from datetime import timedelta as _timedelta
 
@@ -1334,32 +1270,27 @@ def _parse_hhmm(value: str):
     return _time(int(hh), int(mm))
 
 
-#: URL path of the notifications page, served as an explicit ROUTE rather than as a candidate
-#: of the "/" dashboard mount below. Two reasons, both load-bearing:
+#: URL path of the notifications page, an explicit ROUTE rather than a candidate of the "/" dashboard
+#: mount below, for two load-bearing reasons:
 #:
-#: * ``<repo>/dashboard/dist`` already exists on the LAN box and is the FIRST candidate of that
-#:   mount, so ``web/dist`` would never be reached — and promoting it above the React build would
-#:   silently replace the whole dashboard with this one page. A separate path also keeps a
-#:   hand-written, dependency-free page out of reach of the next ``npm run build``.
-#: * A ``StaticFiles`` MOUNT here would answer ``/notifications-ui/`` but 404 the bare
-#:   ``/notifications-ui`` the owner actually types: Starlette only issues its add-the-slash redirect
-#:   when NO route matched, and the catch-all dashboard mount at "/" always matches. Registering the
-#:   real path (and its trailing-slash twin) sidesteps that entirely — the page is ONE self-contained
-#:   file, so a static-directory mount buys nothing anyway.
+#: * ``<repo>/dashboard/dist`` is the FIRST candidate of that mount, so ``web/dist`` would never be
+#:   reached, and promoting it above the React build would replace the whole dashboard with this one
+#:   page. A separate path also keeps the hand-written page out of the next ``npm run build``'s reach.
+#: * A ``StaticFiles`` MOUNT would answer ``/notifications-ui/`` but 404 the bare ``/notifications-ui``:
+#:   Starlette redirects to add the slash only when NO route matched, and the catch-all mount at "/"
+#:   always matches. Registering the real path and its trailing-slash twin avoids that.
 _NOTIFICATIONS_UI_PATHS = ("/notifications-ui", "/notifications-ui/")
 
 
 def _add_notifications_ui_route(app: FastAPI) -> None:
     """Serve the self-contained notifications page (``<repo>/web/dist/index.html``) at
-    :data:`_NOTIFICATIONS_UI_PATHS`. 404s when the file is absent, so a checkout without it still
-    runs the API — same degrade-quietly posture as the dashboard mount.
+    :data:`_NOTIFICATIONS_UI_PATHS`. 404s when the file is absent (the API still runs).
 
-    UNAUTHENTICATED, by necessity and by design: a browser navigating to a URL cannot attach an
-    ``Authorization`` header, and this app has no auth MIDDLEWARE — auth is per-route via
-    ``Depends(_require_owner)``, which this route deliberately does not carry. What ships here is
-    therefore an empty SHELL: it holds no state, prompts for the dashboard token itself, and every
-    byte it displays comes from bearer-authed ``GET /notifications``. Same posture as the
-    existing "/" dashboard mount — the LAN bind plus the token is the boundary."""
+    UNAUTHENTICATED by necessity: a browser navigation cannot attach an ``Authorization`` header and auth
+    is per-route via ``Depends(_require_owner)``, which this route deliberately omits. It is an empty
+    SHELL that holds no state and prompts for the token itself; every byte it displays comes from
+    bearer-authed ``GET /notifications``. Like the "/" dashboard mount, the LAN bind plus the token is the
+    boundary."""
     from pathlib import Path
 
     from fastapi.responses import FileResponse
@@ -1369,8 +1300,7 @@ def _add_notifications_ui_route(app: FastAPI) -> None:
     async def notifications_ui() -> Any:
         if not page.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "notifications page is not installed")
-        # no-store: the page is the owner's live view of an outage; a cached shell pointing at a
-        # stale token prompt is worse than a round trip on a LAN.
+        # no-store: a cached shell with a stale token prompt is worse than a LAN round trip.
         return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-store"})
 
     for path in _NOTIFICATIONS_UI_PATHS:
@@ -1379,13 +1309,11 @@ def _add_notifications_ui_route(app: FastAPI) -> None:
 
 
 def _mount_dashboard_if_present(app: FastAPI, settings: Settings) -> None:
-    """Serve the built React dashboard at ``/`` if a build exists. No-op otherwise so the API runs
-    headless in dev / before the front-end is built.
+    """Serve the built React dashboard at ``/`` if a build exists; no-op otherwise (headless API).
 
-    ``<repo>/dashboard/dist`` is the FIRST candidate and the real one: the front-end source lives
-    in ``dashboard/`` and ``npm run build`` writes there. It is resolved from ``repo_root()`` — NOT from
-    ``Path.cwd()`` — because the engine is normally launched as a service whose working directory is
-    not the repo. The legacy ``web/dist`` locations stay as fallbacks."""
+    ``<repo>/dashboard/dist`` is the first candidate and the real one, resolved from ``repo_root()`` and
+    NOT ``Path.cwd()`` because the engine runs as a service whose working directory is not the repo. The
+    ``web/dist`` locations are fallbacks."""
     from pathlib import Path
 
     data_dir = settings.logs_dir().parent if hasattr(settings, "logs_dir") else Path.cwd()

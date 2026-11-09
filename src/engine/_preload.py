@@ -1,32 +1,23 @@
 """Native import-order guard — scikit-learn MUST load before numba / vectorbt / cvxpy (skfolio).
 
-On Windows, importing **vectorbt** (→ numba → llvmlite/LLVM) and **cvxpy** (skfolio's convex-
-optimization backend, native ``_cvxcore``) into the *same process* segfaults the interpreter with
-``0xC0000005`` STATUS_ACCESS_VIOLATION. It is a native OpenMP runtime load-order conflict — NOT the
-Intel-libiomp duplicate (``KMP_DUPLICATE_LIB_OK`` does not help), and NOT catchable by any Python
-``try/except`` because a C-level access violation bypasses the interpreter entirely.
-
-Importing **scikit-learn first** establishes the process-wide OpenMP runtime; numba/llvmlite and
-cvxpy then coexist safely. Verified deterministically (3/3) on this env (numpy 2.4.6, scipy 1.17.1,
-numba 0.65.1, llvmlite 0.47.0, sklearn 1.9.0, skfolio 0.20.1/cvxpy):
-
-    sklearn -> vectorbt -> numba JIT -> cvxpy solve   ->  clean
-    vectorbt -> cvxpy   (no sklearn preload)          ->  crash
-    numba    -> cvxpy   (either order)                ->  crash
-    numpy/scipy preload before cvxpy                  ->  still crash  (only sklearn fixes it)
+On Windows, importing **vectorbt** (→ numba → llvmlite) and **cvxpy** (skfolio's backend, native
+``_cvxcore``) into the same process segfaults it with ``0xC0000005``: a native OpenMP runtime load-order
+conflict, not the Intel-libiomp duplicate (``KMP_DUPLICATE_LIB_OK`` does not help), and not catchable by
+``try/except``. Importing **scikit-learn first** establishes the process-wide OpenMP runtime and the rest
+coexist. numba→cvxpy crashes in either order; preloading numpy/scipy does not help, only sklearn does.
 
 The guard is lazy: ``engine/__init__`` imports this module, which installs a ``sys.meta_path`` finder.
 For a :data:`GUARDED` package it returns the normal spec with :class:`_SklearnFirstLoader`, which imports
-scikit-learn before the package's own code runs. So only processes that load the native stack (research /
-backtest code) pay the ~5 s sklearn import, and a mere ``find_spec`` probe pays nothing. The import runs
-while the package executes, under that package's module lock — never inside ``find_spec``, which CPython
-calls under its GLOBAL import lock: every other thread's import would wait out the sklearn import, and one
-mid-import of a module sklearn needs (numpy, scipy, joblib) would deadlock. A guarded package imported
-before ``engine`` is out of reach; a scikit-learn that is installed but fails to import raises at the
-first guarded import instead of letting the native stack load unguarded.
+scikit-learn before the package's own code runs, so only processes that load the native stack pay the ~5 s
+import and a mere ``find_spec`` probe pays nothing. The import runs while the package executes, under that
+package's module lock — never inside ``find_spec``, which CPython calls under its GLOBAL import lock: every
+other thread's import would wait out the sklearn import, and one mid-import of a module sklearn needs
+(numpy, scipy, joblib) would deadlock. A guarded package imported before ``engine`` is out of reach; a
+scikit-learn that is installed but fails to import raises at the first guarded import instead of letting
+the native stack load unguarded.
 
-The install smoke test (``scripts/smoke_test.py``) independently validates the coexistence in
-an isolated subprocess, and the startup self-test surfaces :func:`guard_armed` for operational visibility.
+``scripts/smoke_test.py`` validates the coexistence in a subprocess; the startup self-test surfaces
+:func:`guard_armed`.
 """
 
 from __future__ import annotations
