@@ -67,7 +67,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import msgpack
-
 from kiteconnect import KiteTicker
 
 # Importing ``reactor`` installs the default reactor for this interpreter — fine, this process runs nothing else.
