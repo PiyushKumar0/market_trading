@@ -226,9 +226,8 @@ def look_cohort(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def registered_looks(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Look 1 = the first 20 recs of :func:`look_cohort`, look 2 = the first 40; a look forms once every
-    one of its recs is eligible. Cutting from the eligible rows instead let an early fill that finishes
-    late (a long shipped exit, a T+20 backfill) join a look already reached and push its 20th row out.
-    A formed look's rows are final, so later rows never move it."""
+    one of its recs is eligible. Never cut from the eligible rows: a late-finishing early fill would join
+    a look already reached and push its 20th row out. A formed look's rows are final."""
     cohort, progress = look_cohort(rows), look_progress(rows)
     return {
         name: decision_block(cohort[:size]) if progress[name]["eligible"] == size else None

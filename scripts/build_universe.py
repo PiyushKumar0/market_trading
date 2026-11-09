@@ -1,16 +1,14 @@
 #!/usr/bin/env python
-"""Build + persist the universe for one date OUTSIDE the engine (owner tool, 2026-09-06).
+"""Build + persist the universe for one date OUTSIDE the engine (owner tool).
 
-Why it exists: the daily ``universe_build`` job is calendar-guarded at 08:30 and its output is what
-the swing/batch legs, the news resolver and the risk gate read for that date. When the configured
-index changes (owner decision: NIFTY 200 → NIFTY 500 on 2026-09-04) the first build under the new index only
-happens at the next trading day's 08:30 — or, on a late boot, inside the catch-up chain. This
-script performs exactly that build now, for an explicit ``--date``, wired the way the composition
-root wires it (``engine.ops.main`` ``job_universe``): MIS margins refreshed, surveillance lists
-current, the instruments token map hydrated from the persisted ``instruments_daily`` snapshot (the
-F&O membership check needs it — an empty map would mark every name non-F&O), then
-``UniverseBuilder.build(date)``, which replace-writes the day's ``universe_daily`` rows and the
-runtime index cache.
+The daily ``universe_build`` job runs at 08:30 and its output is what the swing/batch legs, the news
+resolver and the risk gate read for that date; after a config change (e.g. the eligible index) the first
+build under it would otherwise wait for the next 08:30 or a late boot's catch-up. This script performs
+that build now for an explicit ``--date``, wired as ``engine.ops.main`` ``job_universe`` wires it: MIS
+margins refreshed, surveillance lists current, the instruments token map hydrated from the persisted
+``instruments_daily`` snapshot (an empty map would mark every name non-F&O), then
+``UniverseBuilder.build(date)``, which replace-writes the day's ``universe_daily`` rows and the runtime
+index cache.
 
 The engine must be OFF (``market.duckdb`` has a single writer). The scheduled 08:30 job on
 ``--date`` still runs if the engine is up then — it rebuilds the same rows (replace-write,

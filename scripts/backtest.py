@@ -5,17 +5,14 @@
         [--grid-density coarse|medium|fine] [--symbols RELIANCE,TCS] [--index-symbol "NIFTY 50"] \
         [--reports-dir data/reports] [--margin-floor-days 20]
 
-For each strategy it: (1) runs the vectorbt sweep over the parameter-envelope grid — the sweep reports the
-**trial count N** (every configuration evaluated); (2) picks the best config by
-cost-adjusted expectancy; (3) runs the ValidationPipeline (anchored walk-forward + skfolio CPCV on
-cost-adjusted returns) citing that N; (4) writes the sweep + validation reports to ``data/reports``
-and persists the candidate to SQLite ``param_sets``. Honest negative results are surfaced, never
-massaged: a negative expectancy / non-promotable verdict is a valid outcome and is printed.
+For each strategy it: (1) runs the vectorbt sweep over the parameter-envelope grid, reporting the
+**trial count N** (every configuration evaluated); (2) picks the best config by cost-adjusted
+expectancy; (3) runs the ValidationPipeline (anchored walk-forward + skfolio CPCV on cost-adjusted
+returns) citing that N; (4) writes the sweep + validation reports to ``data/reports`` and persists the
+candidate to SQLite ``param_sets``. Negative results are printed, never massaged.
 
-This is a **standalone, blocking** tool — fine here. The in-engine nightly re-optimization path
-(``ChampionChallenger``) must run the identical logic **executor-offloaded**
-(``ValidationPipeline.validate`` is already an ``asyncio.to_thread`` wrapper) so it never blocks the
-event loop. Exit codes: 0 = ran; 2 = no symbols/bars resolved (nothing to backtest).
+Standalone and blocking; the in-engine nightly path (``ChampionChallenger``) must run the same logic
+executor-offloaded. Exit codes: 0 = ran; 2 = no symbols/bars resolved (nothing to backtest).
 """
 
 from __future__ import annotations
@@ -49,20 +46,16 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 
 _log = get_logger("scripts.backtest")
 
-#: Canonical reference index for the ``rsi2`` regime filter ("above rising 50-DMA index").
-#: Mirrors ``engine.ops.main.INDEX_SYMBOL`` / the ``FeatureEngine`` default so the DEFAULT backtest
-#: validates the SAME pinned rule the live ``Rsi2Scanner`` runs — never the all-regime variant. Pass
-#: ``--index-symbol ""`` (empty) to deliberately disable the filter (all-regime; disclosed in notes).
+#: Reference index for the ``rsi2`` regime filter ("above rising 50-DMA index"); mirrors
+#: ``engine.ops.main.INDEX_SYMBOL`` so the default backtest validates the rule the live ``Rsi2Scanner``
+#: runs. ``--index-symbol ""`` deliberately disables the filter (all-regime; disclosed in notes).
 _DEFAULT_INDEX_SYMBOL = "NIFTY 50"
 
-#: Winner-stability adjacency (manager-decided wiring, 2026-08-13): DAILY strategies only —
-#: ``orb`` is the intraday/1m-scale baseline and stays single-density (its ``ParamSet`` never gets
-#: an ``adjacent_density``, so the validate report's ``WinnerStability`` reads "not assessed", by
-#: design). ``PRICE_BASELINES`` minus ``orb``.
+#: Winner-stability adjacency applies to DAILY strategies only: ``orb`` (intraday) stays single-density,
+#: so its validate report reads "not assessed".
 DAILY_BASELINES: frozenset[str] = frozenset(PRICE_BASELINES) - {"orb"}
 
-#: The coarse<->medium pair the manager specified. ``fine`` has no adjacency wiring (out of scope
-#: for this change) — a ``--grid-density fine`` run still validates, just without the extra sweep.
+#: coarse<->medium only; ``--grid-density fine`` still validates, just without the extra sweep.
 _ADJACENT_DENSITY: dict[str, str] = {"coarse": "medium", "medium": "coarse"}
 
 
@@ -71,11 +64,8 @@ def _parse_date(s: str) -> date:
 
 
 def _positive_days(s: str) -> int:
-    """argparse type for ``--margin-floor-days`` — the floor's denominator in SESSIONS.
-
-    Rejected at parse time rather than deep inside ``margin_floor_pct_per_day`` (which raises on
-    < 1): a zero would otherwise surface as a divide-by-zero traceback after a multi-minute sweep.
-    """
+    """argparse type for ``--margin-floor-days`` (the floor's denominator, in SESSIONS); rejected at
+    parse time so a zero does not surface after a multi-minute sweep."""
     days = int(s)
     if days < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1 session, got {days}")
@@ -148,13 +138,9 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
     return {
         "n_trades": float(s.n_trades),
         "n_closed": float(s.n_closed),
-        # Every per-trade key here NAMES its population. This dict is persisted verbatim
-        # into ``param_sets.validation_report``, where a query spans rows written on both sides of
-        # 2026-09-13 — so the pre-fix keys ``win_rate`` and ``sweep_expectancy_pct``, whose meaning
-        # would have silently changed from all-trades to closed-only under the same name, are RETIRED
-        # rather than redefined. A query for a retired key returns the pre-fix rows only, which is
-        # unambiguous; a redefined one would have compared two different statistics as if they were
-        # one. The mechanics stamp lives in a sibling field a SQL/JSON comparison would not read.
+        # Persisted verbatim into ``param_sets.validation_report``: every per-trade key names its
+        # population, and the retired keys ``win_rate`` / ``sweep_expectancy_pct`` must never be
+        # redefined (a redefined key would compare two different statistics as one).
         "win_rate_closed": s.win_rate_closed,
         "win_rate_all": s.win_rate,
         "sweep_expectancy_closed_pct": s.expectancy_closed_pct,
@@ -166,12 +152,10 @@ def _sweep_stats_dict(sweep, params: dict[str, float]) -> dict[str, float | None
 
 
 def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
-    """Added 2026-09-12: the winning config's MEASURED holding distribution, in SESSIONS.
+    """The winning config's MEASURED holding distribution, in SESSIONS.
 
-    Returns ``None`` for an intraday sweep (``orb``), whose ``hold_bars_*`` are 1-minute bars — the
-    margin floor's denominator is sessions, and re-labelling 1m bars as sessions would produce a floor
-    ~375× too strict and a headroom multiple to match. ``None`` also when the config scored no
-    trades: there is no realized horizon to report, and the reporting cells are simply omitted.
+    ``None`` for an intraday sweep (``orb``: ``hold_bars_*`` are 1-minute bars, and relabelling them as
+    sessions would make the floor ~375× too strict) and when the config scored no trades.
     """
     s = _best_stat(sweep, params)
     if s is None or not s.n_trades or sweep.bar_unit != "session":
@@ -180,9 +164,7 @@ def _realized_hold(sweep, params: dict[str, float]) -> RealizedHold | None:
         n_trades=s.n_trades,
         n_closed=s.n_closed,
         n_open=s.n_open,
-        # RealizedHold keeps its field meanings: ``_pct`` is the ALL-trades mean, ``_closed_pct``
-        # the closed-only one. The sweep-mechanics fix changed which of the two the sweep ranks on
-        # (the closed one), not what either field holds — so the report can label both correctly.
+        # ``_pct`` is the ALL-trades mean, ``_closed_pct`` the closed-only one (the sweep ranks on closed).
         expectancy_per_trade_pct=s.expectancy_all_pct,
         expectancy_per_trade_closed_pct=s.expectancy_closed_pct,
         mean_sessions=s.hold_bars_mean,
@@ -204,13 +186,12 @@ def _adjacent_winner(
     grid_density: str,
     run_adjacent: bool,
 ) -> tuple[str | None, dict[str, float] | None]:
-    """Winner-stability input (manager-decided wiring): for a DAILY strategy, ALSO run the
-    adjacent grid density (coarse<->medium) and return ``(adjacent_density, adjacent_winner)``.
+    """Winner-stability input: for a DAILY strategy, run the adjacent grid density (coarse<->medium)
+    and return ``(adjacent_density, adjacent_winner)``.
 
-    ``orb`` and any density outside the coarse/medium pair (e.g. ``fine``) return ``(None, None)`` —
-    exactly the "not assessed" input :func:`engine.learning.validate.winner_stability` expects, so
-    the validate report's ``WinnerStability`` flag reads "not assessed" rather than a fabricated
-    comparison. This is a SECOND full sweep (real cost) — ``--no-adjacent`` skips it.
+    ``orb`` and any other density return ``(None, None)``, the "not assessed" input
+    :func:`engine.learning.validate.winner_stability` expects. A SECOND full sweep; ``--no-adjacent``
+    skips it.
     """
     if not run_adjacent or strategy_id not in DAILY_BASELINES:
         return None, None
@@ -247,10 +228,8 @@ def _run_one(
             file=sys.stderr,
         )
 
-    # Surface a silent data shortfall LOUDLY: a request for 2 years that resolves to 6 months of
-    # bars (e.g. 1m history shallower than 1d, data.backfill_minute_years) changes what the
-    # validation verdict means — the reports record the true span, but the operator must not have
-    # to diff dates to notice. 7-day tolerance absorbs holidays/weekends at the window edges.
+    # A silently shorter data span changes what the verdict means; warn loudly. The 7-day tolerance
+    # absorbs holidays/weekends at the window edges.
     _SPAN_TOLERANCE = timedelta(days=7)
     shortfall = []
     if sweep.data_start is not None and sweep.data_start - start > _SPAN_TOLERANCE:
@@ -266,12 +245,9 @@ def _run_one(
             file=sys.stderr,
         )
 
-    # The grid can rank NOTHING: since the sweep-mechanics fix a config that closed no round trip inside the
-    # window is excluded rather than ranked on its unrealized marks, so a window shorter than the
-    # strategy's realized hold — or any vectorbt schema change that makes every open/closed split
-    # unreadable — leaves ``best_params`` None. Falling back to the envelope defaults keeps the run
-    # producing a verdict, but that verdict is about the DEFAULT config, not about a swept winner,
-    # and the console line plus the artifact must both say so. ASCII only (cp1252 console).
+    # The grid can rank NOTHING (a config that closed no round trip is excluded), leaving ``best_params``
+    # None. The fallback validates the envelope DEFAULTS, not a swept winner; the console line and the
+    # artifact must both say so. ASCII only (cp1252 console).
     grid_selected_winner = sweep.best_params is not None
     best = sweep.best_params or _default_params(strategy_id)
     if not grid_selected_winner:
@@ -295,15 +271,13 @@ def _run_one(
         grid_density=sweep.grid_density,              # winner-stability: this run's density
         adjacent_density=adjacent_density,            # None for orb / a non-adjacent density
         adjacent_winner=adjacent_winner,
-        # Realized hold (2026-09-12), REPORTING ONLY — neither reaches the promotion rule:
+        # Realized hold is REPORTING ONLY: it never reaches the promotion rule.
         realized_hold=_realized_hold(sweep, best),    # the horizon the floor should be read against
         population_is_survivorship_tainted_proxy=(    # a present-day list applied backwards
             sweep.population_is_survivorship_tainted_proxy
         ),
-        # Since 2026-09-13: the sweep's mechanics stamp travels into the validation artifact, so a
-        # verdict is never read beside one produced under the pre-fix mechanics.
-        sweep_mechanics=sweep.mechanics,
-        # ... and so does whether these params were RANKED or merely defaulted to (see above).
+        sweep_mechanics=sweep.mechanics,              # stamp travels into the validation artifact
+        # whether these params were RANKED or merely defaulted to (see above)
         params_are_grid_winner=grid_selected_winner,
     )
     report = pipeline.validate_sync(strategy_id, params)
@@ -322,16 +296,15 @@ def _run_one(
         if report.margin_floor_pct_per_day is None
         else f"{report.margin_floor_pct_per_day:.5f}%/day over {report.margin_floor_days}d"
     )
-    # The params label distinguishes a ranked winner from the defaults fallback ON THE VERDICT LINE
-    # itself: this line is what gets pasted into a report, and the stderr warning above may not be.
+    # The label marks the defaults fallback on the verdict line itself: that line gets pasted into
+    # reports, the stderr warning may not.
     label = "best" if grid_selected_winner else "DEFAULTS(no grid winner)"
     print(
         f"[{strategy_id}] N={sweep.trial_count_n} {label}={best}"
         f" expectancy={exp} CPCV_pass={frac}/{bar} margin_floor={floor} -> {verdict}"
     )
-    # the verdict line above quotes the floor at the REGISTERED denominator. Print the measured
-    # horizon and the floor re-based on it right underneath, so the operator cannot read a pass at a
-    # 120-session cap as comfortable without seeing what the median trade was actually held for.
+    # The verdict line quotes the floor at the REGISTERED denominator; print the measured horizon and
+    # the floor re-based on it beneath.
     hold = report.realized_hold
     if hold is not None and hold.median_sessions is not None and hold.mean_sessions is not None:
         print(
@@ -356,11 +329,10 @@ def _run_one(
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = _build_parser().parse_args(argv)
-    # Empty ``--index-symbol ""`` is the explicit opt-out (all-regime); anything else (incl. the
-    # canonical default) engages the pinned rsi2 regime filter.
+    # Empty ``--index-symbol ""`` is the explicit opt-out (all-regime).
     index_symbol = args.index_symbol or None
-    # The denominator is PER-LEG (a leg's own holding cap); one value applied across `all` hands the
-    # short-horizon baselines a floor scaled to somebody else's horizon, which only ever LOOSENS it.
+    # The denominator is PER-LEG; one value across `all` gives short-horizon baselines a floor scaled to
+    # another horizon, which only LOOSENS it.
     if args.strategy == "all" and args.margin_floor_days != MARGIN_FLOOR_DAYS:
         print(
             f"WARNING: --margin-floor-days {args.margin_floor_days} applies to EVERY strategy in "
@@ -386,8 +358,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.symbols
             else _resolve_symbols(store, args.end)
         )
-        # Shell-expansion footgun: `--symbols $syms` under cmd.exe passes the LITERAL text `$syms`
-        # (only PowerShell/bash expand it), so the backtest silently runs on zero real symbols.
+        # cmd.exe passes `--symbols $syms` literally (only PowerShell/bash expand it).
         suspicious = [s for s in symbols if s.startswith(("$", "%")) or "%" in s]
         if suspicious:
             print(

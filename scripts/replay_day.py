@@ -16,13 +16,10 @@ post-close), bars built per day, the order-postback counts, wall time, and the `
 golden-day artefact. Two runs over the same partitions must print the same digest; that equality IS
 the regression test, so the digest is what to record when pinning a day.
 
-The postback/order/fill counts are 0 from this CLI: it attaches no broker (v1 has no order
-origination). They are printed anyway because a zero there is the honest statement that the digest
-covered bars only — the failure this replaces was a harness that reported a bars-only digest while
-looking as though it had checked orders.
+The postback/order/fill counts are 0 from this CLI: it attaches no broker. They are printed anyway so
+a zero states that the digest covered bars only.
 
-Memory is O(chunk), not O(day): the harness streams the day out of DuckDB in bounded chunks, so a
-full 300-symbol session-day replays in the same resident footprint as a single-symbol one.
+Memory is O(chunk), not O(day): the harness streams the day out of DuckDB in bounded chunks.
 
 ``--symbols`` narrows the read to those partitions, which is the difference between seconds and
 minutes on a full archive day (the live dataset holds ~10⁵–10⁶ per-flush fragments per day until
@@ -81,8 +78,7 @@ def _print_report(report: ReplayReport) -> None:
     print(f"  post-close      : {report.post_close_dropped:,}  (no bar)")
     for day, count in report.bars_built.items():
         print(f"bars built {day}: {count:,}")
-    # Zero across the board until a broker is attached (v1 has no order origination) - the counts are
-    # here so a wired-broker replay reports what the digest actually covers (2026-09-10 fix).
+    # Zero until a broker is attached; printed so the report states what the digest covers.
     print(f"postbacks         : {report.postbacks:,}  (order.update frames collected)")
     print(f"  orders          : {report.orders:,}")
     print(f"  fills           : {report.fills:,}")

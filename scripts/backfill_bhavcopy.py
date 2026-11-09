@@ -1,52 +1,45 @@
 #!/usr/bin/env python
 """Full-market ``bars_1d`` history backfill from the NSE bhavcopy archive, plus corporate-action
-history for the same window (owner one-off tool, 2026-09-01 follow-up).
+history for the same window (owner one-off tool).
 
-The daily bhavcopy job (``BhavcopyJob``) only started covering the FULL market on
-2026-07-13; before that, ``bars_1d`` outside the trading universe is sparse. This script fills the
-gap so ``scripts/backtest_hi52.py`` can be re-run on a genuinely full-market population: it walks
-every calendar date in ``[--from, --to]`` (default 2022-07-01..2026-07-12 — exactly the pre-coverage
-window) and, for each trading day, fetches the day's bhavcopy from the NSE archive and persists it
-through the SAME parse + persist path the live job uses.
+The daily bhavcopy job (``BhavcopyJob``) only covers the FULL market from 2026-07-13; before that,
+``bars_1d`` outside the trading universe is sparse. This script walks every calendar date in
+``[--from, --to]`` (default 2022-07-01..2026-07-12, the pre-coverage window) and, for each trading
+day, fetches the day's bhavcopy from the NSE archive and persists it through the SAME parse + persist
+path the live job uses.
 
 Two archive URL formats, chosen by date (falling back to the other on a 404):
 
-* **UDiFF** (current scheme, ``BHAVCOPY_URL_TEMPLATE`` in ``engine.datafeeds.bhavcopy``) — exists
-  for 2024-07-05 onward, 404s for 2023/2022 dates.
+* **UDiFF** (``BHAVCOPY_URL_TEMPLATE`` in ``engine.datafeeds.bhavcopy``) — 2024-07-05 onward.
 * **LEGACY** (``.../content/historical/EQUITIES/<YYYY>/<MON>/cm<DD><MON><YYYY>bhav.csv.zip``) —
-  exists up to 2024-07-05, 404s from 2024-07-08.
+  up to 2024-07-05.
 
-``_LEGACY_UDIFF_SWITCH_DATE`` (2024-07-08) decides which format is TRIED FIRST for a given date; the
-other is the fallback on a 404. EVERY calendar date is attempted — NSE holds Saturday/Sunday sessions
-(DR drills 2024-01-20/03-02/05-18, Muhurat 2023-11-12, Budget 2025-02-01) that a weekday filter
-would silently drop, and a weekend costs only two 404s. A 404 on BOTH formats means a non-trading day
-— checkpointed 'holiday', nothing written — but ``_MAX_HOLIDAY_STREAK`` consecutive such days is not
-a calendar shape NSE produces (the longest closures run 4-5 days): it is an archive outage or a wrong
-URL era, so the leg stops there, the streak's 'holiday' checkpoints are cleared and counted failed,
-and the next run retries them. Any OTHER error fails the date (counted, no checkpoint) so the next
-run retries it. Bars are persisted via ``BhavcopyJob._persist`` exactly as the live job does, so a
-Kite-official row for (symbol, day) is NEVER overwritten — the archive row only fills a gap or
-cross-checks (an adjusted Kite row vs a raw archive row shows up as a mismatch count, nothing more).
+``_LEGACY_UDIFF_SWITCH_DATE`` decides which is TRIED FIRST. EVERY calendar date is attempted: NSE holds
+Saturday/Sunday sessions (DR drills, Muhurat, Budget) that a weekday filter would drop, and a weekend
+costs only two 404s. A 404 on BOTH formats means a non-trading day — checkpointed 'holiday', nothing
+written — but ``_MAX_HOLIDAY_STREAK`` consecutive such days is not a shape NSE produces (longest
+closures run 4-5 days): it is an archive outage or a wrong URL era, so the leg stops there, the
+streak's 'holiday' checkpoints are cleared and counted failed, and the next run retries them. Any OTHER
+error fails the date (counted, no checkpoint) so the next run retries it. Bars are persisted via
+``BhavcopyJob._persist``, so a Kite-official row for (symbol, day) is NEVER overwritten — the archive
+row only fills a gap or cross-checks (an adjusted Kite row vs a raw archive row shows as a mismatch
+count, nothing more).
 
-The corp-actions leg starts ``_CORP_ACTIONS_LOOKBACK_DAYS`` (400, the live hi52 frame window) BEFORE
-``--from``: its consumer is a trailing 400-day lookback per signal date, so the earliest bars need
-ex-dates from a year earlier. A window that parses to zero rows fails (no checkpoint) — NSE lists
-hundreds of actions a month, so an empty window is a capped/failed response, not history.
+The corp-actions leg starts ``_CORP_ACTIONS_LOOKBACK_DAYS`` (400) BEFORE ``--from``: its consumer is a
+trailing 400-day lookback per signal date. A window that parses to zero rows fails (no checkpoint): NSE
+lists hundreds of actions a month, so an empty window is a capped/failed response.
 
-The engine must be OFF while this runs: ``market.duckdb`` (DuckDB) has a single writer, and
-this script opens it directly (no engine IPC). ``--status`` is the one read-only exception — it opens
-``state.db`` (SQLite) read-only and never touches DuckDB, so it is safe to run while the engine is live.
+The engine must be OFF while this runs: ``market.duckdb`` has a single writer and this script opens it
+directly. ``--status`` is the read-only exception (``state.db`` SQLite only), safe while the engine is
+live.
 
-Resumable: each unit is checkpointed in ``state.db`` ``filings_backfill_checkpoints`` (migration
-0002, shared with ``scripts/backfill_filings.py``) — ``feed='bhavcopy_archive'`` with
-``unit=<ISO date>`` (``through_date`` = the same ISO date once ingested, or the literal ``'holiday'``
-for a confirmed non-trading day; both count as done), and ``feed='corp_actions_archive'`` with
-``unit=<from>..<to>`` per <=35-day window. A re-run skips every unit already checkpointed — re-fetching
-would be safe anyway (all writes are idempotent upserts) but skipping saves ~1,000 requests on resume.
-
-Rough runtime: ~1,000 trading sessions in the default window, at ~1-2 s each (one archive GET per
-day, paced by ``--pace-s``, default 1.0 s) — call it 20-30 minutes for the bhavcopy leg alone. It is
-safe to interrupt and resume across multiple evenings.
+Resumable: each unit is checkpointed in ``state.db`` ``filings_backfill_checkpoints`` (shared with
+``scripts/backfill_filings.py``) — ``feed='bhavcopy_archive'`` with ``unit=<ISO date>``
+(``through_date`` = that date once ingested, or the literal ``'holiday'``; both count as done), and
+``feed='corp_actions_archive'`` with ``unit=<from>..<to>`` per <=35-day window. A re-run skips every
+checkpointed unit (writes are idempotent upserts; skipping saves ~1,000 requests). Rough runtime for
+the bhavcopy leg: 20-30 minutes (one GET per day, paced by ``--pace-s``, default 1.0 s); safe to
+interrupt and resume.
 
     python scripts/backfill_bhavcopy.py [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--pace-s SECONDS]
                                          [--skip-corp-actions] [--skip-bhavcopy] [--config-dir DIR]
@@ -96,14 +89,12 @@ _log = get_logger("scripts.backfill_bhavcopy")
 _FEED_BHAVCOPY = "bhavcopy_archive"
 _FEED_CORP_ACTIONS = "corp_actions_archive"
 
-#: UDiFF exists 2024-07-05 onward, 404s before; LEGACY exists up to 2024-07-05, 404s from 2024-07-08.
-#: This switch decides which format is TRIED FIRST for a given date — the other is the 404 fallback.
+#: UDiFF exists 2024-07-05 onward; LEGACY up to 2024-07-05. Decides which is TRIED FIRST (other = 404 fallback).
 _LEGACY_UDIFF_SWITCH_DATE = date(2024, 7, 8)
 
 #: Corp-actions leg: <=35-day NSE windows (same shape as backfill_filings.py's _windows/_NSE_WINDOW_DAYS).
 _CORP_ACTIONS_WINDOW_DAYS = 35
-#: How far before --from the corp-actions leg starts: the consumer (hi52's unadjusted-history veto,
-#: src/engine/ops/main.py hi52_start) looks back 400 calendar days from each signal date.
+#: How far before --from the corp-actions leg starts (hi52's unadjusted-history veto looks back 400 days).
 _CORP_ACTIONS_LOOKBACK_DAYS = 400
 
 #: Consecutive 404-on-both dates that stop the bars leg (see the module docstring).
@@ -136,9 +127,8 @@ def _candidate_urls(d: date) -> list[str]:
     return [udiff, legacy]
 
 
-# --------------------------------------------------------------------------- checkpoints (copied from
-# scripts/backfill_filings.py _cp_done/_cp_set — private to that script, so duplicated here rather
-# than imported)
+# --------------------------------------------------------------------------- checkpoints (duplicated
+# from scripts/backfill_filings.py, where they are private)
 def _windows(frm: date, to: date, span_days: int) -> list[tuple[date, date]]:
     """Ascending <=``span_days`` windows covering ``[frm, to]`` inclusive."""
     out: list[tuple[date, date]] = []
@@ -222,9 +212,9 @@ async def _ingest_bhavcopy_date(
 
 async def _run_bhavcopy_leg(conn, store, http, clock: Clock, job: BhavcopyJob, frm: date, to: date,
                              pace_s: float, report: dict) -> None:
-    """Ascending loop over EVERY calendar date (see the module docstring for why weekends are not
-    skipped). Stops at ``_MAX_HOLIDAY_STREAK`` consecutive holidays: the streak's checkpoints are
-    cleared and re-counted as failed so the next run retries them."""
+    """Ascending loop over EVERY calendar date (weekends included: module docstring). Stops at
+    ``_MAX_HOLIDAY_STREAK`` consecutive holidays: the streak's checkpoints are cleared and re-counted
+    as failed so the next run retries them."""
     d = frm
     one_day = timedelta(days=1)
     streak: list[str] = []
@@ -338,8 +328,8 @@ def _print_summary(report: dict, path: Path) -> None:
 
 
 def _connect_ro(sqlite_path: Path) -> sqlite3.Connection | None:
-    """Read-only SQLite connection, or None if state.db is missing/unreadable (mirrors
-    scripts/backfill.py _connect_ro — --status must never create or migrate state.db)."""
+    """Read-only SQLite connection, or None if state.db is missing/unreadable (--status must never
+    create or migrate state.db)."""
     uri = f"file:{Path(sqlite_path).as_posix()}?mode=ro"
     try:
         return sqlite3.connect(uri, uri=True)
@@ -386,8 +376,7 @@ async def _execute(settings, clock: Clock, args) -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"backfill_bhavcopy: could not open/migrate state.db ({exc})", file=sys.stderr)
             return 2
-        # MarketStore.open() CREATES a missing file: a --config-dir typo must not run 30 minutes into
-        # an empty store and exit 0.
+        # MarketStore.open() CREATES a missing file: a --config-dir typo must not backfill an empty store.
         db_path = Path(settings.resolved_data_dir()) / "market.duckdb"
         if not db_path.exists():
             print(f"backfill_bhavcopy: {db_path} does not exist - wrong --config-dir?", file=sys.stderr)

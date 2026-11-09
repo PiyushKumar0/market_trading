@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Move a renamed symbol's stored history to its new symbol (NSE rename; 2026-10-23 ICICIPRULI→ICICILIFE).
+"""Move a renamed symbol's stored history to its new symbol (NSE rename, e.g. ICICIPRULI→ICICILIFE).
 
     python scripts/rekey_symbol.py OLD NEW [--apply]
 
@@ -17,9 +17,9 @@ free; the lock is held for the whole run, so no engine boots mid-move. ``--apply
 live position (PENDING_ENTRY / OPEN / PENDING_EXIT) names OLD, since moving order state is the owner's
 call; while OLD has a BSE insider row inside the fresh feed's window, since the feed would re-fetch it
 under NEW with a new content-hash id, a duplicate of the moved copy that the twin check cannot see yet;
-and when the rename came with a trading gap (``MarketStore.rename_trading_gap``; HEG→HEGAM was
-suspended 10 sessions around its demerger), since the moved history would carry the hole and the warm-up
-would refuse NEW for a gapped window instead of treating it as a fresh listing.
+and when the rename came with a trading gap (``MarketStore.rename_trading_gap``; a suspension around a
+demerger), since the moved history would carry the hole and the warm-up would refuse NEW for a gapped
+window instead of treating it as a fresh listing.
 
 Default is a dry run: the same statements run in transactions that are rolled back, so the counts printed
 are the ones ``--apply`` commits. market.duckdb cannot be opened while the engine holds it, so the dry run

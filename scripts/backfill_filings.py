@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """Corporate-filings initial-history-seed CLI (stage 1 — ingest + backfill only).
 
-The one-off owner tool that seeds the ~3-year filings history the filings event study (stage 2) will
-backtest. It drives the SAME defensive parse functions the nightly ``filings_*`` jobs use, but owns
-the windowing + checkpointing (exactly as ``scripts/backfill.py`` owns chunking while ``BackfillJob``
-owns the fetch). Point-in-time throughout: every row keyed on its exchange broadcast
-timestamp, never the period label.
+The one-off owner tool that seeds the ~3-year filings history the filings event study backtests. It
+drives the SAME parse functions the nightly ``filings_*`` jobs use but owns the windowing +
+checkpointing. Point-in-time throughout: every row keyed on its exchange broadcast timestamp, never
+the period label.
 
     python scripts/backfill_filings.py seed [--from YYYY-MM-DD] [--symbols CSV]
                                              [--skip-pit] [--skip-results] [--skip-integrated]
@@ -18,8 +17,8 @@ spaced ≥1.5 s (observed safe). Resumable: each (feed, unit) checkpoint lives i
 re-fetching is safe anyway (all writes are idempotent upserts). Prints a summary and writes
 ``data/reports/filings_backfill_report.json``.
 
-BSE caveat: the SHP detail endpoint shapes were LIVE-VERIFIED 2026-07-16 (see ``filings_shp``
-module docstring); the leg stays defensive and degrades per-symbol without aborting the seed.
+BSE caveat: the SHP leg stays defensive (see the ``filings_shp`` module docstring) and degrades
+per-symbol without aborting the seed.
 
 Exit codes: 0 = ran clean; 1 = some units failed for non-setup reasons (re-run to resume); 2 =
 setup error (no universe resolved, ``market.duckdb``/``state.db`` unavailable).
@@ -74,9 +73,8 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 _log = get_logger("scripts.backfill_filings")
 
-#: ``_PACE_S`` / ``_NSE_WINDOW_DAYS`` / ``_windows`` are local aliases of filings_pit's public
-#: ``PIT_PACE_S`` / ``PIT_WINDOW_DAYS`` / ``pit_windows`` — this script walks the SAME endpoint in the
-#: same unit, so filings_pit is the one canonical copy.
+#: ``_PACE_S`` / ``_NSE_WINDOW_DAYS`` / ``_windows`` alias filings_pit's ``PIT_PACE_S`` /
+#: ``PIT_WINDOW_DAYS`` / ``pit_windows``: the one canonical copy.
 _SEED_YEARS = 3
 
 
@@ -121,9 +119,7 @@ def _cp_clear_feed(conn: sqlite3.Connection, feed: str) -> int:
 # --------------------------------------------------------------------------- universe resolution
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
     """Resolve the working symbol set + source label (runtime cache → committed seed → --symbols).
-
-    Cache/seed names track ``UniverseBuilder``; both were renamed off ``nifty200`` by owner decision
-    (2026-09-04), when the eligible index became config (NIFTY 500)."""
+    Cache/seed names track ``UniverseBuilder``."""
     if symbols_arg:
         syms = sorted({s.strip().upper() for s in symbols_arg.split(",") if s.strip()})
         return syms, "--symbols override"
@@ -164,10 +160,10 @@ async def _seed_nse_windowed(
     *, symbols: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """Walk PIT, results or integrated filings over ≤31-day windows (checkpoint per window).
-    event-calendar rides the same window as the results leg (its historical board-meeting dates →
-    earnings_calendar). PIT days before 2026-05-03 come from the old route; later days from the PIT
-    V2.0 listing, fetching the XBRL of ``symbols``' filings only. A PIT window reaching the V2.0 era
-    checkpoints as ``pit_gg``: the old route's ``pit`` checkpoints for those spans hold nothing."""
+    The event calendar rides the results leg's windows (→ earnings_calendar). PIT days before
+    2026-05-03 come from the old route; later days from the PIT V2.0 listing, fetching the XBRL of
+    ``symbols``' filings only. A PIT window reaching the V2.0 era checkpoints as ``pit_gg``: the old
+    route's ``pit`` checkpoints for those spans hold nothing."""
     for w_frm, w_to in _windows(frm, to):
         unit = f"{w_frm.isoformat()}..{w_to.isoformat()}"
         cp_feed = "pit_gg" if feed == "pit" and w_to >= PIT_GG_FIRST_DAY else feed
@@ -221,7 +217,7 @@ async def _seed_nse_windowed(
 
 async def _seed_shp(conn, store, http, clock, symbols: list[str], frm: date, to: date, summary: dict) -> None:
     """Per-symbol BSE SHP quarter loop (checkpoint per symbol). Requires ``symbol_isin`` scrip codes;
-    a symbol without one is skipped-and-counted. BSE shape live-verified 2026-07-16; still degrades per-symbol."""
+    a symbol without one is skipped-and-counted."""
     isin_map = await store.asymbol_isin_map()
     for symbol in symbols:
         if _cp_done(conn, "shp", symbol):

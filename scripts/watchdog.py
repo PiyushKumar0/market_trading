@@ -26,23 +26,19 @@ Per tick, two out-of-band checks:
     A fresh boot heartbeat re-arms the alarm automatically. ``state == 'STOPPED'`` ⇒ SILENT
     (intentional off is normal). ``STOPPING`` + pid alive ⇒ not-a-crash (intentional teardown).
 
-Design resolutions (documented):
-- The wedge force-kill runs only AFTER the confirmed-successful ``ENGINE_DOWN`` send ("the alert is
-  sent first"): killing first and letting NSSM restart would clear the down-condition and lose the
-  retried alert during a correlated outage. Remediation is merely delayed while the network is down —
-  capital is broker-protected throughout and a wedged engine cannot act anyway.
+Design rules:
+- The wedge force-kill runs only AFTER the confirmed-successful ``ENGINE_DOWN`` send: killing first
+  would let NSSM's restart clear the down-condition and lose the retried alert during a network outage.
+  Remediation is merely delayed (capital is broker-protected; a wedged engine cannot act).
 - A scheduled start is NOT flagged missed while the engine is already up across the fire-time
-  (state != STOPPED with a live pid): the active period is covered; the lifecycle alerts likewise do not re-emit
-  ENGINE_STARTED when a running process rolls into a later active period.
+  (state != STOPPED with a live pid): the active period is covered.
 - Trading-day check: NSECalendar is not importable here (import allowlist above), so the calendar
-  YAML (weekday minus full-day holidays and ``special_sessions``) is read directly via
-  ``core.config.load_yaml``. Missing year file ⇒ treated as non-trading (silent) — "no calendar, no
-  trading"-conservative for an alert-only path. Special sessions (muhurat, weekday or weekend) are
-  closed days, matching the engine's calendar (``include_special=False``, 2026-10-11).
+  YAML (weekday minus full-day holidays and ``special_sessions``) is read via ``core.config.load_yaml``.
+  Missing year file ⇒ non-trading (silent; conservative for an alert-only path). Special sessions
+  (muhurat) are closed days, matching the engine's ``include_special=False``.
 
 The decision core (:func:`decide` / :func:`run_tick`) is PURE — state rows, pid prober, killer,
-sender and trading-day predicate are injected — so ``tests/unit/test_watchdog.py`` exercises crash
-vs wedged vs STOPPING vs STOPPED, debounce retry and re-arm without a real process or network.
+sender and trading-day predicate are injected.
 """
 
 from __future__ import annotations

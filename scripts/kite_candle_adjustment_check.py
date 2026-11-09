@@ -1,33 +1,28 @@
 #!/usr/bin/env python
 """Empirical check — are Kite *minute* candles corporate-action adjusted?
 
-One-off task. The check provisionally
-assumes minute candles are **not** corp-action adjusted while DAILY candles **are** (see `bars_1d`); this script answers it empirically against a real recent split/bonus
-ex-date so the bar-stitching job can be configured correctly.
+One-off task. Daily candles are assumed corp-action adjusted (see `bars_1d`); this script tests minute
+candles empirically against a real recent split/bonus ex-date so the bar-stitching job is configured
+correctly.
 
 Method
 ------
-A corporate action (split / bonus) introduces a mechanical price discontinuity at the ex-date: the
-"raw" pre-ex price is divided by the action ratio R on the ex-date. Two ways the candle API can present
-history across that ex-date:
+A split/bonus divides the "raw" pre-ex price by the ratio R on the ex-date. The candle API either:
 
-  * **adjusted**   — every pre-ex price is divided by R, so the series is *continuous* across the ex-date
-                     (the gap between the last pre-ex bar and the first ex-date bar is ~normal overnight).
-  * **unadjusted** — pre-ex prices are left raw, so there is a large mechanical *jump* (~factor R) between
-                     the last pre-ex bar and the first ex-date bar.
+  * **adjusted**   — divides every pre-ex price by R: the series is *continuous* across the ex-date.
+  * **unadjusted** — leaves pre-ex prices raw: a large mechanical *jump* (~factor R) between the last
+                     pre-ex bar and the first ex-date bar.
 
-DAILY candles are corp-action adjusted (the daily baseline). We measure the *daily* close-to-close gap
-across the ex-date (this is the adjusted/continuous reference) and the *minute* gap (last pre-ex session
-close → first ex-date session open). If the minute gap matches the raw mechanical jump (≈ factor R), the
-minute series is **unadjusted**; if it matches the daily/adjusted continuity, it is **adjusted**.
+We measure the *daily* close-to-close gap across the ex-date (the adjusted reference) and the *minute*
+gap (last pre-ex session close → first ex-date session open). A minute gap matching the raw jump
+(≈ factor R) means **unadjusted**; one matching the daily continuity means **adjusted**.
 
 Session / network
 -----------------
-Talks to Kite REST directly via ``pykiteconnect`` (the ``engine.broker`` REST wrappers are not built yet),
-using the daily access token stored in Windows Credential Manager / DPAPI via
-``engine.core.secrets``. All network calls are guarded; with no valid session the script prints how
-to log in first and exits non-zero. Prices are ``Decimal`` throughout. This script NEVER writes config —
-it prints the instruction to record the answer in ``config/settings.yaml`` (``data.minute_candles_adjusted``).
+Talks to Kite REST directly via ``pykiteconnect`` using the daily access token from DPAPI
+(``engine.core.secrets``). With no valid session it prints how to log in and exits non-zero. Prices are
+``Decimal``. NEVER writes config — it prints the instruction to record the answer in
+``config/settings.yaml`` (``data.minute_candles_adjusted``).
 """
 
 from __future__ import annotations

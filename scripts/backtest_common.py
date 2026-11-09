@@ -1,5 +1,5 @@
 """Helpers shared by the loose backtest scripts (``backtest_brk20``, ``backtest_hi52``, ``backtest_tdc``,
-``backtest_candles``; ``backtest_fade`` through ``backtest_tdc``).
+``backtest_candles``).
 
 A leaf module: it imports no sibling script, because ``research_common`` loads ``backtest_brk20`` and
 ``backtest_hi52`` at import time and those two import from here.

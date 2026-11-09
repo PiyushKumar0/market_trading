@@ -1,18 +1,15 @@
 """First-run owner action: register the initial signatures of the protected config files.
 
-``config/limits.yaml`` and ``config/envelope.yaml`` are loaded by the risk gate ONLY
-when their on-disk SHA-256 matches the signature recorded in the SQLite ``protected_config`` table.
-That table is the sole authority for "is this config trusted?", and it is written ONLY by the
-owner-confirmed change flow (Telegram two-step / dashboard token) — never by Tier 1 or the learner. Until a starter file is registered here, ``ProtectedStore.load_verified`` treats it as
-unregistered and refuses to load it (which surfaces as FROZEN-on-flat-book at startup or a
-kill with a live book — that single-rule consequence belongs to the gate, not this script).
+``config/limits.yaml`` and ``config/envelope.yaml`` are loaded by the risk gate ONLY when their on-disk
+SHA-256 matches the signature recorded in the SQLite ``protected_config`` table, which is written ONLY
+by the owner-confirmed change flow (Telegram two-step / dashboard token) — never by Tier 1 or the
+learner. Until a starter file is registered here, ``ProtectedStore.load_verified`` treats it as
+unregistered and refuses to load it (FROZEN on a flat book, a kill with a live book).
 
-This CLI performs the one-time seeding. Because :meth:`ProtectedStore.register_initial` signs WHATEVER
-bytes are currently on disk, running it is itself a trust assertion: it must happen only AFTER the
-owner has actually read the shipped ``limits.yaml`` / ``envelope.yaml``. We therefore gate the call
-behind an explicit interactive "yes, I reviewed these files" confirmation (or an explicit ``--yes``),
-and we build the :class:`OwnerConfirmation` proof token from that (Actor.OWNER, confirmed=True) — the
-same token the runtime owner-update path requires.
+Because :meth:`ProtectedStore.register_initial` signs WHATEVER bytes are on disk, running this is itself
+a trust assertion: it must happen only AFTER the owner has read the shipped files. The call is gated behind an interactive "yes, I reviewed these files"
+confirmation (or an explicit ``--yes``), which builds the :class:`OwnerConfirmation` token
+(Actor.OWNER, confirmed=True) the runtime owner-update path also requires.
 
 Usage::
 

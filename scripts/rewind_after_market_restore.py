@@ -10,92 +10,76 @@ done, and the catch-up would never refill them. This script rewinds exactly thos
                                                    [--apply [--engine-crashed]]
                                                    [--data-dir DIR] [--config-dir DIR]
 
-**S** is the stamp's DATE (IST, the engine's ``clock.now()`` stamp), INCLUSIVE: an export may run
-before that day's EOD jobs (``_market_backup`` only refuses 06:00-15:45 on a trading day,
-``engine/ops/main.py:4652``), and replaying a day is idempotent. With ``--export``, a ``job_runs``
-success for an EARLIER day that was recorded after the stamp (a catch-up that finished after the export
-ran) pulls S back to that day: its writes are not in the export either. ``--since`` takes S verbatim.
+**S** is the stamp's DATE (IST), INCLUSIVE: an export may run before that day's EOD jobs, and replaying
+a day is idempotent. With ``--export``, a ``job_runs`` success for an EARLIER day recorded after the
+stamp (a catch-up that finished after the export ran) pulls S back to that day: its writes are not in
+the export either. ``--since`` takes S verbatim.
 
 Default is a DRY RUN that prints exactly what would change (read-only, safe while the engine runs).
-``--apply`` takes ``<data>/engine.lock`` non-blocking (``InstanceLock``, the engine's own single-instance
-lock: the engine holds it for its whole life and the kernel frees it on any process death) and holds it
-until the transaction is done, so no engine can boot mid-rewind; a held lock is a refusal. It also
-refuses unless ``engine_lifecycle.state`` is ``STOPPED``. ``--engine-crashed`` additionally accepts
-``RUNNING`` / ``STOPPING``, the state a crash or power loss leaves behind: the lock just acquired is the
-proof that no engine process is alive. ``engine_lifecycle`` is never written, so the next boot still
-sees the crash and runs its crash-recovery path. It then re-reads the plan and applies it inside one
-``BEGIN IMMEDIATE`` transaction, after writing a pre-rewind copy ``<state.db>.pre-rewind-<stamp>``
-through the SQLite online-backup API (the undo: put it back with the engine stopped). A second run finds
-nothing to change and writes no copy.
+``--apply`` takes ``<data>/engine.lock`` non-blocking (``InstanceLock``; the kernel frees it on any
+process death) and holds it until the transaction is done, so no engine can boot mid-rewind; a held lock
+is a refusal. It also refuses unless ``engine_lifecycle.state`` is ``STOPPED``. ``--engine-crashed``
+additionally accepts ``RUNNING`` / ``STOPPING`` (what a crash or power loss leaves): the lock just
+acquired proves no engine process is alive. ``engine_lifecycle`` is never written, so the next boot still
+runs its crash recovery. It re-reads the plan and applies it inside one ``BEGIN IMMEDIATE`` transaction,
+after writing a pre-rewind copy ``<state.db>.pre-rewind-<stamp>`` through the SQLite online-backup API
+(the undo: put it back with the engine stopped). A second run finds nothing to change and writes no copy.
 
 **job_runs: SUCCESS rows with run_for_date >= S are deleted for these date-keyed jobs** (output in
-market.duckdb, recomputable from upstream on a replay). Deleting works because the catch-up scans
-from the last success + 1 day (``CatchUpRunner._missed_days``, engine/ops/jobs.py:817-828). ``failed``
-rows are kept: the scan already starts at the oldest one (``include_failed``), and deleting it would
-drop its give-up streak clock and, for a job with no success before S, the retry itself. ``skipped``
-(given-up) rows are kept: that day never wrote its data, and the restore does not change why.
+market.duckdb, recomputable from upstream on a replay); the catch-up scans from the last success + 1 day
+(``CatchUpRunner._missed_days``). ``failed`` rows are kept: the scan already starts at the oldest one,
+and deleting it would drop its give-up streak clock and, for a job with no success before S, the retry
+itself. ``skipped`` (given-up) rows are kept: that day never wrote its data, and the restore does not
+change why.
 
-* ``bhavcopy`` — ``BhavcopyJob.run(d)`` fetches the NSE archive for ``d`` and ``_persist`` writes
-  ``bars_1d`` rows only where none exists (engine/datafeeds/bhavcopy.py:174-238).
-* ``daily_bars`` — ``backfill.run([*watchlist_symbols(), INDEX_SYMBOL, VIX_SYMBOL], "day", d, d)``
-  (engine/ops/main.py:1509-1513). Checkpointed, so it only refetches after the checkpoint rewind below.
-* ``deals`` — ``DealsJob.run(d)``: bulk/block deals for ``d`` → ``upsert_flagged_instrument_days``
-  (engine/datafeeds/deals.py:172-194).
+* ``bhavcopy`` — fetches the NSE archive for ``d``; ``_persist`` writes ``bars_1d`` rows only where none
+  exists.
+* ``daily_bars`` — ``backfill.run([*watchlist_symbols(), INDEX_SYMBOL, VIX_SYMBOL], "day", d, d)``.
+  Checkpointed, so it only refetches after the checkpoint rewind below.
+* ``deals`` — bulk/block deals for ``d`` → ``upsert_flagged_instrument_days``.
 * ``filings_pit`` — NSE PIT windows from the STORE's own watermark ``alatest_insider_broadcast`` to
-  ``d`` (engine/datafeeds/filings_pit.py:487-513); the restored watermark widens the window by itself.
-* ``filings_pit_fresh`` — BSE insider surfaces for ``[d-3, d]`` → ``upsert_insider_trades``
-  (engine/datafeeds/filings_pit_fresh.py:500-551).
+  ``d``; the restored watermark widens the window by itself.
+* ``filings_pit_fresh`` — BSE insider surfaces for ``[d-3, d]`` → ``upsert_insider_trades``.
 * ``filings_results`` — results from the store watermark ``alatest_results_broadcast`` to ``d`` plus
-  the event calendar around ``d`` (engine/datafeeds/filings_results.py:343-382).
-* ``bar_reconcile`` — its symbols are the ``bars_1m`` holders of ``d`` and ``reconcile_log`` is its
-  per-(day, symbol) resume checkpoint (engine/marketdata/reconcile.py:5-10, 179-180, 312-322). For days
-  after the export no bars exist, so the replay is a successful no-op (needs a valid Kite token, else
-  the day records failed until login). Kept for day S: an export taken between 15:45 and the end of
-  that day's 15:50 reconcile holds self-built bars no reconcile has logged, and the replay converts them.
-* ``features_daily`` — ``FeatureEngine.daily_snapshot(d)`` needs ``universe_daily(d)``
-  (engine/features/engine.py:374-377); days after the export have none and record success with a
-  ``features_daily_skipped_empty_universe`` warning. Kept for day S: an export taken after S's 08:30
-  universe build and before its 20:45 features run holds the universe, and S's features are recomputed.
+  the event calendar around ``d``.
+* ``bar_reconcile`` — its symbols are the ``bars_1m`` holders of ``d``; ``reconcile_log`` is its
+  per-(day, symbol) resume checkpoint. For days after the export no bars exist, so the replay is a
+  successful no-op (needs a valid Kite token, else the day records failed until login). Kept for day S:
+  an export taken between 15:45 and that day's 15:50 reconcile holds self-built bars no reconcile has
+  logged, and the replay converts them.
+* ``features_daily`` — needs ``universe_daily(d)``; days after the export have none and record success
+  with a ``features_daily_skipped_empty_universe`` warning. Kept for day S: an export taken after S's
+  08:30 universe build and before its 20:45 features run holds the universe.
 
-**Not rewound:** ``ins_crossings`` writes ``ins_pending`` through the state.db connection
-(engine/datafeeds/ins_crossings.py:310-312), which the restore did not touch; replaying days after the
-export would fail on the missing universe rows (ins_crossings.py:164) and give up after
-``GIVE_UP_AFTER_DAYS``. ``tick_compact`` compacts parquet files under ``paths.parquet_dir``, outside
-market.duckdb (engine/ops/main.py:1530-1531). ``rec_outcomes`` writes ``rec_outcomes`` in state.db
-(engine/ops/rec_outcomes.py:45). ``signal_outcomes`` writes ``signal_outcomes`` in state.db.
-``weekly_summary`` would re-send the owner digest. ``nightly_review``
-is an LLM job writing state.db (engine/ops/main.py:1409-1415). Run-latest and safety-critical jobs are
-not per-day replays: ``universe_build`` and ``instruments`` only ever build TODAY (main.py:1249, 1225),
-so their rows for days before today stay (nothing can rebuild a past day's snapshot).
+**Not rewound:** ``ins_crossings`` writes ``ins_pending`` through the state.db connection, which the
+restore did not touch; replaying days after the export would fail on the missing universe rows and give
+up after ``GIVE_UP_AFTER_DAYS``. ``tick_compact`` compacts parquet files outside market.duckdb.
+``rec_outcomes`` and ``signal_outcomes`` write state.db. ``weekly_summary`` would re-send the owner
+digest. ``nightly_review`` is an LLM job writing state.db. ``universe_build`` and ``instruments`` only
+ever build TODAY, so their rows for days before today stay (nothing can rebuild a past day's snapshot).
 
 **Today's snapshot: TODAY's (IST, ``Clock().today()``) SUCCESS rows for ``universe_build`` and
 ``instruments`` are deleted when the restored file lacks their output** — with ``--export``, rows
-recorded after the stamp (an export from an earlier day, or from before today's 08:15/08:30 builds);
-with ``--since``, every such row (S <= today: today's data is not in the file). Without this the
-watermark tells the boot that today's ``universe_daily`` / ``instruments_daily`` exist, and the engine
-runs on the export's older snapshot until the next morning. ``universe_build`` is RUN_LATEST:
-``_missed_days`` then finds today due and the boot catch-up rebuilds it (before the date-keyed
-``features_daily`` replay that reads it). ``instruments`` is SAFETY_CRITICAL: in session or pre-open
-after 08:15 its governing run is today's (``CatchUpRunner._governing_day``), so the boot re-runs it,
-and if that run fails (before a Kite login, say) the boot freezes entries
-(``data_freshness:instruments``) until a later sweep succeeds. That is the intended fail-closed outcome:
-today's snapshot really is missing. After the close the governing run is the next session's 08:15, so
-the deleted row costs nothing and today's ``instruments_daily`` stays missing. ``failed`` / ``skipped``
-rows are kept on the same rule as above. An export stamped after the row (taken after today's builds)
-holds today's snapshot: the row is kept, since rebuilding after the close would rewrite the universe
+recorded after the stamp; with ``--since``, every such row (today's data is not in the file). Without
+this the watermark tells the boot that today's ``universe_daily`` / ``instruments_daily`` exist, and the
+engine runs on the export's older snapshot until the next morning. ``universe_build`` is RUN_LATEST: the
+boot catch-up finds today due and rebuilds it (before the ``features_daily`` replay that reads it).
+``instruments`` is SAFETY_CRITICAL: in session or pre-open after 08:15 the boot re-runs it
+(``CatchUpRunner._governing_day``), and if that run fails (before a Kite login, say) the boot freezes
+entries (``data_freshness:instruments``) until a later sweep succeeds — the intended fail-closed outcome.
+After the close the governing run is the next session's 08:15, so the deleted row costs nothing.
+``failed`` / ``skipped`` rows are kept on the same rule as above. A row recorded before the stamp
+(export taken after today's builds) is kept: rebuilding after the close would rewrite the universe
 the day traded on.
 
 **backfill_checkpoints: every row (all symbols, both intervals, NIFTY 50 and INDIA VIX included) with
 through_date >= S is set to S-1 (calendar day).** ``BackfillJob.run`` resumes at
-``eff_start = max(start, checkpoint + timedelta(days=1))`` (engine/marketdata/backfill.py:188), so a
-checkpoint of S-1 restarts every later fetch at S — the replayed ``daily_bars`` days and the boot regime
-fill ``backfill.run([index_symbol, vix_symbol], "day", ...)`` (engine/ops/post_login.py:212). A
-calendar S-1 needs no trading calendar and is never later than the trading-day one. ``minute``
-checkpoints are rewound too, but no engine path reads them: the minute fills (``warmup_gap``) pick
-their range from store coverage over TODAY's session (post_login.py:232, main.py:1282), never from a
-checkpoint, so the engine never refetches past minute bars. The rewind keeps the checkpoints truthful,
-so a manual ``scripts/backfill.py run --interval minute`` or a later ``seed`` refetches the days after S
-instead of skipping them as complete.
+``max(start, checkpoint + 1 day)``, so S-1 restarts every later fetch at S — the replayed ``daily_bars``
+days and the boot regime fill. A calendar S-1 needs no trading calendar and is never later than the
+trading-day one. ``minute`` checkpoints are rewound too, but no engine path reads them (minute fills pick
+their range from store coverage over TODAY's session); the rewind keeps them truthful, so a manual
+``scripts/backfill.py run --interval minute`` or a later ``seed`` refetches the days after S instead of
+skipping them as complete.
 
 Exit codes: 0 = dry run printed, applied, or nothing to change; 2 = refused or setup error.
 """

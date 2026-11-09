@@ -2,20 +2,17 @@
 
 Computes the machine-checkable half of the RECOMMEND-mode acceptance gate and prints one line per
 criterion with a MET / NOT-MET / N-A verdict against the gate's bars. The owner-only items
-(manual executions, watchlist-precision reviews, broker order-book audit) are surfaced as
-N-A rows so the checklist in ``runbooks/RUNBOOK.md`` stays 1:1 with the gate text.
+(manual executions, watchlist-precision reviews, broker order-book audit) are N-A rows so the
+checklist in ``runbooks/RUNBOOK.md`` stays 1:1 with the gate text.
 
 SAFETY — this script runs against the LIVE engine's data:
 
-* ``data/state.db`` is opened through a ``file:...?mode=ro`` URI. Read-only at the SQLite
-  layer, so a bug here cannot write, migrate, or lock out the running engine.
-* ``data/market.duckdb`` is NEVER touched (single-writer; the engine holds it). Every number
-  below comes from ``state.db`` + committed config.
+* ``data/state.db`` is opened through a ``file:...?mode=ro`` URI: a bug here cannot write, migrate, or
+  lock out the running engine.
+* ``data/market.duckdb`` is NEVER touched (single-writer; the engine holds it).
 * No engine package import — stdlib only (sqlite3/json/argparse/pathlib/datetime/re). The
   engine's composition root has import side effects; this tool must stay inert.
-* Engine logs are NOT parsed: every metric has a first-class DB record (see SOURCES below),
-  and the daily logs run to hundreds of MB. Log events are named in the source notes only as
-  the manual fallback if a DB row is ever missing.
+* Engine logs are NOT parsed: every metric has a first-class DB record (see SOURCES below).
 
 SOURCES (stated again in the printed output, per criterion):
 
@@ -61,8 +58,8 @@ BAR_SESSIONS_MIN = 20        # "4 weeks of daily recommendations" ~ 20 trading s
 
 MET, NOT_MET, NA = "MET", "NOT-MET", "N-A"
 
-# Quota window (owner-directed 2026-09-12): the budget period is the SUBSCRIPTION's week, not the
-# calendar month. These are fallbacks only — the live anchor is read out of config/agents.yaml below.
+# Quota window: the budget period is the SUBSCRIPTION's week, not the calendar month. Fallbacks only;
+# the live anchor is read from config/agents.yaml.
 WEEKDAYS = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
             "friday": 4, "saturday": 5, "sunday": 6}
 DEFAULT_RESET_WEEKDAY = "thursday"
@@ -106,9 +103,8 @@ def verdict_pct(v: float | None, bar: float) -> str:
 def load_holidays(years: set[int]) -> tuple[set[date], list[str]]:
     """Holiday dates from ``config/calendar/<year>.yaml``.
 
-    Deliberately a targeted line scan rather than a YAML dependency: the block is a flat list of
-    ``- { date: "YYYY-MM-DD", name: ... }`` rows, and this tool stays stdlib-only. Muhurat days
-    live in ``special_sessions`` and are NOT counted as sessions here (weekend dates).
+    A line scan, not YAML (stdlib-only): the block is a flat list of ``- { date: "YYYY-MM-DD", ... }``
+    rows. Muhurat days (``special_sessions``) are NOT counted as sessions.
     """
     holidays: set[date] = set()
     notes: list[str] = []
@@ -177,13 +173,10 @@ class WindowHistory:
         self.current_changed_at = parse_ts(cur[1]) if cur else None
 
     def at(self, t: datetime) -> tuple[time | None, str]:
-        """The window ``start`` in force at instant ``t``, plus a provenance tag.
-
-        Tags: ``audit#<id>`` = a real history row at-or-before ``t``; ``assumed:first-known`` =
-        ``t`` predates the whole ``config_audit`` history (the seeded value is not recorded
-        anywhere, so the earliest known start is used and the day is flagged); ``current`` =
-        no history at all, so the live ``trade_window_state`` row is used.
-        """
+        """The window ``start`` in force at instant ``t``, plus a provenance tag: ``audit#<id>`` = a
+        history row at-or-before ``t``; ``assumed:first-known`` = ``t`` predates the ``config_audit``
+        history (the seeded value is recorded nowhere, so the earliest known start is used);
+        ``current`` = no history at all, so the live ``trade_window_state`` row is used."""
         if not self.rows:
             return self.current_start, "current"
         i = bisect_right(self._keys, t)
@@ -318,10 +311,9 @@ def criterion_orders(conn) -> dict[str, Any]:
 def load_budget_config() -> dict[str, Any]:
     """``budget_allocations_usd`` + ``llm.weekly_credit_usd`` + ``llm.quota_window`` (line scan).
 
-    Weekly since 2026-09-12: the governor's period is the subscription's Thu-14:00-IST quota window,
-    so the allocations below are ONE WEEK's dollars and only a one-week numerator may be divided by
-    them. The anchor is read from the same file the engine reads rather than hardcoded — an owner who
-    moves the reset must not leave this report measuring the previous boundary.
+    The allocations are ONE WEEK's dollars (the governor's Thu-14:00-IST quota window): only a one-week
+    numerator may be divided by them. The anchor is read from the file the engine reads, not hardcoded,
+    so a moved reset is followed.
     """
     path = REPO / "config" / "agents.yaml"
     allocations: dict[str, float] = {}
@@ -358,15 +350,13 @@ def load_budget_config() -> dict[str, Any]:
 def quota_window(at: datetime, weekday: str, hhmm: str) -> tuple[str, datetime, datetime]:
     """``(key, start, end)`` of the subscription quota window containing ``at`` (aware IST).
 
-    Mirrors ``engine.intelligence.governor._window_key`` / ``_window_bounds`` — reimplemented rather
-    than imported because this tool stays stdlib-only (module docstring). Wall-clock and calendar-
-    blind: the subscription refills at the anchor whether or not the NSE is open. Keep the two in
-    step; the governor's unit suite is the authority on the boundary semantics.
+    Mirrors ``engine.intelligence.governor._window_key`` / ``_window_bounds``, reimplemented because
+    this tool stays stdlib-only (module docstring). Wall-clock and calendar-blind; keep the two in
+    step (the governor's unit suite is the authority on boundary semantics).
     """
     reset = parse_hhmm(hhmm) or time(14, 0)
     idx = WEEKDAYS[weekday]
-    # Normalise first, exactly as the governor does: the key is an IST date, so a UTC-stamped caller
-    # would otherwise key the wrong week. A naive stamp is refused rather than read as system-local.
+    # Normalise to IST first, as the governor does (the key is an IST date); a naive stamp is refused.
     if at.tzinfo is None:
         raise ValueError("quota_window: `at` must be tz-aware (the quota window is IST)")
     at = at.astimezone(IST)
@@ -380,10 +370,8 @@ def quota_window(at: datetime, weekday: str, hhmm: str) -> tuple[str, datetime, 
 def criterion_budget(conn, at: datetime) -> dict[str, Any]:
     """budget: ledger spend per agent for the QUOTA WEEK containing ``at``, vs the weekly allocation.
 
-    Window-keyed since 2026-09-12, not month-keyed: ``budget_allocations_usd`` became one week's
-    dollars with the governor, and dividing a month-to-date numerator by a one-week denominator
-    printed ~4x every percentage in this table — the exact false 'over allocation' signal the weekly
-    re-scope exists to retire. The range is the same half-open ``at`` compare the governor runs
+    Window-keyed, not month-keyed: the allocations are one week's dollars, so a month-to-date numerator
+    would inflate every percentage ~4x. The range is the governor's half-open ``at`` compare
     (``budget_ledger.at`` is IST ISO-8601 with a fixed +05:30 offset, so it sorts lexicographically).
     """
     cfg = load_budget_config()
@@ -617,9 +605,8 @@ def main(argv: list[str] | None = None) -> int:
     d_from, d_to = date.fromisoformat(args.date_from), date.fromisoformat(args.date_to)
     if d_to < d_from:
         ap.error("--to is before --from")
-    # The budget block reports ONE quota window, keyed off an instant, not a date range: the
-    # live window for a --to of today or later, otherwise the window that contained that evening. An
-    # explicit --window is taken at its own 14:00 reset, which is inside the window it names.
+    # The budget block reports ONE quota window keyed off an instant: the live window for a --to of
+    # today or later, else the window containing that evening. --window is taken at its own reset time.
     budget_at = min(datetime.now(IST), datetime.combine(d_to, time(23, 59, 59), tzinfo=IST))
     if args.window:
         anchor = load_budget_config()

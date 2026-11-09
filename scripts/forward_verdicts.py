@@ -20,8 +20,7 @@ THE RULE (pre-registered; do not re-derive it after seeing the numbers)
   commit sets `forward_verdicts.KILL_POPULATION_UNTIL["brk20"]` to the last session the filter ran. Resuming it
   needs an owner-approved re-registration with a new R.
 
-**Analyst-value verdict (registered 2026-10-29; re-registered by the owner on 2026-11-09, when the analyst prompts
-lost their retired-plan citations, so its R is 2026-11-09).**
+**Analyst-value verdict (registered 2026-10-29; re-registered by the owner on 2026-11-09, so its R is 2026-11-09).**
 - **Population:** `prescreen_day_slots` rows of brk20, hi52 and ins with `d >= R` and a recorded first
   `analyst_decision`, whose call carries the strategy's registered key `(prompt_version, model)`. The registered
   key is the one on that strategy's first decision on or after R. Rows with another key are excluded and counted.

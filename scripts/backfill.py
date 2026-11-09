@@ -72,11 +72,9 @@ from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 _log = get_logger("scripts.backfill")
 
-# INDEX_SYMBOL / VIX_SYMBOL are canonically DEFINED in engine.ops.main and nowhere
-# else; importing that module would boot the whole composition graph, so the two names are duplicated
-# here (kept in sync with engine.ops.main.INDEX_SYMBOL / VIX_SYMBOL). They are the bars_1d symbols the
-# regime features read (the risk gate's regime_data_ready): the seed's DAILY set includes them, the MINUTE set
-# does not — matching the engine's own backfill_hook / daily_bars job.
+# Duplicated from engine.ops.main.INDEX_SYMBOL / VIX_SYMBOL (importing it would boot the composition
+# graph); keep in sync. The bars_1d symbols the regime features read: the DAILY set includes them, the
+# MINUTE set does not, as in the engine's own backfill_hook / daily_bars job.
 INDEX_SYMBOL = "NIFTY 50"
 VIX_SYMBOL = "INDIA VIX"
 
@@ -154,10 +152,8 @@ def _dedup(items: list[str]) -> list[str]:
 def _resolve_universe(settings, symbols_arg: str | None) -> tuple[list[str], str]:
     """Resolve the working universe + a human-readable source label (shared by seed/run/status).
 
-    Ladder: ``--symbols`` override → runtime cache ``<data>/universe/index_cached.csv`` (the exact
-    name ``UniverseBuilder`` writes) → committed seed ``universe.index_seed_path``. Both were
-    renamed off ``nifty200`` by owner decision (2026-09-04), when the eligible index became config (NIFTY 500).
-    Returns ``([], "")`` if nothing resolves so the caller can print an actionable error and exit 2.
+    Ladder: ``--symbols`` override → runtime cache ``<data>/universe/index_cached.csv`` (the name
+    ``UniverseBuilder`` writes) → committed seed ``universe.index_seed_path``. Returns ``([], "")`` if nothing resolves so the caller can print an actionable error and exit 2.
     """
     if symbols_arg:
         syms = _dedup([s.strip().upper() for s in symbols_arg.split(",") if s.strip()])
