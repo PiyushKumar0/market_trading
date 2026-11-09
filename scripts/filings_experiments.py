@@ -1,12 +1,11 @@
 #!/usr/bin/env python
-"""Pre-registered filings x price-baseline experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness) (2026-07-17).
+"""Pre-registered filings x price-baseline experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness).
 
-Single-pass, honest, offline analysis tools. Each experiment was PRE-REGISTERED (hypothesis +
-discriminator pinned before it ran) so there is no in-sample tuning here: the ORB
-config is the ENVELOPE DEFAULTS (deliberately NOT the sweep-best, to avoid the
-in-sample trap), the RSI2 config is the already-promoted champion, and the insider leg is
-event_study.py's verbatim. The only outputs are gross AND net stats per cohort/slice, reported as
-found with honest n=0 sections when a cohort/slice is empty.
+Single-pass offline analysis tools. Each experiment was PRE-REGISTERED (hypothesis + discriminator
+pinned before it ran), so there is no in-sample tuning: the ORB config is the ENVELOPE DEFAULTS
+(deliberately NOT the sweep-best), the RSI2 config is the already-promoted champion, and the insider
+leg is event_study.py's verbatim. Outputs are gross AND net stats per cohort/slice, with honest n=0
+sections when a cohort/slice is empty.
 
     uv run python scripts/filings_experiments.py <catalyst_orb|rsi2_catalyst_veto|insider_robustness> --from YYYY-MM-DD --to YYYY-MM-DD \
         --symbols RELIANCE,TCS[,...]  [--reports-dir data/reports]
@@ -84,8 +83,7 @@ _log = get_logger("scripts.filings_experiments")
 CATALYST_ORB_PARAMS: dict[str, float] = {
     "orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5,
 }
-#: rsi2_catalyst_veto RSI2 signals: the already-PROMOTED champion config (2026-07-16: 102 trades / 70% win /
-#: +0.58% net per trade) -- a pre-registered fixed config, not re-swept here.
+#: rsi2_catalyst_veto RSI2 signals: the already-PROMOTED champion config -- fixed, not re-swept here.
 RSI2_CATALYST_VETO_PARAMS: dict[str, float] = {
     "rsi_entry": 2.0, "rsi_exit": 65.0, "stop_pct": 6.0, "max_hold_days": 15.0,
 }
@@ -291,20 +289,17 @@ def _year_sort_key(label: str) -> tuple[int, int]:
 # =========================================================================== vbt run + trade extraction
 def _run_portfolio(frames, sig, *, init_cash: float = 100_000.0):
     """ONE vbt Portfolio.from_signals producing the pure GROSS per-trade return in
-    ``pf.trades.records_readable['Return']`` (net is then gross - one CostModel round trip, applied
-    uniformly; see the module report). The per-side fee still feeds the ORB cost-gate floor via the
-    signal builder -- only the vbt fee drag is zeroed here.
+    ``pf.trades.records_readable['Return']`` (net is gross - one CostModel round trip, applied
+    outside). The per-side fee still feeds the ORB cost-gate floor via the signal builder; only the
+    vbt fee drag is zeroed here.
 
-    NOT the same mechanics as ``sweep.SweepRunner._portfolio`` -- it is a GROSS harness and differs
-    deliberately, so do not re-derive one from the other. What it does NOT do: no ``price=`` open
-    frame and no signal shift (fills land on the signal bar's own CLOSE, not the next bar's open); no ``slippage``; no ``stop_entry_price='fillprice'`` (stops anchor at vectorbt's default
-    close, not at the fill); no ``stop_exit_price='stopmarket'`` (a stop exit is priced at the level
-    with slippage zeroed -- immaterial at slippage 0.0); and ``high``/``low`` still go in for
-    INTRADAY frames only while ``open`` is never passed at all, so vectorbt substitutes the close
-    for whichever OHLC legs are missing and a daily stop here is both decided and filled on the
-    close (the sweep-mechanics fix (2026-09-13) corrected that in the sweep, deliberately not here -- this harness measures a
-    GROSS event-study return, and its numbers are never quoted as sweep-comparable). Costs are
-    applied OUTSIDE this function by construction."""
+    NOT the same mechanics as ``sweep.SweepRunner._portfolio`` - do not re-derive one from the other,
+    and never quote these numbers as sweep-comparable. Differences: no ``price=`` open frame and no
+    signal shift (fills land on the signal bar's own CLOSE); no ``slippage``; no
+    ``stop_entry_price='fillprice'`` (stops anchor at vectorbt's default close); no
+    ``stop_exit_price='stopmarket'``; ``high``/``low`` go in for INTRADAY frames only and ``open`` is
+    never passed, so vectorbt substitutes the close for missing OHLC legs and a daily stop is both
+    decided and filled on the close."""
     import vectorbt as vbt  # function-level: engine._preload native import-order guard
 
     kwargs: dict = dict(

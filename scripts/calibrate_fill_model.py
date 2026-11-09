@@ -1,83 +1,58 @@
 #!/usr/bin/env python
 """Fill-model calibration (2026-09-10).
 
-WHY this script exists: the PaperBroker's fill model is `slippage = half-spread + k * sigma_1m`
-Both terms have to come from THIS account's recorded tape, not from a literature
-constant - a wrong k is the difference between a paper expectancy the owner can act on and one that
-is quietly optimistic, which is exactly what the paper-to-live gate and the first live-ramp gate's fill-deviation
-check measure. The script produces `config/fill_model.yaml` (a NON-protected config: platform-written,
-owner informed) plus the evidence report that justifies every number in it.
+The PaperBroker's fill model is `slippage = half-spread + k * sigma_1m`; both terms come from this
+account's recorded tape, not a literature constant. The script produces `config/fill_model.yaml`
+(non-protected config: platform-written, owner informed) plus the evidence report behind every number.
 
-WHY the numbers are shaped the way they are:
+Design rules:
 
-* **k per time-of-day bucket, never one global k.** The recorded corpus is window-biased - the engine
-  runs mostly in the morning window, so a single blended k understates the close /
-  square-off period, which is precisely where a forced MIS exit pays. Buckets are pinned: open 09:15-10:00, mid 10:00-14:30, close 14:30-15:30.
-* **k = the p75 of the normalised samples, not the mean.** A mean fill model is right half the time;
-  a paper broker that is right half the time flatters the ledger. p75 is the conservative choice, and p50/p90 are reported alongside so the shape is visible rather than implied.
-* **A CALIBRATION MAY ONLY TIGHTEN THE MODEL** (manager decision, 2026-09-10 round 3). The shipped
-  k for a bucket is `max(fitted p75, the consumer's own default for that bucket)` -
-  `CONSUMER_DEFAULT_K`, open 1.0 / mid 0.5 / close 1.0, mirrored from `engine.paper.fill_model`.
-  WHY there is a floor at all: the residual `max(|fill - mid| - half_spread, 0)` is *zero-inflated*
-  (over 700 ms a liquid name usually has not left its own quote, so a majority of samples are
-  exactly 0), measured over a corpus that is window-biased (the engine is not up for the whole
-  session) and survivorship-tainted (only names the universe builder admitted). Evidence
-  of that shape cannot justify charging the paper broker LESS slippage than it charges with no
-  calibration at all - that is exactly the silent optimism the paper-to-live gate reads. So a fit
-  above the default replaces it; a fit below it does not.
-* **The fitted quantiles ship ANYWAY, next to k.** Every bucket carries `p50`, `p75`, `p90`, `n` and
-  a `basis` in `{fitted, floored_to_default, thin, degenerate}` in the YAML itself, so the config is
-  its own evidence: the live-AUTO live-vs-paper deviation tracker (first live-ramp gate) recalibrates
-  against these numbers, and a reader can always see what the tape said and why the shipped k
-  differs from it. The finding is surfaced, not massaged.
-* **A thin bucket is not fitted at all.** Under `THIN_BUCKET_MIN_SAMPLES` (500) a p75 is noise, so
-  the bucket ships the consumer default with `basis: thin`.
-* **A DEGENERATE bucket is not fitted either** (2026-09-10 finding). When the fitted p50 is <= 0 the
-  estimator has collapsed onto the zero-inflated mass and its quantiles measure the estimator, not
-  the tape; the bucket ships the consumer default with `basis: degenerate`, and the report says
-  outright that the estimator - a higher quantile, a signed adverse-only residual, a longer horizon -
-  is what the owner may want to re-pin.
-* **half-spread is never 0, and is published as a PERCENT of mid.** L1 is absent on backfilled /
-  WARMING spans. A zero half-spread makes the model non-conservative on restart days, so
-  a non-L1 tick is charged the symbol-day's own median half-spread, else the day's corpus median,
-  else 0 - and 0 only ever INFLATES the residual attributed to k, so the last rung still errs
-  conservative. `symbols[].median_half_spread_pct` is a PERCENT (2026-09-10 round-3 fix: the field
-  name carries the unit and the consumer `engine.paper.fill_model.half_spread()` divides it by 100;
-  round 2 emitted a fraction, which would have charged 1/100th of the measured spread on every
-  non-L1 tick). `tests/unit/test_fill_model.py` loads the shipped YAML through the real consumer
-  loader so the two programs can never drift on this again.
-* **The per-symbol median is NOT clamped up to the tick fallback** (manager decision, 2026-09-10
-  round 4). `half_spread_fallback_ticks x tick_size` is what a symbol gets when nothing was ever
-  measured on it - an ignorance default, not a physical limit - and on this account's corpus a large
-  minority of names quote ONE tick wide, so their measured median legitimately lands under it. The
-  consumer floors the calibrated branch at HALF A TICK instead (the tightest a real book can quote).
-  The report states the count both ways ("Half-spread vs fallback"), computed from the data, so the
-  size of that minority is visible rather than assumed.
-* **A run that cannot responsibly REPLACE the previous file says so** (round 4). Two loud stderr
-  warnings, never a hard stop - a bounded run is legitimate and the operator asked for it, but it
-  must not overwrite the archive's calibration silently: (a) fewer than half the candidate sessions
-  were read; (b) the new `symbols` table is smaller than the one being replaced, i.e. measured
-  half-spreads are about to disappear and those names will fall back to the tick multiple.
+* **k per time-of-day bucket, never one global k.** The corpus is window-biased (the engine runs
+  mostly in the morning), so a blended k understates the close / square-off period. Buckets are
+  pinned: open 09:15-10:00, mid 10:00-14:30, close 14:30-15:30.
+* **k = the p75 of the normalised samples, not the mean** - a mean fill model flatters the ledger.
+  p50/p90 are reported alongside.
+* **A calibration may only tighten the model.** The shipped k is `max(fitted p75, the consumer's
+  default for that bucket)` (`CONSUMER_DEFAULT_K`, mirrored from `engine.paper.fill_model`). The
+  residual `max(|fill - mid| - half_spread, 0)` is zero-inflated (over 700 ms a liquid name usually
+  has not left its quote), and the corpus is window-biased and survivorship-tainted (only names the
+  universe builder admitted); such evidence cannot justify charging LESS slippage than the
+  uncalibrated model - that would be silent optimism in what the paper-to-live gate reads.
+* **The fitted quantiles ship anyway**: each bucket carries `p50`, `p75`, `p90`, `n` and a `basis`
+  in `{fitted, floored_to_default, thin, degenerate}`, so the config is its own evidence and the
+  live-vs-paper fill-deviation tracker can recalibrate against it.
+* **A thin bucket is not fitted**: under `THIN_BUCKET_MIN_SAMPLES` (500) a p75 is noise; it ships
+  the consumer default with `basis: thin`.
+* **A degenerate bucket is not fitted**: a fitted p50 <= 0 means the estimator collapsed onto the
+  zero-inflated mass; it ships the default with `basis: degenerate` and the report says the
+  estimator (higher quantile, signed adverse-only residual, longer horizon) may need re-pinning.
+* **half-spread is never 0 and is published as a PERCENT of mid.** L1 is absent on backfilled /
+  WARMING spans, so a non-L1 tick is charged the symbol-day's own median half-spread, else the
+  day's corpus median, else 0 (0 only inflates the residual attributed to k, so it errs
+  conservative). `symbols[].median_half_spread_pct` is a percent; the consumer
+  `engine.paper.fill_model.half_spread()` divides by 100. `tests/unit/test_fill_model.py` loads the
+  shipped YAML through the real consumer loader so the two cannot drift.
+* **The per-symbol median is NOT clamped up to the tick fallback.** `half_spread_fallback_ticks x
+  tick_size` is an ignorance default for unmeasured symbols, not a physical limit, and many names
+  quote one tick wide. The consumer floors the calibrated branch at HALF A TICK instead. The report
+  counts symbols under the fallback both ways ("Half-spread vs fallback").
+* **A run that cannot responsibly replace the previous file says so**: two loud stderr warnings,
+  never a hard stop - (a) fewer than half the candidate sessions were read; (b) the new `symbols`
+  table is smaller than the one being replaced (measured half-spreads would disappear).
 
-WHY it reads Parquet directly: `market.duckdb` is held by the live engine. This script opens its own
-in-memory DuckDB over `data/parquet/ticks/date=*/symbol=*/*.parquet`, so it can run beside a trading session. The archive is compacted
-concurrently, so a day whose files vanish mid-scan is retried and, if it still fails, recorded in
-`days_skipped` rather than silently dropped.
+It reads Parquet directly: `market.duckdb` is held by the live engine, so the script opens its own
+in-memory DuckDB over `data/parquet/ticks/date=*/symbol=*/*.parquet` and can run beside a session.
+The archive is compacted concurrently, so a day whose files vanish mid-scan is retried and, if it
+still fails, recorded in `days_skipped` rather than silently dropped.
 
-WHY the run is BOUNDED, and why that is stated rather than hidden (2026-09-10): the archive is 27
-sessions x up to ~300 symbols, and an UN-compacted session holds thousands of tiny fragments per
-symbol - a single symbol-day of 2026-09-09 measured 17-33 s to read, so a whole-corpus scan is hours
-of disk the live session needs. Three controls bound a run: `--days N` (most recent N sessions),
-`--symbols-per-day N` (a deterministic every-k-th stride over the SORTED symbol list, never a head
-slice - a head slice calibrates the alphabet), and `--compacted-only` (skip any session still held
-as loose fragments). Whatever is skipped is named in `days_skipped`, and the report carries a
-per-day COVERAGE table - symbols available vs used, ticks, compacted yes/no, seconds - so the owner
-reads what was actually measured instead of assuming the whole corpus.
+The run is bounded because an un-compacted session holds thousands of tiny fragments per symbol
+(17-33 s to read one symbol-day). Controls: `--days N` (most recent N sessions), `--symbols-per-day N`
+(deterministic every-k-th stride over the SORTED symbol list, never a head slice, which would
+calibrate the alphabet), `--compacted-only`. Whatever is skipped is named in `days_skipped`, and the
+report carries a per-day COVERAGE table so the owner reads what was actually measured.
 
-WHY it is vectorised: the corpus is ~10^7 ticks across ~2.5M small Parquet files. Every step is
-DuckDB SQL (minute resample, sigma, ASOF forward-fill lookup, bucketing) and the only Python that
-touches per-tick data is a numpy percentile over the sampled residuals - a per-row Python loop here
-re-creates the measured pathologies the hot-path invariants pin.
+Every step is DuckDB SQL; the only Python touching per-tick data is a numpy percentile over the
+sampled residuals - a per-row Python loop here is a measured pathology.
 
 Method:
 
@@ -99,11 +74,9 @@ Standalone / blocking offline research tool - it places no orders, imports nothi
 `engine.oms` / `engine.risk`, and is not reachable from the RECOMMEND pipeline.
 
 Exit codes: 0 = calibrated (outputs written); 2 = no readable tick partitions under
-`--parquet-root`; 3 = every candidate session was skipped, so NOTHING was written. WHY 3 exists
-(2026-09-10 round-3 fix): a run that read zero sessions used to exit 0 and write a YAML whose
-buckets were the untouched defaults and whose `symbols` table was EMPTY - silently deleting the
-per-symbol half-spread fallbacks a previous good calibration had established, and calling it
-success. A run with no evidence writes nothing and prints `days_skipped` with reasons.
+`--parquet-root`; 3 = every candidate session was skipped, so NOTHING was written (a run with no
+evidence must not replace the previous per-symbol half-spreads with an empty table); `days_skipped`
+is printed with reasons.
 """
 
 from __future__ import annotations
@@ -138,11 +111,9 @@ LATENCY_MS = 700                    # plan 3.2.9 simulated order latency
 HALF_SPREAD_FALLBACK_TICKS = 2      # plan 3.2.9 "tick_size x multiple" fallback, never 0
 THIN_BUCKET_MIN_SAMPLES = 500       # under this a p75 is noise -> consumer default instead
 K_QUANTILE = 75.0                   # conservative, not the mean
-#: The consumer's OWN defaults (`engine.paper.fill_model.DEFAULT_K_EDGE / DEFAULT_K_MID`), mirrored
-#: here deliberately rather than imported: this script must not import `engine.paper` (it is an
-#: offline research tool, and the import discipline runs the other way), so the mirror is the
-#: contract. These are the FLOOR - a calibration may only tighten the model, never loosen it. Keep
-#: in step with `engine.paper.fill_model` if the defaults are ever re-pinned.
+#: The consumer's own defaults (`engine.paper.fill_model.DEFAULT_K_EDGE / DEFAULT_K_MID`), mirrored
+#: rather than imported: this script must not import `engine.paper`. They are the FLOOR on k; keep
+#: in step with `engine.paper.fill_model`.
 CONSUMER_DEFAULT_K: dict[str, float] = {"open": 1.0, "mid": 0.5, "close": 1.0}
 SESSION_START = "09:15:00"
 SESSION_END = "15:30:00"
@@ -154,22 +125,17 @@ BUCKETS: tuple[tuple[str, str, str], ...] = (
 )
 DEFAULT_MAX_SAMPLES = 1_000_000
 #: Quantum of the per-symbol half-spread frequency table, as a FRACTION of mid. Half-spreads are
-#: quantised by tick size, so 1e-6 of mid (a hundredth of a paisa at Rs 1,000, a fifth of a tick at
-#: Rs 10,000) loses nothing real and turns the per-symbol median into an exact frequency-table
-#: computation instead of a reservoir. Finer would blow the Counter cardinality up by the number of
-#: distinct traded prices per name, across 200 names x 22 sessions.
+#: tick-quantised, so 1e-6 of mid loses nothing real and makes the per-symbol median an exact
+#: frequency-table computation; finer blows up the Counter cardinality.
 HS_FRACTION_ROUND = 6
-#: Decimals kept on the published PERCENT (`median_half_spread_pct`). The value is a multiple of
-#: `10 ** -HS_FRACTION_ROUND * 100`, so 6 dp is lossless against the histogram above.
+#: Decimals kept on the published PERCENT (`median_half_spread_pct`); lossless against the histogram.
 HS_PCT_ROUND = 6
-#: Decimals kept on the per-symbol reference-price frequency table (report only, never shipped in
-#: the YAML). Rounded to the RUPEE on purpose: a 2 dp table's cardinality is every traded price of
-#: every name across the corpus, while the only question asked of it is whether a symbol's own
-#: half-spread lands over or under a 10-paisa fallback - a rupee is far finer than that needs.
+#: Decimals of the per-symbol reference-price frequency table (report only, never shipped). Rounded
+#: to the rupee: a finer table's cardinality is every traded price, and the only question asked is
+#: whether a half-spread lands over or under a 10-paisa fallback.
 PRICE_ROUND = 0
-#: Reference price and tick the report's "half-spread vs fallback" comparison is stated at. Rs 1,000
-#: at the standard NSE Rs 0.05 equity tick is the same reference `tests/unit/test_fill_model.py`
-#: uses, so the two documents quote one number.
+#: Reference price and tick of the report's "half-spread vs fallback" comparison; the same
+#: reference `tests/unit/test_fill_model.py` uses.
 FALLBACK_REFERENCE_LTP = 1000.0
 FALLBACK_REFERENCE_TICK = 0.05
 _DAY_RETRIES = 3                    # the live engine compacts the archive under us
@@ -181,17 +147,15 @@ EXIT_NO_SESSIONS = 3
 def _tod(column: str) -> str:
     """SQL for the IST time-of-day of a TIMESTAMPTZ column.
 
-    WHY the double cast: DuckDB refuses TIMESTAMPTZ -> TIME directly. Casting to TIMESTAMP first
-    renders the instant in the SESSION time zone, which `calibrate()` pins to Asia/Kolkata - so the
-    session filter and the bucket edges are IST wall-clock, as the contract states.
+    The double cast is needed: DuckDB refuses TIMESTAMPTZ -> TIME directly; via TIMESTAMP the instant
+    renders in the session time zone, which `calibrate()` pins to Asia/Kolkata.
     """
     return f"CAST(CAST({column} AS TIMESTAMP) AS TIME)"
 
 
 # --- the YAML contract, as a strict model --------------------------------------------------------
-# The consumer (engine.paper) implements its OWN loader against this same contract; this
-# model exists so the producer cannot emit a shape the contract does not allow. extra="forbid"
-# everywhere: a typo'd key must fail loudly here rather than be silently ignored downstream.
+# The consumer (engine.paper) has its own loader for this contract; this model stops the producer
+# emitting a shape the contract disallows. extra="forbid": a typo'd key must fail loudly.
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -205,16 +169,15 @@ class SourceModel(_Strict):
     ticks: int
 
 
-#: How the shipped k was arrived at. `fitted` = the p75 cleared the consumer default and replaced
-#: it; `floored_to_default` = a real fit that came out BELOW the default, so the default ships;
-#: `thin` / `degenerate` = the fit is not a measurement at all (too few samples / p50 collapsed onto
-#: the zero-inflated mass), so the default ships and the quantiles are evidence only.
+#: How the shipped k was arrived at: `fitted` = p75 cleared the consumer default; `floored_to_default`
+#: = a real fit below the default, so the default ships; `thin` / `degenerate` = no usable fit (too
+#: few samples / p50 collapsed onto the zero mass), default ships, quantiles are evidence only.
 Basis = Literal["fitted", "floored_to_default", "thin", "degenerate"]
 
 
 class BucketModel(_Strict):
     """One time-of-day bucket: the shipped k, the `basis` that produced it, and the fitted
-    quantiles kept verbatim as the live-AUTO (first live-ramp gate) recalibration evidence."""
+    quantiles kept verbatim as recalibration evidence."""
 
     start: str
     end: str
@@ -279,11 +242,8 @@ class _Accumulator:
     def merge(self, other: _Accumulator) -> None:
         """Fold a completed session's accumulator into the run's.
 
-        WHY a session is accumulated aside and merged rather than written straight into the run's
-        accumulator (2026-09-10 round 3): `_process_day` mutates as it goes, and now that a DuckDB
-        failure anywhere in it is caught and RETRIED (a fragment can be torn mid-write by the live
-        engine's compaction), a half-processed day written in place would be double-counted by the
-        retry. Merging only on success makes a failed attempt leave no trace.
+        A session is accumulated aside and merged only on success: `_process_day` mutates as it
+        goes and a DuckDB failure is retried, so writing in place would double-count a half-processed day.
         """
         for symbol, hist in other.spread_hist.items():
             self.spread_hist[symbol].update(hist)
@@ -341,17 +301,10 @@ def discover_symbols(parquet_root: Path, day: date) -> list[str]:
 def select_symbols(symbols: list[str], limit: int | None) -> list[str]:
     """Bound a session to EXACTLY `limit` symbols, spread over the SORTED list.
 
-    WHY a spread and not a head slice: `symbols[:limit]` would calibrate whatever the alphabet puts
-    first (every 'A...' name), which is a systematically different liquidity mix from the corpus.
-
-    WHY index-rounding and not `symbols[::ceil(M/limit)]` (2026-09-10 round-3 fix): a fixed integer
-    stride under-delivers whenever `ceil(M/limit)` overshoots - M=5, limit=4 yields 3 symbols;
-    M=9, limit=6 yields 5. The bound then quietly reads less tape than the operator asked for while
-    the coverage table reports the request as if it had been met. `round(i * (M-1) / (limit-1))` for
-    i in [0, limit) lands exactly `limit` indices (consecutive spacing is >= 1 whenever
-    limit <= M, so rounding stays strictly increasing), keeps both endpoints of the universe, and is
-    deterministic - re-running the same bounded command reproduces the same numbers. The dedup is
-    belt-and-braces so the postcondition holds even if that spacing argument is ever broken.
+    A spread, not a head slice (which would calibrate the alphabet's first names). Index-rounding,
+    not a fixed integer stride `symbols[::ceil(M/limit)]`, which under-delivers (M=5, limit=4 gives
+    3). `round(i * (M-1) / (limit-1))` lands exactly `limit` strictly increasing indices (spacing
+    >= 1 when limit <= M), keeps both endpoints, and is deterministic. The dedup is belt-and-braces.
     """
     if limit is None or limit <= 0 or len(symbols) <= limit:
         return list(symbols)
@@ -365,9 +318,8 @@ def select_symbols(symbols: list[str], limit: int | None) -> list[str]:
 def _is_compacted(parquet_root: Path, day: date, symbols: list[str]) -> bool:
     """True when every selected symbol-day is a single `compact-ticks.parquet`.
 
-    WHY it early-exits at the second entry: an un-compacted symbol-day holds thousands of fragments
-    and merely COUNTING them costs real disk time beside a live session (measured 2026-09-10). One
-    entry is all the evidence the answer needs.
+    Early-exits at the second entry: counting thousands of fragments costs real disk time beside a
+    live session.
     """
     day_dir = _day_dir(parquet_root, day)
     for symbol in symbols:
@@ -388,9 +340,8 @@ def _is_compacted(parquet_root: Path, day: date, symbols: list[str]) -> bool:
 def _day_globs(parquet_root: Path, day: date, symbols: list[str] | None) -> list[str]:
     """Glob(s) for a session: the whole day when unbounded, else one per selected symbol.
 
-    Naming the selected symbol dirs (rather than globbing the day and filtering in SQL) is what
-    makes `--symbols-per-day` an I/O bound and not just a row filter - the files of the symbols we
-    skipped are never opened.
+    Naming the selected symbol dirs (not filtering in SQL) makes `--symbols-per-day` an I/O bound:
+    skipped symbols' files are never opened.
     """
     day_dir = _day_dir(parquet_root, day)
     if symbols is None:
@@ -405,9 +356,7 @@ def _load_day(
 ) -> int:
     """Materialise one session's in-session ticks into `day_ticks`; return the row count.
 
-    WHY materialise: every later step (minute resample, sigma, sampling, the ASOF fill lookup) reads
-    the same rows. Scanning the ~10^5 tiny Parquet files of a day once and reusing the table is the
-    difference between one file-open pass and five.
+    Materialised once because every later step reads the same rows (one file-open pass, not five).
     """
     con.execute(
         f"""
@@ -477,9 +426,7 @@ def _process_day(
     ).fetchall():
         acc.hour_hist[int(hour)] += int(count)
 
-    # (2) half-spread frequency table, per symbol - exact median across the whole corpus later.
-    # Accumulated as a PERCENT of mid, the unit the consumer reads (`median_half_spread_pct` / 100);
-    # the quantum is `HS_FRACTION_ROUND` decimals of the FRACTION, i.e. 1e-4 percent.
+    # (2) half-spread frequency table, per symbol (exact corpus median later), as a PERCENT of mid.
     for symbol, value, count in con.execute(
         f"""
         SELECT symbol,
@@ -490,17 +437,15 @@ def _process_day(
     ).fetchall():
         acc.spread_hist[symbol][float(value)] += int(count)
 
-    # Per-symbol price level, for the report's half-spread-vs-fallback comparison ONLY. A percent of
-    # mid says nothing about whether a name's real half-spread clears a fixed-rupee fallback until
-    # it is evaluated at the price the name actually trades at, so the price is accumulated too.
+    # Per-symbol price level, for the report's half-spread-vs-fallback comparison only (a percent
+    # of mid needs the traded price to be compared with a fixed-rupee fallback).
     for symbol, value, count in con.execute(
         f"SELECT symbol, round(ltp, {PRICE_ROUND}), count(*) FROM day_ticks GROUP BY 1, 2"
     ).fetchall():
         acc.price_hist[symbol][float(value)] += int(count)
 
-    # The deterministic non-L1 fallback ladder: this symbol-day's own median, else the day's corpus
-    # median. Both as a FRACTION of mid (not the published percent), applied at the decision tick's
-    # own mid to give a price-unit half-spread for the residual below.
+    # Non-L1 fallback ladder: the symbol-day's own median, else the day's median; both as a FRACTION
+    # of mid (not the published percent), applied at the decision tick's mid.
     con.execute(
         """
         CREATE OR REPLACE TEMP TABLE day_hs AS
@@ -511,8 +456,7 @@ def _process_day(
     day_median = con.execute(
         "SELECT median((ask - bid) / 2.0 / ((ask + bid) / 2.0)) FROM day_ticks WHERE bid IS NOT NULL"
     ).fetchone()[0]
-    # WHY 0.0 as the last rung: with no L1 reference anywhere, charging 0 spread leaves the WHOLE
-    # move attributed to k - it inflates k rather than flattering it.
+    # Last rung 0.0: charging 0 spread attributes the whole move to k, inflating rather than flattering it.
     day_median_sql = "0.0" if day_median is None else repr(float(day_median))
 
     # (3) sigma_1m per symbol-day, from the minute resample (last ltp per minute).
@@ -535,13 +479,9 @@ def _process_day(
         """
     )
 
-    # (4) sampled decision ticks. The stride keeps the WHOLE run under --max-samples without
-    # biasing any one symbol or hour: it is a per-symbol every-Nth, not a head/tail slice.
-    # WHY the stride is anchored at row 1 (`(rn - 1) % stride`) and not row `stride` (2026-09-10
-    # review): `rn % stride = 0` samples nothing at all from a symbol with fewer than `stride`
-    # ticks, and on this corpus that silently deletes the whole illiquid tail - precisely the names
-    # whose slippage the fill model most needs to charge for. Anchoring at row 1 guarantees every
-    # symbol present contributes at least one sample.
+    # (4) sampled decision ticks: a per-symbol every-Nth (keeps the run under --max-samples without
+    # biasing a symbol or hour). Anchored at row 1 (`(rn - 1) % stride`): `rn % stride = 0` samples
+    # nothing from a symbol with fewer than `stride` ticks, silently deleting the illiquid tail.
     stride = max(1, math.ceil(n_ticks / max(1, per_day_budget)))
     con.execute(
         f"""
@@ -565,11 +505,9 @@ def _process_day(
         """
     )
 
-    # One fill candidate per (symbol, instant). WHY: ASOF picks the closest matching ROW, and when
-    # several prints share an exchange_ts "closest" does not name one - the join would return an
-    # arbitrary print and the calibration would not reproduce. The representative is pinned to the
-    # HIGHEST print at that instant: an arbitrary-but-stated rule, chosen over "first row seen"
-    # because only a value rule is reproducible across scan orders.
+    # One fill candidate per (symbol, instant): ASOF over several prints at one exchange_ts would
+    # return an arbitrary row. The HIGHEST print is the representative - a value rule, reproducible
+    # across scan orders.
     con.execute(
         """
         CREATE OR REPLACE TEMP TABLE day_fills AS
@@ -691,18 +629,12 @@ def calibrate(
                     acc.merge(scratch)
                     break
                 except duckdb.Error as exc:
-                    # WHY: the live engine compacts this archive; a file listed by the glob can be
-                    # gone, or half-written, by the time it is opened. Re-glob and retry; give up
-                    # loudly on ONE DAY, not on the run, so the report shows exactly which session
-                    # is missing and the good sessions still calibrate.
-                    #
-                    # WHY `duckdb.Error` and not `duckdb.IOException` (2026-09-10 round-3 fix): a
-                    # fragment torn mid-write surfaces as InvalidInputException ("No magic bytes
-                    # found"), not IOException - so a single truncated file aborted the whole
-                    # calibration and took every already-read session down with it. The cost of the
-                    # wider catch is that a genuine SQL defect in this script also lands in
-                    # `days_skipped` rather than crashing; it lands there for EVERY day, with the
-                    # DuckDB message attached, which is loud enough to diagnose from the report.
+                    # The live engine compacts this archive: a globbed file can be gone or
+                    # half-written by the time it is opened. Re-glob and retry; give up on ONE
+                    # DAY (named in `days_skipped`), not the run.
+                    # `duckdb.Error`, not IOException: a torn fragment raises InvalidInputException
+                    # ("No magic bytes found"). A genuine SQL defect also lands in `days_skipped`,
+                    # for every day, with the DuckDB message - loud enough to diagnose.
                     if attempt == _DAY_RETRIES:
                         acc.days_skipped.append(
                             {"day": day.isoformat(), "reason": f"duckdb_error: {exc}"[:200]}
@@ -738,23 +670,13 @@ def _finalise(
             (float(np.percentile(z, 50)), float(np.percentile(z, K_QUANTILE)), float(np.percentile(z, 90)))
             if n else (0.0, 0.0, 0.0)
         )
-        # Rounding is a PUBLICATION step and nothing else (2026-09-10 round-4 fix): it happens after
-        # the classifier has read the real quantiles. Rounding first made a small-but-real fit -- a
-        # true p50 of 3e-5 -- present as 0.0 and get stamped `degenerate`, i.e. "the estimator
-        # collapsed, re-pin it". It had not collapsed; it had been rounded, and `degenerate` is a
-        # finding the report escalates to the owner, so a rounding artefact must never manufacture
-        # one. The shipped k is the default under either label, but the label is evidence.
+        # Rounding is publication only: the classifier reads the raw quantiles (a true p50 of 3e-5
+        # rounded first would be mislabelled `degenerate`, a finding escalated to the owner).
         p50, p75, p90 = round(raw_p50, 4), round(raw_p75, 4), round(raw_p90, 4)
         default = CONSUMER_DEFAULT_K[name]
-        # The k policy, in one place (manager decision 2026-09-10, module docstring for the WHY):
-        #   thin       - too few samples for a quantile to mean anything -> the consumer default
-        #   degenerate - p50 collapsed onto the zero-inflated mass, so the quantiles measure the
-        #                estimator, not the tape -> the consumer default
-        #   otherwise  - a real fit, but a calibration may only TIGHTEN: max(fit, default)
-        # In every branch the fitted quantiles ship alongside k as the first live-ramp gate's evidence.
-        # The floor comparison is made against the ROUNDED p75 deliberately, because that is the
-        # value that would actually ship: comparing the raw one could stamp a bucket `fitted` and
-        # then publish a k identical to the default it supposedly cleared.
+        # k policy (module docstring for the why): thin / degenerate -> the consumer default;
+        # otherwise max(fit, default). The floor compares the ROUNDED p75, the value that would
+        # ship, so a `fitted` bucket never publishes a k equal to the default it supposedly cleared.
         if n < THIN_BUCKET_MIN_SAMPLES or not math.isfinite(raw_p75):
             basis, k = "thin", default
         elif raw_p50 <= 0.0:
@@ -781,12 +703,9 @@ def _finalise(
             n_ticks=int(sum(hist.values())),
         )
 
-    # How the measured half-spreads compare with the model's IGNORANCE default (round 4). The
-    # fallback `half_spread_fallback_ticks x tick_size` is what a symbol gets when nothing was ever
-    # measured on it; the honest question the report has to answer is how many measured symbols come
-    # in under it. Stated twice, because the two answers differ a lot: at one reference price (which
-    # compares the SPREADS) and at each symbol's own corpus-median price (which is what the paper
-    # broker will actually resolve). Both counts are computed here, never written by hand.
+    # How many measured symbols come in under the ignorance fallback (`half_spread_fallback_ticks x
+    # tick_size`), counted twice: at one reference price (compares the SPREADS) and at each symbol's
+    # own median price (what the paper broker actually resolves).
     fallback_price = HALF_SPREAD_FALLBACK_TICKS * FALLBACK_REFERENCE_TICK
     median_price = {
         symbol: _weighted_median(acc.price_hist[symbol])
@@ -799,8 +718,7 @@ def _finalise(
     )
     below_real = sum(
         1 for symbol, cell in symbols.items()
-        # A symbol with no price level (impossible on a real corpus, but the report must not crash
-        # on one) is measured at the reference instead, so it is counted rather than dropped.
+        # A symbol with no price level is measured at the reference, counted rather than dropped.
         if median_price.get(symbol, FALLBACK_REFERENCE_LTP) * cell.median_half_spread_pct / 100.0
         < fallback_price
     )
@@ -844,9 +762,8 @@ def _finalise(
         "days": list(acc.days),
         "days_skipped": list(acc.days_skipped),
         "coverage": list(acc.coverage),
-        # How many sessions this run was POINTED AT after --days/exclude, i.e. the denominator the
-        # publish-time warning judges "did this run read enough of the corpus to replace the file?"
-        # against. Distinct from `days_requested` (the flag) and from len(days) (what was read).
+        # Sessions this run was pointed at after --days/exclude: the denominator of the publish-time
+        # "read enough to replace the file?" warning. Not `days_requested` (the flag) nor len(days).
         "days_candidate": len(acc.days) if days_candidate is None else days_candidate,
         "days_requested": days_requested,
         "symbols_per_day": symbols_per_day,
@@ -887,7 +804,7 @@ def _caveats(
     symbols_per_day: int | None = None,
     compacted_only: bool = False,
 ) -> list[str]:
-    """The honest caveat block. These are the three ways this calibration can be wrong."""
+    """The caveat block: the ways this calibration can be wrong."""
     if acc.hour_hist:
         top = sorted(acc.hour_hist.items(), key=lambda kv: -kv[1])[:3]
         total = sum(acc.hour_hist.values()) or 1
@@ -918,8 +835,7 @@ def _caveats(
             + (f"; {not_compacted} further session(s) were skipped as not_compacted "
                "(--compacted-only: still held as loose fragments, too slow to read beside a live "
                "session)" if not_compacted else "")
-            # Prose, not `repr(list[dict])` (round-4 fix): this sentence is read by the owner before
-            # any number below it is trusted, so it must not contain a Python literal.
+            # Prose, not a repr: the owner reads this before trusting any number.
             + (f"; sessions skipped: {_skipped_text(acc.days_skipped)}" if acc.days_skipped else "")
             + ". The per-day Coverage table states exactly what was read. Numbers below describe "
             "THAT slice; widen the bounds and re-run when the archive is fully compacted."
@@ -1161,9 +1077,8 @@ def render_report_md(calibration: Calibration) -> str:
 
 
 def _existing_symbol_count(path: Path | str) -> int | None:
-    """How many symbols the file about to be replaced carries, or None when there is nothing to
-    compare against - a first run, or a file this script cannot parse. Neither is worth failing on:
-    this is a warning input, not a precondition."""
+    """Symbols in the file about to be replaced; None for a first run or an unparseable file
+    (a warning input, not a precondition)."""
     try:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError):
@@ -1176,14 +1091,10 @@ def _existing_symbol_count(path: Path | str) -> int | None:
 def _publish_warnings(report: dict[str, Any], out_path: Path | str) -> list[str]:
     """The two ways a run can be a bad REPLACEMENT for the file it is about to overwrite.
 
-    WHY warnings and not a hard stop (manager decision, 2026-09-10 round 4): a deliberately bounded
-    run (`--days`, `--compacted-only`) is a legitimate calibration and the operator asked for it -
-    refusing to write would make the bounding flags useless on a trading day. What is unacceptable
-    is doing it SILENTLY. Both cases below end with the previous evidence gone: a thin run replaces
-    the archive's k with one slice's k, and a shrunken symbols table drops measured per-symbol
-    half-spreads, so every dropped name falls back to `half_spread_fallback_ticks x tick_size` from
-    the next paper session on - a loosening of the model that nothing in the output would otherwise
-    announce. The exit code stays 0; the operator gets told.
+    Warnings, not a hard stop: a deliberately bounded run is legitimate and refusing would make the
+    bounding flags useless on a trading day; doing it silently is what is unacceptable (a thin run
+    replaces the archive's k, and dropped symbols fall back to `half_spread_fallback_ticks x
+    tick_size`, loosening the model). The exit code stays 0.
     """
     warnings: list[str] = []
     read = len(report["days"])
@@ -1244,10 +1155,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_NO_PARTITIONS
 
     if not calibration.report["days"]:
-        # WHY nothing is written (2026-09-10 round-3 fix): with every candidate session skipped the
-        # model would be all-defaults with an EMPTY `symbols` table - so writing it would silently
-        # delete the per-symbol half-spread fallbacks the previous good calibration established,
-        # while exiting 0 and reporting success. A run with no evidence produces no artefact.
+        # Nothing is written: an all-defaults model with an EMPTY `symbols` table would silently
+        # delete the previous calibration's per-symbol half-spreads.
         print(
             f"ERROR: no session was read - nothing written to {args.out} "
             f"(the previous calibration, if any, is left intact).",

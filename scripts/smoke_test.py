@@ -1,43 +1,32 @@
 #!/usr/bin/env python
 """Install smoke test.
 
-A CI-style runnable script that, in ONE venv on the pinned interpreter, imports and
-minimally exercises every heavy third-party dependency the platform relies on, and
-reports PASS/FAIL per item with a final summary and a nonzero exit on any failure.
-
-This is the install-tier gate ("install smoke test green
-on pinned Python"). It is a *script*, so it uses print() (engine modules must not — they
-use engine.core.log). Each heavy third-party import runs in its OWN subprocess so that even a
-NATIVE crash — a C-level segfault (e.g. an OpenMP runtime conflict), which NO Python try/except
-can catch — is reported as that check's FAIL instead of hard-killing the run and masking every
-check after it. A try/except per check additionally accumulates ordinary failures so one broken
-dep does not mask the rest.
+The install-tier gate: in ONE venv on the pinned interpreter, imports and minimally exercises every
+heavy third-party dependency, reports PASS/FAIL per item, and exits nonzero on any failure. It is a
+script, so it uses print(). Each heavy import runs in its OWN subprocess so a NATIVE crash (a
+C-level segfault, e.g. an OpenMP runtime conflict, which no try/except can catch) is reported as
+that check's FAIL instead of killing the run; a try/except per check accumulates ordinary failures.
 
 What it covers:
-  - pinned interpreter: assert Python is 3.12.x (one pinned interpreter; .python-version/pyproject).
-  - pykiteconnect: KiteConnect (REST) + KiteTicker importable; version startswith 5.2.
-  - KiteTicker reactor: construct KiteTicker + start/stop a bare Twisted reactor in a subprocess (proves the reactor-in-a-child pattern works offline;
-    the live connect is the ticker's own job).
-  - engine Claude Code CLI (agents.yaml llm.cli_path, else the SDK's _bundled one): `--version`
-    exits 0 (the evidence that SDK subprocess calls work under the service account).
-  - vectorbt+skfolio COEXISTENCE: both imported into ONE process (the real backtest+optimize
-    pattern) followed by a cvxpy solve — guards the native OpenMP load-order conflict that
-    segfaults the interpreter on Windows (0xC0000005) unless scikit-learn is imported first
-    (enforced engine-side by engine._preload). Isolated in its own subprocess.
-  - claude-agent-sdk: importable; the model / turn / effort / allowed-tools / setting-source /
-    cli_path / env / strict-MCP knobs the harness uses are present on the options surface if
-    introspectable. A REAL one-Haiku-call test is a SEPARATE owner step needing the pinned
-    CLI's stored claude.ai login + network — it is GUARDED behind --live-llm (default OFF) so this
-    script never spends credit by default.
+  - pinned interpreter: Python is 3.12.x (.python-version/pyproject).
+  - pykiteconnect: KiteConnect + KiteTicker importable; version startswith 5.2.
+  - KiteTicker reactor: construct KiteTicker + start/stop a bare Twisted reactor in a subprocess
+    (offline; the live connect is the ticker's own job).
+  - engine Claude Code CLI (agents.yaml llm.cli_path, else the SDK's _bundled one): `--version` exits 0.
+  - vectorbt+skfolio COEXISTENCE in ONE process plus a cvxpy solve: guards the native OpenMP
+    load-order conflict (0xC0000005 on Windows unless scikit-learn is imported first, enforced
+    engine-side by engine._preload).
+  - claude-agent-sdk: importable; the harness's knobs (model / turn / effort / allowed-tools /
+    setting-source / cli_path / env / strict-MCP) are present on the options surface if
+    introspectable. A REAL one-Haiku-call test needs the pinned CLI's stored login + network and is
+    GUARDED behind --live-llm (default OFF) so the script never spends credit by default.
   - river, duckdb, vectorbt, skfolio, pydantic, yaml, keyring, msgpack, structlog, ntplib,
     fastapi, uvicorn, telegram (python-telegram-bot): importable, version printed.
-  - zoneinfo.ZoneInfo("Asia/Kolkata"): resolves — asserts the tzdata wheel is present, which
-    Windows REQUIRES because zoneinfo has no system IANA DB. The engine's only "now" is
-    core.Clock/IST, which depends on this; we check it via the same sys.path the engine uses.
-  - DuckDB trivial query + a River incremental learn step actually EXECUTE ("minimal run",
-    not just import).
-  - API-key trap: ANTHROPIC_API_KEY must be ABSENT from the environment (a stray key silently bills
-    pay-as-you-go alongside the Max-plan OAuth credit). Guarded by --allow-api-key.
+  - zoneinfo.ZoneInfo("Asia/Kolkata"): resolves - asserts the tzdata wheel (Windows has no system
+    IANA DB; core.Clock/IST depends on it).
+  - DuckDB trivial query + a River incremental learn step actually EXECUTE.
+  - API-key trap: ANTHROPIC_API_KEY must be ABSENT (a stray key silently bills pay-as-you-go
+    alongside the Max-plan OAuth credit). Guarded by --allow-api-key.
 
 Usage:
     python scripts/smoke_test.py [--live-llm] [--allow-api-key]
@@ -55,10 +44,7 @@ import textwrap
 from pathlib import Path
 from types import ModuleType
 
-# --- Make `import engine.core...` work the same way the engine does (src/ layout) -----------
-# The ZoneInfo("Asia/Kolkata") check below is the exact dependency engine.core.clock relies on;
-# we insert src/ so a future variant of this check could import engine.core.clock directly, and
-# so the script is runnable from any working directory (the service runs from elsewhere).
+# --- src/ layout shim: runnable from any working directory (the service runs from elsewhere) ---
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -108,12 +94,8 @@ class Results:
 
 
 def _ver(mod) -> str:
-    """Best-effort version string for a module.
-
-    Handles the pykiteconnect quirk where ``kiteconnect.__version__`` is a *submodule*
-    (kiteconnect/__version__.py), not a string: unwrap it to the string it carries so the
-    version assertion sees "5.2.0" rather than the module's repr.
-    """
+    """Best-effort version string. pykiteconnect's ``__version__`` is a *submodule*, not a string:
+    unwrapped here so the assertion sees "5.2.0"."""
     ver = getattr(mod, "__version__", None)
     if isinstance(ver, ModuleType):
         ver = getattr(ver, "__version__", None) or getattr(ver, "VERSION", None)
@@ -121,15 +103,13 @@ def _ver(mod) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
-# Subprocess isolation — the load-bearing part of "one broken dep must not mask the rest".
-# A native crash (C-level segfault) in a compiled dependency bypasses Python exception handling
-# entirely and kills the whole interpreter. The per-check try/except CANNOT catch that. So every
-# heavy import below runs in its own subprocess: an isolated crash comes back as a nonzero exit and
-# is reported as that check's FAIL, with the crash code decoded, leaving the rest of the run intact.
+# Subprocess isolation — a native crash kills the whole interpreter and no try/except catches it,
+# so every heavy import runs in its own subprocess: a crash comes back as a nonzero exit, reported
+# as that check's FAIL with the crash code decoded.
 # ---------------------------------------------------------------------------------------------
 
-# Windows STATUS_* crash codes (normalized to unsigned 32-bit). A subprocess killed by an access
-# violation returns 0xC0000005 (Python surfaces it as -1073741819; & 0xFFFFFFFF normalizes it).
+# Windows STATUS_* crash codes (normalized to unsigned 32-bit: Python surfaces 0xC0000005 as
+# -1073741819; & 0xFFFFFFFF normalizes it).
 _NATIVE_CRASH: dict[int, str] = {
     0xC0000005: "ACCESS_VIOLATION 0xC0000005 (segfault - often a native-library/OpenMP conflict)",
     0xC000001D: "ILLEGAL_INSTRUCTION 0xC000001D",
@@ -183,11 +163,7 @@ def _run_isolated(snippet: str, *, timeout: float = 180.0) -> str:
 # Individual checks. Each is a zero-arg callable that raises on failure and may return a detail.
 # ---------------------------------------------------------------------------------------------
 def check_python_version() -> str:
-    """ASSERT the pinned interpreter is 3.12.x (not merely print it).
-
-    ONE tested interpreter is pinned (.python-version / pyproject ``requires-python``). Running the smoke
-    test — the install-tier gate — under a stray non-3.12 interpreter must FAIL, not silently pass.
-    """
+    """ASSERT the pinned interpreter is 3.12.x (a stray interpreter must FAIL, not pass silently)."""
     major, minor = sys.version_info[:2]
     assert (major, minor) == (3, 12), (
         f"interpreter is {major}.{minor}.x; the project pins Python 3.12.x (.python-version / pyproject). "
@@ -197,11 +173,7 @@ def check_python_version() -> str:
 
 
 def check_pykiteconnect() -> str:
-    """Import KiteConnect + KiteTicker; assert version startswith 5.2 (pinned 5.2.0).
-
-    Isolated subprocess (see _run_isolated). Note ``kiteconnect.__version__`` is a *submodule*, not a
-    string — the injected ``_ver`` unwraps it, so the assertion sees "5.2.0" not the module's repr.
-    """
+    """Import KiteConnect + KiteTicker; assert version startswith 5.2 (pinned 5.2.0). Isolated."""
     return _run_isolated(
         """
         import kiteconnect
@@ -216,11 +188,9 @@ def check_pykiteconnect() -> str:
 def check_kiteticker_reactor() -> str:
     """Prove the Twisted-reactor-in-a-subprocess pattern works — OFFLINE, no live connect.
 
-    KiteTicker is Twisted/autobahn-based and its reactor cannot run inside the engine's asyncio loop
-    (hence the separate ``mt-ticker`` child). A bare import does not exercise that; this constructs
-    a KiteTicker and starts+stops a bare Twisted reactor inside an isolated subprocess, proving the
-    reactor loads and shuts down cleanly in a child interpreter. The authenticated connect needs a live
-    token + network and is the ticker's own responsibility.
+    KiteTicker's Twisted reactor cannot run inside the engine's asyncio loop (hence the separate
+    ``mt-ticker`` child); this constructs a KiteTicker and starts+stops a bare reactor in an isolated
+    subprocess. The authenticated connect is the ticker's own responsibility.
     """
     return _run_isolated(
         """
@@ -269,11 +239,9 @@ def _resolve_engine_cli() -> Path:
 def check_engine_cli() -> str:
     """The Claude Code CLI the engine spawns is invocable under this account.
 
-    Resolve it the way the harness does (agents.yaml ``llm.cli_path``; the SDK's ``_bundled`` CLI only
-    when that key is unset — the SDK's own PATH fallback is not checked), FAIL if the resolved file is
-    missing, and run ``--version`` asserting a
-    clean exit — the evidence that every SDK subprocess call will work under the service account.
-    Records the resolved path. Offline (no network/credit), so it always runs.
+    Resolved as the harness does (agents.yaml ``llm.cli_path``; the SDK's ``_bundled`` CLI only when
+    that key is unset - the SDK's PATH fallback is not checked). FAILs if the file is missing or
+    ``--version`` does not exit cleanly. Offline (no network/credit), so it always runs.
     """
     cli = _resolve_engine_cli()
     if not cli.is_file():
@@ -291,13 +259,11 @@ def check_engine_cli() -> str:
 def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
     """Import the SDK and introspect the cost-control knobs.
 
-    A real Haiku call is a SEPARATE owner step requiring the OAuth token + network and
-    spending credit — so it is OFF by default and only attempted under --live-llm. By default we
-    assert importability and report which of the model / max-turn / effort / allowed-tools /
-    setting-source / cli_path / env knobs are present on the options surface, so one can confirm
-    the agents.yaml knobs map to real SDK parameters before any agent is wired up. The SDK has no
-    output-token cap option (agents.yaml ``max_output_tokens`` is not sent). Missing setting_sources,
-    cli_path, env, a strict-MCP knob or an allowed-tools knob FAILS, matching the harness refusals.
+    The real Haiku call spends credit and is attempted only under --live-llm. By default: assert
+    importability and report which knobs are present on the options surface, so agents.yaml knobs can
+    be confirmed to map to real SDK parameters. The SDK has no output-token cap option (agents.yaml
+    ``max_output_tokens`` is not sent). Missing setting_sources, cli_path, env, a strict-MCP knob or
+    an allowed-tools knob FAILS, matching the harness refusals.
     """
 
     def _import_and_introspect() -> str:
@@ -306,8 +272,7 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
         version = _ver(sdk)
         exported = {n for n in dir(sdk) if not n.startswith("_")}
 
-        # The options dataclass has been named ClaudeAgentOptions (current) and ClaudeCodeOptions
-        # (older) across SDK releases; accept either so the check is resilient to the pinned version.
+        # The options class is ClaudeAgentOptions (current) or ClaudeCodeOptions (older); accept either.
         options_cls = None
         for cand in ("ClaudeAgentOptions", "ClaudeCodeOptions"):
             options_cls = getattr(sdk, cand, None)
@@ -318,13 +283,11 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
         assert has_query, "claude_agent_sdk.query() not found — single-shot agent invocation unavailable"
 
         if options_cls is None:
-            # Importable + query present, but no recognizable options class. Don't fail the import
-            # check on that alone — record what we saw so the owner can verify the knobs manually.
+            # Not a failure on its own: record it so the owner can verify the knobs manually.
             return f"v{version} (query present; options class NOT found — verify knobs manually)"
 
-        # Knobs the harness probes: explicit model, turn cap, effort, the tool allowlist,
-        # setting_sources (prevents loading stray CLAUDE.md/settings), cli_path/env (pinned CLI,
-        # isolation env) and strict MCP (drops the account's claude.ai connectors).
+        # Knobs the harness probes: setting_sources (no stray CLAUDE.md/settings), cli_path/env
+        # (pinned CLI, isolation env), strict MCP (drops the account's claude.ai connectors).
         knob_fields = {
             "model": ("model",),
             "max_turns": ("max_turns",),
@@ -337,7 +300,7 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
         }
         required = ("setting_sources", "cli_path", "env", "strict_mcp_config", "allowed_tools")
         annotations = getattr(options_cls, "__annotations__", {}) or {}
-        # dataclass fields land in __annotations__; also probe a default instance for attributes.
+        # Dataclass fields land in __annotations__; also probe a default instance.
         try:
             probe = options_cls()
         except Exception:  # noqa: BLE001 — some versions require args; fall back to annotations only
@@ -372,11 +335,7 @@ def check_claude_agent_sdk(results: Results, live_llm: bool) -> None:
 
 
 def _live_haiku_call() -> str:
-    """Opt-in: one minimal Haiku call via the SDK (spends credit; owner step).
-
-    Runs the SDK's async query() to completion against Haiku with a trivial prompt. Imported and
-    executed lazily so the default (no --live-llm) path never touches the network or credit.
-    """
+    """Opt-in: one minimal Haiku call via the SDK (spends credit); lazy so the default path never touches the network."""
     import asyncio
 
     import claude_agent_sdk as sdk
@@ -385,8 +344,7 @@ def _live_haiku_call() -> str:
     if options_cls is None:
         raise RuntimeError("no ClaudeAgentOptions/ClaudeCodeOptions to configure a live call")
 
-    # Minimal, byte-stable prompt; cheapest model; no tools; load nothing from disk. The
-    # engine's CLI and the isolation env are passed the way harness._build_options does.
+    # Minimal prompt, cheapest model, nothing loaded from disk; CLI and isolation env as harness._build_options.
     cli = _resolve_engine_cli()
     cli_kwargs: dict = {}
     fields = set(getattr(options_cls, "__dataclass_fields__", {}) or {}) | set(
@@ -468,12 +426,9 @@ def check_river_run() -> str:
 def check_vectorbt_skfolio_coexistence() -> str:
     """vectorbt (numba/llvmlite) + skfolio (cvxpy/native _cvxcore) in ONE process — the real engine pattern.
 
-    These two segfault the interpreter (0xC0000005) on Windows when their native OpenMP runtimes
-    initialize in the wrong order — a C-level crash no try/except can catch. Importing scikit-learn
-    FIRST establishes the OpenMP runtime and makes them coexist; the engine enforces this via
-    engine._preload. This check reproduces the full backtest+optimize pattern (import both, then run a
-    cvxpy solve) in an isolated subprocess and asserts it survives — so a regression in the dependency
-    stack, or in the sklearn-first workaround, is caught at install time instead of at runtime.
+    They segfault (0xC0000005) on Windows when their native OpenMP runtimes initialize in the wrong
+    order; importing scikit-learn FIRST makes them coexist (engine._preload). Runs import-both plus
+    a cvxpy solve in a subprocess, so a regression in the stack or the workaround shows at install time.
     """
     return _run_isolated(
         """
@@ -492,10 +447,9 @@ def check_vectorbt_skfolio_coexistence() -> str:
 def check_anthropic_api_key_absent(allow_api_key: bool) -> str:
     """API-key trap: ANTHROPIC_API_KEY must be ABSENT (a stray key silently bills pay-as-you-go).
 
-    The platform authenticates the Agent SDK via the Max-plan OAuth token (CLAUDE_CODE_OAUTH_TOKEN);
-    a co-present ANTHROPIC_API_KEY would route calls to metered billing instead. The startup self-test
-    enforces this in production; the smoke test enforces it here too. --allow-api-key is the
-    deliberate escape hatch for the metered-key fallback configuration.
+    The SDK authenticates via the Max-plan OAuth token; a co-present ANTHROPIC_API_KEY would route
+    calls to metered billing. The startup self-test enforces this in production too.
+    --allow-api-key is the deliberate escape hatch for the metered-key fallback.
     """
     present = bool(os.environ.get("ANTHROPIC_API_KEY"))
     if allow_api_key:

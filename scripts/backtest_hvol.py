@@ -9,10 +9,10 @@ names over the same dates. Evidence only: this script wires nothing and reads a 
 ===============================================================================================
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
-**ONE rule is registered and NO parameter sweep is run, here or before.** :data:`PRIMARY` is the
-registered rule (VR >= 3.0, not a breakout, fresh, structural-ex-date clean); every threshold below
-is a module constant copied from the pre-registration, and no CLI flag changes any of them. The trial count
-cited to the research-validation deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`).
+**ONE rule is registered and NO parameter sweep is run.** :data:`PRIMARY` is the registered rule
+(VR >= 3.0, not a breakout, fresh, structural-ex-date clean); every threshold is a module constant
+copied from the pre-registration and no CLI flag changes any of them. The trial count for the
+deflation machinery is **N = 1** (:data:`TRIAL_COUNT_N`).
 
 The robustness variants (:data:`VR_2`, :data:`VR_5`, :data:`BREAKOUT_INCLUSIVE`, and the primary
 cell's own T+5 / T+10 rows) are REPORTED, NEVER SELECTED: no code path picks, pools or max-picks
@@ -35,8 +35,7 @@ CONVENTIONS (each one a choice; the pre-registration is the spec of record)
   the 20 sessions strictly before ``y`` >= Rs 5cr; close(y) >= Rs 10; >= 40 of the 50 baseline
   sessions with volume > 0. Traded value is rounded to paise before the median so the floor
   comparison is not decided by float noise. Exactly 20 prior sessions are required (the live
-  builder accepts <= 20; with >= 60 prior sessions that difference cannot bind for a signal, it
-  binds only for benchmark members).
+  builder accepts <= 20; that difference binds only for benchmark members).
 * **VR.** ``volume(y) / median(volume over y-50 .. y-1)``. For the FRESHNESS look-back the VR of a
   day ``j`` in ``y-20 .. y-1`` uses the same definition; when ``j < 50`` (possible only for
   ``y < 70``) its baseline is the ``j`` available sessions (>= 40). A zero baseline median with
@@ -97,7 +96,7 @@ KNOWN OPTIMISM (stated, not corrected)
   split a fake -50%) and applies to the benchmark identically.
 
 ===============================================================================================
-ETF EXCLUSION (2026-10-09, before the full-population run)
+ETF EXCLUSION
 ===============================================================================================
 * **ETFs excluded (2026-10-09).** The population is STOCKS: every symbol on NSE's ETF
   list (``--etf-list``, default ``data/research/nse_etf_list_2026-10-09.csv``, its ``Symbol``

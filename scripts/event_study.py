@@ -3,9 +3,8 @@
 prerequisite before any headline corpus or filings-typed origination.
 
 No historical archive of ET/Moneycontrol RSS headlines exists, so `cat` cannot be conventionally
-backtested at design time. Interim evidence comes from an event study on
-signals that DO have deep history — it validates the two mechanical legs `cat` relies on WITHOUT
-headlines:
+backtested. This event study validates the two mechanical legs `cat` relies on WITHOUT headlines,
+on signals that DO have deep history:
 
 * **PEAD leg** — post-event drift conditioned on the T-day reaction sign. Event set = historical
   earnings dates (``earnings_calendar``) + bhavcopy gap/volume events (|open-gap vs prior close| ≥ 2%
@@ -30,24 +29,21 @@ headlines:
   Directional forward drift T+1,5,10,20 keyed off the quarter row's ``broadcast_dt`` (PIT, not qtr end).
 
 Every leg reports BOTH **gross** and **net** (net = gross − one round-trip CNC cost, ``CostModel``
-breakeven at the reference notional) with honest stats — hit rate, mean/median drift. Negative/flat
-results are surfaced, not massaged; every filings leg degrades to an honest ``n=0`` section when
-its table is empty. Output: ``data/reports/event_study_<ts>.md`` + ``.json`` (timestamped because
-the earlier fixed name overwrote the previous run's evidence). Standalone/blocking
-(offline research tool). Exit codes: 0 = ran; 2 = no symbols/bars resolved.
+breakeven at the reference notional) with hit rate and mean/median drift. Negative/flat results are
+surfaced; every filings leg degrades to an honest ``n=0`` section when its table is empty. Output:
+``data/reports/event_study_<ts>.md`` + ``.json`` (timestamped so a run never overwrites earlier
+evidence). Standalone/blocking offline research tool. Exit codes: 0 = ran; 2 = no symbols/bars resolved.
 
-**Entry-fill mechanics (2026-08-14).** Every leg's signal is knowable at the CLOSE of its
-event session T (the filings legs by construction — :func:`entry_session_index` maps a broadcast to
-the first close at which it was public; the PEAD legs because the reaction sign is read off T's own
-open/close). ``--entry-fill`` decides where that signal is FILLED:
+**Entry-fill mechanics.** Every leg's signal is knowable at the CLOSE of its event session T (the
+filings legs by construction - :func:`entry_session_index` maps a broadcast to the first close at
+which it was public; the PEAD legs because the reaction sign is read off T's own open/close).
+``--entry-fill`` decides where that signal is FILLED:
 
-* ``next_open`` (**default**) — fill at ``open_(T+1)``, the first price actually reachable by an
-  order placed after observing close_T. Horizon T+k then measures ``close_(T+k) / open_(T+1)``.
-* ``close_t`` — the earlier convention: fill at ``close_T`` itself. For the filings legs this is
-  defensible (the broadcast timestamp precedes the close, so the information was genuinely in hand
-  before the auction) but it still books the T→T+1 overnight gap that no post-close order can
-  capture; for the reaction-sign PEAD/confirmation legs it is the same-bar fill error outright (the
-  signal is DERIVED from close_T and filled AT close_T). Kept only for old-vs-new comparison.
+* ``next_open`` (**default**) — fill at ``open_(T+1)``, the first price reachable by an order placed
+  after observing close_T. Horizon T+k then measures ``close_(T+k) / open_(T+1)``.
+* ``close_t`` — fill at ``close_T`` itself. Still books the T→T+1 overnight gap no post-close order
+  can capture; for the reaction-sign PEAD/confirmation legs it is a same-bar fill error outright
+  (signal derived from close_T, filled AT close_T). Kept only for old-vs-new comparison.
 
 The cost subtracted from every NET column is the full round-trip friction — statutory fees **plus**
 the measured bid-ask spread — via ``CostModel.breakeven_pct``; the report header prints the
@@ -74,14 +70,11 @@ from engine.core.clock import IST, Clock  # noqa: E402
 from engine.core.config import load_settings  # noqa: E402
 from engine.core.log import configure_logging, get_logger  # noqa: E402
 
-# --- the insider-crossing primitives this script VALIDATED, now owned by the engine package.
-#     Promoted 2026-08-17 with the `ins` leg: a LIVE EOD job computes crossings on the decision
-#     path, and engine code may not path-load a loose script at runtime (the shim
-#     engine.datafeeds.filings_events used to carry, flagged in its own docstring). The dependency is
-#     inverted, not copied — this module still exports the same names at module scope, so
-#     `es.insider_buy_events(...)` and friends resolve exactly as before for
-#     scripts/filings_experiments.py and tests/offline/test_event_study_filings.py, and the study and the
-#     live `ins_crossings` job run the SAME bytes. Editing the rule means editing
+# --- the insider-crossing primitives this script validated, owned by the engine package: a LIVE EOD
+#     job computes crossings on the decision path and engine code may not path-load a loose script.
+#     Re-exported at module scope so `es.insider_buy_events(...)` and friends resolve for
+#     scripts/filings_experiments.py and tests/offline/test_event_study_filings.py; the study and
+#     the live `ins_crossings` job run the SAME code. Editing the rule means editing
 #     engine/datafeeds/insider_crossings.py and re-running this study.
 from engine.datafeeds.insider_crossings import (  # noqa: E402
     INSIDER_ACQ_MODE_EXCLUSIONS,  # noqa: F401  - re-exported for `es.`-style consumers
@@ -138,9 +131,7 @@ def _median(vals: list[float]) -> float:
     return statistics.median(vals) if vals else float("nan")
 
 
-#: Back-compat alias for the pre-promotion private name. ``scripts/filings_experiments.py`` reaches
-#: it as ``es._to_ist`` (the loose-script consumers address this module by attribute); keeping the
-#: alias means the 2026-08-17 promotion changed no consumer.
+#: Alias: ``scripts/filings_experiments.py`` reaches it as ``es._to_ist``.
 _to_ist = to_ist
 
 
@@ -168,10 +159,8 @@ def gap_volume_event_days(bars: list[DailyBar]) -> list[date]:
 
 
 # ------------------------------------------------------------------ point-in-time entry mapping
-# ``after_hours`` / ``entry_session_index`` / ``is_open_market_buy`` / ``is_open_market_sell`` /
-# ``insider_cluster_events`` / ``insider_buy_events`` moved to engine.datafeeds.insider_crossings on
-# 2026-08-17 (see the import block above) — imported back, not reimplemented, so this study and the
-# live `ins` leg cannot diverge.
+# ``after_hours`` / ``entry_session_index`` / ``is_open_market_*`` / ``insider_*_events`` live in
+# engine.datafeeds.insider_crossings (imported above), so the study and the live `ins` leg cannot diverge.
 def event_session_indices(sessions: list[date], broadcast_dts: list[datetime]) -> list[int]:
     """Unique, ascending PIT entry-session indices for a list of broadcast timestamps. Two
     filings mapping to the same session (e.g. a result's standalone + consolidated rows share a
@@ -285,9 +274,8 @@ def measure_event(
     """Measure one reaction-sign event at series position ``idx`` (day T). ``None`` if unmeasurable.
 
     ``cost_pct`` is one round-trip CNC breakeven (%), subtracted once from every signed drift to give
-    the net. The gross (pre-cost) drift is retained alongside (net-only hid the diagnosis).
-    ``entry_fill`` picks the fill price the drift is measured FROM — ``open_(T+1)`` by
-    default, ``close_T`` under the superseded ``close_t`` convention (see the module docstring).
+    the net; gross is retained alongside. ``entry_fill`` picks the fill price the drift is measured
+    FROM (see the module docstring).
     """
     T = rows[idx]
     if T.close == T.open:
@@ -316,8 +304,7 @@ def measure_event(
     vol_ok = med > 0 and t1.volume >= CAT_CONFIRM_VOL_MULT * med
     obs.confirmed = bool(move_ok and vol_ok)
     if obs.confirmed:
-        # The confirmation signal is read off close_(T+1), so it fills on the SAME convention one
-        # session later (open_(T+2) by default; close_(T+1) under close_t — which is same-bar).
+        # The confirmation is read off close_(T+1), so it fills on the same convention one session later.
         c_base = entry_price(rows, idx + 1, entry_fill)
         for k in HORIZONS:
             if k < 2 or c_base is None:
@@ -603,7 +590,7 @@ def run_study(
         pos_by_date = {r.d: i for i, r in enumerate(rows)}
         sessions = [r.d for r in rows]
 
-        # ----- existing PEAD legs (earnings_calendar + gap/volume) — UNCHANGED --------------------
+        # ----- PEAD legs (earnings_calendar + gap/volume) --------------------
         earnings_dates = {
             r["event_date"] for r in store.get_earnings_calendar(start, end, symbol=sym)
         }
@@ -682,13 +669,7 @@ def run_study(
 
 
 def _write(agg: dict, meta: dict, reports_dir: Path) -> Path:
-    """Write ``event_study_<ts>.{md,json}`` (TIMESTAMPED, like every other report artifact).
-
-    Previously this wrote a FIXED ``event_study.md``/``.json``, so each run destroyed the previous
-    one — including the 2026-07-17 stage-2 artifact the ``insider_net_buy`` verdict (T+10 +0.75%,
-    T+20 +1.61%, n=110) is recorded against, which is exactly the history a re-run must be compared
-    with. The old files are left untouched as the earlier record.
-    """
+    """Write ``event_study_<ts>.{md,json}``, timestamped so a re-run never destroys earlier evidence."""
     import json
 
     reports_dir.mkdir(parents=True, exist_ok=True)

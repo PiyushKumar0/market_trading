@@ -53,24 +53,22 @@ CONVENTIONS (pinned; each one is a choice, so each one is stated)
   of age >= 1 predates ``d`` by definition (``news_pipeline`` event age: trading days in
   (first-seen date, ``d``]). A journal row with no originating watchlist row, or an age-0 story
   whose clusters ``news_clusters`` no longer holds, is a HOLE: the entry session cannot be decided.
-  Why: ``hi52``'s ``open(d)`` is safe because its trigger is yesterday's bar, but a post-open digest
-  (an owner boot at 09:30-10:00) can grade an age-0 cluster first seen at 09:40 on ``d``, the 10:00
-  sweep journals it, and ``open(d)`` would book the announcement move the rule could never have
-  traded. **This is a review-driven clarification made 2026-10-26, before the verdict cohort formed
-  but after interim numbers from earlier runs of this report had been seen** — stated so a reader
-  can weigh the optional-stopping risk; it was motivated by a lookahead defect, not by an outcome.
+  Why: a post-open digest can grade an age-0 cluster first seen at 09:40 on ``d`` and the 10:00
+  sweep journals it; ``open(d)`` would book an announcement move the rule could never have traded.
+  **This convention (2026-10-26) was fixed before the verdict cohort formed but after interim
+  numbers had been seen** - stated so a reader can weigh the optional-stopping risk; it was
+  motivated by a lookahead defect, not an outcome.
 * **Hold and exit are ``hi52``'s, through the same code** (``engine.learning.hi52_forward``),
   counted from the ENTRY session: exit for horizon k = the CLOSE of the k-th session of the hold,
   entry session first: ``close(entry + k-1 sessions) / open(entry) - 1``. Sessions are positions in
   the symbol's own ``bars_1d`` series. Horizons T+10 and T+20 only — nothing else is pre-registered.
 * **Renames are followed.** ``rekey_symbol.py`` moves ``bars_1d`` and ``corp_actions`` to the new
-  symbol and deliberately leaves ``prescreen_day_slots`` under the old one, so a signal journalled
-  under OLD would otherwise be a permanent ``no_bars`` hole whose "fix the data" remedy is wrong.
-  Renames come from ``engine.marketdata.store.symbol_renames`` (``instruments_daily`` token
-  continuity, the universe's own source) read as of the latest snapshot — identity metadata, not
-  price data; bars stay bounded by ``as_of``. A renamed signal's bars and corp actions are read
-  under EVERY name of the instrument and merged by date, the current name's row winning on a shared
-  date (rekey's rule), so it measures whether or not the rekey ran. Listed as ``OLD (now NEW)``.
+  symbol but leaves ``prescreen_day_slots`` under the old one, so a signal journalled under OLD
+  would otherwise be a permanent ``no_bars`` hole. Renames come from
+  ``engine.marketdata.store.symbol_renames`` (token continuity) as of the latest snapshot -
+  identity metadata; bars stay bounded by ``as_of``. A renamed signal's bars and corp actions are
+  read under EVERY name and merged by date, the current name winning a shared date (rekey's rule).
+  Listed as ``OLD (now NEW)``.
 * **The 5% disaster stop and the 20-session time exit are not simulated.** The pre-registration
   measures net DRIFT at fixed horizons; ``cat.stop_pct`` enters only through the per-trade risk sizing
   below (a wider stop means a smaller notional and a higher cost floor).
@@ -469,10 +467,7 @@ def verdict(
     threshold_10: float,
     threshold_20: float,
 ) -> tuple[str, str]:
-    """``(verdict, reason)`` — the module docstring's THE RULE, and nothing else.
-
-    No severity ladder, no "close to the line" wording, no running cell casting a vote.
-    """
+    """``(verdict, reason)`` — the module docstring's THE RULE, and nothing else (no running cell votes)."""
     holds = []
     if sessions < MIN_SESSIONS:
         holds.append(f"{sessions} sessions, rule needs {MIN_SESSIONS}")

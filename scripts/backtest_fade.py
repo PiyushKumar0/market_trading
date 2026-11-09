@@ -1,23 +1,19 @@
 #!/usr/bin/env python
-"""``fade`` PRE-REGISTERED backtest harness (`fade` pre-registered 2026-09-12) - the SHORT side of intraday, which no backtest in this repo has ever run.
+"""``fade`` PRE-REGISTERED backtest harness (`fade` pre-registered 2026-09-12) - the SHORT side of intraday.
 
-Every intraday sweep here has been LONG-ONLY under the short gate: ORB twice, `tdc`, the
-candle battery, the aborted VWAP-deviation study. The one piece of evidence pointing the other way
-is the `orb` v2 finding of a **negative-gross fade of breakouts in 2025-H2** - i.e. the thing that
-killed the long side is the prior FOR this study. This harness measures two fade rules and nothing
-else.
+Measures two fade rules and nothing else.
 
 ===============================================================================================
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
-**NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
-:data:`PARAMS` dict and one :data:`RULES` dict, both fixed at import time and both transcribed from
-the pre-registration paragraph. **TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``failed_breakout``, ``gap_fade``). Every
-other entry in :data:`RULES` is a REPORTING-ONLY cell, marked ``registered=False``, and is never a
-competitor failed_breakout/gap_fade is picked from: two of them are the pre-registration's stated reporting variants (failed_breakout at 12:00,
-gap_fade with a 15:15-only exit) and two are EXECUTION-CONSERVATISM cells (the stop evaluated on the 1m
-HIGH instead of the 1m close) that can only make a fade look WORSE. The CLI exposes no flag that
-changes a signal parameter.
+**NO PARAMETER SWEEP IS RUN BY THIS SCRIPT.** There is exactly one :data:`PARAMS` dict and one
+:data:`RULES` dict, fixed at import time and transcribed from the pre-registration paragraph.
+**TRIAL COUNT N = 2** - :data:`PRE_REGISTERED_RULES` (``failed_breakout``, ``gap_fade``). Every
+other entry in :data:`RULES` is a REPORTING-ONLY cell (``registered=False``), never a competitor the
+registered rules are picked from: two are the pre-registration's stated reporting variants
+(failed_breakout at 12:00, gap_fade with a 15:15-only exit) and two are EXECUTION-CONSERVATISM cells
+(the stop evaluated on the 1m HIGH instead of the 1m close) that can only make a fade look WORSE.
+The CLI exposes no flag that changes a signal parameter.
 
 ``promotable`` is the house `tdc` boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
 ``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a REFUTATION, it is
@@ -39,11 +35,8 @@ THE TWO RULES (transcribed from the pre-registration; every clause is evaluated 
 * ``rel_volume_tod >= 1.5`` - cumulative volume 09:15..T over the MEDIAN, across the 20 sessions
   immediately preceding this one, of that symbol's cumulative volume to the SAME minute. Fewer than
   ``rvol_min_valid_sessions`` (10) usable priors ⇒ the symbol-day is SKIPPED and counted, never
-  admitted on a thin denominator. PINNED INTERPRETATION: the pre-registered phrase "broke ... on
-  rel_volume_tod >= 1.5" does not say at WHICH minute participation is measured; it is measured at
-  the DECISION bar T, which is the `tdc` definition verbatim, so the same words mean the same thing
-  in both studies. The alternative (at the break minute) was NOT computed, so no selection between
-  the two took place.
+  admitted on a thin denominator. PINNED INTERPRETATION: participation is measured at the DECISION
+  bar T (the `tdc` definition verbatim), not at the break minute; the alternative was not computed.
 * the T bar's close is back BELOW the OR high (strictly).
 
 **gap_fade - gap fade.** At the decision bar ``T`` (10:00 IST):
@@ -57,13 +50,12 @@ HIGH SO FAR - ``max(high)`` over ``09:15..T``, fixed at entry, never trailed. Th
 FOLLOWING bar's open; else the 15:15 squareoff (the 15:15 bar's close, or the last bar at or before
 it). Whichever comes first. No target.
 
-**The stop is structurally DOMINATED and the report says so rather than hiding it:** the session
-high through T is by construction ``>=`` the OR high (failed_breakout) and ``>=`` the T bar's high (gap_fade), so a
-close above the stop is also a close above the failure level and the failure exit fires on the same
-bar at the same price. Under the registered close-trigger the stop can therefore never be the SOLE
-reason for an exit; ``n_exits_stop_first`` is reported and is expected to be 0. That is exactly why
-the two ``*_stop_on_1m_high`` reporting cells exist: evaluated on the bar HIGH the stop DOES bind,
-strictly earlier and strictly worse for the short, and those cells are the honest execution check.
+**The stop is structurally DOMINATED:** the session high through T is ``>=`` the OR high
+(failed_breakout) and ``>=`` the T bar's high (gap_fade), so a close above the stop is also a close
+above the failure level and the failure exit fires on the same bar at the same price. Under the
+registered close-trigger the stop is never the SOLE reason for an exit; ``n_exits_stop_first`` is
+reported and expected to be 0. The two ``*_stop_on_1m_high`` cells are the honest execution check:
+evaluated on the bar HIGH the stop binds, strictly earlier and worse for the short.
 
 ===============================================================================================
 SHORT ARITHMETIC AND COSTS
@@ -107,7 +99,7 @@ POPULATION (survivorship, stated not buried)
 ===============================================================================================
 The ELIGIBLE universe - the CURRENT (latest ``universe_daily`` day) ``included`` rows plus rows
 excluded for ``['watchlist_cap']`` exactly, i.e. the set ``get_universe_eligible_symbols`` hands the
-live sweep, which is NIFTY 500-based since owner decision 2026-09-04 - applied BACKWARDS over the whole
+live sweep (NIFTY 500-based) - applied BACKWARDS over the whole
 window and intersected with the symbols ``bars_1m`` actually holds that session. This is a
 **survivorship-tainted proxy** in the same sense the `brk20` and `hi52` reports carry: index
 membership as of each historical session is stored nowhere in this platform. For a LONG continuation
@@ -271,10 +263,9 @@ TRIGGER_HIGH = "high"
 class RuleSpec:
     """One measured cell. ``registered`` marks the two that carry the trial count.
 
-    ``family`` is the REGISTERED rule a cell belongs to. The ATR tercile cuts are taken once per
-    family (the candle study's posture), so a symbol-day sits in the same cell under every variant of its rule and
-    the cells compare populations rather than cuts. failed_breakout and gap_fade measure different populations at
-    different decision bars, so their cuts are never pooled with each other.
+    ``family`` is the REGISTERED rule a cell belongs to. ATR tercile cuts are taken once per family,
+    so a symbol-day sits in the same cell under every variant of its rule; the two families measure
+    different populations at different decision bars, so their cuts are never pooled.
     """
 
     name: str
@@ -526,9 +517,8 @@ def load_daily(
 ) -> dict[str, tuple[list[date], list[float], list[float], list[float]]]:
     """``symbol -> (days, highs, lows, closes)`` ascending, from ``bars_1d`` up to ``end``.
 
-    Feeds two things: gap_fade's PRIOR CLOSE (the exchange's own previous-close reference, which is the
-    30-minute closing VWAP and NOT the 15:29 print - so it is the right anchor for a gap and the
-    wrong one to compare a 1m close against without tolerance) and the ATR(14,1d) tercile split.
+    Feeds gap_fade's PRIOR CLOSE (the exchange's previous-close reference, the 30-minute closing VWAP,
+    NOT the 15:29 print - compare a 1m close against it only with tolerance) and the ATR(14,1d) tercile.
     """
     wanted = sorted({s.strip().upper() for s in symbols})
     if not wanted:
@@ -559,10 +549,8 @@ def load_prior_close_1m(
 ) -> dict[tuple[str, date], float]:
     """``(symbol, d) -> the session's LAST 1m close at or after 15:00``, for the gap_fade cross-check.
 
-    Restricted to the closing half hour: the last bar of a full session is 15:29, and a session with
-    no bar at all after 15:00 is truncated (or a muhurat session), in which case the cross-check is
-    simply unavailable and gap_fade falls back to the ``bars_1d`` close alone - counted, never vetoed on
-    the absence of a CHECK.
+    A session with no bar after 15:00 is truncated (or muhurat): the cross-check is then unavailable
+    and gap_fade uses the ``bars_1d`` close alone - counted, never vetoed on the absence of a check.
     """
     sql = """
     WITH b AS (
@@ -609,8 +597,7 @@ def has_ex_date_within(ex_dates: dict[str, list[date]], symbol: str, d: date, da
 def prior_daily_index(days: Sequence[date], d: date) -> int | None:
     """Index of the last daily bar STRICTLY BEFORE ``d``, or None. ``days`` must be ascending.
 
-    ``bisect`` reads the sequence in place: this runs once per scanned symbol-day over a ~1,000-row
-    daily history, so copying it here would cost more than the search.
+    ``bisect`` reads the sequence in place; copying a daily history per symbol-day would cost more.
     """
     i = bisect_left(days, d)
     return i - 1 if i > 0 else None
@@ -624,20 +611,14 @@ def atr_pct_at(
     period: int,
     cache: dict[tuple[str, date], float | None] | None = None,
 ) -> float | None:
-    """The candle study's ATR statistic VERBATIM: Wilder ATR(``period``) over the ``period`` completed daily sessions
-    STRICTLY BEFORE ``d``, over the close of the last of them, in percent. ``None`` when the symbol
-    has fewer than ``period`` prior daily sessions.
+    """The candle study's ATR statistic VERBATIM: Wilder ATR(``period``) over the ``period`` completed
+    daily sessions STRICTLY BEFORE ``d``, over the close of the last of them, in percent. ``None``
+    when the symbol has fewer than ``period`` prior daily sessions.
 
-    Two consequences of "strictly before", both deliberate: the signal day's own range never enters
-    the label it is sorted by, and the window's FIRST bar has no prior close inside the window, so
-    ``wilder_atr`` gives it the plain ``high - low`` true range (the candle study's pinned reading; the gap-aware
-    alternative was not computed, so no selection between the two took place). With exactly
-    ``period`` bars the Wilder recursion never runs and the value is the SMA seed - the mean of the
-    window's true ranges - which is what makes the window definition and the house function agree.
-
-    Percent-of-close, because a rupee ATR is not comparable across a Rs 90 and a Rs 4,000 stock and
-    the tercile would then be a price ranking. Only measured trades ask for this, so the cache keeps
-    the per-window call count at the number of distinct measured symbol-days.
+    The signal day's own range never enters its label. The window's FIRST bar has no prior close
+    inside the window, so ``wilder_atr`` gives it the plain ``high - low`` true range (the candle
+    study's pinned reading). With exactly ``period`` bars the Wilder recursion never runs and the
+    value is the SMA seed. Percent-of-close, so the tercile is not a price ranking.
     """
     key = (symbol, d)
     if cache is not None and key in cache:
@@ -661,11 +642,9 @@ def atr_pct_at(
 def tercile_cuts(values: Sequence[float]) -> tuple[float, float] | None:
     """The two cuts of a tercile split, or None when it is not computable (needs 3+ finite values).
 
-    ``statistics.quantiles(..., n=3)`` - the same construction ``backtest_brk20.margin_tercile_cuts``
-    uses, so the two studies' tercile rows mean the same thing. A FULL-SAMPLE statistic of the
-    measured population, so the split is DESCRIPTIVE, never a tradeable filter - the cuts are not
-    knowable at signal time (the `brk20`/`hi52` caveat, verbatim in force). Equal cuts (a degenerate
-    population) yield None rather than three cells two of which are empty by arithmetic.
+    ``statistics.quantiles(..., n=3)``, as ``backtest_brk20.margin_tercile_cuts``. A FULL-SAMPLE
+    statistic, so the split is DESCRIPTIVE, never a tradeable filter (the cuts are not knowable at
+    signal time). Equal cuts yield None rather than cells that are empty by arithmetic.
     """
     xs = sorted(v for v in values if v is not None and math.isfinite(v))
     if len(xs) < 3:
@@ -988,9 +967,8 @@ def run_study(
                         index_ret_pct=iret, index_is_real=ireal,
                         atr_pct=atr_pct_at(daily, sym, d, period=atr_period, cache=atr_cache),
                     ))
-            # How far above the entry the two levels sit, as a percent of the entry price. This is
-            # the geometry of the rule as WRITTEN, and it is reported because it decides the exit
-            # mix: a failure level a few ticks above the fill is a hair-trigger stop, not a thesis.
+            # Rule geometry as written: how far above entry the two levels sit (a failure level a
+            # few ticks above the fill is a hair-trigger stop, and decides the exit mix).
             lvl_gaps = [
                 (t.exit_level / t.entry_px - 1.0) * 100.0 for t in out if t.exit_level is not None
             ]
@@ -1022,10 +1000,7 @@ def run_study(
             })
 
     # ---------------------------------------------------------------- ATR cells, cut ONCE per family
-    # The candle study's posture: the cuts are taken over the DISTINCT measured (symbol, signal day) pairs of the
-    # rule family, so a symbol-day sits in the same cell under every variant of its rule and the
-    # cells compare populations rather than cuts. failed_breakout and gap_fade measure different populations at
-    # different decision bars, so their cuts are never pooled with one another.
+    # Cuts over the DISTINCT measured (symbol, signal day) pairs of the rule family (see RuleSpec).
     cuts_by_family: dict[str, tuple[float, float] | None] = {}
     for fam in sorted({spec.family for spec in rule_defs.values()}):
         pairs: dict[tuple[str, date], float | None] = {}
@@ -1298,11 +1273,8 @@ def select_rule(
 
 
 def verdict(doc: dict[str, Any]) -> dict[str, Any]:
-    """The registered outcome, computed from the report itself: which cells clear the pre-registered boolean.
-
-    A REFUTATION is the default and is stated as one. Reporting-only cells are listed separately and
-    are never part of the outcome - they cannot promote what the registered rules did not.
-    """
+    """The registered outcome: which cells clear the pre-registered boolean. REFUTED is the default;
+    reporting-only cells are listed separately and are never part of the outcome."""
     promotable = [
         {"rule": name, "split": cell, "n": s["n"], "mean_net_pct": s["mean_net_pct"],
          "t_stat": s["t_stat"], "cpcv_positive_share": s["cpcv"]["positive_share"]}
