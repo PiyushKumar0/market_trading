@@ -5,9 +5,9 @@
     {signal_id, strategy_id, symbol, side, style, raw_levels, score, features_snapshot_id,
      catalyst_ref: str | None}
 
-``catalyst_ref`` is the ``catalyst_watchlist.entry_id`` audit link; it is ``None`` for
-every price baseline (orb/rsi2/trend/mom) and set only by the cat/cat_reversal batch rules (``_shadow_catalyst.build_candidate``). Prices are
-``Decimal`` (money convention; pydantic serializes them as strings in JSON mode).
+``catalyst_ref`` is the ``catalyst_watchlist.entry_id`` audit link; it is ``None`` for every price
+baseline and set only by the cat/cat_reversal batch rules (``_shadow_catalyst.build_candidate``).
+Prices are ``Decimal`` (money convention; pydantic serializes them as strings in JSON mode).
 
 ``ScanContext`` is the internal pre-screen → scanner seam (not a pinned surface): the
 ``SignalPreScreen`` context provider assembles everything a scanner may need for one bar so the
@@ -80,16 +80,15 @@ class SignalCandidate(BaseModel):
 
 class PendingSetup(BaseModel):
     """A strategy condition that is NOT currently true, with the deterministic price at which it
-    would arm (owner-directed 2026-07-29).
+    would arm.
 
     Purely informational — it never enters the pipeline and no LLM sees it at origination. The owner
-    uses it to decide whether shifting/extending the trade window is worth it ("RELIANCE arms above
-    ₹1,280"). ``trigger_price`` is None where the condition is not price-invertible (cross-sectional
-    / rule-based) and ``condition`` then carries the plain-text rule alone. ``arms_when`` is the
-    SCANNER's own statement of the crossing direction (2026-07-29 owner feedback: inferring it from
-    price comparison mislabeled a BUY breakout "below" when trigger == last). ``stop_price`` /
-    ``target_price`` / ``exit_rule`` carry the full would-be trade plan so the owner message never
-    shows a naked buy/sell point.
+    uses it to decide whether extending the trade window is worth it. ``trigger_price`` is None where
+    the condition is not price-invertible (cross-sectional / rule-based) and ``condition`` then
+    carries the plain-text rule alone. ``arms_when`` is the SCANNER's own statement of the crossing
+    direction (inferring it from a price comparison mislabels when trigger == last).
+    ``stop_price`` / ``target_price`` / ``exit_rule`` carry the full would-be plan, never a naked
+    level.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -128,9 +127,8 @@ class ScanContext(BaseModel):
 
     flagged: bool = False
     """Symbol appears in ``flagged_instrument_days`` for the PRIOR trading session (bulk/block
-    deal) — volume-breakout scanners suppress. Prior session, not today:
-    NSE publishes deals ~EOD and the deals job writes them at 20:30, so a day's own flags are
-    unknowable while it trades (2026-08-18 fix — a today-read was structurally empty)."""
+    deal) — volume-breakout scanners suppress. Prior session, not today: NSE publishes deals ~EOD and
+    the deals job writes them at 20:30, so a day's own flags are unknowable while it trades."""
 
     trade_window: tuple[datetime, datetime] | None = None
     """Today's owner trade window [start, end], already session-clamped (``NSECalendar.trade_window``)."""

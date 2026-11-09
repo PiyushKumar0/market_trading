@@ -1,42 +1,24 @@
-"""Per-strategy EVALUATION CONTRACTS, rendered into every signal-candidate context (2026-08-20).
+"""Per-strategy EVALUATION CONTRACTS, rendered into every signal-candidate context.
 
 The analyst judges a candidate within its OWN strategy's frame — timeframe class, exit mechanism,
 reward basis, evidence status, entry-anchor semantics and the strategy's own disqualifier list —
-instead of inside a single intraday day-trade rubric that fits exactly one of the legs (seven at the time).
+not inside a single intraday day-trade rubric that fits only one leg. Two failure modes this
+prevents: swing candidates declined on intraday microstructure (a category error for a 5-20 session
+hold), and ``target=None`` legs (``rsi2``, ``ins``, by design) declined for "reward cannot be
+framed" one layer above the gate seam (``strategy_expected_edge_pct``) that already handles it.
+Evidence status is stated per leg (ins validated, hi52 forward test, the rest exploratory, cat and
+cat_reversal SHADOW), so the claim cannot live in the shared prompt. Related fixes: render-time
+input handling in :mod:`engine.intelligence.context` and ``intraday.SYSTEM_PROMPT`` rules 12 and 13.
 
-WHY THIS FILE EXISTS (the funnel autopsy, 08-13 -> 08-19). 63/63 analyst evaluations ended
-``no_action``, zero proposals were ever created and the risk gate has never been invoked. The
-declines decomposed into two inputs that lie and one rubric that structurally cannot pass the shapes
-the platform validated:
-
-* **The rel_volume misread** — ``features.rel_volume`` is cumulative session volume over the 20d
-  median FULL-DAY volume with no time-of-day adjustment, and was read as time-adjusted participation
-  ("roughly 3% of normal participation for this time of day"); phantom thinness was cited in 44/63 declines.
-* **The sentiment misread** — ``sentiment_agg`` is a CLIPPED decay-weighted SUM that saturates at ±1.0
-  once a handful of same-direction headlines land, and was read as an extreme regime reading (46/63 declines).
-* **The no-target declines** — ``rsi2`` (indicator exit) and ``ins`` (time exit) carry ``target=None``
-  BY DESIGN and were declined for "no target ⇒ reward cannot be framed"; 52/63 declines were exactly
-  those two legs, one layer above the gate seam (``strategy_expected_edge_pct``) that already handles the case.
-* **The wrong frame** — swing candidates were judged on intraday microstructure (five 1m bars, VWAP
-  position, opening-range completeness at 09:20) — a category error for a 5-20 session hold, and on the
-  one validated leg (``ins``) it re-imposed the exact discretionary filter the validation removed.
-
-The two misreads are fixed at render time in :mod:`engine.intelligence.context`; the no-target declines
-and the wrong frame are fixed here plus in ``intraday.SYSTEM_PROMPT`` rules 12 and 13. Evidence status is
-stated HONESTLY per leg — one validated (ins),
-one forward test (hi52), the rest exploratory (cat/cat_reversal as SHADOW) — which is why the claim cannot live in the shared prompt any more.
-
-PLAIN DATA. No imports beyond the stdlib-free module body itself: this is read by the context
-assembler on the hot path and must never drag a heavy module (store, pandas, numba) into an import
-graph that does not already have one. Nothing here is a limit, a filter or a gate — the gate is
-untouched by this change and remains the hard disposal layer.
+PLAIN DATA. No imports: this is read by the context assembler on the hot path and must never drag a
+heavy module (store, pandas, numba) into the import graph. Nothing here is a limit, a filter or a
+gate — the gate remains the hard disposal layer.
 """
 
 from __future__ import annotations
 
 #: Returned for a ``strategy_id`` with no registered contract. Never silently empty: an unregistered
-#: id is a deployment defect (a new scanner shipped without its frame), and the analyst must be told
-#: that the frame it is judging in is missing rather than inferring one.
+#: id is a deployment defect, and the analyst must be told the frame is missing rather than infer one.
 UNKNOWN_CONTRACT = "UNKNOWN (unregistered strategy_id — evaluate conservatively and flag it)"
 
 _INS = """class: swing (CNC), event-driven. Exit is TIME: hold 20 trading sessions (the validated T+20 horizon). The 5% stop is a DISASTER stop, not the exit.
@@ -45,9 +27,8 @@ reward basis: target=None BY DESIGN. Reward is the validated expected edge, whic
 entry anchor: entry is the crossing session's close — a stale-by-design pre-open REFERENCE for a next-open-style fill (replay determinism; the gate sizes off max(entry, LTP)). entry below the live price does NOT mean 'bidding into weakness'.
 valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst of the fraud/default/pledge-invocation class; surveillance flags; the results-day entry ban; evident liquidity collapse; concrete evidence the disclosure itself is suspect. Absent those grounds the validated design expects this candidate to become a proposal — if you decline, name which ground applies."""
 
-#: The cost-gate reminder for every leg that ships with NO configured validated edge (rsi2,
-#: trend, mom): the gate can only verify cost economics from an explicit target on these legs, so a
-#: targetless enter is rejected as unverifiable regardless of merit. One constant, not three pastes.
+#: The cost-gate reminder for every leg with NO configured validated edge (rsi2, trend, mom): the
+#: gate verifies cost economics only from an explicit target, so a targetless enter is rejected.
 _NO_EDGE_GATE_NOTE = (
     "no configured validated edge — the gate verifies cost economics only from an explicit target; "
     "include a target_price derived from shown levels when proposing, or the enter is gate-rejected "
@@ -96,8 +77,6 @@ valid decline grounds, exhaustively: a fresh materially-negative symbol catalyst
 #: ``strategy_id`` -> the contract rendered into that candidate's context block. The keys are exactly
 #: the deterministic legs; a new leg MUST land here in the same commit that ships it, or its
 #: candidates reach the analyst with :data:`UNKNOWN_CONTRACT` and a warning in the log.
-#: (That rule was violated once: hi52 shipped 2026-09-01 without its entry and IDFCFIRSTB was
-#: evaluated under the generic frame — caught by the 2026-09-02 review.)
 STRATEGY_CONTRACTS: dict[str, str] = {
     "ins": _INS,
     "rsi2": _RSI2,
@@ -114,8 +93,7 @@ STRATEGY_CONTRACTS: dict[str, str] = {
 def contract_text(strategy_id: str) -> str:
     """The evaluation contract for ``strategy_id``, or :data:`UNKNOWN_CONTRACT` for an unknown id.
 
-    Total by construction — a context assembly must never fail on an unregistered strategy (fail
-    to zero): a thinner frame is a worse call, a raised exception is a lost one.
+    Total by construction: a context assembly must never fail on an unregistered strategy.
     """
     return STRATEGY_CONTRACTS.get(strategy_id, UNKNOWN_CONTRACT)
 

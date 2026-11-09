@@ -8,9 +8,8 @@ Inputs arrive pre-computed on the context (the provider computes ``indicators.mo
 same ``bars_1d`` history for EVERY universe symbol — a per-symbol scanner cannot see the cross
 section): ``ctx.momentum_by_symbol`` (symbol → 4-week fractional return; NaN = insufficient
 history ⇒ unrankable), ``ctx.mom_sessions_since_rebalance`` (trading sessions since the last
-rebalance; ``None`` ⇒ never ⇒ due now — 2026-08-13: the LIVE provider now supplies the real,
-restart-persisted count instead of a permanent ``None``; see ``engine.ops.scan_context``'s
-``mom_rebalance_state`` — ``None`` remains the correct value for the genuine bootstrap case), and
+rebalance; ``None`` ⇒ never ⇒ due now; the LIVE provider supplies the restart-persisted count, see
+``engine.ops.scan_context``'s ``mom_rebalance_state``), and
 ``ctx.upcoming_ex_dates`` (this symbol's known upcoming corp-action ex-dates).
 
 Documented choices where the sketch is silent:

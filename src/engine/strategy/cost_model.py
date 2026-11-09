@@ -9,21 +9,18 @@ the worked examples to the paisa against it:
 * delivery ₹20,000 ≈ ₹60 (dominated by ₹40 STT + ₹15.34 DP)
 * 5× MIS ₹1,00,000 notional ≈ ₹83 (~0.083% of notional = ~0.41% of capital per turn)
 
-**Two cost classes, one surface (2026-08-13).** Statutory *fees* (brokerage/STT/txn/SEBI/
-stamp/GST/DP) are what the broker bills — contract-note verifiable, and the three worked examples
-above are FEES ONLY, unchanged to the paisa. The bid-ask *spread* is market friction the broker
-never bills but every round trip pays; it is modelled as one extra component, ``spread``, from the
-measured ``costs.yaml`` ``spread_pct`` (see that file for the 48-symbol-day provenance).
-``spread_pct`` is the FULL quoted spread; each leg crosses HALF of it (buy ≈ mid + spread/2, sell
-≈ mid − spread/2), so a round trip pays exactly ``spread_pct`` of notional.
+**Two cost classes, one surface.** Statutory *fees* (brokerage/STT/txn/SEBI/stamp/GST/DP) are what
+the broker bills — contract-note verifiable; the three worked examples above are FEES ONLY. The
+bid-ask *spread* is friction the broker never bills but every round trip pays; it is one extra
+component, ``spread``, from the measured ``costs.yaml`` ``spread_pct``. ``spread_pct`` is the FULL
+quoted spread; each leg crosses HALF of it, so a round trip pays exactly ``spread_pct`` of notional.
 
 * :meth:`CostModel.round_trip` / :meth:`CostModel.breakeven_pct` — **fees + spread**, the full
-  friction. This is the LIVE surface: ``min_viable_size`` (``risk/gate.py`` ``_rule_min_viable_size``
-  → ``round_trip`` + ``expected_edge_pct``) and :meth:`min_viable_qty` inherit the spread automatically,
-  which strictly TIGHTENS the viability check (an edge must now also pay the spread).
+  friction and the LIVE surface: ``min_viable_size`` (``risk/gate.py`` ``_rule_min_viable_size``)
+  and :meth:`min_viable_qty` inherit the spread (an edge must also pay it).
 * :meth:`CostModel.fee_breakeven_pct` — **statutory fees only**, the contract-note anchor. Used by
-  the research sweeps (which charge spread separately as vectorbt slippage, so it is never double-counted)
-  and by the ``reference_roundtrips`` assertions.
+  the research sweeps (which charge spread separately as vectorbt slippage, so it is never
+  double-counted) and by the ``reference_roundtrips`` assertions.
 
 Rounding contract (the "to the paisa" convention): each charge component is computed exactly in
 ``Decimal`` from the yaml rates, GST is computed on the RAW (unquantized) bases named by
@@ -131,8 +128,7 @@ class CostRates(BaseModel):
         if sebi.get("applies_to", "both_sides") != "both_sides":
             raise ValueError("costs.yaml sebi_charge.applies_to changed — update CostModel deliberately")
         if "spread_pct" not in raw:
-            # Never default silently: a missing spread measurement would quietly restore the
-            # zero-spread cost surface the spread correction removed and re-loosen the live viability check.
+            # Never default: a missing spread would silently restore a zero-spread cost surface.
             raise ValueError(
                 "costs.yaml is missing spread_pct — the measured bid-ask spread. Add it "
                 "with its measurement provenance; it is NOT defaulted."
@@ -244,11 +240,9 @@ class CostModel:
     ) -> CostBreakdown:
         """Full round-trip (buy + sell) FRICTION for ``notional`` under ``product``.
 
-        Friction = statutory fees **+ the measured bid-ask spread**: the ``spread`` component
-        is ``spread_pct`` × notional — half the quoted spread on each of the two legs. The fee
-        components are unchanged and still contract-note exact; :meth:`fee_breakeven_pct` exposes the
-        fees-only view for the worked examples and for callers (the sweeps) that charge spread
-        separately.
+        Friction = statutory fees **+ the measured bid-ask spread** (``spread_pct`` × notional);
+        the fee components stay contract-note exact, and :meth:`fee_breakeven_pct` exposes the
+        fees-only view.
 
         ``n_scrips_sell_day`` models the multi-scrip case: the notional split across that many
         equal slices sold the same day (DP charged per scrip; brokerage capped per order). Spread is
@@ -298,12 +292,9 @@ class CostModel:
     ) -> int:
         """Smallest qty whose expected edge covers ``edge_multiple_min`` × breakeven.
 
-        The breakeven here is the FULL friction (fees + spread), so the required size rises
-        wherever the spread is a material share of the edge — the intended conservative direction.
-        Note the spread is PROPORTIONAL: unlike the flat DP/brokerage components it does not amortize
-        with size, so it raises the floor a trade must clear at *every* size (monotonicity — on which
-        the binary search below depends — is preserved: fees are non-increasing in notional and the
-        spread term is constant).
+        The breakeven is the FULL friction (fees + spread). The spread is PROPORTIONAL and does not
+        amortize with size, so it raises the floor at *every* size; monotonicity (which the binary
+        search below needs) holds: fees are non-increasing in notional and the spread term is constant.
 
         Levels are first snapped to ``symbol``'s banded tick via ``InstrumentStore.round_to_tick``.
         Direction is inferred from the stop (stop below entry ⇒ long, above ⇒ short) and

@@ -6,18 +6,15 @@ rules with no per-bar condition, so they implement no ``Scanner`` protocol and a
 directly by the composition root (``prescreen.admit``), which binds them to the identical prescreen
 dedupe/caps.
 
-``cat`` (v2 SHADOW, owner-directed 2026-08-18) is the one that changed
-shape: the original design registered here as a per-bar peer with an intraday price/volume
-confirmation, and that confirmation was RETIRED. The rule now mirrors ``ins`` — a batch
-translation of today's ``originating`` watchlist rows in :mod:`engine.strategy.scanners.cat`. Its
-candidates carry ``catalyst_ref`` and are additionally capped by
-``catalyst_guard.max_catalyst_entries_day`` in the pre-screen.
+``cat`` (SHADOW) mirrors ``ins``: a batch translation of today's ``originating`` watchlist rows in
+:mod:`engine.strategy.scanners.cat`. Its candidates carry ``catalyst_ref`` and are additionally
+capped by ``catalyst_guard.max_catalyst_entries_day`` in the pre-screen.
 
-``cat_reversal`` (2026-08-27) is a SECOND, separate news shadow on the same batch path: it
-originates on a story-level directional REVERSAL (the winning cluster refutes an earlier
-opposite-direction cluster of the same story) rather than on catalyst drift. Its candidates carry
-``catalyst_ref`` too, so they share the SAME ``max_catalyst_entries_day`` budget as ``cat`` — a new
-strategy must not widen the platform's total news-originated exposure surface.
+``cat_reversal`` is a SECOND, separate news shadow on the same batch path: it originates on a
+story-level directional REVERSAL (the winning cluster refutes an earlier opposite-direction cluster
+of the same story) rather than on catalyst drift. Its candidates carry ``catalyst_ref`` too, so they
+share the SAME ``max_catalyst_entries_day`` budget as ``cat`` — a new strategy must not widen the
+platform's total news-originated exposure surface.
 """
 
 from __future__ import annotations

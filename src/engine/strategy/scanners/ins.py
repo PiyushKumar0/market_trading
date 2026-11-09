@@ -1,86 +1,79 @@
-"""``ins`` — insider net-BUY swing leg (owner-directed 2026-08-17).
+"""``ins`` — insider net-BUY swing leg.
 
-The platform's FIRST evidence-first origination rule. Promoted from the filings event-study evidence
-because it is the only recorded edge that survived the corrected-mechanics re-check (2026-08-14: T+10 **+0.7297%** / T+20 **+1.5797%** net at next-open fills with full spread-inclusive
-costs; CPCV +0.0359%/day with the median passing split 4x the margin floor).
+The platform's first evidence-first origination rule, from the filings event study: the only
+recorded edge that survived the corrected-mechanics re-check (T+10 **+0.7297%** / T+20 **+1.5797%**
+net at next-open fills with full spread-inclusive costs).
 
 **Architecture — a pure batch rule, like ``brk20``, deliberately NOT a :class:`Scanner`.** Filings
-arrive EOD, so there is nothing per-bar to scan and the (1m bar, ScanContext) protocol does
-not fit. The EOD ``ins_crossings`` job (:mod:`engine.datafeeds.ins_crossings`) computes the day's NEW
-crossings with the shared, validated crossing function and persists them as ``ins_pending`` rows; the
-next session's window-open//``scan_now`` sweep turns those rows into candidates HERE and admits them
-through ``SignalPreScreen.admit`` so the prescreen's dedupe/caps bind identically (no cap bypass).
+arrive EOD, so there is nothing per-bar to scan. The EOD ``ins_crossings`` job
+(:mod:`engine.datafeeds.ins_crossings`) computes the day's NEW crossings with the shared, validated
+crossing function and persists them as ``ins_pending`` rows; the next session's
+window-open//``scan_now`` sweep turns those rows into candidates HERE and admits them through
+``SignalPreScreen.admit`` so the dedupe/caps bind identically (no cap bypass).
 
-This module holds NO crossing logic of its own — it never re-derives an event. It is the pure
-crossing-row → :class:`SignalCandidate` translation, and nothing else.
+This module holds NO crossing logic: it is the pure crossing-row → :class:`SignalCandidate`
+translation.
 
 PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
 
 * **Event:** a symbol's trailing-10-session open-market insider net-BUY value crosses ≥
   ``ins.threshold_inr`` (₹1,00,00,000), anchored on the **disclosure broadcast timestamp** (never the
-  transaction date), with the re-arm hysteresis. Owner-fixed and **NOT learnable**: the
-  threshold defines the validated event population, and moving it re-opens multiplicity.
-  Computed upstream by :func:`engine.datafeeds.insider_crossings.insider_cluster_events` — the ONE
-  definition the corrected-mechanics study runs.
+  transaction date), with the re-arm hysteresis. Owner-fixed and **NOT learnable**: the threshold
+  defines the validated event population. Computed upstream by
+  :func:`engine.datafeeds.insider_crossings.insider_cluster_events` — the ONE definition the
+  corrected-mechanics study runs.
 * **Style/side:** swing (CNC), BUY.
 
 WHICH PRICE ANCHORS WHAT (read this before touching the levels)
 ---------------------------------------------------------------
-The validated fill is the **next-session OPEN** after the crossing session. That price does not exist
-when the EOD job runs, and it still does not exist as a committed, replayable number when the morning
-sweep admits the row. So three distinct prices are in play and only one of them is the entry:
+The validated fill is the **next-session OPEN** after the crossing session, which is not a committed,
+replayable number when the EOD job runs or the morning sweep admits the row. Three prices are in play
+and only one is the entry:
 
-1. ``reference_close`` — the CROSSING SESSION's close, journalled by the EOD job. This is the
-   freshest COMMITTED price available at admission time (at 09:30+ it is literally yesterday's
-   close), and it is what ``raw_levels.entry`` is computed from. It is a **pre-open reference for
-   the next-session-open fill**, not a limit the market owes us.
-2. The live LTP — the analyst sees it on the payload's price line, and the risk gate's sizing
-   reference already sizes off ``max(entry, LTP)`` for a BUY, so a market that has run away from the
-   reference shrinks the size rather than flattering it. Nothing here needs to chase it.
-3. The actual fill — the owner's, in RECOMMEND. The ``close_t`` A/B showed this edge is SLOW
-   (a 2-4 week drift), so minutes of open-slippage against the reference are immaterial; that is
-   exactly why a stale-by-one-session anchor is acceptable here and would not be for ``orb``.
+1. ``reference_close`` — the CROSSING SESSION's close, journalled by the EOD job: the freshest
+   COMMITTED price at admission, and what ``raw_levels.entry`` is computed from. A **pre-open
+   reference for the next-session-open fill**, not a limit the market owes us.
+2. The live LTP — the analyst sees it on the payload's price line, and the gate sizes off
+   ``max(entry, LTP)`` for a BUY, so a market that ran away from the reference shrinks the size
+   rather than flattering it. Nothing here needs to chase it.
+3. The actual fill — the owner's, in RECOMMEND. The edge is a SLOW (2-4 week) drift, so minutes of
+   open-slippage against the reference are immaterial; that is why a stale-by-one-session anchor is
+   acceptable here and would not be for ``orb``.
 
 Levels, pre-registered:
 
 * ``entry`` = ``round_to_tick(reference_close)`` — the pre-open reference above.
-* ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**. This is a **disaster
-  stop and a deliberate deviation from the stopless validated design**: per-trade risk sizing needs a risk
-  distance, so one has to exist. It is set wide enough that the T+10/T+20 drift capture is rarely
-  interrupted; its interference is measurable in the ledger and reviewable. It is NOT the rule's
-  exit.
-* ``target`` = ``None``. The rule has no price target — the validated T+20 median (+1.21%) is
-  INFORMATION, never an order level, and inventing one would put a fabricated number into the
-  gate's edge math. The cost gate's edge input comes from the configured per-strategy expected edge
-  (``ins.expected_edge_pct`` = the validated T+20 net +1.58%), not from a synthetic target.
-* **Exit is TIME**, not price: hold ``ins.hold_sessions`` (20) sessions — exactly the validated
-  T+20 horizon — and the time exit (``RecommendationPipeline.time_exit_check``) IS the exit path.
-  No exit code lives here or anywhere else for ``ins``. The T+10 variant remains recorded evidence,
-  not a rule.
+* ``stop``  = ``round_to_tick(entry x (1 - stop_pct/100))``, default **5%**. A **disaster stop and a
+  deliberate deviation from the stopless validated design**: per-trade risk sizing needs a risk
+  distance. Wide enough that the T+10/T+20 drift capture is rarely interrupted. NOT the rule's exit.
+* ``target`` = ``None``. The validated T+20 median (+1.21%) is INFORMATION, never an order level; a
+  synthetic target would put a fabricated number into the gate's edge math. The cost gate's edge
+  input is the configured per-strategy expected edge (``ins.expected_edge_pct`` = the validated T+20
+  net +1.58%).
+* **Exit is TIME**, not price: hold ``ins.hold_sessions`` (20) sessions — the validated T+20 horizon
+  — and the time exit (``RecommendationPipeline.time_exit_check``) IS the exit path. No exit code
+  lives here. The T+10 variant is recorded evidence, not a rule.
 
 Rounding order is pinned (as for ``brk20``): ``entry``/``stop`` are tick-rounded and the coherence
-test is applied AFTER rounding, so a stop that collapses onto the entry under tick rounding emits
-nothing rather than shipping ``stop >= entry`` into the risk gate's ``levels_coherent`` check.
+test is applied AFTER rounding, so a stop that collapses onto the entry emits nothing rather than
+shipping ``stop >= entry`` into the risk gate's ``levels_coherent`` check.
 
 Score = ``min(1.0, max(0.0, 0.5 + 0.5 x log10(trailing_value / threshold)))`` — a bare crossing (1x
-the threshold) scores 0.5 and a 10x cluster scores 1.0, so the strength signal is the crossing's
-MAGNITUDE in orders of magnitude above the floor. Scores are only ever compared WITHIN a strategy
-(the funnel ranks by per-strategy score quantile), so this scale needs to agree with no other
-scanner's.
+the threshold) scores 0.5 and a 10x cluster scores 1.0: the strength signal is the crossing's
+MAGNITUDE in orders of magnitude above the floor. Scores are only compared WITHIN a strategy.
 
 EVIDENCE CAVEATS THAT RIDE ALONG (binding):
 
-* **Live-reachability.** Live crossings come from the BSE fresh feed (live since 2026-07-19, ~13-18
-  in-universe rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old NSE route's ~70-day
-  content embargo had made NSE historical-only). The live-reachable event population is NOT proven
-  identical to the backtested one. The ``ins_crossings`` job logs fresh-feed row counts every run:
-  sustained zero-rows is STARVATION, not absence of signal.
+* **Live-reachability.** Live crossings come from the BSE fresh feed and NSE's PIT V2.0 route. The
+  live-reachable event population is NOT proven identical to the backtested one. The
+  ``ins_crossings`` job logs fresh-feed row counts every run: sustained zero-rows is STARVATION, not
+  absence of signal.
 * The CPCV pass is **boundary-exact** (60.0% of folds against a 60% bar — one fold from failure).
 * The survivorship / index-membership bound is uncorrectable with stored data.
 
-``ins`` is the best-evidenced leg the platform has. It is not a proven money-printer, and it ships
-RECOMMEND-only (the current mode is structurally so); live-AUTO enablement follows the ``cat``
-precedent — owner approval as new strategy logic plus soak evidence (the owner promotion gate).
+``ins`` is the best-evidenced leg the platform has, not a proven money-printer. It ships
+RECOMMEND-only; live-AUTO enablement follows the ``cat`` precedent — owner approval as new strategy
+logic plus soak evidence (the owner promotion gate).
 """
 
 from __future__ import annotations
@@ -97,11 +90,9 @@ from engine.strategy.types import RawLevels, SignalCandidate, round_to_tick
 
 STRATEGY_ID = "ins"
 
-#: Owner knobs (``settings.yaml`` ``ins:`` block), NOT parameter-envelope rows — the design pins
-#: ``stop_pct`` [4-8] and ``hold_sessions`` [10-20] as FUTURE envelope rows and keeps them static
-#: owner settings until the learning phase needs them (no protected-store churn before then).
-#: ``threshold_inr`` is owner-FIXED and never learnable at all: it defines the validated event
-#: population (moving it re-opens multiplicity).
+#: Owner knobs (``settings.yaml`` ``ins:`` block), NOT parameter-envelope rows: static owner
+#: settings (``stop_pct`` [4-8] and ``hold_sessions`` [10-20] are the future envelope ranges).
+#: ``threshold_inr`` is owner-FIXED and never learnable: it defines the validated event population.
 DEFAULT_PARAMS: dict[str, float] = {
     "stop_pct": 5.0,             # disaster stop; deliberate deviation from the stopless validated design
     "hold_sessions": 20,         # = the swing max_holding cap = the validated T+20 horizon
@@ -113,9 +104,8 @@ class Crossing(NamedTuple):
     """One persisted ``ins_pending`` row — a crossing the EOD job already found and journalled.
 
     ``reference_close`` is the CROSSING SESSION's close (see the module docstring's "which price
-    anchors what"): the freshest committed price at admission time, and the pre-open reference for
-    the validated next-session-open fill. It is deliberately journalled at EOD rather than re-read at
-    admission, so the same pending row always produces the same candidate (replay determinism).
+    anchors what"). Journalled at EOD rather than re-read at admission, so the same pending row always
+    produces the same candidate (replay determinism).
     """
 
     symbol: str

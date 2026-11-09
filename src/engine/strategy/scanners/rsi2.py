@@ -11,7 +11,7 @@ Documented choices where the sketch is silent:
   over 20 sessions (``sma50[t] > sma50[t−20]``, strict — a flat index is NOT an uptrend). Evaluated
   on COMPLETED index sessions (``ctx.index_daily_closes``): the regime is a slow filter, deliberately
   not recomputed from a live index tick. A shut leg logs ``rsi2_regime_blocked`` once per session
-  (:meth:`Rsi2Scanner._log_regime_blocked`) — silence and a shut filter used to look the same.
+  (:meth:`Rsi2Scanner._log_regime_blocked`).
 * **Daily series = completed daily closes + today's provisional close** (the scanned 1m bar's close):
   RSI(2) and the 200-DMA both include today's provisional value, so the signal reflects the price at
   which the entry would actually happen. Needs 199 completed dailies (200-DMA) — fewer ⇒ fail to
@@ -60,11 +60,9 @@ class Rsi2Scanner(Scanner):
 
     def __init__(self, params: Mapping[str, float] | None = None) -> None:
         super().__init__(params)
-        #: Session date of the last ``rsi2_regime_blocked`` line. The ONLY mutable state on this
-        #: scanner and it is log-only: :meth:`scan` returns the same candidates with or without it,
-        #: so the purity contract in ``scanners/base.py`` still holds for the outputs. The guard
-        #: is per instance because the integrator builds one scanner per process, and `scan` runs on
-        #: every 1m bar of every watchlist symbol — ~80,000 lines a session without it.
+        #: Session date of the last ``rsi2_regime_blocked`` line. The ONLY mutable state and it is
+        #: log-only (the purity contract in ``scanners/base.py`` holds for outputs). `scan` runs on
+        #: every 1m bar of every watchlist symbol, so without it the line would flood.
         self._regime_logged_on: date | None = None
 
     def scan(self, bar: Bar, ctx: ScanContext) -> list[SignalCandidate]:
@@ -102,14 +100,11 @@ class Rsi2Scanner(Scanner):
         ]
 
     def _log_regime_blocked(self, bar: Bar, r: regime.IndexRegime) -> None:
-        """One INFO per SESSION naming why the index regime leg refused (2026-09-12).
+        """One INFO per SESSION naming why the index regime leg refused ("filter working" must be
+        distinguishable from "scanner broken").
 
-        NIFTY 50 has been under its 50-DMA every session since 08-27 and rsi2 has produced nothing
-        since 08-28 with no log line anywhere saying which of the two legs was shut — "the filter is
-        working" and "the scanner is broken" looked identical from the outside for two weeks.
-
-        Session date = ``bar.ts_minute.date()`` (bars are IST-aware), never a Clock: the same rule
-        the pre-screen uses for "today", so a replay logs once per replayed session too.
+        Session date = ``bar.ts_minute.date()`` (bars are IST-aware), never a Clock: the pre-screen's
+        rule for "today", so a replay logs once per replayed session too.
         """
         session = bar.ts_minute.date()
         if self._regime_logged_on == session:

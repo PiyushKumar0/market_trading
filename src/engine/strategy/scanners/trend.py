@@ -14,16 +14,14 @@ Documented choices where the sketch is silent:
   point. ADX(14) and ATR(14, 1d) are computed on COMPLETED daily bars only — today's daily
   high/low/close do not exist intraday (a 1m bar is not a day bar); the trigger's trend-strength and
   trail distance come from finished sessions.
-* **Warm-up**: ≥ 150 completed dailies required (2026-08-13 — raised from a 60-bar floor). EMA is seeded deterministically from the series start (see ``indicators``
-  module contract), so the seed's own contribution after ``n`` bars decays as
+* **Warm-up**: ≥ 150 completed dailies required. EMA is seeded deterministically from the series
+  start (see ``indicators`` module contract), so the seed's contribution after ``n`` bars decays as
   ``(1 − alpha)**n`` with ``alpha = 2 / (period + 1)``; for EMA(50) (``alpha = 2/51``) that residual
   seed weight is **9.07% at 60 bars** — still material — versus **0.25% at 150 bars**, the
-  sub-1%-residual convergence point this floor targets (the derivation this docstring states is the
-  one this floor's acceptance bar cites). ADX(14) itself only needs 28 rows — EMA50's seed is the binding
-  constraint, not ADX. ``warmup_ready``/startup backfill supplies 1–2 y of dailies for established
-  listings, so the raise costs nothing there; it only holds back young listings, closing the gap
-  where WarmupGate's young-listing exemption previously let a 60–150-session listing through with a
-  live golden-cross carrying material EMA-seed noise (fewer trend signals on young names — intended).
+  sub-1%-residual convergence point this floor targets. ADX(14) itself only needs 28 rows — EMA50's
+  seed is the binding constraint. ``warmup_ready``/startup backfill supplies 1–2 y of dailies for
+  established listings; the floor only holds back young listings (WarmupGate's young-listing
+  exemption would otherwise let a 60–150-session listing through with material EMA-seed noise).
 * **ADX boundary is strict**: ``adx > adx_min``, not ``>=``.
 * **Score** = ``(adx − adx_min) / (50 − adx_min)`` clamped to [0, 1] — ADX 50 (a very strong trend)
   or higher scores 1.0. Informational only.

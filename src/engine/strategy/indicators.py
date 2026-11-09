@@ -11,9 +11,8 @@ Design contract (load-bearing for replay determinism and the vectorbt sweep):
   the stream happens to begin"), a scanner passing the same window always gets the same value.
   Vectorized (research): pass the full history once.
 * **Floats, deliberately.** Indicators are statistics, not money — inputs are coerced to
-  ``float64`` (Decimals via ``str``-free direct ``float()``: these feed comparisons and multipliers,
-  never a ledger). Scanners convert final PRICE LEVELS back to exact ``Decimal`` with
-  ``strategy.types.round_to_tick`` — no float ever becomes a persisted price.
+  ``float64`` (they feed comparisons and multipliers, never a ledger). Scanners convert final PRICE
+  LEVELS back to exact ``Decimal`` with ``strategy.types.round_to_tick``.
 
 Smoothing conventions (documented so hand-computed test vectors are unambiguous):
 
@@ -132,8 +131,8 @@ def wilder_atr(
 ) -> pd.Series:
     """Wilder ATR (SMA seed over the first ``period`` TRs, then Wilder recursion).
 
-    Timeframe-agnostic — pass 1m bars for ATR(14,1m) (the atr14_1m feature) or daily bars for
-    ATR(14,1d) (trend trail, the atr14_1d feature, the rec card's stop-in-ATR extra). First value at index ``period − 1``.
+    Timeframe-agnostic — 1m bars for ATR(14,1m), daily bars for ATR(14,1d) (trend trail, the rec
+    card's stop-in-ATR extra). First value at index ``period − 1``.
     """
     h, lo, c = as_float_series(high), as_float_series(low), as_float_series(close)
     out = _empty_like(c)
