@@ -2,7 +2,7 @@
 
 Newest first. About two weeks of entries are kept; older ones are in git history.
 
-## 2026-11-09 17:10 — Second citation census: about 200 retired codes the earlier passes missed
+## 2026-11-09 17:20 — Second citation census: about 200 retired codes the earlier passes missed; engine restarted 17:17
 
 - **Why:** the earlier censuses skipped codes followed by a colon, letters outside a fixed set, identifier segments and
   .csv/.json/.xml files. A census of every letter-and-number token in every tracked file found the rest; the analysts'
@@ -11,12 +11,14 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   and a test variable; `17f8596` 142 "CODE:" prefixes in 87 files, about 20 identifiers (`why._SURVEILLANCE_CODES`,
   test names, `_PROTECTION_SQL`, the latency probe's default report name), 27 case-list labels in test docstrings and
   60 double-encoded lines in two tests; `813218f` one more docstring.
-- **Runtime text, live at the next restart:** the gate's trade-window detail "(exits unaffected)" and the self-test's
-  "non-trading day (skipped)".
+- **Runtime text, live since the 17:17 restart:** the gate's trade-window detail "(exits unaffected)" and the
+  self-test's "non-trading day (skipped)".
 - **Verified:** per file, AST equal to HEAD's with docstrings (or all strings) blanked, renames mapped back; unit gate
   4262 passed / 19 skipped, offline tier 521 passed; ruff findings are the ones at HEAD.
-- **Waiting for the owner:** `limits.yaml`'s capital-anchor comment still opens with a retired code. The one-line
-  comment patch passes `git apply --check`; applying it needs the stop, apply, reseed, start flow.
+- **Protected comment (owner: "Apply now"), commit `d593035`:** `limits.yaml`'s capital-anchor comment lost its code.
+  Nothing in flight; stopped 17:16:48 (`exit_clean`); one-line patch applied; reseeded (parsed data identical to HEAD,
+  signatures match, `protected_config_status.py` OK); started 17:17:34. Selftest PASS with both `protected_store`
+  checks, frozen []; catch-up failed nothing; `engine_ready` 17:19:46, `boot_contract_ok` 130.1 s; no ERROR lines.
 
 ## 2026-11-09 16:20 — Leverage start key renamed after the close (owner: "Rename now"); engine restarted on the day's renames
 
