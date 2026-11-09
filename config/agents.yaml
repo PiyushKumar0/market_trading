@@ -4,12 +4,12 @@
 # it — only engine.intelligence does. Model is ALWAYS set explicitly per agent: the SDK defaults to
 # Opus on Max plans and would burn credit at 5× Haiku rates. The harness probes each knob against
 # the SDK's options surface; note `effort` does NOT exist on Haiku 4.5 — Haiku 5.5 does take it. `max_output_tokens` is NOT
-# enforced: claude-agent-sdk has no output-token option, so the values below are unsent (2026-10-03).
+# enforced: claude-agent-sdk has no output-token option, so the values below are unsent.
 
 schema_version: 1
 
 llm:
-  # WEEKLY, not monthly (owner-directed 2026-09-12): the Agent SDK draws on the subscription's weekly
+  # WEEKLY, not monthly: the Agent SDK draws on the subscription's weekly
   # quota, so the governor's period must be that week or it measures the wrong thing in both directions.
   # This ledger figure is a governor proxy, not real spend — billing is subscription-limit based.
   weekly_credit_usd: 200
@@ -26,7 +26,7 @@ llm:
   # startup self-test asserts it absent unless overflow is deliberately enabled.
   auth_mode: oauth_subscription            # oauth_subscription | api_key (the auth-mode swap seam)
   setting_sources: []                      # load NOTHING from filesystem CLAUDE.md/settings
-  # Engine-owned Claude Code CLI, relative to the repo root (2026-10-03): Sonnet 5.5 needs CLI >= 2.1.284,
+  # Engine-owned Claude Code CLI, relative to the repo root: Sonnet 5.5 needs CLI >= 2.1.284,
   # newer than any claude-agent-sdk Windows wheel bundles. Missing file => every call fails closed.
   # Re-pin by copying a newer claude.exe into a new version folder and changing this line.
   cli_path: data/run/claude-cli/2.1.288/claude.exe
@@ -40,32 +40,22 @@ llm:
 # Standard per-MTok rates (USD) — the governor prices ledger usage from these (no balance API).
 model_pricing_usd_per_mtok:
   haiku-4.5:  { input: 1,  output: 5 }
-  sonnet-5: { input: 2,  output: 10 }   # 3/15 → 2/10 (owner-directed 2026-09-18; Anthropic first-party
-                                        # Sonnet 5 rate). Every enabled agent billed at this key from the
-                                        # 09-15 roster move until 2026-10-03 (now sonnet-5.5, same rate;
-                                        # this key prices historical rows), so the proxy was ~50% high; the
-                                        # $200 weekly allocations were sized at the old rate — re-base
-                                        # them if the ladder now trips too late for comfort.
+  sonnet-5: { input: 2,  output: 10 }   # prices historical ledger rows (agents now run sonnet-5.5, same rate)
   opus-5:   { input: 5,  output: 25 }
   fable-5:    { input: 10, output: 50 }
-  # 2026-10-03, platform.claude.com pricing page. Every MODEL_API_IDS name is priced here (tested).
+  # Every MODEL_API_IDS name is priced here (tested).
   sonnet-4.6: { input: 3,  output: 15 }
   opus-4.8:   { input: 5,  output: 25 }
   sonnet-5.5: { input: 2,  output: 10 }
   opus-5.5:   { input: 4,  output: 20 }
   fable-5.1:  { input: 10, output: 50 }
-  haiku-5.5:  { input: 0.10, output: 0.50 }   # 2026-10-11, prompts <=100K tokens ($0.50/$2.50 beyond);
+  haiku-5.5:  { input: 0.10, output: 0.50 }   # prompts <=100K tokens ($0.50/$2.50 beyond);
                                               # flat here — only the tiny sdk_smoke call uses it
 
 # WEEKLY allocation per agent [tunable] — one Thursday-14:00-IST quota window. Sum = $200.
-# Re-based 2026-09-12 (owner-directed) from the retired monthly split. Sized at ~2x the peak OBSERVED
-# week: the 09-03 window billed $103.13 total (intraday $42.78, news $54.58, preopen $3.66, nightly
-# $1.98); the four prior weeks ran $45-76. 2x keeps a normal week nowhere near the ladder while a
-# genuine runaway still trips it, and the whole $200 sits inside the ~5x real bandwidth headroom the
-# owner stated 2026-08-18. The ledger dollar remains a governor PROXY — billing is the subscription's
+# Sized at ~2x the peak observed week, so a normal week stays nowhere near the ladder while a
+# genuine runaway still trips it. The ledger dollar is a governor PROXY — billing is the subscription's
 # weekly quota, not a credit balance, so these numbers gate cadence, never money.
-# news_analyst 80 (monthly) → 90 (weekly) is the fix for the actual 08-28/09-09 failure: it was
-# spending $38-55 per WEEK against a $80 MONTH, tripping DG1 and holding the forward cap at 4/day.
 # weekly_researcher stays token (enabled:false until it is switched on) — re-fund it at enablement.
 # The catalyst digest is deterministic — $0.
 budget_allocations_usd:
@@ -77,69 +67,54 @@ budget_allocations_usd:
   reserve: 5
 
 # Degrade ladder trip points — cache-aware; shrink context before switching models.
-# agent_alloc_pct no longer moves the PLATFORM tier (2026-09-12): it degrades only that agent's own
-# cadence knobs. degraded_forward_cap_frac replaces the flat cap of 4 — that constant was written
-# against a base of 6 and became a 92% cut once the base went to 48.
+# agent_alloc_pct does not move the PLATFORM tier: it degrades only that agent's own
+# cadence knobs. degraded_forward_cap_frac scales the intraday forward cap (a flat cap would not track the base).
 degrade_ladder:
   DG1: { pro_rata_pct: 110, agent_alloc_pct: 85, degraded_forward_cap_frac: 0.67 }
   DG2: { pro_rata_pct: 125, global_alloc_pct: 85 }
   DG3: { global_alloc_pct: 95 }
   # DG4 = credit exhausted / SDK billing errors => zero SDK calls (== LLM-unavailable safe state)
 
-# Timeouts recalibrated 2026-07-28 against MEASURED single-shot durations through the CLI subprocess
-# (~1.5s spawn + full response before anything streams usage): the real 30-cluster news call took 32s
-# with thinking off and 48-80s+ before the harness pinned thinking to zero; the old 45/60s budgets
-# timed out every production call on 2026-07-28 while the tiny smoke call passed. Budgets are ~3x the
-# measured duration — a slow call that completes is billed anyway, so cutting it off wastes the spend.
-# sonnet-5 → sonnet-5.5 roster-wide 2026-10-03 (owner-directed; replay-backed, with the
-# cat v2 shadow-window caveat). news_analyst has no effort key by owner choice: the CLI default applies.
+# timeout_s budgets are ~3x the measured single-shot duration through the CLI subprocess (~1.5s spawn
+# + full response before anything streams usage; a 30-cluster news call takes ~32s with thinking off).
+# A slow call that completes is billed anyway, so cutting it off wastes the spend: headroom is free.
+# news_analyst has no effort key by owner choice: the CLI default applies.
 # `triggers` and `schedule_ist` are documentary — no code reads them: call classes are code constants
 # and fire times are settings.yaml jobs.* (preopen_planner_ist, nightly_review_ist).
 agents:
   # --- intraday: SINGLE-SHOT, tools disabled, structured output, fresh query per call ---
   intraday_analyst:
-    model: sonnet-5.5         # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
-                              # (Opus for decision roles; entry decisions are the platform's core
-                              # judgment point). The system is in RECOMMEND mode, so neither latency nor
-                              # tier is order-critical, and the deterministic gates still do the
+    model: sonnet-5.5         # the system is in RECOMMEND mode, so neither latency nor tier is
+                              # order-critical, and the deterministic gates still do the
                               # quality filtering ahead of this call.
-    effort: medium             # thinking DEPTH (2026-10-03 prompt audit): Sonnet 5 thinks whatever the
+    effort: medium             # thinking DEPTH: Sonnet 5 thinks whatever the
                                # deprecated max_thinking_tokens says, so depth is set here, never pinned off
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1200
-    timeout_s: 180             # 120→180 at the 08-18 opus switch; KEPT on the way back down — a call
-                               # that completes is billed anyway, so headroom costs nothing and a
-                               # cut-off one wastes the spend (same reasoning as the news_analyst key)
+    timeout_s: 180
     triggers: [signal_candidate, position_event]   # (a) window-gated; (b) whenever up
-    prescreen_cap_per_day: 48  # [tunable] 6→12 (owner 2026-08-11: the cap, not signal quality, was
-                               # binding — 66 candidates by 10:13 vs 6 evaluations); 12→48 (owner
-                               # 2026-08-18: bandwidth ~5x — cap sized to clear a 66-candidate morning
-                               # with the deterministic gates still doing the quality filtering)
+    prescreen_cap_per_day: 48  # [tunable] sized to clear a busy (~66-candidate) morning with the
+                               # deterministic gates still doing the quality filtering; settings.yaml
+                               # strategy.prescreen.max_candidates_per_day must equal it
 
   preopen_planner:
-    model: sonnet-5.5         # opus→sonnet 2026-09-15 (owner-directed). Was sonnet→opus 2026-08-18
-                              # (Opus for decision roles; one call/day, cost delta trivial)
+    model: sonnet-5.5         # one call/day
     effort: medium
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 2000
-    timeout_s: 240             # 180→240 at the 08-18 opus switch; kept (headroom is free, see above)
+    timeout_s: 240
     triggers: [schedule]
     schedule_ist: "08:50"
 
-  news_analyst:                # formerly sentiment_scorer — upgraded (2026-07-06)
-    model: sonnet-5.5          # haiku→sonnet 2026-08-18 (owner: substitute Sonnet where it helps —
-                               # the haiku choice was cost-driven, not quality-driven; materiality/
-                               # novelty judgments feed the watchlist and `cat` origination).
+  news_analyst:
+    model: sonnet-5.5          # materiality/novelty judgments feed the watchlist and `cat` origination
     shape: single_shot
     tools_enabled: false
     max_output_tokens: 1500    # richer per-CLUSTER schema: scope/entities/sectors/themes/sentiment/
                                # materiality/event_type(closed enum)/novelty; batched ≤30 clusters/call
-    timeout_s: 240             # 120→240 (2026-08-20/21: 4 timeouts on this key in two days,
-                               # each bills a wasted call (~$0.28) and delays cluster scoring; measured
-                               # 32s thinking-off for a full batch, so headroom was not the problem —
-                               # batch size deliberately unchanged, one knob at a time)
+    timeout_s: 240
     triggers: [schedule, batch]
     # market hours + 19:00–22:00 sweep + pre-open batch that MUST complete before the ~08:35
     # catalyst digest; NOT window-gated. Scores are UNTRUSTED;
@@ -147,7 +122,7 @@ agents:
 
   # --- agentic multi-turn permitted ONLY for nightly/weekly, with hard caps ---
   nightly_reviewer:
-    model: sonnet-5.5         # stays sonnet (owner challenge 2026-08-18): every consumer of this
+    model: sonnet-5.5         # every consumer of this
                               # output is human-gated or gate-validated — Telegram summary, dashboard
                               # suggestions (owner applies via POST /config/params only),
                               # proposals (deterministic validation; no live influence yet), and the
@@ -155,7 +130,7 @@ agents:
                               # not a judgment). Revisit → opus at the future AGENTIC upgrade, when
                               # the reviewer pulls its own evidence and tier starts to matter.
     effort: medium
-    # v1 DEVIATION (2026-07-28): single-shot with deterministically pre-assembled context —
+    # v1 DEVIATION: single-shot with deterministically pre-assembled context —
     # at current volume (a handful of recommendations/day, no auto trades) the agentic tool
     # loop adds cost + an unverified SDK MCP surface for no analytical gain. The agentic shape +
     # read-only MCP toolset return in a future upgrade; run_budget_tokens is kept as that upgrade's envelope.
@@ -169,9 +144,7 @@ agents:
 
   weekly_researcher:
     enabled: false             # Not yet enabled; not loadable until its read-only MCP allowlist is wired
-    model: sonnet-5.5       # opus→sonnet 2026-09-15 (owner-directed; roster-wide). Opus was originally specified
-                            # for the weekly deep review — revisit at its enablement,
-                            # when this agent actually runs and its output quality can be judged.
+    model: sonnet-5.5       # revisit (opus) at its enablement, when its output quality can be judged.
     shape: agentic
     tools_enabled: true
     max_turns: 20
