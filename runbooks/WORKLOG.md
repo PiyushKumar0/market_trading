@@ -2,9 +2,21 @@
 
 Newest first. About two weeks of entries are kept; older ones are in git history.
 
-## 2026-11-09 09:40 — Identifier cleanup and the brk20 report re-key; overnight outage was the lid closing; limits key rename waits for the close
+## 2026-11-09 16:20 — Leverage start key renamed after the close (owner: "Rename now"); engine restarted on the day's renames
 
-- **Owner, answered ~09:2x:** rename `max_leverage.phase4_start_x` to `live_auto_start_x` (signed store); keep migration
+- **Commit `8bc45af`:** `max_leverage`'s start key is `live_auto_start_x` in limits.yaml, the `MaxLeverage` model and
+  the loader test; nothing reads it until live routing is built. The cap's comment no longer names an overlay file that
+  was never built.
+- **Deploy:** close jobs done (reco_expire 15:45, bar_reconcile 15:52), nothing in flight; stopped 16:06:20
+  (`exit_clean`); unit gate 4262 passed / 19 skipped, offline tier 521 passed; reseeded 16:17:22 (limits data equals HEAD
+  apart from the key, envelope unchanged, `protected_config_status.py` OK for both); started 16:17:48 on `8bc45af`, so
+  `c87703c` is live too. Selftest all PASS with both `protected_store` checks, frozen []; catch-up failed nothing; ticker
+  303 tokens; `engine_ready` 16:20:01, `boot_contract_ok` 135.1 s (a post-close boot first re-checks the day's minute
+  bars, 300 symbols); no ERROR lines. Ruff's two findings at `limits.py:299` are at HEAD too.
+
+## 2026-11-09 09:40 — Identifier cleanup and the brk20 report re-key; overnight outage was the lid closing
+
+- **Owner, answered ~09:2x:** rename the signed store's leverage start key to `live_auto_start_x`; keep migration
   0003's filename (applied migrations are tracked by filename); re-key the registered 2026-09-12 brk20 report.
 - **Commit `c87703c`:** `forward_verdicts`' regime-gate arms are `RegimeGateArms` / `regime_gate`; the offline tests load
   the study scripts as `exit_geometry` / `regime_filter` / `selection_filters`; the exit-geometry cost-of-stop keys
@@ -16,9 +28,6 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   connection and the engine took a graceful SIGINT stop (`exit_clean` 02:02:07); Kernel-Power 506 at 02:02:22, "entering
   Modern Standby, Reason: Lid"; asleep 06:52–09:03. Started 09:03 on `8c6fdea` (the 01:31 code); Kite login 09:04:17,
   post-login recovery ok. `c87703c` goes live at the next restart.
-- **Pending:** the limits key rename needs the engine stopped and an unsigned `limits.yaml` for a few minutes, so it
-  runs after the 15:30 close: stop, rename in limits.yaml + limits.py + the test (and drop the comment's pointer to a
-  never-built overlay file), full gate, reseed, restart.
 
 ## 2026-11-09 01:35 — Cleanup finished: study labels named, analyst prompts and protected configs cleaned (owner: "Apply now", "Clean both now"); engine restarted 01:31
 
@@ -36,8 +45,6 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   ticker 303 tokens; `engine_ready` 01:32:02; `boot_contract_ok` 37.1 s; no ERROR lines.
 - **Verified:** unit gate 4261 passed / 19 skipped plus one failure that passes alone (the replay heartbeat test's 1 s
   wall-clock bound under 8 workers); offline tier 521 passed; ruff findings are the ones at HEAD.
-- **Kept, live names:** `phase4_start_x`, migration `0003_phase2.sql`, the `DG0`–`DG4` tiers, the `phase3` branch; the
-  2026-09-12 brk20 report keeps its own keys (`config/strategy_evidence.yaml` reads them).
 
 ## 2026-11-09 00:10 — Repo-wide cleanup of retired plan citations; memory, docs and this log pruned (owner: "clean up redundant memory, comments, text and work history")
 
@@ -444,7 +451,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **How it was built:**
   - Ten file-locality packages. Each was built by an implementer agent and checked by a separate reviewer, with one
     or two fix rounds.
-  - P4–P6 ran in a second worktree and were cherry-picked in with no conflicts.
+  - Three of the packages ran in a second worktree and were cherry-picked in with no conflicts.
   - A whole-branch review from three angles followed: line-by-line, removed behaviour, and a cross-file tracer. Its
     findings are fixed or listed under "Left open".
 - **What changed:**
