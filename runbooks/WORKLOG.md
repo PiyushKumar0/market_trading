@@ -4,6 +4,18 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 00:57 — Engine stop/start around the macro mood-signal study
+
+- **Downtime 11-09 ~22:20 → 11-10 00:56 (holiday):** the owner stopped `mt-engine` so the study could read
+  `market.duckdb`.
+  - The database was copied whole to `data\research\full_market_2026-11-09.duckdb` (6.47 GB), the study's research
+    copy, which holds the news tables that `research_snapshot.py` does not copy.
+  - Restart was clean: selftest PASS, catch-up owed nothing, `engine_ready` at 00:57:11, ticker connected
+    (303 tokens).
+- **The study is registered (commit 9722e00).** Its headline forward tests count from 2026-11-11 and read
+  `agent_calls`, so engine downtime from now on leaves holes in them. The study's two scheduled tasks (content capture,
+  nightly scoring) get their own entry when they are created.
+
 ## 2026-11-09 — Owner-directed cleanup (citations, identifiers, comments); what still matters
 
 - **Analyst-value verdict re-registered from 2026-11-09** (`forward_verdicts.ANALYST_REGISTERED_FROM`): the analyst
