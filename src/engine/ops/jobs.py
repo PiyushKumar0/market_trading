@@ -20,18 +20,14 @@ Jobs are registered by the integrator (``engine.ops.main``) against :class:`JobR
 this module owns only the machinery. Job ids are the ``job_runs.job_id`` keys and must stay stable
 across releases (they ARE the watermark identity).
 
-**Boot ordering (2026-08-13).** A pass is scoped (:class:`CatchUpScope`): the boot pass runs
-LOAD-BEARING data steps only, while the ids the integrator declares ``deferred`` (the news chain →
-digest → planner) fire as one-shots AFTER ``scheduler.start()`` through the
-same machinery under ``DEFERRED`` — same code, same watermarks, new firing point. The 08-10 wedge
-(an unbounded news chain inside boot) starved every scheduled job for 8 h *including* the sweep that
-exists to self-heal; behind the armed scheduler the identical wedge costs only the digest. Passes
-are single-flight so the post-arm one-shot and the 30-min sweep can never replay a job twice.
+**Boot ordering.** A pass is scoped (:class:`CatchUpScope`): the boot pass runs LOAD-BEARING data
+steps only, while the ids the integrator declares ``deferred`` (the news chain → digest → planner)
+fire as one-shots AFTER ``scheduler.start()`` through the same machinery under ``DEFERRED`` — an
+unbounded news chain inside boot would starve every scheduled job, including the self-healing sweep.
+Passes are single-flight so the post-arm one-shot and the 30-min sweep can never replay a job twice.
 
-**Early hydration (owner-directed 2026-09-09).** Every due-gate above treats today's
-job as not-missed until its fire-time passes — correct for a replay, and the reason a 06:30 login
-could not pull the pre-open chain forward on the days the owner boots before travelling.
-``hydrate_ahead`` is that one deliberate exception: named jobs, today, ahead of their clock, through
+**Early hydration.** Every due-gate treats today's job as not-missed until its fire-time passes.
+``hydrate_ahead`` is the one deliberate exception: named jobs, today, ahead of their clock, through
 the same watermarks/lock/verdict as a pass. The gates themselves are untouched.
 """
 
@@ -57,9 +53,8 @@ _log = get_logger("engine.ops.jobs")
 
 
 def _job_result_ok(result: object) -> bool:
-    """A job's return value participates in the watermark verdict (2026-08-13 fix): most jobs return
-    ``None`` (unaffected, defaults True); a job that degrades-without-raising (e.g. bhavcopy) can
-    return a result object whose ``ok=False`` must now sink the watermark too.
+    """A job's return value participates in the watermark verdict: ``None`` counts as ok; a result
+    object with ``ok=False`` (a job that degrades without raising, e.g. bhavcopy) sinks the watermark.
 
     Deliberately NOT widened to bare ``bool`` returns: the advisory LLM jobs return a
     tri-state (:class:`AdvisoryOutcome`) whose "governor blocked me" case is a CORRECT outcome, and
@@ -72,8 +67,7 @@ def _job_unfinished(result: object) -> bool:
     """A result whose ``unfinished`` is True did not do the day's work (``TickCompactionResult``:
     skipped for an in-flight run, or stopped at the session window / shutdown; ``MarketBackupResult``:
     not started in the trading-day window or the retry hold after a failed export). Its runner records NO
-    watermark, so the day stays missed and a later pass replays it. Recording those as success left
-    every ``tick_compact`` watermark from 2026-09-22 to 09-28 without a completed run behind it."""
+    watermark, so the day stays missed and a later pass replays it."""
     return getattr(result, "unfinished", False) is True
 
 
@@ -86,8 +80,7 @@ class AdvisoryOutcome(StrEnum):
     """How an advisory LLM job (pre-open planner, nightly reviewer) ended.
 
     These jobs are advisory-only and NEVER raise into the scheduler (planner death blocks
-    nothing), so before this tri-state their ``bool`` return was discarded and every run — blocked, failed or
-    real — green-stamped its watermark. The tri-state distinguishes the two false cases:
+    nothing), so the tri-state, not a ``bool``, tells the watermark machinery what happened:
 
     - ``RAN``     — the work was done and persisted ⇒ success watermark.
     - ``BLOCKED`` — the budget governor declined the call. A CORRECT outcome, not a failure:
@@ -172,18 +165,16 @@ class JobClass(StrEnum):
 
 
 class CatchUpScope(StrEnum):
-    """Which slice of the registry a catch-up pass replays (boot reordering).
+    """Which slice of the registry a catch-up pass replays.
 
     ``LOAD_BEARING`` is the DEFAULT so the boot path (``SessionLifecycle.startup`` → ``catch_up()``)
-    gets the reordering without the lifecycle knowing about it: the never-load-bearing jobs the
-    integrator declared ``deferred`` (news chain → digest → planner) are skipped at boot and fired as
-    one-shots right after ``scheduler.start()`` under ``DEFERRED``. The periodic sweep asks for
-    ``ALL`` — that is what re-runs a deferred job whose post-arm one-shot failed.
+    skips the ``deferred`` jobs without the lifecycle knowing. The periodic sweep asks for ``ALL``,
+    which re-runs a deferred job whose post-arm one-shot failed.
     """
 
     LOAD_BEARING = "load_bearing"   # everything EXCEPT the deferred set (boot + self-test remediation)
     DEFERRED = "deferred"           # ONLY the deferred set (the post-scheduler-arm one-shot)
-    ALL = "all"                     # the whole registry (the 30-min sweep; also the rollback path)
+    ALL = "all"                     # the whole registry (the 30-min sweep)
 
 
 @dataclass(frozen=True)
@@ -234,11 +225,9 @@ class JobRegistry:
 #: Calendar days a date-keyed day may keep FAILING (measured from its first recorded failure —
 #: ``job_runs.first_failed_at``, migration 0009) before catch-up marks it ``skipped`` (terminal).
 #: A streak clock, never the day's calendar age: a cold boot after a long off-gap replays old dates
-#: on their FIRST-ever attempt, and an age rule would abandon them on one burst of NSE 503s
-#: (review-confirmed by execution, 2026-08-18). At the 30-min sweep cadence a 7-day streak means
-#: hundreds of attempts while neighboring dates succeeded — a permanent upstream condition
-#: (observed: NSE 503 on deals for exactly one date, five days running), not a transient one.
-#: The 30-day ``max_lookback_days`` horizon already implied give-up — silently.
+#: on their FIRST-ever attempt, and an age rule would abandon them on one burst of NSE 503s.
+#: At the 30-min sweep cadence a 7-day streak means hundreds of attempts while neighboring dates
+#: succeeded — a permanent upstream condition, not a transient one.
 GIVE_UP_AFTER_DAYS = 7
 
 
@@ -270,9 +259,8 @@ def _failure_set(result: CatchUpResult, told: Sequence[str] | None) -> list[str]
 class CatchUpRunner:
     """Watermark-driven missed-job catch-up.
 
-    The ``job_runs`` watermark machinery (``record_run``/``was_run``) is stable; the later
-    addition is the registry-driven replay. ``registry=None`` keeps the runner a pure watermark store
-    (test-only; ``engine.ops.main`` always passes the registry).
+    ``registry=None`` keeps the runner a pure watermark store (test-only; ``engine.ops.main``
+    always passes the registry).
 
     Parameters
     ----------
@@ -283,13 +271,11 @@ class CatchUpRunner:
     max_lookback_days:
         Hard horizon (calendar days) for missed-fire-day scans — bounds a fresh install / ancient
         watermark so catch-up never enumerates years (the initial history backfill is its own
-        job, not a catch-up). Spec-silent bound, resolved here; 30 days covers any plausible off-span.
+        job, not a catch-up).
     deferred:
-        Job ids that are NEVER load-bearing for entries and therefore must not run inside the
-        boot pass (they fire as one-shots after ``scheduler.start()`` instead). A ``LOAD_BEARING``
-        pass skips them, a ``DEFERRED`` pass runs only them, and an ``ALL`` pass (the periodic sweep)
-        runs everything — so a deferred job whose post-arm one-shot failed is still swept. Empty ⇒
-        the behavior from before deferral existed exactly (every scope is the whole registry).
+        Job ids that are NEVER load-bearing for entries and so must not run inside the boot pass.
+        A ``LOAD_BEARING`` pass skips them, a ``DEFERRED`` pass runs only them, an ``ALL`` pass
+        runs everything. Empty means every scope is the whole registry.
     """
 
     def __init__(
@@ -312,27 +298,20 @@ class CatchUpRunner:
         self._freeze = freeze
         self._notify = notify
         self._deferred = frozenset(deferred)
-        #: Single-flight: the 30-min sweep must never race a still-running pass. Required
-        #: by the reordering — the post-arm one-shot can now still be in flight when the first sweep
-        #: fires (APScheduler's max_instances=1 only serializes sweep-vs-sweep). Constructed outside
-        #: a running loop is safe on 3.10+ (asyncio.Lock no longer binds a loop at construction).
+        #: Single-flight: the 30-min sweep must never race a still-running pass (APScheduler's
+        #: max_instances=1 only serializes sweep-vs-sweep, not sweep-vs-post-arm one-shot).
         self._pass_lock = asyncio.Lock()
-        #: Mirror of ``freeze`` (2026-08-06): clears a job's ``data_freshness:<job>`` cause once the
-        #: job is verified fresh — without it a pre-login failure latched FROZEN for the whole day
-        #: even after the post-login catch-up succeeded (observed live: instruments, 2026-08-06).
+        #: Mirror of ``freeze``: clears a job's ``data_freshness:<job>`` cause once the job is
+        #: verified fresh.
         self._clear = clear
         self._max_lookback_days = int(max_lookback_days)
-        #: Last failure set sent to the owner (2026-08-18). A stuck failure used to re-send the
-        #: identical CATCHUP_REPORT on every 30-min sweep (15+/day observed); a report whose only
-        #: content is an unchanged failure set says nothing new. Process state on purpose: a fresh
-        #: boot re-sends once, which doubles as the "still broken after restart" signal.
+        #: Last failure set sent to the owner: a report whose only content is an unchanged failure
+        #: set is suppressed. Process state on purpose: a fresh boot re-sends once, which doubles as
+        #: the "still broken after restart" signal.
         self._last_failed_alert: list[str] | None = None
-        #: (job_id, run_for_date) pairs whose data_freshness FREEZE has already been announced to the
-        #: owner. ``was_run`` keeps a failed
-        #: safety-critical job retryable, so without this every 30-min sweep re-sent the identical
-        #: freeze alert. The FREEZE itself stays unconditional (idempotent state that must always
-        #: hold) — only the notify is one-shot. Process state on purpose, exactly like
-        #: ``_last_failed_alert``: a restart re-alerts once, which doubles as "still broken".
+        #: (job_id, run_for_date) pairs whose data_freshness FREEZE has already been announced.
+        #: The FREEZE itself stays unconditional (idempotent state that must always hold) — only
+        #: the notify is one-shot. Process state on purpose, like ``_last_failed_alert``.
         self._freeze_notified: set[tuple[str, str]] = set()
 
     # ------------------------------------------------------------------ watermarks (job_runs)
@@ -374,9 +353,9 @@ class CatchUpRunner:
         return bool(row and row["status"] in ("success", "skipped"))
 
     def first_failed_date(self, job_id: str) -> date | None:
-        """Oldest retryable (``failed``) day. With per-day continue (2026-08-18) the success
-        watermark can advance PAST a failed day, so ``_missed_days`` must anchor its scan here or a
-        transient failure would be silently abandoned the moment a later day succeeds."""
+        """Oldest retryable (``failed``) day. The success watermark can advance PAST a failed day
+        (per-day continue), so ``_missed_days`` must anchor its scan here or a transient failure
+        would be abandoned the moment a later day succeeds."""
         row = self._conn.execute(
             "SELECT min(run_for_date) AS d FROM job_runs WHERE job_id=? AND status='failed'",
             (job_id,),
@@ -428,8 +407,8 @@ class CatchUpRunner:
         Safety-critical jobs run or verify before entries open, so the governing run is the
         latest fire at or before the next moment entries can be taken — ``now`` in session, else the
         next session's open. For a pre-open job (instruments 08:15) that is today's own fire; for an
-        EOD job (earnings 18:30) it is the PREVIOUS fire-day's (2026-09-23 chaos case 16: a missed
-        evening run was never replayed, so the next session traded on an older calendar). ``None``
+        EOD job (earnings 18:30) it is the PREVIOUS fire-day's (a missed evening run must still be
+        replayed before the next session trades). ``None``
         while that fire is still ahead (the armed scheduler owns it) or no session is in reach.
         """
         today = now.date()
@@ -463,16 +442,13 @@ class CatchUpRunner:
     ) -> CatchUpResult:
         """Replay every missed job in ``scope`` over the off-window, by class then dependency order.
 
-        ``quiet`` (an on-time scheduled lane fire, 2026-10-11): the fire's own ``"job_id:YYYY-MM-DD"``
-        entry was not missed, so its success alone is no CATCHUP_REPORT. Everything else the same pass
-        catches up, a recovery, failures and freezes report exactly as on any other pass
-        (:meth:`_report_is_news`).
+        ``quiet`` (an on-time scheduled lane fire): the fire's own ``"job_id:YYYY-MM-DD"`` entry was
+        not missed, so its success alone is no CATCHUP_REPORT. Everything else reports as on any
+        other pass (:meth:`_report_is_news`).
 
-        SINGLE-FLIGHT: a pass firing while another is still running is a logged no-op,
-        never a second concurrent replay. Watermarks make a *later* pass a cheap no-op anyway, but
-        they cannot make a CONCURRENT one safe — two passes would both see the same un-watermarked
-        job and run it twice (the post-arm news chain vs. the 30-min sweep is exactly that race).
-        The ``locked()`` check and the acquire below are not separated by an await point (an
+        SINGLE-FLIGHT: a pass firing while another is still running is a logged no-op. Watermarks
+        cannot make a CONCURRENT pass safe — both would see the same un-watermarked job and run it
+        twice. The ``locked()`` check and the acquire below are not separated by an await point (an
         uncontended ``asyncio.Lock.acquire`` returns without yielding), so no pass can slip between.
         """
         if self._pass_lock.locked():
@@ -484,36 +460,29 @@ class CatchUpRunner:
         async with self._pass_lock:
             return await self._pass(off_since=off_since, scope=scope, quiet=quiet)
 
-    # ------------------------------------------------------------------ early hydration (2026-09-09)
+    # ------------------------------------------------------------------ early hydration
     async def hydrate_ahead(
         self, job_ids: Sequence[str], *, reason: str, not_after: time | None = None,
     ) -> dict[str, str]:
         """Run the named jobs for TODAY *ahead of their fire-time*; returns ``{job_id: outcome}``.
 
-        ``not_after`` (2026-09-10, from the first live morning): the boundary past which the chain
-        is simply DUE and the boot pass / 30-min sweep own it — the session open. It is re-checked
-        AFTER the pass lock is acquired, because the wait can be long: a 09:06 login queued 36 min
-        behind the post-arm one-shot draining an overnight news backlog and ran at 09:44, in-session.
-        A late acquisition is a logged skip (``early_hydration_skipped_not_after``), never a run.
+        ``not_after``: the boundary past which the chain is simply DUE and the boot pass / 30-min
+        sweep own it — the session open. It is re-checked AFTER the pass lock is acquired, because
+        the wait can be long (a queued post-arm one-shot). A late acquisition is a logged skip
+        (``early_hydration_skipped_not_after``), never a run.
 
-        Owner-directed 2026-09-09: on most trading days the owner leaves
-        at 08:15 and boots the PC 09:30–10:00, so the pre-open chain fires after the trade window
-        opens (digest-before-open 61%). No existing catch-up path can serve the ~06:30 login they
-        sometimes do: every due-gate here (``_missed_days``, ``_run_safety_critical``) treats today's
-        job as NOT missed until its fire-time has passed, which is exactly right for a replay and
-        exactly wrong for a deliberate early run. This is the deliberate one — the caller
+        Every due-gate here (``_missed_days``, ``_run_safety_critical``) treats today's job as NOT
+        missed until its fire-time has passed — right for a replay, wrong for a deliberate early
+        run. This is the deliberate one: the caller
         (:class:`engine.ops.early_hydration.EarlyHydration`) names the jobs; nothing here decides.
 
-        Everything else is the catch-up machinery unchanged: the same class/order sequence a pass
-        uses, the same ``_job_result_ok`` verdict, the same ``job_runs`` watermarks. Those watermarks
-        make the SLEEP case a no-op: a PC that sleeps through 08:20–08:50 and wakes at 09:30 finds the
-        catch-up sweep satisfied and keeps the 06:30 run. On an AWAKE PC the scheduled fires run again
-        DELIBERATELY (``engine.ops.main._scheduled_runner`` is unconditional, by review reversal) — a
-        fresher digest and plan, and a universe rebuilt behind the 08:15 instruments refresh instead of
-        one pinned to a pre-08:00 dump; the second pre-open plan message this costs is the accepted
-        trade-off. A failed job records ``failed``, the siblings continue, and NO
-        freeze/notify fires: an early run that fails has cost the day nothing that the 08:20 fire and
-        the boot pass do not still own.
+        Everything else is the catch-up machinery unchanged: the same class/order sequence, the same
+        ``_job_result_ok`` verdict, the same ``job_runs`` watermarks. Those watermarks make the
+        SLEEP case a no-op (the early run is kept). On an AWAKE PC the scheduled fires run again
+        DELIBERATELY (``engine.ops.main._scheduled_runner`` is unconditional) — a fresher digest and
+        plan, and a universe rebuilt behind the 08:15 instruments refresh; the second pre-open plan
+        message this costs is the accepted trade-off. A failed job records ``failed``, the siblings
+        continue, and NO freeze/notify fires: the 08:20 fire and the boot pass still own the day.
 
         Runs under the single-flight pass lock, but WAITS for an in-flight pass rather than skipping
         like a sweep does: a login is a one-shot opportunity, and after the wait the watermarks the
@@ -630,9 +599,8 @@ class CatchUpRunner:
         return result
 
     def _report_is_news(self, result: CatchUpResult, *, quiet: frozenset[str] = frozenset()) -> bool:
-        """Owner-report suppression (2026-08-18): progress (caught-up) and freeze events always send;
-        a pure failure report sends only when the failure set CHANGED since the last one sent —
-        an unchanged stuck failure re-reported every 30-min sweep is noise, and the pass's own
+        """Owner-report suppression: progress (caught-up) and freeze events always send; a pure
+        failure report sends only when the failure set CHANGED since the last one sent. The pass's
         ``catch_up_complete`` log line keeps the full per-pass record either way.
 
         ``quiet`` entries (an on-time scheduled fire's own ``job:day``) are not progress. A quiet
@@ -663,7 +631,7 @@ class CatchUpRunner:
     async def _clear_freshness(self, job_id: str) -> None:
         """Clear ``data_freshness:<job_id>`` after the job is verified fresh (success or a today's
         success watermark). Idempotent — the latch's clear_cause is a no-op recompute on an inactive
-        cause. A clear failure degrades to the old always-latched behavior, never fails the pass."""
+        cause. A clear failure degrades to staying latched, never fails the pass."""
         if self._clear is None:
             return
         try:
@@ -680,9 +648,7 @@ class CatchUpRunner:
         if run_for is None:
             return
         if self.was_run(spec.job_id, run_for):
-            # Verified fresh — a PRIOR failure's latched cause is stale evidence; clear it so a
-            # restart self-heals (2026-08-06: instruments failed pre-login, succeeded post-login,
-            # and the latch held FROZEN all day because no path cleared on later success).
+            # Verified fresh — a PRIOR failure's latched cause is stale evidence; clear it.
             await self._clear_freshness(spec.job_id)
             return
         try:
@@ -705,8 +671,7 @@ class CatchUpRunner:
         """Shared failure handling for the safety-critical path — an exception and a not-ok return
         are treated identically (record failed, freeze, notify).
 
-        The freeze is unconditional (idempotent); the NOTIFY is once per (job, run_for) per process —
-        a persistently failing job used to re-alert on every 30-min sweep.
+        The freeze is unconditional (idempotent); the NOTIFY is once per (job, run_for) per process.
         """
         self.record_run(spec.job_id, run_for, status="failed")
         result.jobs_failed.append(f"{spec.job_id}:{run_for.isoformat()}")
@@ -714,11 +679,9 @@ class CatchUpRunner:
         result.frozen_reasons.append(reason)
         if self._freeze is not None:
             await self._freeze(reason)
-        # Prune before keying: every write below ADDS a new (job_id, date) pair and a date never
-        # recurs, so left alone the set grows for the life of the process. Pruned by AGE, not by
-        # "same date as this failure": two jobs can fail for different governing days at once (an
-        # EOD job's is the previous fire-day), and date-equality pruning would evict each other's
-        # key on alternating sweeps and re-alert both every 30 minutes.
+        # Prune before keying so the set cannot grow for the life of the process. Pruned by AGE, not
+        # "same date as this failure": two jobs can fail for different governing days at once, and
+        # date-equality pruning would evict each other's key and re-alert both every sweep.
         horizon = (now.date() - timedelta(days=self._max_lookback_days)).isoformat()
         self._freeze_notified = {k for k in self._freeze_notified if k[1] >= horizon}
         key = (spec.job_id, run_for.isoformat())
@@ -764,15 +727,13 @@ class CatchUpRunner:
         self, spec: JobSpec, now: datetime, off_since: datetime | None, result: CatchUpResult
     ) -> None:
         """One run per missed day, ascending. A failed day is recorded and the replay CONTINUES to
-        later days (2026-08-18: the old first-failure ``break`` let one NSE-poisoned date —
-        ``deals:2026-08-13``, 503 on every retry while adjacent dates fetched fine — block five
-        days of later dates from ever being attempted). Dates are per-day independent by the
+        later days (one poisoned date must not block the rest). Dates are per-day independent by the
         DATE_KEYED contract; cross-date dependencies live in the jobs' own missing-data handling.
         A day whose failing STREAK (first recorded failure → now) exceeds
         :data:`GIVE_UP_AFTER_DAYS` is marked ``skipped`` (terminal — ``was_run`` treats it as done)
         instead of retrying forever; a still-``failed`` day that has drifted beyond the
-        ``max_lookback_days`` scan horizon is resolved the same way (the horizon already meant
-        give-up — silently, and it would otherwise pin ``first_failed_date`` forever). An
+        ``max_lookback_days`` scan horizon is resolved the same way (it would otherwise pin
+        ``first_failed_date`` forever). An
         :func:`_job_unfinished` run records nothing and ends this job's replay; the next pass
         resumes at that day."""
         today = now.date()
@@ -804,10 +765,9 @@ class CatchUpRunner:
         """Record a failed date-keyed day: retryable (``failed``) until its failing streak — first
         recorded failure through ``now``, NEVER the day's calendar age (a cold boot replays old
         dates on their first-ever attempt) — exceeds :data:`GIVE_UP_AFTER_DAYS`; then terminal
-        (``skipped``). An upstream that still errors for one specific date after a week of retries,
-        while adjacent dates succeed, is a permanent condition (observed: NSE deals 503 for one date
-        across five days), and eternal 30-min retries would hammer it and alert forever. The marker
-        is plain ``job_runs`` state, so a manual re-run can still overwrite it."""
+        (``skipped``): eternal 30-min retries of a permanently failing date would hammer the
+        upstream and alert forever. The marker is plain ``job_runs`` state, so a manual re-run can
+        still overwrite it."""
         streak_days = self._failing_streak_days(spec.job_id, d, now)
         if streak_days > GIVE_UP_AFTER_DAYS:
             self.record_run(spec.job_id, d, status="skipped")
@@ -855,9 +815,8 @@ class CatchUpRunner:
         not catch-up's). Always clamped to ``max_lookback_days``.
 
         ``include_failed`` (the DATE_KEYED caller): pull the start back to the oldest still-``failed``
-        day. Since per-day continue (2026-08-18) the success watermark advances past a failed day, so
-        without this anchor the day would silently fall out of the scan the moment a later day
-        succeeds. Run-latest callers must NOT set it: their failed rows are recorded under gap-target
+        day. The success watermark advances past a failed day, so without this anchor the day would
+        fall out of the scan the moment a later day succeeds. Run-latest callers must NOT set it: their failed rows are recorded under gap-target
         dates and pulling the scan back would re-run an already-superseded gap forever.
         """
         today = now.date()
