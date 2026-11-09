@@ -351,9 +351,16 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
     - Before the overlap, a day whose open equals the previous close or lies outside [low, high] is dropped from
       the open-anchored arms and counted.
     - A calendar year that loses more than 10% of its sessions fails the gate for that year.
-  - `BZ=F` rolls between contract months: an oil-drop signal whose 3-session window spans an ICE Brent expiry (the
-    last business day of the second month before delivery) is flagged. The verdict is computed with and without
-    flagged signals; if the two disagree, the result is null.
+  - `BZ=F` rolls between contract months: an oil-drop signal whose 3-session window spans an ICE Brent expiry is
+    flagged. The verdict is computed with and without flagged signals; if the two disagree, the result is null.
+  - The expiry calendar changed in 2016, so it is built per era (corrected 2026-11-10, before any data was seen;
+    the first draft gave only the post-2016 rule):
+    - up to the February 2016 contract: the business day immediately preceding the 15th calendar day before the
+      delivery month;
+    - from the March 2016 contract (first expiry 2016-01-29): the last business day of the second month before
+      delivery.
+  - Each expiry maps to the last `BZ=F` session on or before it. A signal is flagged when its compared sessions
+    meet the two sessions before an expiry through the one after, because Yahoo's roll timing is unknown.
 - **Verdict per hypothesis:**
   - **Supported** iff all of these hold on its confirmatory sample:
     - at least 30 trades;

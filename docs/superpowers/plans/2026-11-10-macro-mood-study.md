@@ -73,7 +73,8 @@
   - `us_overnight(nifty_days: Sequence[date], close: pd.Series) -> pd.Series`: indexed by NIFTY day D. The value is the compounded % return of the series' sessions u with D_prev ≤ u < D, or NaN when there are none.
   - `brent_change(nifty_days: Sequence[date], close: pd.Series, n: int = 3) -> pd.DataFrame`: indexed by D, with columns:
     - `pct`: the latest Brent close dated before D versus the one n Brent sessions earlier, in %;
-    - `roll_flag`: True if any of the n+1 compared sessions is the last weekday of its month (an ICE Brent expiry).
+    - `roll_flag`: True if the n+1 compared sessions meet [e−2, e+1] for any mapped ICE Brent expiry session e.
+      Expiries come from the per-era calendar in the spec: before the March 2016 contract, the business day before the 15th calendar day before delivery; from it, the last weekday of month M−2. Each maps to the last BZ=F session on or before it.
   - `trailing_pctl_signal(x: pd.Series, window: int, pctl: float) -> pd.Series[bool]`: True where x exceeds the given percentile of its previous `window` values (strictly earlier). False while fewer than `window` values exist.
   - `zscore_trailing(x: pd.Series, window: int) -> pd.Series`: uses the mean and sample SD of the previous `window` values; NaN before that.
   - `@dataclass(frozen=True) TradeRow(signal_date: date, entry_date: date, exit_date: date, gross: float, net: float, flagged: bool = False)`.
