@@ -1,12 +1,10 @@
-"""Corporate-filings layer (stage 1): defensive parsers over probe-verified NSE shapes,
-the BSE ``error_Bse.html``-as-200 quirk, content-hash id stability, watermark windowing, store
-round-trips, and the per-source/per-symbol degrade-never-raise contract.
+"""Corporate-filings layer: defensive parsers over probe-verified NSE shapes, the BSE
+``error_Bse.html``-as-200 quirk, content-hash id stability, watermark windowing, store round-trips,
+and the per-source/per-symbol degrade-never-raise contract.
 
-Fixtures are lifted VERBATIM from the probe result files where a real capture exists (PIT,
-results, SHP-master, the Integrated Filing listing and XBRL). The BSE SHP DETAIL stack (``shp_quarter_index.json`` /
-``shp_detail.json``) is REPRESENTATIVE, not probe-verified: those endpoints returned ``error_Bse.html``
-during probing (see the ``filings_shp`` module docstring) — the parsers key off BSE's
-structurally-verified Table/Table1 envelope with [VERIFY] field aliases.
+Fixtures are verbatim captures (PIT, results, SHP-master, Integrated Filing listing and XBRL) except the
+BSE SHP DETAIL stack (``shp_quarter_index.json`` / ``shp_detail.json``), which is representative: those
+endpoints returned ``error_Bse.html`` when probed (see the ``filings_shp`` module docstring).
 """
 
 from __future__ import annotations
@@ -67,8 +65,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 D = FIXED_NOW.date()
 
 PIT_JSON = json.loads((FIXTURES / "filings_pit.json").read_text(encoding="utf-8"))
-# Captured 2026-09-24 from NSE's PIT V2.0 route: listing rows (NCLIND, NAUKRI, an HCLTECH revision, a
-# blank-symbol row) and NAUKRI's real XBRL (four disclosures).
+# NSE PIT V2.0 route capture: listing rows (NCLIND, NAUKRI, an HCLTECH revision, a blank-symbol row) and NAUKRI's XBRL (four disclosures).
 PIT_GG_JSON = json.loads((FIXTURES / "filings_pit_gg.json").read_text(encoding="utf-8"))
 NAUKRI_XBRL = (FIXTURES / "pit_xbrl_naukri.xml").read_bytes()
 NAUKRI_XBRL_URL = "https://nsearchives.nseindia.com/corporate/xbrl/IT_2460_WebXMLFile_20260923_165535265.xml"
@@ -191,7 +188,7 @@ def test_parse_pit_fixture():
     assert hl["before_pct"] == 0.01 and hl["after_pct"] == 0.01
     assert hl["txn_from"] == date(2023, 1, 25) and hl["intim_dt"] == date(2023, 1, 30)
     assert hl["broadcast_dt"] == datetime(2023, 1, 31, 20, 39, tzinfo=IST)   # point-in-time key
-    # A gift's secVal='0' is a real zero value, NOT dropped by or-chaining (the _first_present fix).
+    # A gift's secVal='0' is a real zero value, not dropped by or-chaining (_first_present).
     assert by_symbol["RELIANCE"]["value"] == Decimal("0") and by_symbol["RELIANCE"]["qty"] == 150000
 
 
@@ -270,8 +267,7 @@ def _seed_rename(store, old: str, new: str, token: int) -> None:
 
 
 async def test_filings_pit_admits_a_renamed_constituent_the_csv_still_names_old(store, clock, monkeypatch):
-    """2026-10-23: NSE files ICICI Life's disclosures as ICICILIFE while the index CSV still says
-    ICICIPRULI; filtered on the CSV alone, every one counted out-of-universe and was never stored."""
+    """NSE can file under the new symbol while the index CSV still has the old one; filtering on the CSV alone would drop every such disclosure."""
     _seed_rename(store, "HCLOLD", "HCLTECH", 7)
     routes = {"corporates-pit-gg": lambda: httpx.Response(200, json=PIT_GG_JSON),
               NAUKRI_XBRL_URL: lambda: httpx.Response(200, content=NAUKRI_XBRL),
@@ -299,9 +295,8 @@ async def test_filings_pit_without_constituents_degrades_before_fetching(store, 
 
 
 async def test_filings_shp_out_of_universe_skip_is_not_degraded(store, clock):
-    # 2026-07-23 owner report: a healthy run alerted "7 skipped (no scrip code)" — but those were
-    # MARKET-WIDE submissions for symbols outside the universe (not in symbol_isin). Routine skips
-    # must not degrade or alert; only failed fetches / unmapped IN-universe symbols do.
+    # Market-wide submissions for symbols outside the universe (not in symbol_isin) are routine skips:
+    # they must not degrade or alert; only failed fetches / unmapped in-universe symbols do.
     store.upsert_symbol_isin([
         {"symbol": "RELIANCE", "isin": "INE002A01018", "bse_scrip_code": "500325", "as_of": D},
     ])
@@ -319,9 +314,8 @@ async def test_filings_shp_out_of_universe_skip_is_not_degraded(store, clock):
 
 
 def test_insider_reupsert_is_do_nothing_and_never_faults(store):
-    # 2026-07-23 FATAL regression: re-upserting identical content-hash rows via ON CONFLICT DO
-    # UPDATE tripped DuckDB's ART index ("Failed to delete all rows from index") and invalidated
-    # the connection. insider_trades' id IS the content hash ⇒ conflict action must be DO NOTHING.
+    # insider_trades' id is the content hash ⇒ the conflict action must be DO NOTHING (ON CONFLICT DO UPDATE
+    # trips DuckDB's ART index and invalidates the connection).
     row = {"id": "bse:deadbeef", "symbol": "JSWENERGY", "person_name": "A",
            "value": Decimal("12345678.00"), "broadcast_dt": datetime(2026, 6, 23, 21, 43, tzinfo=IST)}
     assert store.upsert_insider_trades([row]) == 1
@@ -331,8 +325,7 @@ def test_insider_reupsert_is_do_nothing_and_never_faults(store):
     store.upsert_insider_trades([row, dict(row)])
     rows = [r for r in store.get_insider_trades() if r["id"] == "bse:deadbeef"]
     assert len(rows) == 1 and rows[0]["person_name"] == "A"
-    # DO NOTHING semantics pinned: a (theoretically impossible) same-id-different-content row
-    # keeps the ORIGINAL — content-hash ids make the difference unreachable in practice.
+    # DO NOTHING: a same-id-different-content row (unreachable in practice) keeps the original.
     store.upsert_insider_trades([{**row, "person_name": "B"}])
     rows = [r for r in store.get_insider_trades() if r["id"] == "bse:deadbeef"]
     assert rows[0]["person_name"] == "A"
@@ -351,17 +344,14 @@ async def test_filings_pit_window_keys_off_watermark(store, clock, monkeypatch):
 
 def test_store_insider_source_predicate_matches_the_feeds_tags():
     # The store cannot import a datafeed (every datafeed imports the store), so its source predicate
-    # duplicates the writers' tags — the pair is asserted here, as for _EXCL_CAP in the store.
-    # (fpit.NSE_SOURCE == SOURCE_NSE is no longer asserted here: filings_events.SOURCE_NSE is now an
-    # import of fpit.NSE_SOURCE, not a copy — 2026-09-23 dedup — so the two can never drift apart.)
+    # duplicates the writers' tags; the pair is asserted here, as for _EXCL_CAP in the store.
     assert set(_INSIDER_SOURCE_PREDICATE) == {SOURCE_NSE, BSE_SOURCE}
     assert _INSIDER_SOURCE_PREDICATE[BSE_SOURCE] == f"id LIKE '{BSE_ID_PREFIX}%'"
     assert _INSIDER_SOURCE_PREDICATE[SOURCE_NSE] == f"id NOT LIKE '{BSE_ID_PREFIX}%'"
 
 
 async def test_latest_insider_broadcast_partitions_by_id_prefix(store):
-    # 2026-09-13: insider_trades has no source column — the id prefix IS the partition.
-    # Timestamps mirror the live store on 2026-09-12: NSE ceiling 2026-05-02 16:46, BSE writing today.
+    # insider_trades has no source column: the id prefix is the partition. NSE ceiling is old, BSE writes today.
     nse_dt = datetime(2026, 5, 2, 16, 46, tzinfo=IST)
     bse_dt = datetime(2026, 6, 17, 19, 3, tzinfo=IST)
     assert store.latest_insider_broadcast(SOURCE_NSE) is None        # empty table: no invented row
@@ -386,7 +376,7 @@ def _trade(id_: str, broadcast: datetime, *, person="Niraj Kumar Rana", qty=5000
 
 
 def test_insider_trades_count_a_trade_both_exchanges_carry_once(store):
-    # Shapes measured 2026-09-24: the same filing on BSE (earlier) and NSE (~24 s later).
+    # The same filing on BSE (earlier) and NSE (~24 s later).
     bse = datetime(2026, 9, 23, 16, 55, 13, tzinfo=IST)
     nse = datetime(2026, 9, 23, 16, 55, 37, tzinfo=IST)
     store.upsert_insider_trades([
@@ -414,7 +404,7 @@ def test_insider_trades_keep_one_sources_repeats_and_pair_before_filtering(store
 
 
 def empty_pit() -> httpx.Response:
-    """A FRESH empty PIT listing per call — the job issues several per run."""
+    """A fresh empty PIT listing per call (the job issues several per run)."""
     return httpx.Response(200, json={"data": []})
 
 
@@ -437,11 +427,8 @@ def pit_spans(seen: list[str]) -> list[tuple[date, date]]:
 
 
 def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
-    # scripts/backfill_filings walks the SAME endpoint as the daily job and imports filings_pit's
-    # PIT_WINDOW_DAYS / pit_windows / PIT_PACE_S rather than keeping copies (2026-09-23). A local copy
-    # creeping back would let the two drift, so the daily job asks for a span the repo has never
-    # walked — the shape whose only failure mode (a silent truncation to the newest slice) leaves an
-    # unreachable hole with no warning.
+    # scripts/backfill_filings walks the same endpoint and must import filings_pit's PIT_WINDOW_DAYS /
+    # pit_windows / PIT_PACE_S, not copy them: a drifted span can silently truncate to the newest slice.
     path = Path(__file__).resolve().parents[2] / "scripts" / "backfill_filings.py"
     spec = importlib.util.spec_from_file_location("_backfill_filings_under_test", path)
     bf = importlib.util.module_from_spec(spec)
@@ -453,13 +440,12 @@ def test_pit_window_unit_matches_the_backfill_that_walks_the_same_endpoint():
     frm, to = date(2026, 1, 1), date(2026, 4, 30)
     assert fpit.pit_windows(to, frm) == []                    # inverted span: zero requests, no wrap
     assert fpit.pit_windows(frm, to)[0][0] == frm and fpit.pit_windows(frm, to)[-1][1] == to
-    # The floor is expressed in whole requests: N INCLUSIVE chunks reach N*unit - 1 days behind d.
+    # The floor is in whole requests: N inclusive chunks reach N*unit - 1 days behind d.
     assert fpit.MAX_WINDOW_DAYS == fpit.PIT_WINDOW_DAYS * fpit.MAX_WINDOWS_PER_RUN - 1
 
 
 async def test_filings_pit_window_ignores_the_bse_watermark(store, clock, monkeypatch):
-    # The regression: a BSE fresh row stamped the run day pinned the whole-table
-    # watermark to today and collapsed this job's window to [d-1, d].
+    # A BSE fresh row stamped the run day must not pin the watermark and collapse this job's window to [d-1, d].
     store.upsert_insider_trades([
         {"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)},
         {"id": f"{BSE_ID_PREFIX}seed", "symbol": "Y",
@@ -474,8 +460,7 @@ async def test_filings_pit_window_ignores_the_bse_watermark(store, clock, monkey
 
 
 async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch, caplog):
-    # A watermark older than the floor becomes neither ONE wide request nor an unbounded number of
-    # them: exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS.
+    # A watermark older than the floor becomes exactly MAX_WINDOWS_PER_RUN chunks of <=PIT_WINDOW_DAYS.
     store.upsert_insider_trades(
         [{"id": "ancient", "symbol": "X", "broadcast_dt": datetime(2024, 1, 5, 10, 0, tzinfo=IST)}]
     )
@@ -493,13 +478,11 @@ async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch,
         clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
         assert [r.levelname for r in clamps] == ["WARNING"]
         assert clamps[0].uncovered_days == (floor - date(2024, 1, 5)).days
-        # LATCHED: the condition holds for as long as the feed stores nothing, and a boot catch-up
-        # replays one run per missed day through this instance — warn on the transition only.
+        # Latched: warn on the transition only (a boot catch-up replays one run per missed day).
         await job.run(D)
         clamps = [r for r in caplog.records if r.getMessage() == "filings_pit_window_clamped"]
         assert [r.levelname for r in clamps] == ["WARNING", "INFO"]
-        # Symmetric clear (2026-09-01): a watermark back inside the floor stops the line AND re-arms
-        # it, so the next time the floor bites the owner hears about it.
+        # A watermark back inside the floor stops the line and re-arms it.
         store.upsert_insider_trades(
             [{"id": "recent", "symbol": "X", "broadcast_dt": datetime(2026, 6, 10, 18, 0, tzinfo=IST)}]
         )
@@ -510,8 +493,7 @@ async def test_filings_pit_window_floored_and_chunked(store, clock, monkeypatch,
 
 
 async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monkeypatch):
-    # A chunked run that dies part-way must leave the watermark INSIDE the covered prefix, so the
-    # next run re-opens AT the hole rather than stepping over it.
+    # A chunked run that dies part-way leaves the watermark inside the covered prefix, so the next run re-opens at the hole.
     store.upsert_insider_trades(
         [{"id": "seed", "symbol": "X", "broadcast_dt": datetime(2026, 5, 2, 16, 46, tzinfo=IST)}]
     )
@@ -536,8 +518,7 @@ async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monke
     assert result.ok is False and result.degraded is True     # never raises
     assert result.rows_parsed == 4 and result.rows_written == 4  # the partial ingest is durable
     assert msgs and msgs[0].data["job_id"] == "filings_pit"
-    # The watermark sits behind the hole, not past it: the retry re-opens at 03-05 (10-05 less the
-    # retry margin), before window 2 began.
+    # The watermark sits behind the hole: the retry re-opens at 03-05 (10-05 less the retry margin), before window 2.
     assert store.latest_insider_broadcast(SOURCE_NSE) == datetime(2026, 5, 10, 11, 0, tzinfo=IST)
     seen.clear()
     await _pit_job(store, clock, monkeypatch, routed_client({"corporates-pit-gg": empty_pit}, seen)).run(D)
@@ -545,9 +526,8 @@ async def test_filings_pit_stops_at_the_first_failing_window(store, clock, monke
 
 
 async def test_filings_pit_degrades_when_the_watermark_read_raises(store, clock, monkeypatch):
-    # the watermark read is INSIDE the guard. An unknown source tag RAISES by design
-    # (store.latest_insider_broadcast), and a raise that escaped run() would bypass its per-day
-    # alert dedup and its degraded result — the owner would never hear the feed stopped.
+    # The watermark read is inside the guard: an unknown source tag raises by design, and a raise escaping
+    # run() would bypass the per-day alert dedup and the degraded result.
     async def boom(*_a, **_kw):
         raise ValueError("unknown insider source 'nse_pit'")
 
@@ -624,9 +604,8 @@ async def test_filings_results_partial_failure_keeps_other_leg(store, clock):
 
 
 # =========================================================================== integrated filings + line items
-# Fixtures are verbatim NSE captures (2026-09-24): an Integrated Filing listing page subset, and the
-# XBRL of BDL's Q4 FY26 (INDAS: quarter AND full-year contexts), HDFC Bank's Q1 FY27 consolidated
-# (BANKING taxonomy) and HDFC Life's Q1 FY27 (LI taxonomy).
+# Fixtures are verbatim NSE captures: an Integrated Filing listing subset, and XBRL for BDL Q4 FY26
+# (INDAS: quarter and full-year contexts), HDFC Bank Q1 FY27 (BANKING taxonomy) and HDFC Life Q1 FY27 (LI).
 def _xbrl(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
 
@@ -702,7 +681,7 @@ def test_line_item_candidates_prefer_consolidated_and_skip_attempted(store):
 
 
 async def test_stale_results_feed_is_degraded_and_alerted(store, clock):
-    """The 2025-26 failure: the listing kept 'succeeding' while nothing new arrived."""
+    """A listing that keeps 'succeeding' while nothing new arrives is degraded."""
     client = routed_client({
         "corporates-financial-results": httpx.Response(200, json=RESULTS_JSON),   # periods <= 2024-12-31
         "integrated-filing-results": httpx.Response(200, json={"data": [], "totalCount": 0}),
@@ -785,8 +764,7 @@ def test_parse_shp_master_fixture():
 
 
 def test_parse_shp_quarter_index_and_qtrid_lookup():
-    # Live-verified: qtrid is a float ('130.0') normalized to '130'; qtr is a 'June 2026' LABEL whose
-    # month-end (30-Jun-2026) matches the SHP-master's date.
+    # qtrid is a float ('130.0') normalized to '130'; qtr is a 'June 2026' label whose month-end matches the SHP-master's date.
     idx = parse_shp_quarter_index(SHP_QUARTER_INDEX_JSON)
     assert {e["qtrid"] for e in idx} == {"130", "129", "128"}
     assert qtrid_for(idx, date(2026, 6, 30)) == "130"
@@ -795,7 +773,7 @@ def test_parse_shp_quarter_index_and_qtrid_lookup():
 
 
 def test_parse_shp_detail_verified_shape():
-    # Live-verified: the SEBI per-category table is Table1 (Fld_ShortName / Fld_TotalNoOfShares /
+    # The SEBI per-category table is Table1 (Fld_ShortName / Fld_TotalNoOfShares /
     # Fld_TotalPercentageOf_A_B_C2 / Fld_PledgeEncumbered*).
     explicit = datetime(2026, 7, 2, 11, 20, 5, tzinfo=IST)
     rows = parse_shp_detail(
@@ -813,9 +791,8 @@ def test_parse_shp_detail_verified_shape():
 
 
 def test_parse_shp_detail_falls_back_to_declaration_authorise_date():
-    # The backfill path passes broadcast_dt=None (quarter loops carry no NSE-master
-    # timestamp); the payload's OWN declaration-row Fld_AuthoriseDate must land on every category
-    # row — this was the defect that NULLed all 13k backfilled rows and faked pledge-leg n=0.
+    # The backfill path passes broadcast_dt=None (no NSE-master timestamp); the payload's own
+    # declaration-row Fld_AuthoriseDate must land on every category row.
     rows = parse_shp_detail(
         SHP_DETAIL_JSON, symbol="RELIANCE", qtr_end=date(2026, 6, 30),
         broadcast_dt=None, revised=False,
@@ -859,9 +836,8 @@ async def test_filings_shp_fetches_new_submissions(store, clock):
 
 
 async def test_filings_shp_skips_symbol_without_scrip_code(store, clock):
-    # SHAH is IN-universe (symbol_isin row exists) but its BSE scrip mapping is missing — the
-    # 2026-07-23 taxonomy: this IS a real degradation (its SHP data is silently unobtainable),
-    # unlike out-of-universe skips (see the not-degraded test above).
+    # SHAH is in-universe (symbol_isin row exists) but its BSE scrip mapping is missing: a real degradation
+    # (its SHP data is unobtainable), unlike out-of-universe skips.
     store.upsert_symbol_isin([
         {"symbol": "RELIANCE", "isin": "INE002A01018", "bse_scrip_code": "500325", "as_of": D},
         {"symbol": "SHAH", "isin": "INE482J01021", "bse_scrip_code": None, "as_of": D},
@@ -914,10 +890,8 @@ async def test_filings_shp_master_failure_degrades(store, clock):
 
 
 async def test_filings_shp_master_repeated_failure_alerts_once(store, clock):
-    """2026-08-13 (structural deviation representative — filings_shp is RUN_LATEST with NO ``d``
-    parameter on ``run()`` or ``_alert()``, unlike every other job here): dedup falls back to a single
-    process-lifetime bool flag instead of bhavcopy's ``set[date]``. Two consecutive failing runs must
-    still produce exactly one notify."""
+    """filings_shp is RUN_LATEST with no ``d`` parameter, so alert dedup is a process-lifetime bool flag
+    (not bhavcopy's ``set[date]``): two consecutive failing runs produce exactly one notify."""
     msgs, sink = collect_alerts()
     job = FilingsShpJob(store, clock, failing_client(), notify=sink)
     result1 = await job.run()
@@ -927,10 +901,8 @@ async def test_filings_shp_master_repeated_failure_alerts_once(store, clock):
 
 
 async def test_filings_shp_master_alert_rearms_after_success(store, clock):
-    """The bool flag resets on a fully clean run — a LATER failure (a fresh failing streak) alerts
-    again, mirroring bhavcopy's per-date discard/re-arm despite the different key type. Toggled by an
-    externally-mutated flag (not a raw handler call count — ``nse_get`` primes the www host + retries
-    transient failures internally, so the number of underlying HTTP requests per ``run()`` varies)."""
+    """The flag resets on a clean run, so a later failing streak alerts again. Failure is toggled by an external flag,
+    not a handler call count (``nse_get`` primes the www host and retries internally, so requests per ``run()`` vary)."""
     should_fail = {"v": True}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -964,7 +936,7 @@ def test_parse_announcements_isin_fallback():
 
 
 def test_parse_scrip_master_bulk_isin_to_scrip():
-    """The 2026-09-12 bulk layer: a BARE LIST of scrip dicts -> {isin: code}, defensively."""
+    """The bulk layer: a bare list of scrip dicts -> {isin: code}, defensively."""
     payload = [
         {"SCRIP_CD": "500002", "Scrip_Name": "ABB India Ltd", "ISIN_NUMBER": "INE117A01022"},
         {"SCRIP_CD": "500325", "ISIN_NUMBER": "INE002A01018"},
@@ -978,8 +950,7 @@ def test_parse_scrip_master_bulk_isin_to_scrip():
 
 
 def test_parse_scrip_master_first_code_per_isin_wins_and_tolerates_a_wrapper():
-    """No ISIN in the probe capture carried two codes, so the tie-break is a determinism guarantee.
-    A ``Table``-wrapped body is tolerated in case BSE ever wraps this endpoint like its siblings."""
+    """The first-code tie-break is a determinism guarantee; a ``Table``-wrapped body is tolerated in case BSE wraps this endpoint like its siblings."""
     rows = [
         {"scrip_cd": "500325", "isin_number": "INE002A01018"},
         {"scrip_cd": "600325", "isin_number": "INE002A01018"},
@@ -1019,8 +990,7 @@ async def test_isin_map_maps_every_constituent_from_one_master_request(store, cl
 
 
 async def test_isin_map_stamps_the_symbol_a_lagging_constituents_csv_renamed(store, clock, monkeypatch):
-    """The CSV still names TCS; Kite carries the token as TCSNEW — the row (and the newest as_of the
-    scrip reverse map trusts) belongs to TCSNEW."""
+    """The CSV still names TCS but Kite carries the token as TCSNEW: the row (and the newest as_of the scrip reverse map trusts) is TCSNEW's."""
     _seed_rename(store, "TCS", "TCSNEW", 99)
     job, _ = _isin_job(store, clock, monkeypatch, httpx.Response(200, json=_SCRIP_MASTER))
     await job.run()

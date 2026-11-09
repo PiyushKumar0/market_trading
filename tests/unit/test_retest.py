@@ -1,15 +1,10 @@
-"""``brk20`` RETEST re-arm — the durable resting-level book (2026-09-12).
+"""``brk20`` RETEST re-arm: the durable resting-level book (a limit resting at the broken level for five sessions).
 
-The 2026-09-12 pre-registered entry-mechanism backtest selected ``limit_5_sessions`` (a limit
-resting at the broken level for five sessions) and the live rule shipped N=1 — the level published
-once, on the session after the crossing. These tests pin the mechanism that closes that gap AND, just
-as load-bearing, the four ways it must stay narrow: it re-offers the SAME levels, only inside the
+Pins the mechanism and the four ways it stays narrow: it re-offers the SAME levels, only inside the
 ``entry_sanity_band``, only inside the ``(signal_d, expires_d]`` window, and at most once a day.
 
-The window arithmetic is asserted against the REAL NSE calendar rather than a stub, because the one
-thing a calendar-blind ``+4 days`` gets wrong is exactly the case that matters: 2026-06-17 + 4
-sessions is 06-23 (a weekend intervenes), and 2026-06-22 + 4 sessions is 06-29 (a weekend AND the
-06-26 holiday intervene) — both materially later than a naive date add.
+Window arithmetic runs against the real NSE calendar: 2026-06-17 + 4 sessions is 06-23 (weekend),
+and 2026-06-22 + 4 sessions is 06-29 (weekend and the 06-26 holiday), later than a calendar-blind date add.
 """
 
 from __future__ import annotations
@@ -49,8 +44,7 @@ BAND = Decimal("2.0")          # the shipped limits.yaml `entry_sanity_band.cnc_
 
 # --------------------------------------------------------------------------- doubles / helpers
 class _MovableClock(Clock):
-    """A ``Clock`` whose DATE the test moves — the whole mechanism is multi-session, so a frozen
-    clock cannot exercise it. 10:05 IST keeps every ``now()`` inside a real session."""
+    """A ``Clock`` whose date the test moves (the mechanism is multi-session); 10:05 IST keeps ``now()`` inside a session."""
 
     def __init__(self, day: date) -> None:
         super().__init__(time_source=lambda: datetime.combine(self.day, time(10, 5), tzinfo=IST))
@@ -100,9 +94,7 @@ def _rows(conn) -> list[dict]:
 
 # --------------------------------------------------------------------------- record
 def test_record_is_idempotent_per_symbol_and_signal_day(book, conn, caplog) -> None:
-    """A second sweep the same day (an owner /scan_now, a freeze-lift re-sweep) must not re-write the
-    row: the FIRST admission's levels, score, expiry and created_at are the ones the publication
-    session earned, and a later write would silently extend the window or move the level."""
+    """A second sweep the same day must not re-write the row: the first admission's levels, score and expiry stand."""
     assert book.record(_cand(entry="100.00", score=0.60)) is True
     first = _rows(conn)[0]
 
@@ -123,9 +115,7 @@ def test_record_is_idempotent_per_symbol_and_signal_day(book, conn, caplog) -> N
 
 
 def test_the_window_is_counted_in_TRADING_sessions_not_calendar_days(book, conn, rclock) -> None:
-    """``expires_d`` is resolved through the NSE calendar: a naive ``+N days`` would shorten the
-    window across every weekend and holiday, i.e. exactly when a price is most likely to have walked
-    away and come back."""
+    """``expires_d`` is resolved through the NSE calendar; a naive ``+N days`` would shorten the window across weekends and holidays."""
     book.record(_cand("AAA"))
     assert _rows(conn)[0]["expires_d"] == EXPIRES_D.isoformat()
     assert EXPIRES_D != SIGNAL_D + timedelta(days=DEFAULT_RETEST_SESSIONS - 1)
@@ -148,8 +138,7 @@ def test_expiry_is_n_minus_1_sessions_after_signal_d(book, conn, rcalendar, rclo
 
 def test_a_zero_or_negative_sessions_knob_still_writes_a_window_that_exists(conn, rcalendar,
                                                                            rclock) -> None:
-    """A window of 0 sessions is a disabled mechanism expressed as a config value; the book clamps to
-    N=1, the level offered on signal_d alone, never a window that ends before signal_d."""
+    """A window of 0 sessions clamps to N=1, never a window that ends before signal_d."""
     for bad in (0, -3):
         conn.execute("DELETE FROM brk20_resting_levels")
         RestingLevelBook(conn, rcalendar, rclock, sessions=bad).record(_cand("AAA"))
@@ -158,8 +147,7 @@ def test_a_zero_or_negative_sessions_knob_still_writes_a_window_that_exists(conn
 
 
 def test_stop_and_target_survive_a_none(book, conn, rclock) -> None:
-    """``RawLevels`` permits None; a schema that cannot represent what the type permits would turn a
-    future level shape into an IntegrityError inside the sweep."""
+    """``RawLevels`` permits None, so the schema must represent it (no IntegrityError inside the sweep)."""
     assert book.record(_cand("AAA", stop=None, target=None)) is True
     rclock.day = FIRST_RETEST_D
     (cand,) = book.due(_ltp(AAA="100.00"), BAND, FIRST_RETEST_D)
@@ -168,9 +156,7 @@ def test_stop_and_target_survive_a_none(book, conn, rclock) -> None:
 
 # --------------------------------------------------------------------------- due(): the window
 def test_due_is_open_at_the_near_end_and_closed_at_the_far_end(book, rclock) -> None:
-    """``signal_d < today <= expires_d``. Strictly after ``signal_d`` (the level was already
-    published that day — the pre-screen's same-day dedupe owns it) and INCLUSIVE at expiry, or a
-    5-session window would only offer three re-offer sessions."""
+    """``signal_d < today <= expires_d``: not on ``signal_d`` (already published; the pre-screen's same-day dedupe owns it), inclusive at expiry."""
     book.record(_cand("AAA", entry="100.00"))
     ltp = _ltp(AAA="100.00")                      # dead-on the level all week
 
@@ -183,9 +169,8 @@ def test_due_is_open_at_the_near_end_and_closed_at_the_far_end(book, rclock) -> 
 
 
 def test_the_republished_candidate_is_the_same_trade_with_a_fresh_identity(book, rclock) -> None:
-    """No new entry price: same levels, same score. A FRESH signal_id because a new publication is a
-    new signal (the journal, the forward queue and the recommendation all key off it), and NO
-    features_snapshot_id — the caller mints that after ``prescreen.admit``, as the sweep does."""
+    """Same levels and score; a fresh signal_id (a new publication is a new signal) and no
+    features_snapshot_id (the caller mints it after ``prescreen.admit``)."""
     original = _cand("AAA", entry="100.00", stop="94.00", target="112.00", score=0.73)
     book.record(original)
     rclock.day = FIRST_RETEST_D
@@ -200,9 +185,8 @@ def test_the_republished_candidate_is_the_same_trade_with_a_fresh_identity(book,
 
 # --------------------------------------------------------------------------- due(): the band
 def test_the_band_edge_publishes_and_a_hair_beyond_it_does_not(book, rclock, caplog) -> None:
-    """The ``entry_sanity_band`` formula and its ``<=`` edge, verbatim: ``dev == band`` is a
-    PASS in the gate, so it is a pass here. AAA's level sits EXACTLY 2.00% from the live price and
-    BBB's 2.05% — the band is a NARROWING, and nothing in this book may loosen it."""
+    """The ``entry_sanity_band`` formula and its ``<=`` edge: ``dev == band`` passes, as in the gate.
+    AAA sits exactly 2.00% from the live price, BBB 2.05%. The band only narrows."""
     book.record(_cand("AAA", entry="102.00"))     # |102-100|/100*100 == 2.00 exactly
     book.record(_cand("BBB", entry="102.05"))     # 2.05 > 2.00
     rclock.day = FIRST_RETEST_D
@@ -210,20 +194,18 @@ def test_the_band_edge_publishes_and_a_hair_beyond_it_does_not(book, rclock, cap
     with caplog.at_level(logging.INFO, logger=LOGGER):
         due = book.due(_ltp(AAA="100.00", BBB="100.00"), BAND, FIRST_RETEST_D)
     assert [c.symbol for c in due] == ["AAA"]
-    # `_offered`, never `_republished`: the caller emits the publication line off `offers` AFTER
-    # `prescreen.admit` has ruled, so the two funnel stages stay separately greppable.
+    # `_offered`, never `_republished`: the caller emits that line after `prescreen.admit` rules.
     assert "brk20_retest_offered" in caplog.text
     assert "brk20_retest_republished" not in caplog.text
 
-    # A tighter owner band binds immediately — it is read per tick, never captured at construction.
+    # The band is read per tick, never captured at construction.
     rclock.day = date(2026, 6, 19)
     assert book.due(_ltp(AAA="100.00"), Decimal("1.0"), date(2026, 6, 19)) == []
 
 
 @pytest.mark.parametrize("price", [None, "0", "-5.00", "0.00"])
 def test_an_unpriceable_symbol_publishes_nothing(book, rclock, price) -> None:
-    """No tick, or a non-positive one, is the one case where the band CANNOT be evaluated. A
-    mechanism that spends a scarce analyst slot stays silent there rather than guessing."""
+    """No tick, or a non-positive one, cannot be banded: stay silent rather than spend an analyst slot on a guess."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
     ltp = (lambda _s: None) if price is None else (lambda _s: Decimal(price))
@@ -231,7 +213,7 @@ def test_an_unpriceable_symbol_publishes_nothing(book, rclock, price) -> None:
 
 
 def test_a_raising_ltp_costs_its_own_row_and_nothing_else(book, rclock, caplog) -> None:
-    """One bad row must never take the tick down with it — the whole module is fail-to-zero."""
+    """One bad row never takes the tick down (the module is fail-to-zero)."""
     book.record(_cand("AAA", entry="100.00"))
     book.record(_cand("BBB", entry="100.00", score=0.9))
     rclock.day = FIRST_RETEST_D
@@ -249,10 +231,8 @@ def test_a_raising_ltp_costs_its_own_row_and_nothing_else(book, rclock, caplog) 
 
 # --------------------------------------------------------------------------- due(): the day bound
 def test_a_level_is_offered_once_a_day_and_again_the_next_session(book, rclock) -> None:
-    """The row STAYS resting: a re-publication that expires unactioned (declined, capped out,
-    re-armed by a freeze) may fire again on the next session inside the window. What bounds it is
-    per-day — the 60 s cadence must not hand ``prescreen.admit`` the same row 375 times, because
-    admit counts every candidate as RAW and the funnel would become unreadable."""
+    """The row stays resting and may fire again next session; the bound is per day, so the 60 s cadence
+    does not hand ``prescreen.admit`` the same row 375 times (admit counts every candidate as RAW)."""
     book.record(_cand("AAA", entry="100.00"))
     ltp = _ltp(AAA="100.00")
 
@@ -267,8 +247,7 @@ def test_a_level_is_offered_once_a_day_and_again_the_next_session(book, rclock) 
 
 
 def test_a_level_outside_the_band_this_minute_is_still_offerable_later_today(book, rclock) -> None:
-    """The offer bound is spent on an OFFER, never on a look: a level that is out of band at 09:20
-    and back inside it at 14:00 is exactly the case this mechanism exists for."""
+    """The offer bound is spent on an offer, never on a look: out of band at 09:20 and back inside at 14:00 still offers."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
     assert book.due(_ltp(AAA="130.00"), BAND, FIRST_RETEST_D) == []     # far away all morning
@@ -276,10 +255,7 @@ def test_a_level_outside_the_band_this_minute_is_still_offerable_later_today(boo
 
 
 def test_one_symbol_yields_one_candidate_even_with_two_resting_levels(book, rclock) -> None:
-    """A symbol can cross twice inside one window (cross, fall back, cross again). Handing the
-    pre-screen two same-symbol candidates in one batch buys nothing — the dedupe admits one — while
-    costing a raw count and a suppression line, so the strongest breakout margin goes and the other
-    is left un-offered, still available tomorrow."""
+    """A symbol that crosses twice in one window yields one candidate (the strongest score); the other stays un-offered, available tomorrow."""
     book.record(_cand("AAA", entry="100.00", score=0.55))
     rclock.day = FIRST_RETEST_D
     book.record(_cand("AAA", entry="101.00", score=0.85))
@@ -288,17 +264,15 @@ def test_one_symbol_yields_one_candidate_even_with_two_resting_levels(book, rclo
     rclock.day = date(2026, 6, 19)
     due = book.due(_ltp(AAA="100.50"), BAND, date(2026, 6, 19))
     assert [str(c.raw_levels.entry) for c in due] == ["101.00"]   # score desc wins
-    # …and the day's offer is spent for the SYMBOL, not merely for that row: the loser must not
-    # sneak back in on the next minute-pulse, where the pre-screen could only ever dedupe it away
-    # at the cost of a raw count and a suppression line.
+    # The day's offer is spent for the symbol, not just that row: the loser does not return on the next pulse.
     assert book.due(_ltp(AAA="100.50"), BAND, date(2026, 6, 19)) == []
-    # Tomorrow it is the strongest row's turn again — the other is never consumed, just outranked.
+    # Tomorrow the strongest row is up again; the other is outranked, never consumed.
     rclock.day = date(2026, 6, 22)
     again = book.due(_ltp(AAA="100.50"), BAND, date(2026, 6, 22))
     assert [str(c.raw_levels.entry) for c in again] == ["101.00"]
 
-    # ...and the outranked level was never consumed: on a later session inside BOTH windows (06-17 -> 06-24,
-    # 06-18 -> 06-25), a price inside ITS band but outside the winner's offers it
+    # On a later session inside BOTH windows (06-17 -> 06-24, 06-18 -> 06-25), a price inside the
+    # outranked level's band but outside the winner's offers it
     # (|100.00 - 98.50| / 98.50 = 1.52% <= 2.0%; 101.00 is 2.54% away).
     rclock.day = date(2026, 6, 23)
     later = book.due(_ltp(AAA="98.50"), BAND, date(2026, 6, 23))
@@ -307,12 +281,8 @@ def test_one_symbol_yields_one_candidate_even_with_two_resting_levels(book, rclo
 
 # --------------------------------------------------------------------------- due(): tick freshness
 def test_a_stale_trigger_price_offers_nothing(book, rclock, caplog) -> None:
-    """The tick cache has NO upper bound on age and ``mark_price`` cannot say so, so without this the
-    TRIGGER can be a price from hours ago — while the risk gate that judges the resulting proposal
-    rejects anything past ``stale_data_guard.max_tick_age_s``. Originating on a stale print spends a
-    prescreen day slot, the symbol's one offer of the day and one of the day's analyst calls on a
-    certain reject. Worst exactly for the population ``resting_symbols`` exists to reach: sub-cap
-    eligible names that go minutes between prints."""
+    """The tick cache has no age bound, but the risk gate rejects anything past ``stale_data_guard.max_tick_age_s``;
+    originating on a stale print would spend a day slot, the symbol's offer and an analyst call on a certain reject."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
     ltp = _ltp(AAA="100.00")
@@ -322,18 +292,15 @@ def test_a_stale_trigger_price_offers_nothing(book, rclock, caplog) -> None:
                         tick_age_fn=lambda _s: 9.0, max_tick_age_s=5.0) == []
     assert "brk20_retest_tick_stale" in caplog.text
 
-    # A symbol the cache has never aged at all is the same refusal — fail to zero, never to a guess.
+    # An unknown age is the same refusal; neither refusal spends the offer.
     assert book.due(ltp, BAND, FIRST_RETEST_D,
                     tick_age_fn=lambda _s: None, max_tick_age_s=5.0) == []
-    # …and no offer was spent on either refusal: the tape comes back and so does the level.
     assert book.due(ltp, BAND, FIRST_RETEST_D,
                     tick_age_fn=lambda _s: 5.0, max_tick_age_s=5.0)   # `<=` edge, as in the gate
 
 
 def test_the_staleness_refusal_is_logged_once_a_day_not_once_a_minute(book, rclock, caplog) -> None:
-    """A refusal is re-evaluated on every 60 s pulse; an unbounded line would be ~375 copies a day
-    per symbol (the `prescreen_out_of_window` discipline). Bounded per (symbol, day), and the bound
-    rolls with the day so each session re-states it once."""
+    """The refusal is re-evaluated every 60 s pulse; the log line is bounded per (symbol, day) and re-states once each session."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
     stale = dict(tick_age_fn=lambda _s: 99.0, max_tick_age_s=5.0)
@@ -351,10 +318,8 @@ def test_the_staleness_refusal_is_logged_once_a_day_not_once_a_minute(book, rclo
 
 # --------------------------------------------------------------------- due(): the not-offerable screen
 def test_a_level_already_acted_on_is_never_re_offered(book, rclock, caplog) -> None:
-    """The mechanism the backtest measured books ONE trade per signal. A symbol already HELD (or
-    carrying a pending entry recommendation) is rejected by `gate._rule_per_stock_exposure` as
-    `already held or pending` — a HARD reason no shrink can cure — but only AFTER the day slot and
-    one of the day's (DG1-capped) analyst calls are spent. The book refuses first."""
+    """One trade per signal: a symbol already held or with a pending entry recommendation is a hard gate
+    reject (`gate._rule_per_stock_exposure`) only after the day slot and an analyst call are spent, so the book refuses first."""
     book.record(_cand("AAA", entry="100.00", score=0.9))
     book.record(_cand("BBB", entry="100.00", score=0.5))
     rclock.day = FIRST_RETEST_D
@@ -366,14 +331,12 @@ def test_a_level_already_acted_on_is_never_re_offered(book, rclock, caplog) -> N
     assert [c.symbol for c in due] == ["BBB"]
     assert "brk20_retest_not_offerable" in caplog.text
 
-    # The skip spends NO offer: the reason can lapse inside the day (the position closes, the
-    # recommendation expires) and the level has not stopped being a level.
+    # The skip spends no offer: the reason can lapse inside the day.
     assert [c.symbol for c in book.due(ltp, BAND, FIRST_RETEST_D, skip_fn=lambda _s: {})] == ["AAA"]
 
 
 def test_the_screen_sees_every_due_symbol_exactly_once_per_tick(book, rclock) -> None:
-    """It reads the positions/recommendations tables, so it is called ONCE per tick with the whole
-    due set — never per row, and never on the ordinary minute when nothing is in the window."""
+    """The screen reads the positions/recommendations tables: called once per tick with the whole due set, never per row or on an empty window."""
     book.record(_cand("AAA"))
     book.record(_cand("BBB"))
     rclock.day = FIRST_RETEST_D
@@ -389,15 +352,13 @@ def test_the_screen_sees_every_due_symbol_exactly_once_per_tick(book, rclock) ->
     book.due(_ltp(AAA="100.50", BBB="100.00"), BAND, date(2026, 6, 19), skip_fn=skip)
     assert seen == [["AAA", "BBB"]]               # deduped and deterministic
 
-    # …and an EMPTY window never calls it at all (the cadence has to stay one cheap SQL read).
     seen.clear()
     book.due(_ltp(), BAND, date(2026, 7, 1), skip_fn=skip)
     assert seen == []
 
 
 def test_an_unevaluable_screen_offers_nothing(book, rclock, caplog) -> None:
-    """A narrowing that cannot be evaluated fails to ZERO, exactly like an unreadable band: the
-    alternative is re-offering a level the platform may already own."""
+    """A screen that cannot be evaluated fails to zero, like an unreadable band."""
     book.record(_cand("AAA", entry="100.00"))
     rclock.day = FIRST_RETEST_D
 
@@ -411,9 +372,8 @@ def test_an_unevaluable_screen_offers_nothing(book, rclock, caplog) -> None:
 
 # --------------------------------------------------------------------------- offer detail for the caller
 def test_the_offer_detail_rides_out_for_the_callers_publication_line(book, rclock) -> None:
-    """`brk20_retest_republished` belongs at the PUBLICATION step — emitted at offer time it would
-    also count everything `prescreen.admit` suppressed. The book fills `offers` in place (the
-    `brk20.sweep_daily(veto_counts=...)` convention) so the caller can log the accepted ones."""
+    """`brk20_retest_republished` belongs at the publication step, so the book fills `offers` in place
+    (the `brk20.sweep_daily(veto_counts=...)` convention) for the caller to log the accepted ones."""
     book.record(_cand("AAA", entry="102.00"))
     rclock.day = FIRST_RETEST_D
     offers: dict[str, dict[str, str]] = {}
@@ -428,11 +388,8 @@ def test_the_offer_detail_rides_out_for_the_callers_publication_line(book, rcloc
 
 # --------------------------------------------------------------------------- the feed follows
 def test_resting_symbols_is_todays_window_so_the_feed_can_follow_a_level(book, rclock) -> None:
-    """Without this the mechanism is DEAD for the population it exists for. ``due`` bands against a
-    LIVE price and the engine's only price source is the tick cache; the sweep's batch subscription
-    ROLLS AT MIDNIGHT, so a level on a sub-cap symbol (no 1m bars, never on the watchlist) would read
-    ``ltp is None`` on every retest day. The sweep feeds this list into the same subscription set it
-    builds from today's admissions."""
+    """``due`` bands against a live tick-cache price, and the sweep's batch subscription rolls at midnight, so a
+    sub-cap symbol's level would read ``ltp is None`` on every retest day; the sweep adds this list to its subscription set."""
     book.record(_cand("AAA"))
     book.record(_cand("BBB"))
     assert book.resting_symbols(SIGNAL_D) == []          # today's own admissions are in the batch
@@ -448,7 +405,7 @@ def test_resting_symbols_is_todays_window_so_the_feed_can_follow_a_level(book, r
 
 
 def test_resting_symbols_never_breaks_the_sweep(book, conn, caplog) -> None:
-    """It is a FEED HINT on the sweep's hot path; an unreadable journal costs a re-offer, not a scan."""
+    """A feed hint on the sweep's hot path: an unreadable journal costs a re-offer, not a scan."""
     book.record(_cand("AAA"))
     conn.execute("DROP TABLE brk20_resting_levels")
     with caplog.at_level(logging.WARNING, logger=LOGGER):
@@ -458,8 +415,7 @@ def test_resting_symbols_never_breaks_the_sweep(book, conn, caplog) -> None:
 
 # --------------------------------------------------------------------------- expire
 def test_expire_marks_rows_past_the_window_and_never_on_the_expiry_day(book, conn, rclock) -> None:
-    """``expires_d`` is the LAST offerable session (``due`` is inclusive there), so expiring it on
-    its own day would silently ship an N-1 window."""
+    """``expires_d`` is the last offerable session (``due`` is inclusive), so expiring it that day would ship an N-1 window."""
     book.record(_cand("AAA"))
 
     rclock.day = EXPIRES_D
@@ -476,9 +432,7 @@ def test_expire_marks_rows_past_the_window_and_never_on_the_expiry_day(book, con
 
 
 def test_due_does_not_depend_on_expire_having_run(book, rclock) -> None:
-    """A day the engine was down, or the window never opened, leaves stale rows ``resting``.
-    ``due`` re-tests ``expires_d >= today`` itself, so housekeeping that never ran cannot resurrect
-    a level whose window closed."""
+    """``due`` re-tests ``expires_d >= today`` itself, so housekeeping that never ran cannot resurrect a closed window."""
     book.record(_cand("AAA", entry="100.00"))
     later = date(2026, 7, 1)
     rclock.day = later
@@ -490,9 +444,7 @@ def test_due_does_not_depend_on_expire_having_run(book, rclock) -> None:
 def test_an_engine_restart_between_the_signal_and_the_retest_loses_nothing(
     db_path, rcalendar, rclock
 ) -> None:
-    """THE reason the state is SQLite. The 2026-09-11 forensics recorded the in-memory forward queue
-    being lost on every mid-session reboot; a multi-session mechanism whose state does not survive a
-    restart silently degenerates into the single-session one it was built to replace."""
+    """The state is SQLite so a multi-session mechanism survives a restart."""
     first = connect(db_path)
     apply_migrations(first)
     RestingLevelBook(first, rcalendar, rclock).record(_cand("AAA", entry="100.00", score=0.71))
@@ -505,9 +457,7 @@ def test_an_engine_restart_between_the_signal_and_the_retest_loses_nothing(
         (cand,) = reborn.due(_ltp(AAA="100.00"), BAND, EXPIRES_D)
         assert (cand.symbol, str(cand.raw_levels.entry)) == ("AAA", "100.00")
         assert cand.score == pytest.approx(0.71)
-        # The per-day OFFER bound is process memory, and losing it in a restart costs exactly one
-        # extra offer that day — deduped by the pre-screen, +1 on a raw counter. That is the same
-        # cost a restart already imposes on the ordinary sweep, which re-admits its whole batch.
+        # The per-day offer bound is process memory: a restart costs one extra offer that day (deduped by the pre-screen).
         third = RestingLevelBook(second, rcalendar, rclock)
         assert len(third.due(_ltp(AAA="100.00"), BAND, EXPIRES_D)) == 1
         assert reborn.due(_ltp(AAA="100.00"), BAND, EXPIRES_D) == []   # …but not within one process
@@ -530,8 +480,7 @@ def test_an_unreadable_journal_re_offers_nothing_and_never_raises(book, conn, ca
 
 
 def test_a_corrupt_price_column_costs_its_own_row(book, conn, rclock, caplog) -> None:
-    """Rows are TEXT decimal strings written by this platform, but a hand-edited or half-migrated
-    row must not be able to kill the tick for every other resting level."""
+    """A hand-edited or half-migrated row must not kill the tick for every other resting level."""
     book.record(_cand("AAA", entry="100.00"))
     book.record(_cand("BBB", entry="100.00", score=0.9))
     conn.execute("UPDATE brk20_resting_levels SET entry = 'not-a-price' WHERE symbol = 'BBB'")

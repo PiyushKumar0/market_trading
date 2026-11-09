@@ -1,13 +1,10 @@
-"""Stage-3 BSE FRESH insider feed (``filings_pit_fresh``): defensive parse over the probe-verified
-``getCorp_Regulation_ng/w`` shape, the equity filter (startswith 'equity'), scrip->symbol resolution +
-skip counting, txn_type mapping (incl. Revoke / Pledge pass-through), source-tagged (``bse:``) content-
-hash ids, the ~25-row-cap per-day subdivision, store round-trip + idempotency, the 2026-09-12
-per-run scrip-map rebuild (stored codes union the index-CSV x BSE-bulk-master join) with its
-per-stage funnel counts, and the degrade-never-raise contract.
+"""BSE FRESH insider feed (``filings_pit_fresh``): defensive parse over the ``getCorp_Regulation_ng/w``
+shape, the equity filter (startswith 'equity'), scrip->symbol resolution + skip counting, txn_type
+mapping (incl. Revoke / Pledge pass-through), source-tagged (``bse:``) content-hash ids, the ~25-row-cap
+per-day subdivision, store round-trip + idempotency, the per-run scrip-map rebuild (stored codes union
+the index-CSV x BSE-bulk-master join) with its per-stage funnel counts, and the degrade-never-raise contract.
 
-Fixtures (``fixtures/filings_pit_fresh.json``) are lifted VERBATIM from the 2026-07-19 BSE probe
-captures (``bse_insider_out/01_default_isdefault1.json`` + ``14_reliance_2023_2024.json``). The live
-``data/market.duckdb`` is never touched — every store is a tmp DuckDB.
+``fixtures/filings_pit_fresh.json`` is a verbatim BSE probe capture. Every store is a tmp DuckDB.
 """
 
 from __future__ import annotations
@@ -40,22 +37,22 @@ D = FIXED_NOW.date()
 FRESH_JSON = json.loads((FIXTURES / "filings_pit_fresh.json").read_text(encoding="utf-8"))
 
 # scrip -> symbol reverse map (bare-int-string keys, as store.bse_scrip_symbol_map builds). NINtec's
-# 539843 is DELIBERATELY absent so it exercises the unmapped-scrip skip on an EQUITY row.
+# 539843 is deliberately absent, to exercise the unmapped-scrip skip on an equity row.
 SCRIP_MAP = {
     "544759": "GOLDLINE", "539436": "COFFEEDAY", "504341": "RAVINDRA",
     "940227": "PRACHAY", "533148": "JSWENERGY", "500325": "RELIANCE",
 }
 
 
-#: BSE bulk scrip master shape (probe-verified 2026-09-12): a BARE LIST, SCRIP_CD + ISIN_NUMBER.
-#: NINtec's 539843 is the row that turns the fixture's unmapped-scrip skip into a resolved AIAENG row.
+#: BSE bulk scrip master shape: a bare list, SCRIP_CD + ISIN_NUMBER. Scrip 539843 turns the fixture's
+#: unmapped-scrip skip into a resolved AIAENG row.
 MASTER_JSON = [
     {"SCRIP_CD": "539843", "Scrip_Name": "AIA Engineering Ltd", "ISIN_NUMBER": "INE212H01026"},
     {"SCRIP_CD": "500325", "Scrip_Name": "Reliance Industries Ltd", "ISIN_NUMBER": "INE002A01018"},
 ]
 
 #: symbol -> ISIN half of the map (the cached index-constituents CSV in production). ONLYNSE has no
-#: BSE listing at all — the expected residue (BSE/CDSL in the live universe), not a failure.
+#: BSE listing: the expected residue, not a failure.
 CONSTITUENTS_ISIN = {
     "AIAENG": "INE212H01026", "RELIANCE": "INE002A01018", "ONLYNSE": "INE999Z01010",
 }
@@ -63,11 +60,10 @@ CONSTITUENTS_ISIN = {
 
 @pytest.fixture(autouse=True)
 def _isolate_constituents(monkeypatch):
-    """Default the symbol->ISIN half to EMPTY so no test reads the repo's live universe cache.
+    """Default the symbol->ISIN half to empty so no test reads the live universe cache.
 
-    Empty ⇒ the job skips the master request entirely and resolves off the stored ``symbol_isin``
-    map alone (the pre-2026-09-12 behaviour), which is exactly the baseline the older tests assert.
-    Tests that exercise the rebuilt map override this.
+    Empty ⇒ the job skips the master request and resolves off the stored ``symbol_isin`` map alone;
+    tests exercising the rebuilt map override this.
     """
     monkeypatch.setattr("engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: {})
 
@@ -78,16 +74,14 @@ def settings():
 
 
 def serving_json(payload) -> httpx.AsyncClient:
-    """A client that returns a FRESH Response(200, json=payload) for every request (the fresh job
-    fetches the Isdefault=1 + Isdefault=2 surfaces, so each call needs its own response)."""
+    """A client returning a fresh Response(200, json=payload) per request (the job fetches the Isdefault=1 and =2 surfaces)."""
     return httpx.AsyncClient(transport=httpx.MockTransport(lambda _req: httpx.Response(200, json=payload)))
 
 
 def routed_client(master, insider=FRESH_JSON, recorder: list | None = None):
     """Route the scrip-master URL to ``master()`` and every insider surface to ``insider``.
 
-    ``master`` is a CALLABLE (a fresh Response per call): the job fetches the master once per run and
-    a test may run twice, and a Response instance cannot be replayed once its stream is read."""
+    ``master`` is a callable (a fresh Response per call): a Response cannot be replayed once its stream is read."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -117,8 +111,7 @@ def collect_alerts():
 
 
 def stepping_clock():
-    """A Clock the test can advance — the per-day master memo and its failure cooldown are the only
-    behaviour in this job that depends on the passage of time."""
+    """A Clock the test can advance (the per-day master memo and its failure cooldown are the time-dependent behaviour)."""
     cur = [FIXED_NOW]
 
     def step(days: int = 0, minutes: int = 0):
@@ -168,8 +161,7 @@ def test_fresh_url_surfaces():
 def test_parse_pit_fresh_field_map_and_filters():
     parse = parse_pit_fresh(FRESH_JSON, SCRIP_MAP)
     assert parse.raw_rows == 8
-    # 5 equity+mapped rows kept; Ravindra ('Any other instrument') + Prachay ('Debentures') are
-    # non-equity; NINtec (scrip 539843) is equity but unmapped.
+    # 5 equity+mapped rows kept; Ravindra ('Any other instrument') and Prachay ('Debentures') are non-equity; NINtec (539843) is unmapped.
     assert parse.skipped_non_equity == 2
     assert parse.skipped_unmapped_scrip == 1
     assert parse.skipped_no_broadcast == 0
@@ -212,11 +204,10 @@ def test_parse_pit_fresh_empty_payloads():
 async def test_job_persists_deduped_and_is_idempotent(seeded_store, clock, settings):
     job = FilingsPitFreshJob(seeded_store, clock, serving_json(FRESH_JSON), settings=settings)
     result = await job.run(D)
-    # Both surfaces return the same 8-row payload -> 5 valid rows, deduped on the content-hash id.
+    # Both surfaces parse the same 8-row payload: rows dedupe on the content-hash id (5 unique), but the
+    # skip tallies are per-parse diagnostics and accumulate across the two surfaces (2+2 / 1+1).
     assert result.ok is True and result.degraded is False
     assert result.rows_written == 5 and result.windows_subdivided == 0
-    # Both surfaces parse the SAME 8-row payload here: rows dedupe on the id (5 unique), but the skip
-    # tallies are per-parse diagnostics and so accumulate across the two surfaces (2+2 / 1+1).
     assert result.skipped_non_equity == 4 and result.skipped_unmapped_scrip == 2
 
     rows = seeded_store.get_insider_trades()
@@ -246,7 +237,7 @@ def _cap_rows(n: int) -> list[dict]:
 
 
 async def test_windowed_cap_triggers_per_day_subdivision(seeded_store, clock, settings):
-    """An Isdefault=2 window returning >= 25 rows is assumed truncated -> refetched per-day."""
+    """An Isdefault=2 window returning >= 25 rows is assumed truncated and refetched per day."""
     per_day: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -281,12 +272,12 @@ async def test_both_surfaces_fail_degrades_and_warns(seeded_store, clock, settin
     assert fresh.BSE_FRESH_URL.startswith("https://api.bseindia.com/")
 
 
-# =================================================== per-run scrip-map rebuild (2026-09-12)
+# =================================================== per-run scrip-map rebuild
 async def test_scrip_map_rebuild_resolves_rows_the_stored_map_alone_drops(
     seeded_store, clock, settings, monkeypatch
 ):
-    """The 09-12 starvation fix: index-CSV ISINs joined to the BSE bulk master recover an issuer the
-    one-shot ``symbol_isin`` backfill never mapped (fixture scrip 539843 -> AIAENG)."""
+    """Index-CSV ISINs joined to the BSE bulk master recover an issuer the one-shot ``symbol_isin``
+    backfill never mapped (fixture scrip 539843 -> AIAENG)."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -304,8 +295,7 @@ async def test_scrip_map_rebuild_resolves_rows_the_stored_map_alone_drops(
 async def test_scrip_map_reads_a_lagging_constituents_csv_through_the_rename(
     seeded_store, clock, settings, monkeypatch
 ):
-    """2026-10-23: the index CSV kept naming ICICIPRULI after NSE renamed it ICICILIFE (same Kite
-    token), so the company's BSE filings resolved to the retired symbol."""
+    """A lagging index CSV still names the old symbol after an NSE rename (same Kite token); BSE filings must resolve to the new one."""
     eq = {"exchange": "NSE", "segment": "NSE", "instrument_type": "EQ"}
     seeded_store.upsert_instruments_daily([
         {"d": D - timedelta(days=2), "instrument_token": 7, "tradingsymbol": "AIAOLD", **eq},
@@ -323,8 +313,7 @@ async def test_scrip_map_reads_a_lagging_constituents_csv_through_the_rename(
 
 
 async def test_stored_code_wins_over_a_disagreeing_master(seeded_store, clock, settings, monkeypatch):
-    """Precedence is stored-wins on a scrip key: the stored codes are the per-symbol PeerSmartSearch
-    resolutions, so a master that claims 500325 for someone else must not silently re-point it."""
+    """Stored wins on a scrip key (stored codes are per-symbol PeerSmartSearch resolutions): a master claiming 500325 for someone else must not re-point it."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin",
         lambda _s: {"IMPOSTOR": "INE002A01018"},                       # same ISIN -> RELIANCE's code
@@ -338,10 +327,9 @@ async def test_stored_code_wins_over_a_disagreeing_master(seeded_store, clock, s
 async def test_scrip_master_failure_degrades_to_stored_map_and_alerts_once(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """A failed master leg silently reverts the feed to the 199-code coverage that starved `ins`
-    for two months, and its own ``ins_feed_coverage_low`` measures the 120-day CORPUS, so it
-    cannot see it. The map stage therefore owns the detection: it warns, and alerts ONCE on the
-    transition (a replay must not storm). Rows keep flowing, so ``ok`` stays true."""
+    """A failed master leg reverts the feed to the stored-map coverage that starves `ins`, and
+    ``ins_feed_coverage_low`` measures the 120-day corpus so cannot see it; the map stage owns the detection:
+    it warns, and alerts once on the transition. Rows keep flowing, so ``ok`` stays true."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -363,8 +351,7 @@ async def test_scrip_master_failure_degrades_to_stored_map_and_alerts_once(
     assert len(msgs) == 1 and msgs[0].severity == "warning"
     assert msgs[0].data["job_id"] == "filings_pit_fresh"
 
-    # The latch: a second degraded run through the SAME instance (a catch-up replaying another day)
-    # re-warns but does NOT re-alert.
+    # Latch: a second degraded run through the same instance (a catch-up replaying another day) re-warns but does not re-alert.
     caplog.clear()
     with caplog.at_level("INFO"):
         await job.run(D - timedelta(days=1))
@@ -373,9 +360,8 @@ async def test_scrip_master_failure_degrades_to_stored_map_and_alerts_once(
 
 
 async def test_a_healthy_map_re_arms_the_degradation_alert(seeded_store, settings, monkeypatch):
-    """Symmetric clear (the 2026-09-01 latch lesson): a recovery must re-arm the alarm, or the next
-    collapse is silent for the life of the process. Each run is a fresh IST day, which is also what
-    expires the per-day master memo."""
+    """A recovery re-arms the alarm, or the next collapse is silent for the life of the process. Each run is a
+    fresh IST day, which also expires the per-day master memo."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -400,9 +386,7 @@ async def test_a_healthy_map_re_arms_the_degradation_alert(seeded_store, setting
 async def test_master_shape_change_is_degraded_not_a_silent_revert(
     seeded_store, clock, settings, monkeypatch
 ):
-    """BSE renames SCRIP_CD/ISIN_NUMBER: a 200 that parses to nothing. The old code called that a
-    success (``degraded=False``) and reverted to the stored codes with the run line certifying a
-    healthy map — the exact regression this change exists to make visible."""
+    """BSE renaming SCRIP_CD/ISIN_NUMBER gives a 200 that parses to nothing: degraded, not a silent revert to stored codes."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -415,7 +399,7 @@ async def test_master_shape_change_is_degraded_not_a_silent_revert(
 
     assert result.scrip_master_rows == 0 and result.scrip_map_degraded is True
     assert result.scrip_codes == len(SCRIP_MAP)
-    # The alert must name the leg that failed: three legs, three hosts, three different fixes.
+    # The alert names the leg that failed (three legs, three hosts, three fixes).
     assert len(msgs) == 1 and msgs[0].data["cause"] == "bulk_master_empty"
     assert "renamed" in msgs[0].body
 
@@ -423,9 +407,8 @@ async def test_master_shape_change_is_degraded_not_a_silent_revert(
 async def test_stale_stored_symbol_shadows_the_master_and_is_counted(
     store, clock, settings, monkeypatch, caplog
 ):
-    """After a tradingsymbol rename (MINDTREE->LTIM class), until ``isin_map`` stores the new symbol the
-    stale stored row keeps shadowing the right symbol. Stored still wins — but the loser is counted
-    and warned, or the run line would certify full resolution while that issuer starves forever."""
+    """After a tradingsymbol rename, until ``isin_map`` stores the new symbol the stale stored row shadows the
+    right one. Stored still wins, but the loser is counted and warned, or the run line would certify full resolution."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin",
         lambda _s: {"RELIANCE": "INE002A01018"},          # the master codes it to the stored 500325
@@ -450,10 +433,8 @@ async def test_stale_stored_symbol_shadows_the_master_and_is_counted(
 async def test_an_empty_master_body_is_not_memoised_for_the_day(
     seeded_store, settings, monkeypatch
 ):
-    """2026-09-12 review: a 200 that parses to nothing is a transient BSE shape, not a fact about the
-    day. Memoising it pinned the feed at the pre-fix coverage through the 19:00 run that followed a
-    healthy BSE. It takes the failure cooldown instead: inside it the next run does not re-fetch
-    (and reads as a cooling-down master), after it the healthy master is fetched and used."""
+    """A 200 that parses to nothing is a transient BSE shape, not a fact about the day, so it is not memoised;
+    it takes the failure cooldown: inside it the next run does not re-fetch, after it the healthy master is used."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -485,9 +466,7 @@ async def test_an_empty_master_body_is_not_memoised_for_the_day(
 async def test_a_truncated_master_trips_the_coverage_floor(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """2026-09-12 review: `not master` is a presence bit. A master BSE truncates still parses to
-    hundreds of pairs and would have certified a map covering a tenth of the universe as healthy.
-    The detector is a floor on constituents that ended up with their own code."""
+    """`not master` is only a presence bit: a truncated master still parses to many pairs, so the detector is a floor on constituents that ended up with their own code."""
     constituents = {f"SYM{i:02d}": f"INE_T{i:02d}" for i in range(10)}
     truncated = [
         {"SCRIP_CD": "600001", "Scrip_Name": "Sym 01", "ISIN_NUMBER": "INE_T01"},
@@ -514,9 +493,8 @@ async def test_a_truncated_master_trips_the_coverage_floor(
 async def test_two_constituents_on_one_isin_are_not_counted_as_shadowed(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """`shadowed` means a STORED row shadows the master's symbol. Two constituents sharing an ISIN
-    (a dual listing, a rename window) collide inside the same loop and are a CSV fact — counted
-    apart, so the shadowed alarm keeps its one meaning."""
+    """`shadowed` means a stored row shadows the master's symbol; two constituents sharing an ISIN (dual listing,
+    rename window) are a CSV fact, counted apart."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin",
         lambda _s: {"AIAENG": "INE212H01026", "AIAENGDUP": "INE212H01026"},   # not a stored code
@@ -532,8 +510,7 @@ async def test_two_constituents_on_one_isin_are_not_counted_as_shadowed(
 
 
 def test_non_finite_considerations_read_as_no_value():
-    """A bare ``NaN`` token survives json.loads and constructs a Decimal; every ordering comparison
-    on it raises — outside the degrade guard, in the ins-eligible tally. Non-finite is 'no value'."""
+    """A bare ``NaN`` survives json.loads and builds a Decimal whose ordering comparisons raise (outside the degrade guard); non-finite is 'no value'."""
     assert fresh._dec("NaN") is None
     assert fresh._dec(float("nan")) is None
     assert fresh._dec("Infinity") is None
@@ -543,8 +520,7 @@ def test_non_finite_considerations_read_as_no_value():
 async def test_store_read_failure_degrades_instead_of_propagating(
     seeded_store, clock, settings, monkeypatch, caplog
 ):
-    """The ``symbol_isin`` read is inside the guard too. A locked duckdb file must not turn the
-    run into a bare ``scheduled_job_failed`` with no funnel line at all."""
+    """The ``symbol_isin`` read is inside the guard: a locked duckdb file must not become a bare ``scheduled_job_failed`` with no funnel line."""
 
     async def boom():
         raise RuntimeError("duckdb: could not set lock on file")
@@ -557,7 +533,7 @@ async def test_store_read_failure_degrades_instead_of_propagating(
         ).run(D)
     assert result.scrip_map_degraded is True and result.ok is True
     assert result.scrip_codes == 0 and result.rows_written == 0   # nothing resolves without a map
-    # A store failure must NOT be reported as a BSE problem (symbols==0 is produced by both).
+    # A store failure must not be reported as a BSE problem (symbols==0 arises from both).
     assert _record(caplog, "filings_pit_fresh_scrip_map_degraded").cause == "symbol_isin_read"
     assert msgs[0].data["cause"] == "symbol_isin_read"
 
@@ -565,9 +541,8 @@ async def test_store_read_failure_degrades_instead_of_propagating(
 async def test_master_is_fetched_once_per_day_across_replayed_runs(
     seeded_store, clock, settings, monkeypatch
 ):
-    """DATE_KEYED catch-up replays one run per missed day through ONE job instance. The master is a
-    today-view of BSE's active list — identical on every replayed date — so a multi-day replay must
-    cost one 1.7 MB fetch, not one per day, and must not burst an unpaced host."""
+    """DATE_KEYED catch-up replays one run per missed day through one job instance; the master is a today-view
+    identical on every replayed date, so a replay costs one 1.7 MB fetch, not one per day."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -587,9 +562,8 @@ async def test_master_is_fetched_once_per_day_across_replayed_runs(
 async def test_failed_master_is_not_refetched_inside_the_cooldown(
     seeded_store, clock, settings, monkeypatch
 ):
-    """The failure path is the one that must not burst: a BSE outage during a boot catch-up would
-    otherwise meet every replayed day with its own 1.7 MB attempt, back-to-back and unspaced — and
-    an unspaced burst is what makes BSE serve ``error_Bse.html`` in the first place."""
+    """A BSE outage during a boot catch-up must not meet every replayed day with its own back-to-back attempt:
+    an unspaced burst is what makes BSE serve ``error_Bse.html``."""
     monkeypatch.setattr(
         "engine.datafeeds.filings_pit_fresh.load_constituents_isin", lambda _s: CONSTITUENTS_ISIN
     )
@@ -608,8 +582,7 @@ async def test_failed_master_is_not_refetched_inside_the_cooldown(
 async def test_constituents_read_that_raises_degrades_instead_of_propagating(
     seeded_store, clock, settings, monkeypatch
 ):
-    """A corrupt universe cache raises shapes ``load_constituents_isin`` does not catch — the
-    feed must still ingest off the stored map rather than take the exception into the scheduler."""
+    """A corrupt universe cache raises shapes ``load_constituents_isin`` does not catch; the feed still ingests off the stored map."""
 
     def boom(_s):
         raise csv.Error("field larger than field limit")
@@ -635,9 +608,8 @@ async def test_empty_constituents_skips_the_master_request(seeded_store, clock, 
 
 # =========================================================================== per-stage funnel counts
 async def test_stage_counts_close_and_count_ins_eligible_buys(seeded_store, clock, settings):
-    """The funnel has to close arithmetically or it cannot tell starvation from a quiet day:
-    fetched = non_equity + unmapped + no_broadcast + resolved (per-fetch sums over both surfaces),
-    with parsed/written after the id dedupe."""
+    """The funnel closes arithmetically: fetched = non_equity + unmapped + no_broadcast + resolved (per-fetch
+    sums over both surfaces), with parsed/written after the id dedupe."""
     result = await FilingsPitFreshJob(
         seeded_store, clock, serving_json(FRESH_JSON), settings=settings
     ).run(D)
@@ -648,11 +620,9 @@ async def test_stage_counts_close_and_count_ins_eligible_buys(seeded_store, cloc
         + result.skipped_no_broadcast + result.rows_resolved
     )
     assert result.rows_resolved == 10 and result.rows_parsed == 5 and result.rows_written == 5
-    # Of the 5 deduped rows, GOLDLINE (Market Purchase) and RELIANCE (Off Market) are the open-market
-    # BUYs — the Revoke, the ESOP Sell and the Pledge are not what `ins` aggregates. But the
-    # counter must match what the RULE can act on, and insider_cluster_events drops a filing with no
-    # positive value AFTER the predicate passes: RELIANCE's buy is zero-consideration, so the rule
-    # sees one. A counter that said 2 would overstate on exactly the shape that starves it silently.
+    # GOLDLINE (Market Purchase) and RELIANCE (Off Market) are the BUYs `ins` aggregates, but the counter must
+    # match what the rule can act on: insider_cluster_events drops a filing with no positive value after the
+    # predicate passes, and RELIANCE's buy is zero-consideration, so the count is 1.
     assert result.rows_ins_eligible == 1
     zero_value_buys = [
         r for r in seeded_store.get_insider_trades()
@@ -662,9 +632,7 @@ async def test_stage_counts_close_and_count_ins_eligible_buys(seeded_store, cloc
 
 
 async def test_run_line_carries_the_whole_funnel(seeded_store, clock, settings, caplog):
-    """The measurability deliverable is the LOG LINE, not the result model: a rename or
-    a dropped kwarg on ``filings_pit_fresh_ingested`` would leave every result-field assertion green
-    while the next starvation became invisible on the one line built to expose it."""
+    """The log line ``filings_pit_fresh_ingested`` carries the whole funnel; a renamed or dropped kwarg would pass every result-field assertion."""
     with caplog.at_level("INFO"):
         result = await FilingsPitFreshJob(
             seeded_store, clock, serving_json(FRESH_JSON), settings=settings
@@ -697,7 +665,7 @@ def test_bse_scrip_symbol_map_round_trip(seeded_store):
 
 
 def test_bse_scrip_symbol_map_prefers_the_newest_row_after_a_rename(store):
-    """The renamed-away symbol sorts LAST, so symbol order alone would resolve its filings to it."""
+    """The renamed-away symbol sorts last, so symbol order alone would resolve filings to it."""
     store.upsert_symbol_isin([
         {"symbol": "MINDTREE", "isin": "INE214T01019", "bse_scrip_code": "532819",
          "as_of": D - timedelta(days=60)},

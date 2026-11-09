@@ -1,9 +1,8 @@
 """Hand-computed expected signals for the four price-baseline scanners.
 
-Every expected level below is derived BY HAND from the pinned rule sketches, the
-envelope defaults, and the smoothing conventions pinned in ``engine.strategy.indicators`` (Wilder
-SMA-seeded recursions; EMA seeded at the first value). Synthetic bar sequences are built so the
-intermediate indicator values are exact (uniform true ranges ⇒ ATR is a closed-form number).
+Expected levels are derived by hand from the rule sketches, the envelope defaults, and the smoothing
+conventions in ``engine.strategy.indicators`` (Wilder SMA-seeded recursions; EMA seeded at the first
+value). Synthetic bars make indicator values exact (uniform true ranges ⇒ ATR is closed-form).
 """
 
 from __future__ import annotations
@@ -37,9 +36,9 @@ def _window(start: tuple[int, int], end: tuple[int, int]) -> tuple[datetime, dat
 #
 # Session built for orb_minutes=15 (inside the envelope range 15–45, small enough to hand-verify):
 #   * range bars 09:15–09:29 — uniform O=100 H=100.50 L=99.50 C=100 V=1000; the 09:15 seed bar
-#     carries auction_open=102 ⇒ effective range = [99.50, 102.00]. v2 (2026-07-12)
-#     anchors the stop/target at the OPPOSITE range edge, so only these two edges — not any
-#     TR/ATR path — drive the levels; the bar shape need only pin the range and the volume median.
+#     carries auction_open=102 ⇒ effective range = [99.50, 102.00]. The stop/target anchor at the
+#     OPPOSITE range edge, so only these two edges drive the levels; the bar shape pins the range
+#     and the volume median.
 #   * filler bars 09:30..trigger−1 — same uniform shape.
 #   * trigger bar at ``trigger`` — the scanned bar.
 # Volume median over the 20 bars before the trigger = 1000 exactly.
@@ -96,7 +95,7 @@ def _buy_trigger(ts: datetime, *, close: str = "102.05", high: str = "102.10",
 
 
 def test_signal_candidate_pinned_field_set():
-    # PINNED — a drift here is a contract change, not a refactor.
+    # A drift here is a contract change, not a refactor.
     assert set(SignalCandidate.model_fields) == {
         "signal_id", "strategy_id", "symbol", "side", "style", "raw_levels", "score",
         "features_snapshot_id", "catalyst_ref",
@@ -105,13 +104,12 @@ def test_signal_candidate_pinned_field_set():
 
 def test_orb_buy_breakout_hand_computed_levels():
     # Trigger 09:35, close 102.05 > 102.00 (auction-seeded range high). vol 1500 = 1.5 × median(1000).
-    # v2 (2026-07-12): risk anchored at the OPPOSITE range edge — the range low 99.50:
+    # Risk anchored at the OPPOSITE range edge — the range low 99.50:
     #   risk   = stop_range_frac(1.0) × (102.05 − 99.50) = 2.55
     #   stop   = 102.05 − 2.55 = 99.50            → round_to_tick 99.50
     #   target = 102.05 + 1.5 × 2.55 = 105.875    → round_to_tick 105.90
     #            (105.875 / 0.05 = 2117.5 steps, ROUND_HALF_UP → 2118 → 2118 × 0.05 = 105.90)
-    # score = 1.5 / (1.5 + 2 × 1.5) = 1/3 — the 2026-09-02 saturation-free squash (1/3 exactly at
-    # the volume threshold; the old min(1, ratio/3) clamped most live fires to a 1.0 tie).
+    # score = 1.5 / (1.5 + 2 × 1.5) = 1/3, a saturation-free squash (exactly 1/3 at the volume threshold).
     trigger = _buy_trigger(_dt(9, 35))
     ctx = _orb_ctx(_orb_session(trigger), features_snapshot_id="fs-001")
     out = _orb().scan(trigger, ctx)
@@ -131,7 +129,7 @@ def test_orb_buy_breakout_hand_computed_levels():
 
 
 def test_orb_sell_breakout_hand_computed_levels():
-    # close 99.40 < 99.50 range low. v2: risk anchored at the OPPOSITE (upper) range edge 102.00:
+    # close 99.40 < 99.50 range low. Risk anchored at the opposite (upper) range edge 102.00:
     #   risk   = stop_range_frac(1.0) × (102.00 − 99.40) = 2.60
     #   stop   = 99.40 + 2.60 = 102.00            → round_to_tick 102.00
     #   target = 99.40 − 1.5 × 2.60 = 95.50       → round_to_tick 95.50
@@ -174,7 +172,7 @@ def test_orb_auction_open_seeds_the_range():
     # close 101.55 clears the tick-derived high (100.50) but NOT the auction-seeded 102.00.
     trigger = _buy_trigger(_dt(9, 35), close="101.55", high="101.60", low="100.60")
     assert _orb().scan(trigger, _orb_ctx(_orb_session(trigger))) == []
-    # Without the auction print the same close IS a breakout — proves the seed changed the range.
+    # Without the auction print the same close is a breakout: the seed changed the range.
     bars = _orb_session(trigger, auction_open=None)
     out = _orb().scan(trigger, _orb_ctx(bars))
     assert len(out) == 1 and out[0].side == "BUY"
@@ -310,12 +308,10 @@ def test_rsi2_insufficient_history_fails_to_zero():
     assert Rsi2Scanner().scan(bar, ctx) == []
 
 
-# --------------------------------------------------- regime visibility (owner-directed 2026-09-12)
-# NIFTY 50 sat under its 50-DMA every session from 08-27 and rsi2 produced nothing from 08-28, with
-# no line anywhere saying which leg was shut: "the filter is working" and "the scanner is broken"
-# were indistinguishable from the log for two weeks.
+# --------------------------------------------------- regime visibility
+# A shut regime must log which leg is shut, so "the filter is working" is distinguishable from "the scanner is broken".
 
-# Close below its own (still rising) 50-DMA — the live shape since 08-27.
+# Close below its own (still rising) 50-DMA.
 BELOW_DMA_INDEX = [*UPTREND_INDEX[:-1], Decimal("120")]
 
 
@@ -351,9 +347,8 @@ def test_rsi2_regime_block_names_the_rising_leg_when_that_is_what_failed(caplog)
 
 
 def test_rsi2_regime_block_logs_once_per_session(caplog):
-    """``scan`` runs on every 1m bar of every watchlist symbol — ~80,000 calls a session. One line a
-    session, and the day guard must RELEASE on the next session (a latch with no symmetric clear is
-    the 2026-09-01 freeze lesson)."""
+    """``scan`` runs on every 1m bar of every watchlist symbol (~80,000 calls a session): one line a session,
+    and the day guard releases on the next session (a latch needs a symmetric clear)."""
     scanner = Rsi2Scanner()                       # one instance, as the integrator builds it
     ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=BELOW_DMA_INDEX)
     with caplog.at_level("INFO"):
@@ -363,7 +358,7 @@ def test_rsi2_regime_block_logs_once_per_session(caplog):
                       volume=1000)
             assert scanner.scan(bar, ctx) == []
         assert len(_regime_records(caplog)) == 1
-        # ...and a bar from the NEXT session logs again.
+        # A bar from the next session logs again.
         next_day = Bar(symbol="TCS", ts_minute=datetime(2026, 6, 18, 10, 0, tzinfo=IST),
                        open=Decimal("194.50"), high=Decimal("194.50"), low=Decimal("194.50"),
                        close=Decimal("194.50"), volume=1000)
@@ -373,8 +368,7 @@ def test_rsi2_regime_block_logs_once_per_session(caplog):
 
 
 def test_rsi2_passing_regime_logs_nothing(caplog):
-    """The line names a SHUT filter. A passing regime that produces a candidate must stay silent, or
-    the signal it exists to carry is buried on every normal session."""
+    """The line names a shut filter; a passing regime that produces a candidate stays silent."""
     ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX)
     with caplog.at_level("INFO"):
         assert len(Rsi2Scanner().scan(_swing_bar("194.50"), ctx)) == 1
@@ -382,8 +376,7 @@ def test_rsi2_passing_regime_logs_nothing(caplog):
 
 
 def test_rsi2_warmup_shortfall_is_not_a_regime_block(caplog):
-    """Too few index closes is a warm-up condition, not a shut regime — the filter was never
-    evaluated, so naming a failing leg would be an invention."""
+    """Too few index closes is a warm-up condition, not a shut regime: the filter was never evaluated, so no leg is named."""
     ctx = ScanContext(daily_bars=_dailies([*RSI2_RISING, 196.5]), index_daily_closes=UPTREND_INDEX[:69])
     with caplog.at_level("INFO"):
         assert Rsi2Scanner().scan(_swing_bar("194.50"), ctx) == []
@@ -461,9 +454,8 @@ def test_trend_death_cross_not_emitted():
 
 
 def test_trend_warmup_floor_149_150_boundary():
-    # The floor is 150 completed dailies (raised from 60) — the boundary is the test.
-    # 149 fails to zero (warm-up, warmup_ready); 150 is a live golden cross, hand-computed
-    # identically to test_trend_golden_cross_hand_computed above.
+    # The floor is 150 completed dailies. 149 fails to zero (warm-up, warmup_ready); 150 is a live golden
+    # cross, hand-computed as in test_trend_golden_cross_hand_computed.
     assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(149))) == []
     out = TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(150)))
     assert len(out) == 1
@@ -472,9 +464,7 @@ def test_trend_warmup_floor_149_150_boundary():
 
 
 def test_trend_young_listing_emits_nothing_at_60_bars():
-    # Acceptance: a young-listing fixture at the OLD 60-bar floor must now emit nothing — the
-    # exact gap WarmupGate's young-listing exemption previously let through with material EMA-seed
-    # noise.
+    # A young listing at 60 bars must emit nothing (WarmupGate's young-listing exemption would let through material EMA-seed noise).
     assert TrendScanner().scan(_swing_bar("101"), ScanContext(daily_bars=_trend_dailies(60))) == []
 
 
@@ -533,10 +523,9 @@ def test_mom_ex_date_skip_horizon():
     assert len(scanner.scan(bar, _mom_ctx(ex_dates=[date(2026, 6, 16)]))) == 1  # past ex-date ignored
 
 
-# ------------------------------------------------------------------ pending arm levels (2026-07-29)
+# ------------------------------------------------------------------ pending arm levels
 def test_orb_pending_reports_both_range_edges_inside_the_range():
-    """Price INSIDE the auction-seeded range [99.50, 102.00] => both edges reported as arm levels
-    (the sweep's "shift your window to catch it" input)."""
+    """Price inside the auction-seeded range [99.50, 102.00] => both edges reported as arm levels."""
     inside = Bar(symbol="TCS", ts_minute=_dt(9, 40), open=Decimal("100"), high=Decimal("100.60"),
                  low=Decimal("99.80"), close=Decimal("100.60"), volume=900)
     pend = _orb().pending(inside, _orb_ctx(_orb_session(inside)))
@@ -559,8 +548,7 @@ def test_orb_pending_silent_beyond_range_while_forming_and_flagged():
 
 
 def test_rsi2_pending_inverts_the_arm_price():
-    """The bisection contract: the reported dip level brackets the RSI(2) < rsi_entry boundary
-    within one tick, and the level respects the 200-DMA floor."""
+    """The reported dip level brackets the RSI(2) < rsi_entry boundary within one tick and respects the 200-DMA floor."""
     from engine.strategy.indicators import wilder_rsi
 
     series = [*RSI2_RISING, 196.5]                           # 199 completed dailies (as scan tests)
@@ -589,9 +577,7 @@ def test_rsi2_pending_silent_when_live_or_regime_off():
 
 
 def test_orb_score_never_saturates_and_stays_monotone():
-    """2026-09-02 de-saturation: heavier volume must always score strictly higher, and 1.0 is an
-    asymptote never reached - the three-session lockout (08-27/09-01/09-02) happened because most
-    live fires tied at a clamped 1.0 and neither ranking nor displacement could discriminate."""
+    """Heavier volume always scores strictly higher and 1.0 is never reached: clamped ties at 1.0 leave ranking and displacement unable to discriminate."""
     scores = []
     for mult in (1.0, 2.0, 4.0, 10.0, 40.0):
         vol = int(1000 * 1.5 * mult)                     # median is 1000 ⇒ vol_ratio = 1.5 × mult

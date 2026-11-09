@@ -1,8 +1,6 @@
-"""OMS order state machine unit tests (2026-09-10).
-
-Covers every edge of the transition table (plus a forbidden sample per state), `filled_qty`
-preservation across the residual-cancel / lapse paths, the modification cap (20) and the
-cancel-and-replace threshold (18), and reject-reason capture.
+"""OMS order state machine: every edge of the transition table (plus a forbidden sample per state),
+`filled_qty` preservation across the residual-cancel / lapse paths, the modification cap (20) and
+cancel-and-replace threshold (18), reject-reason capture, the postback parser and pending correlation.
 """
 
 from __future__ import annotations
@@ -105,7 +103,7 @@ def test_position_and_protection_states_match_plan_3_5_2() -> None:
         "PROTECTED",
         "PROTECTION_PENDING",
         "PROTECTION_FAILED",
-        "TIME_EXIT_ONLY",                  # 2026-10-15 addition (paper no-stop exit test)
+        "TIME_EXIT_ONLY",
     ]
 
 
@@ -172,13 +170,12 @@ def test_every_allowed_edge_is_traversable(frm: OrderState, to: OrderState) -> N
 
 _S = OrderState
 
-#: The state diagram TRANSCRIBED BY HAND, edge for edge. Compared for LITERAL EQUALITY
-#: against the shipped table (2026-09-10 review finding: a derived/subset assertion is tautological —
-#: it passes for any widening of the table). Anything added to, or dropped from, the machine has to be
-#: re-transcribed here by hand, so an unreviewed edge cannot reach the OMS.
+#: The state diagram transcribed by hand, edge for edge, and compared for literal equality against the
+#: shipped table (a derived/subset assertion passes for any widening). Every edge change must be
+#: re-transcribed here, so an unreviewed edge cannot reach the OMS.
 EXPECTED_DIAGRAM_TRANSITIONS = {
-    _S.DRAFT: {_S.VALIDATED, _S.REJECTED},          # REJECTED: 2026-10-06 amendment (abandoned)
-    _S.VALIDATED: {_S.SUBMITTED, _S.REJECTED},      # REJECTED: 2026-10-06 amendment (abandoned)
+    _S.DRAFT: {_S.VALIDATED, _S.REJECTED},          # REJECTED: abandoned
+    _S.VALIDATED: {_S.SUBMITTED, _S.REJECTED},      # REJECTED: abandoned
     _S.SUBMITTED: {_S.ACKED, _S.CANCEL_PENDING, _S.REJECTED},
     _S.ACKED: {_S.PARTIALLY_FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED},
     _S.PARTIALLY_FILLED: {_S.FILLED, _S.CANCEL_PENDING, _S.MODIFY_PENDING, _S.LAPSED},
@@ -190,11 +187,10 @@ EXPECTED_DIAGRAM_TRANSITIONS = {
     _S.LAPSED: set(),
 }
 
-#: The broker-reality additions, transcribed from the ratified decision (2026-09-10).
-#: Load-bearing exclusion: CANCEL_PENDING -> ACKED is ABSENT — a cancel intent is cleared only by
-#: CANCELLED or by the explicit :func:`cancel_rejected` door, never by a replayed/stale OPEN frame
-#: (the Reconciler's 5-minute re-read returns OPEN for an in-flight cancel; flipping the row back
-#: steers the square-off coordination into the double-exit hazard).
+#: The broker-reality additions, transcribed by hand.
+#: CANCEL_PENDING -> ACKED is deliberately absent: a cancel intent is cleared only by CANCELLED or the
+#: explicit :func:`cancel_rejected` door, never by a replayed OPEN frame (the Reconciler's 5-minute
+#: re-read returns OPEN for an in-flight cancel; flipping back risks a double exit).
 EXPECTED_BROKER_REALITY_TRANSITIONS = {
     _S.SUBMITTED: {_S.PARTIALLY_FILLED, _S.FILLED, _S.CANCELLED},
     _S.ACKED: {_S.FILLED, _S.CANCELLED, _S.REJECTED},
@@ -229,8 +225,8 @@ def test_broker_reality_edges_are_disjoint_from_the_diagram() -> None:
 
 
 def test_cancel_pending_is_never_cleared_by_a_working_state_edge() -> None:
-    # The whole point of the 2026-09-10 ratification: no postback-driven edge leaves CANCEL_PENDING
-    # for a working state except a REAL fill (guarded on growth in updates.apply_update).
+    # No postback-driven edge leaves CANCEL_PENDING for a working state except a real fill
+    # (guarded on growth in updates.apply_update).
     assert OrderState.ACKED not in ALLOWED_TRANSITIONS[OrderState.CANCEL_PENDING]
     assert OrderState.MODIFY_PENDING not in ALLOWED_TRANSITIONS[OrderState.CANCEL_PENDING]
 
@@ -312,17 +308,15 @@ def test_filled_qty_regression_raises() -> None:
 
 
 def test_a_fill_completion_never_shrinks_the_recorded_fill_count() -> None:
-    # 2026-09-10 round-3 review (minor): a row whose qty sits BELOW what is already filled (the
-    # overfill case the Reconciler has yet to resolve, or a quantity the broker amended down) used to
-    # complete to `qty` AFTER the regression check had passed — deleting 10 filled shares from the
-    # audit chain. The completion is now evaluated first, so the regression check sees it.
+    # A row whose qty sits below what is already filled (an unresolved overfill, or a broker amend-down)
+    # must not complete to `qty`: the completion is evaluated before the regression check, so it sees it.
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40, qty=30)
     with pytest.raises(FillQuantityError):
         transition(order, OrderState.FILLED, payload={}, at=AT)
 
 
 def test_partial_of_zero_is_refused() -> None:
-    # Nothing has happened, so nothing is lost by refusing: a "partial fill" of zero is a parser bug.
+    # A "partial fill" of zero is a parser bug; nothing is lost by refusing it.
     order = make_order(OrderState.ACKED)
     with pytest.raises(FillQuantityError):
         transition(order, OrderState.PARTIALLY_FILLED, payload={}, at=AT, filled_qty=0)
@@ -337,7 +331,7 @@ def test_partial_that_completes_the_qty_is_recorded_and_flagged_never_raised() -
 
 
 def test_filled_short_of_recorded_qty_is_recorded_and_flagged_never_raised() -> None:
-    # a fill that already happened must always land; the Reconciler resolves the disagreement.
+    # A fill that already happened always lands; the Reconciler resolves the disagreement.
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     filled, ev = transition(order, OrderState.FILLED, payload={}, at=AT, filled_qty=90)
     assert filled.state is OrderState.FILLED and filled.filled_qty == 90
@@ -562,8 +556,8 @@ def test_apply_update_rejects_a_foreign_broker_id() -> None:
 
 
 def test_apply_update_refuses_an_uncorrelated_order() -> None:
-    # apply_update is pure and correlation is an explicit prior step (2026-09-10 review): an update
-    # for an order whose broker id is unknown belongs in PendingCorrelation, not in the machine.
+    # apply_update is pure and correlation is an explicit prior step: an update for an order with an
+    # unknown broker id belongs in PendingCorrelation, not in the machine.
     order = make_order(OrderState.SUBMITTED, broker_order_id=None)
     with pytest.raises(CorrelationMismatch):
         apply_update(order, parse_postback(postback(status="OPEN")), at=AT)
@@ -584,8 +578,7 @@ def test_pending_correlation_buffers_then_resolves_in_arrival_order() -> None:
         assert pc.hold("251009000123456", postback(filled_quantity=i), at=AT) == []
     pc.hold("OTHER", postback(order_id="OTHER"), at=AT)
     got = pc.resolve("01JORDER", "251009000123456")
-    # Entries, not bare payloads: the caller must pass each update's ARRIVAL time into apply_update,
-    # so the audit row carries when the platform saw it, not when it got around to applying it.
+    # Entries, not bare payloads: the caller passes each update's arrival time into apply_update, so the audit row carries it.
     assert [e.data["filled_quantity"] for e in got] == [0, 1, 2]
     assert [e.at for e in got] == [AT, AT, AT]
     assert [e.seq for e in got] == [1, 2, 3]
@@ -616,9 +609,8 @@ def test_pending_correlation_sweep_returns_stale_entries() -> None:
 
 
 # ------------------------------------------------- cancel intent is cleared ONLY by a cancel outcome
-# 2026-09-10 review finding (major): a replayed/stale OPEN frame moved CANCEL_PENDING back to ACKED,
-# which would let the square-off coordination send a market exit alongside a protective order
-# that is in fact still resting (or already triggered) — the double-exit-into-a-short hazard.
+# A stale OPEN frame must not move CANCEL_PENDING back to ACKED: square-off coordination would send a
+# market exit alongside a protective order still resting (double exit into a short).
 def test_stale_open_postback_never_clears_a_cancel_intent() -> None:
     order = make_order(OrderState.CANCEL_PENDING, broker_order_id="251009000123456")
     same, ev = apply_update(order, parse_postback(postback(status="OPEN")), at=AT)
@@ -646,7 +638,7 @@ def test_cancel_outcome_still_applies_from_cancel_pending() -> None:
 
 
 def test_a_fill_that_already_happened_still_lands_from_cancel_pending() -> None:
-    # "the cancel is REJECTED because the protective order already triggered/filled in the gap".
+    # The cancel is rejected because the protective order already triggered/filled in the gap.
     order = make_order(OrderState.CANCEL_PENDING, filled_qty=40, broker_order_id="251009000123456")
     filled, _ = apply_update(
         order, parse_postback(postback(status="COMPLETE", filled_quantity=QTY)), at=AT
@@ -695,8 +687,7 @@ def test_cancel_rejected_only_applies_to_a_cancel_intent(state: OrderState) -> N
 
 # ------------------------------------------------- the broker REFUSED our modify (mirrors the above)
 def test_amend_records_the_pre_amend_values_on_its_event() -> None:
-    # The frozen row keeps only the NEW values, so the old ones have to live somewhere the platform
-    # can read them back: the amend's own audit row. modify_rejected restores from there.
+    # The frozen row keeps only the new values, so the old ones live on the amend's audit row; modify_rejected restores from there.
     order = make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, side="SELL", qty=40,
                        price=None, trigger_price=Decimal("98.50"), broker_order_id="251009000999999")
     _, ev = amend(order, qty=70, trigger_price=Decimal("99.10"), at=AT)
@@ -732,9 +723,8 @@ def test_modify_rejected_returns_a_partial_to_its_pre_modify_fill_state() -> Non
 
 
 def test_modify_rejected_without_prior_fields_moves_the_state_only() -> None:
-    # The caller could not find the amend's audit row: the state must still leave MODIFY_PENDING (it
-    # has no outgoing modify edge, so a stranded order breaks the SL-M ladder), and the row
-    # keeps what it has rather than inventing values the platform never held.
+    # Without the amend's audit row the state must still leave MODIFY_PENDING (a stranded order breaks
+    # the SL-M ladder), and the row keeps what it has rather than inventing values.
     order = make_order(OrderState.ACKED, qty=40, broker_order_id="251009000123456")
     pending, _ = amend(order, qty=70, at=AT)
     back, ev = modify_rejected(pending, payload={"status": "REJECTED"}, at=AT)
@@ -772,8 +762,7 @@ def test_modify_ack_applies_when_the_broker_timestamp_is_newer() -> None:
     ],
 )
 def test_modify_ack_is_a_noop_when_the_frame_predates_the_modify(exchange_ts: str, case: str) -> None:
-    # A replayed OPEN frame from BEFORE the modify must not be read as the modify's acknowledgement,
-    # or the order looks amended when the broker never applied it (duplicate/out-of-order).
+    # A replayed OPEN frame from before the modify must not be read as its acknowledgement.
     order = make_order(OrderState.MODIFY_PENDING, modifications=1,
                        broker_order_id="251009000123456",
                        updated_at=datetime(2026, 9, 10, 10, 5, 2, 400000, tzinfo=IST))
@@ -784,13 +773,10 @@ def test_modify_ack_is_a_noop_when_the_frame_predates_the_modify(exchange_ts: st
 
 
 def test_modify_ack_within_the_same_second_still_applies() -> None:
-    """The broker clock is whole-second; the platform clock is not. Compare at the BROKER's resolution.
+    """The broker clock is whole-second, the platform clock is not: compare at the broker's resolution.
 
-    A literal ``broker_ts > updated_at`` drops the ack of a modify applied inside the same second —
-    the normal case at ~100-300 ms postback latency — stranding the order in MODIFY_PENDING, which
-    has no outgoing modify edge. The SL-M qty ladder then breaks on the next fill accretion:
-    the stale-frame guard would have become a broker-resident protection hazard. Probed with the property
-    generator, which never once reached a cleared modify intent under the literal comparison.
+    A literal ``broker_ts > updated_at`` would drop the ack of a modify applied inside the same second
+    (normal at ~100-300 ms latency), stranding the order in MODIFY_PENDING and breaking the SL-M qty ladder.
     """
     order = make_order(OrderState.MODIFY_PENDING, modifications=1, qty=40,
                        broker_order_id="251009000123456",
@@ -815,13 +801,9 @@ def test_a_fill_during_a_modify_applies_regardless_of_the_broker_clock() -> None
 
 
 def test_stale_partial_frame_never_clears_a_modify_intent_or_reverts_the_amend() -> None:
-    """2026-09-10 round-3 review (major): the clock gate covered only MODIFY_PENDING -> ACKED.
-
-    A PARTIALLY_FILLED order under a modify intent gets its stale OPEN re-report parsed as
-    PARTIALLY_FILLED (fills are already on the row), which walked straight past the gate: the intent
-    was cleared and ``_broker_fields`` carried the PRE-amend price back onto the row, so the platform
-    believed a modify had been acknowledged that the broker never applied. Every MODIFY_PENDING ->
-    working-state move is now gated on a real fill or a frame that does not predate the intent.
+    """A stale OPEN re-report of a PARTIALLY_FILLED order under a modify intent parses as PARTIALLY_FILLED and
+    must not clear the intent or carry the pre-amend price back: every MODIFY_PENDING -> working-state move
+    is gated on a real fill or a frame that does not predate the intent.
     """
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40,
                        broker_order_id="251009000123456",
@@ -848,11 +830,8 @@ def test_stale_partial_frame_never_clears_a_modify_intent_or_reverts_the_amend()
 
 
 def test_a_stale_but_grown_frame_lands_the_fill_without_reverting_the_amend() -> None:
-    """2026-09-10 round-3 review (major, both lenses): the `grew` exemption let a PRE-amend frame
-    that carries a real fill clear MODIFY_PENDING *and* write its stale trigger back onto the row —
-    the protective-SL revert, through the fill door instead of the ack door. The two decisions
-    are now split: the fill lands and the state moves (it already happened), but a frame that
-    predates the intent never rewrites the amended fields — they ride the event as evidence."""
+    """A pre-amend frame carrying a real fill lands the fill and moves the state, but never rewrites the
+    amended fields (no protective-SL revert through the fill door); they ride the event as evidence."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=5, order_type="SL-M",
                        broker_order_id="251009000123456",
                        trigger_price=Decimal("100.00"),
@@ -890,10 +869,9 @@ def test_a_partial_fill_during_a_modify_applies_however_old_the_frame_is() -> No
 
 
 # ------------------------------------------------- a fill is read from the FILL COUNT, not the word
-# 2026-09-10 round-3 review (major): Kite reports "TRIGGER PENDING" for a triggered SL leg that is
-# already filling, and "OPEN" with filled_quantity == quantity for the frame that completes an order.
-# Both map to ACKED, which has no self-edge — so the fill hit a non-existent edge and apply_update
-# raised IllegalTransition into the postback loop, losing every later frame in the batch.
+# Kite reports "TRIGGER PENDING" for a triggered SL leg that is already filling, and "OPEN" with
+# filled_quantity == quantity for the frame completing an order. Both map to ACKED, which has no
+# self-edge, so the fill count (not the status word) decides.
 def test_trigger_pending_frame_carrying_a_fill_is_promoted_to_a_partial_fill() -> None:
     order = make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, side="SELL",
                        trigger_price=Decimal("98.50"), broker_order_id="251009000123456")
@@ -914,8 +892,7 @@ def test_open_frame_reporting_a_complete_fill_is_promoted_to_filled() -> None:
 
 
 def test_a_grown_fill_is_never_discarded_as_a_rank_regression() -> None:
-    # The rank check (ACKED ranks below PARTIALLY_FILLED) must never swallow a frame whose fill count
-    # actually moved: a fill that already happened always lands.
+    # The rank check (ACKED ranks below PARTIALLY_FILLED) must never swallow a frame whose fill count moved.
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40, broker_order_id="251009000123456")
     grown, ev = apply_update(
         order, parse_postback(postback(status="TRIGGER PENDING", filled_quantity=70)), at=AT
@@ -925,9 +902,8 @@ def test_a_grown_fill_is_never_discarded_as_a_rank_regression() -> None:
 
 
 def test_apply_update_never_raises_an_illegal_transition_for_a_broker_frame() -> None:
-    # A residual shape the table cannot absorb (here: a postback correlated to a row that was never
-    # submitted) is an anomaly to RECORD, not to raise — raising aborts the postback loop and loses
-    # every later frame. The event is a no-op carrying the raw payload, so record_noop accepts it.
+    # A shape the table cannot absorb (a postback for a never-submitted row) is recorded, not raised:
+    # raising aborts the postback loop and loses later frames. The event is a no-op, so record_noop accepts it.
     order = make_order(OrderState.DRAFT, broker_order_id="251009000123456")
     same, ev = apply_update(order, parse_postback(postback(status="OPEN")), at=AT)
     assert same is order
@@ -938,8 +914,7 @@ def test_apply_update_never_raises_an_illegal_transition_for_a_broker_frame() ->
 
 
 def test_same_state_postback_records_the_fields_the_broker_reported() -> None:
-    # A no-op does not rewrite the row (purity), but a broker reporting different parameters is
-    # evidence the Reconciler needs — it used to be dropped on the floor.
+    # A no-op does not rewrite the row (purity), but differing broker parameters are evidence for the Reconciler.
     order = make_order(OrderState.ACKED, broker_order_id="251009000123456")
     upd = parse_postback(postback(status="OPEN", quantity=70, pending_quantity=70, price=102.25))
     same, ev = apply_update(order, upd, at=AT)
@@ -1000,12 +975,8 @@ def test_amend_counts_against_the_modification_budget_and_stops_at_the_cap() -> 
 
 
 def test_protective_sl_modified_upward_then_fills_end_to_end() -> None:
-    """Broker-resident protection path: the SL-M is sized to the first partial, qty-modified upward as fills accrete.
-
-    Before the 2026-09-10 fix the modify could not carry the new qty, so the FILLED postback for the
-    enlarged protective order raised FillQuantityError against the stale row qty — a fill that had
-    already happened was refused, leaving the platform believing a closed position was still open.
-    """
+    """The SL-M is sized to the first partial and qty-modified upward as fills accrete; the modify must carry
+    the new qty, or the FILLED postback would hit FillQuantityError against the stale row qty."""
     sl = correlate(
         make_order(OrderState.ACKED, role=OrderRole.PROTECTIVE_SL, side="SELL", qty=40,
                    price=None, trigger_price=Decimal("98.50")),
@@ -1077,8 +1048,7 @@ def test_fill_disagreeing_with_the_row_is_recorded_and_flagged_never_raised() ->
 
 # ------------------------------------------------- garbled/missing quantity on a partial
 def test_partial_with_a_missing_quantity_is_still_a_partial_fill() -> None:
-    # 2026-09-10 review finding: an OPEN postback carrying filled_quantity but no `quantity` was
-    # parsed as a plain ACK and then swallowed as a same-state duplicate — a real fill went unseen.
+    # An OPEN postback with filled_quantity but no `quantity` must not parse as a plain ACK and be swallowed as a duplicate.
     data = postback(filled_quantity=40)
     del data["quantity"]
     upd = parse_postback(data)
@@ -1097,8 +1067,7 @@ def test_partial_with_a_garbled_quantity_is_still_a_partial_fill() -> None:
 
 
 def test_accretion_is_never_swallowed_as_a_duplicate_whatever_the_target() -> None:
-    # The accretion exemption applies to ANY target whose filled_quantity has grown, not only to a
-    # PARTIALLY_FILLED self-edge (a quantity-less OPEN reports ACKED-shaped frames as fills accrete).
+    # The accretion exemption applies to any target whose filled_quantity grew, not only a PARTIALLY_FILLED self-edge.
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40, broker_order_id="251009000123456")
     data = postback(filled_quantity=55)
     del data["quantity"]
@@ -1124,9 +1093,7 @@ def test_correlate_refuses_to_re_point_an_order_at_another_broker_id() -> None:
 
 @pytest.mark.parametrize("state", sorted(TERMINAL_ORDER_STATES), ids=lambda s: str(s))
 def test_correlate_refuses_a_terminal_order(state: OrderState) -> None:
-    # 2026-09-10 round-3 review: correlation is persisted by OrderStore.record, which refuses a
-    # terminal row — so binding a broker id to one produces an in-memory fact that can never be
-    # written. It is a correlation bug (a stray id matched to a dead order); surface it here.
+    # OrderStore.record refuses a terminal row, so binding a broker id to one is a correlation bug that can never be persisted.
     order = make_order(state, filled_qty=QTY if state is OrderState.FILLED else 0,
                        broker_order_id=None)
     with pytest.raises(IllegalTransition):
@@ -1145,7 +1112,7 @@ def test_apply_update_is_pure_on_a_noop() -> None:
 
 
 def test_buffered_updates_are_applied_with_their_arrival_times() -> None:
-    """The end-to-end sequence: buffer -> correlate -> apply, each with its OWN arrival time."""
+    """buffer -> correlate -> apply, each update with its own arrival time."""
     pc = PendingCorrelation(max_entries=8)
     pc.hold("251009000123456", postback(status="OPEN"), at=AT)
     pc.hold("251009000123456", postback(filled_quantity=40), at=AT + timedelta(seconds=1))

@@ -1,19 +1,14 @@
-"""Notification journal + Telegram retry outbox + the notifications page (2026-08-21).
+"""Notification journal + Telegram retry outbox + the notifications page.
 
-Before this, ``TelegramBot._send_text`` DROPPED on failure: logged, never queued, never stored. With
-223 ConnectTimeouts on 08-20 and 186 on 08-19 that is a recommendation silently lost, and nothing on
-the platform able to say it had ever existed. ONE mechanism fixes both halves — a ``notifications``
-row written BEFORE the wire attempt, which is the retry outbox AND what the owner's page reads.
+A ``notifications`` row is written BEFORE the wire attempt; it is both the retry outbox and what the owner's page reads.
 
-The properties pinned here are the ones whose breakage would put the loss back:
-
-* **Journal first.** The row exists even when the transport is dead / not started, and the split into
-  Telegram-sized parts is a TRANSPORT detail — one notification is one row, however many parts flew.
+* **Journal first.** The row exists even when the transport is dead / not started; the split into
+  Telegram-sized parts is a transport detail, one notification is one row.
 * **A failure is `pending`, not gone.** attempts+1 and ``last_error`` recorded; only expiry may move a
-  row to ``failed``, and a CRITICAL row (a recommendation, a login prompt, a freeze) never expires.
-* **Journalling never breaks a send.** No store, or a broken store, and the send proceeds as before.
+  row to ``failed``, and a CRITICAL row (recommendation, login prompt, freeze) never expires.
+* **Journalling never breaks a send.** No store, or a broken store, and the send proceeds.
 * **The page is bearer-authed data on an unauthenticated shell.** ``GET /notifications`` 401s without
-  the token; the static page itself carries no data and no off-box dependency.
+  the token; the static page carries no data and no off-box dependency.
 """
 
 from __future__ import annotations
@@ -58,8 +53,7 @@ UI_HTML = repo_root() / "web" / "dist" / "index.html"
 
 # --------------------------------------------------------------------------- test doubles
 class _MovableClock:
-    """A Clock whose "now" the test advances — the drainer's backoff and the 6 h expiry are both
-    clock-driven, and a wall-clock test of a 6 h rule is not a test."""
+    """A Clock whose "now" the test advances (the drainer's backoff and 6 h expiry are clock-driven)."""
 
     def __init__(self, start):
         self._now = start
@@ -161,7 +155,7 @@ def _insert(conn, notification_id: str, created_at: str, **kw) -> None:
 # --------------------------------------------------------------------------- journal write
 @pytest.mark.asyncio
 async def test_send_journals_then_delivers(conn, clock):
-    """The happy path end to end: one row, written pending BEFORE the wire, stamped delivered after."""
+    """One row, written pending before the wire, stamped delivered after."""
     bot, sender = _bot(conn, clock)
     msg = catalog.engine_started(mode="RECOMMEND", version="1.2.3")
 
@@ -179,8 +173,7 @@ async def test_send_journals_then_delivers(conn, clock):
 
 @pytest.mark.asyncio
 async def test_journalled_row_reconstructs_the_exact_wire_text(conn, clock):
-    """A retry must ship the SAME bytes the first attempt did — the journal stores render inputs, so
-    the reconstruction is pinned against ``CatalogMessage.render`` itself, not against a copy of it."""
+    """A retry ships the same bytes as the first attempt: the journal stores render inputs, pinned against ``CatalogMessage.render``."""
     bot, sender = _bot(conn, clock)
     for msg in (
         catalog.login_prompt("kite-login-url"),
@@ -194,8 +187,7 @@ async def test_journalled_row_reconstructs_the_exact_wire_text(conn, clock):
 
 @pytest.mark.asyncio
 async def test_plain_string_send_is_journalled_and_round_trips(conn, clock):
-    """The ``alert()``/ad-hoc path sends a bare string: first line is the title, the rest is the body,
-    and the reconstruction is the identity (no severity ⇒ no glyph to re-add)."""
+    """A bare string (the ``alert()`` path): first line is the title, the rest the body; reconstruction is the identity."""
     bot, sender = _bot(conn, clock)
     text = "dashboard/login API failed to bind\nport 8400 already in use"
 
@@ -211,8 +203,7 @@ async def test_plain_string_send_is_journalled_and_round_trips(conn, clock):
 
 @pytest.mark.asyncio
 async def test_failed_send_leaves_the_row_pending_with_the_error(conn, clock):
-    """The whole point: a send that fails is QUEUED, not gone. Status stays pending (only expiry may
-    say failed), attempts is 1, and last_error names the exception class."""
+    """A failed send is queued: status stays pending, attempts is 1, last_error names the exception class."""
     bot, sender = _bot(conn, clock, _ScriptedBot(fail_forever=True))
 
     await bot.send(catalog.catalyst_disabled("feed outage"))
@@ -229,8 +220,7 @@ async def test_failed_send_leaves_the_row_pending_with_the_error(conn, clock):
 
 @pytest.mark.asyncio
 async def test_send_before_the_transport_starts_is_queued_not_dropped(conn, clock):
-    """A disabled/not-yet-started bot used to log ``telegram_send_dropped`` and lose the message. It
-    still logs it — but the row is on disk, pending, for the drainer to pick up once polling is up."""
+    """A not-yet-started bot still logs the drop, but the row is on disk, pending, for the drainer."""
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock, conn=conn)   # no _app assigned
 
     await bot.send(catalog.login_prompt("kite-login-url"))
@@ -242,8 +232,7 @@ async def test_send_before_the_transport_starts_is_queued_not_dropped(conn, cloc
 
 @pytest.mark.asyncio
 async def test_split_message_is_one_notification_not_five(conn, clock):
-    """The 4096-char split is unchanged and stays a TRANSPORT detail: five parts on the wire,
-    ONE journal row, and the row holds the whole un-split body."""
+    """The 4096-char split is a transport detail: five wire parts, one journal row holding the whole body."""
     bot, sender = _bot(conn, clock)
     body = "X" * 30000
     msg = CatalogMessage(kind=MessageKind.DAILY_SUMMARY, title="Daily summary", body=body)
@@ -298,8 +287,7 @@ async def test_an_oversized_button_ships_the_text_alone_and_the_row_is_delivered
 
 @pytest.mark.asyncio
 async def test_a_broken_journal_never_blocks_the_send(conn, clock, caplog):
-    """Owner alerting, applied to the journal itself: the mechanism that exists to stop messages being lost must
-    never become the thing that loses them. A dropped table costs a WARNING, not the notification."""
+    """A dropped table costs a WARNING, never the notification."""
     conn.execute("DROP TABLE notifications")
     bot, sender = _bot(conn, clock)
 
@@ -312,8 +300,7 @@ async def test_a_broken_journal_never_blocks_the_send(conn, clock, caplog):
 
 @pytest.mark.asyncio
 async def test_an_unwired_state_store_sends_exactly_as_before(clock):
-    """No conn ⇒ no journal ⇒ the pre-journal behaviour, verbatim (the ``wired_bot`` fixture in
-    ``test_telegram_commands`` is exactly this shape, so this guards those tests too)."""
+    """No conn ⇒ no journal, plain send (the ``wired_bot`` fixture in ``test_telegram_commands`` has this shape)."""
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
     sender = _ScriptedBot()
     bot._app = _App(sender)
@@ -326,8 +313,7 @@ async def test_an_unwired_state_store_sends_exactly_as_before(clock):
 # --------------------------------------------------------------------------- outbox drainer
 @pytest.mark.asyncio
 async def test_drainer_retries_a_failed_row_and_marks_it_delivered(conn, moving):
-    """Fail once, then succeed: the row survives the failure, waits out its 30 s backoff, and the
-    NEXT drain pass delivers it. attempts counts both tries — the dashboard says "delivered on 2"."""
+    """Fail once, wait out the 30 s backoff, and the next drain delivers; attempts counts both tries."""
     sender = _ScriptedBot(failures=1)
     bot, _ = _bot(conn, moving.clock, sender)
 
@@ -349,8 +335,7 @@ async def test_drainer_retries_a_failed_row_and_marks_it_delivered(conn, moving)
 
 @pytest.mark.asyncio
 async def test_drainer_preserves_order_and_batches_five(conn, moving):
-    """Oldest-first, at most five per pass: a recovered link replays the backlog in the order the
-    engine raised it instead of flooding the chat out of order."""
+    """Oldest-first, at most five per pass, so a recovered link replays the backlog in order."""
     sender = _ScriptedBot()
     bot, _ = _bot(conn, moving.clock, sender)
     base = moving.now()
@@ -367,8 +352,7 @@ async def test_drainer_preserves_order_and_batches_five(conn, moving):
 
 @pytest.mark.asyncio
 async def test_backoff_doubles_to_a_five_minute_ceiling(conn, moving):
-    """min(300, 30 * 2**(attempts-1)) after the last attempt: 30s, 60s, … capped at 300s. A row inside
-    its window is SKIPPED, keeping its place — it is never swapped for a younger row."""
+    """min(300, 30 * 2**(attempts-1)) after the last attempt. A row inside its window is skipped, keeping its place."""
     bot, sender = _bot(conn, moving.clock, _ScriptedBot(fail_forever=True))
     now = moving.now()
     _insert(conn, "n1", now.isoformat(), attempts=2, last_attempt_at=now.isoformat())   # due in 60 s
@@ -390,8 +374,7 @@ async def test_backoff_doubles_to_a_five_minute_ceiling(conn, moving):
 
 @pytest.mark.asyncio
 async def test_non_critical_row_expires_after_six_hours(conn, moving):
-    """A feed-degraded alert six hours stale is history, not news — the drainer gives up and says so
-    (``failed``), rather than retrying it into next week."""
+    """A non-critical row still failing after 6 h is marked ``failed``, not retried indefinitely."""
     bot, sender = _bot(conn, moving.clock, _ScriptedBot(fail_forever=True))
     _insert(conn, "n1", moving.now().isoformat(), kind=MessageKind.FEED_DEGRADED.value,
             severity="warning")
@@ -418,8 +401,7 @@ async def test_non_critical_row_expires_after_six_hours(conn, moving):
     ],
 )
 async def test_critical_rows_never_expire(conn, moving, kind, severity):
-    """Late beats never for a recommendation / login / freeze / kill: these retry until delivered or
-    the process ends. Two independent arms qualify a row — its severity, or its kind."""
+    """Critical rows retry until delivered; either critical severity or a critical kind qualifies."""
     bot, sender = _bot(conn, moving.clock, _ScriptedBot(fail_forever=True))
     _insert(conn, "n1", moving.now().isoformat(), kind=kind, severity=severity)
 
@@ -432,9 +414,8 @@ async def test_critical_rows_never_expire(conn, moving, kind, severity):
 
 @pytest.mark.asyncio
 async def test_surveillance_migration_dedupes_across_bot_instances(conn, moving):
-    """``SurveillanceIngest`` re-raises the held-position alert on every refresh; the journal's
-    unique ``dedupe_key`` index is what makes it once per (position, list), across a restart. The
-    ``critical`` severity alone keeps it from ever expiring."""
+    """``SurveillanceIngest`` re-raises the alert on every refresh; the unique ``dedupe_key`` makes it once per
+    (position, list), across a restart. ``critical`` severity alone keeps it from expiring."""
     def msg(status: str) -> CatalogMessage:
         return catalog.surveillance_migration(
             symbol="HELDX", position_id="P1", qty=10, list_key="asm", as_of="2026-06-17",
@@ -453,8 +434,7 @@ async def test_surveillance_migration_dedupes_across_bot_instances(conn, moving)
 
 
 def test_critical_kinds_covers_recommendation_and_the_login_freeze_kinds():
-    """The set exists for kinds whose catalog severity understates the cost of losing them; a kind
-    dropped from it silently becomes expirable, which is the lost-notification failure mode returning."""
+    """The set holds kinds whose catalog severity understates the cost of losing them; a kind dropped from it becomes expirable."""
     assert MessageKind.RECOMMENDATION.value in CRITICAL_KINDS
     assert MessageKind.REC_FILL_SUSPECTED.value in CRITICAL_KINDS
     assert MessageKind.LOGIN_PROMPT.value in CRITICAL_KINDS
@@ -464,8 +444,7 @@ def test_critical_kinds_covers_recommendation_and_the_login_freeze_kinds():
 
 @pytest.mark.asyncio
 async def test_outage_is_logged_once_per_streak_and_reset_by_a_success(conn, moving, caplog):
-    """One loud line per outage EPISODE. With a dead link and a full batch the drainer fails five
-    times a pass — an ERROR per failure would bury the log it is trying to make legible."""
+    """One ERROR line per outage episode, not per failed attempt."""
     sender = _ScriptedBot(fail_forever=True)
     bot, _ = _bot(conn, moving.clock, sender)
     base = moving.now()
@@ -480,7 +459,7 @@ async def test_outage_is_logged_once_per_streak_and_reset_by_a_success(conn, mov
     outages = [r for r in caplog.records if r.getMessage() == "telegram_outage"]
     assert len(outages) == 1 and outages[0].consecutive_failures >= 10
 
-    # A success ends the streak, so the NEXT outage pages again instead of staying silent forever.
+    # A success ends the streak, so the next outage logs again.
     bot._app = _App(_ScriptedBot())
     await bot.send("link is back")
     assert bot._drain_fail_streak == 0 and bot._outage_logged is False
@@ -488,8 +467,7 @@ async def test_outage_is_logged_once_per_streak_and_reset_by_a_success(conn, mov
 
 @pytest.mark.asyncio
 async def test_drainer_is_started_by_start_and_cancelled_by_stop(conn, clock, monkeypatch):
-    """Lifecycle: the task is owned by the bot, comes up with polling and is awaited down by stop() —
-    a drainer outliving the connection would raise into a closed SQLite handle at teardown."""
+    """The drainer task comes up with polling and is awaited down by stop(), before the SQLite handle closes."""
     from engine.notify import telegram as tg_mod
 
     async def _ok(self, app):
@@ -515,7 +493,7 @@ async def test_drainer_is_started_by_start_and_cancelled_by_stop(conn, clock, mo
 
 @pytest.mark.asyncio
 async def test_no_state_store_means_no_drainer(clock):
-    """Nothing to drain without a journal — the bot must not spin an empty task forever."""
+    """Without a journal there is nothing to drain, so no task is spun."""
     bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=clock)
     bot._start_outbox_drainer()
     assert bot._drain_task is None
@@ -524,9 +502,7 @@ async def test_no_state_store_means_no_drainer(clock):
 
 @pytest.mark.asyncio
 async def test_drain_loop_survives_a_bad_pass(conn, clock, monkeypatch):
-    """The retry mechanism dying silently would restore exactly the failure it exists to remove, so
-    one exploding pass is logged and the loop continues. Event-driven: a fixed real-time budget
-    (it slept 80 ms) starved on a loaded Windows host, whose timer tick is ~15.6 ms."""
+    """One exploding pass is logged and the loop continues. Event-driven: a fixed real-time budget starves on a loaded Windows host (~15.6 ms timer tick)."""
     from engine.notify import telegram as tg_mod
 
     monkeypatch.setattr(tg_mod, "_DRAIN_INTERVAL_S", 0.01)
@@ -550,12 +526,8 @@ async def test_drain_loop_survives_a_bad_pass(conn, clock, monkeypatch):
     assert len(passes) >= 2                            # it kept going after the first explosion
 
 
-# ------------------------------------------------- head-of-line blocking (2026-08-24)
-# The 08-24 incident: 203 rows queued, almost all of them stale alert spam at 46 attempts each (so
-# backing off the full five minutes), and the drainer took the FIVE OLDEST every pass and skipped the
-# ones inside their window — spending the whole pass on rows it was never going to send. A fresh
-# owner-action ack sat at attempt 1 for hours behind them. The rule the fix adds: a row that cannot be
-# attempted yet costs nothing and blocks nobody.
+# ------------------------------------------------- head-of-line blocking
+# A row that cannot be attempted yet (inside its backoff window) costs nothing and blocks nobody.
 def _stale_backlog(conn, moving, n: int = 20, *, attempts: int = 46) -> None:
     """``n`` old, heavily-retried, non-critical rows — all deep inside their 5-minute backoff."""
     base = moving.now() - timedelta(hours=2)
@@ -566,9 +538,7 @@ def _stale_backlog(conn, moving, n: int = 20, *, attempts: int = 46) -> None:
 
 @pytest.mark.asyncio
 async def test_a_fresh_critical_row_is_not_blocked_by_a_backlog_in_backoff(conn, moving):
-    """THE regression. Twenty older rows, none of them due; one fresh critical row at the BACK of the
-    queue. The next pass must attempt the critical row — under the old oldest-five selection it would
-    not have been looked at until the backlog drained, which is hours."""
+    """Twenty older rows none of them due, plus one fresh critical row at the back: the next pass must attempt the critical row."""
     sender = _ScriptedBot()
     bot, _ = _bot(conn, moving.clock, sender)
     _stale_backlog(conn, moving)
@@ -586,8 +556,7 @@ async def test_a_fresh_critical_row_is_not_blocked_by_a_backlog_in_backoff(conn,
 
 @pytest.mark.asyncio
 async def test_rows_inside_their_backoff_window_do_not_consume_the_batch(conn, moving):
-    """The mechanism behind the regression above, isolated: twenty rows in backoff plus three that are
-    DUE. All three fly in one pass — the batch is spent on eligible rows, never on skipped ones."""
+    """Twenty rows in backoff plus three due: all three fly in one pass; the batch is spent on eligible rows only."""
     sender = _ScriptedBot()
     bot, _ = _bot(conn, moving.clock, sender)
     _stale_backlog(conn, moving)
@@ -602,8 +571,7 @@ async def test_rows_inside_their_backoff_window_do_not_consume_the_batch(conn, m
 
 @pytest.mark.asyncio
 async def test_critical_rows_go_first_and_chronology_holds_inside_each_class(conn, moving):
-    """Ordering, in full: criticals ahead of the rest, and within EACH class the order the engine
-    raised them. Interleaved on purpose — a stable sort is what keeps the second half true."""
+    """Criticals first, and chronological within each class (interleaved input, so only a stable sort passes)."""
     sender = _ScriptedBot()
     bot, _ = _bot(conn, moving.clock, sender)
     base = moving.now()
@@ -625,9 +593,7 @@ async def test_critical_rows_go_first_and_chronology_holds_inside_each_class(con
 
 @pytest.mark.asyncio
 async def test_a_stale_row_expires_wherever_it_sits_in_the_queue(conn, moving):
-    """Expiry now runs over the whole scan window, not just the front of it: a 6-hour-old row buried
-    behind nineteen others is retired on the next pass. Otherwise a spam backlog is re-scanned
-    forever and the queue never shrinks — which is how it reached 203 rows."""
+    """Expiry runs over the whole scan window: a 6-hour-old row buried behind nineteen others is retired next pass, so the queue shrinks."""
     bot, _ = _bot(conn, moving.clock, _ScriptedBot())
     _stale_backlog(conn, moving)
     _insert(conn, "buried", (moving.now() - timedelta(hours=7)).isoformat(), title="BURIED",
@@ -641,32 +607,27 @@ async def test_a_stale_row_expires_wherever_it_sits_in_the_queue(conn, moving):
 
 
 def test_the_scan_window_is_wider_than_the_batch():
-    """The two numbers do different jobs and must not be collapsed back into one: the SCAN decides
-    what the pass may CONSIDER (and expire), the BATCH decides how many it may SEND. Equal values are
-    the old head-of-line bug restored."""
+    """SCAN is how many rows a pass may consider (and expire), BATCH how many it may send; equal values reintroduce head-of-line blocking."""
     assert _DRAIN_SCAN > _DRAIN_BATCH and _DRAIN_BATCH == 5
 
 
-# ------------------------------------------------- the HTTP transport (2026-08-24)
+# ------------------------------------------------- the HTTP transport
 def test_the_transport_timeouts_clear_the_measured_connect_times():
-    """The whole 08-24 finding in one assertion: first connects to api.telegram.org were MEASURED at
-    4.25 s and 4.84 s, against python-telegram-bot's stock 5.0 s connect timeout. The budget must sit
-    far enough above the measurement that ordinary jitter cannot cross it."""
+    """First connects to api.telegram.org measured up to 4.84 s against python-telegram-bot's stock 5.0 s
+    connect timeout; the budget must sit far enough above that for jitter not to cross it."""
     assert _CONNECT_TIMEOUT_S >= 4 * 4.84
     assert _READ_TIMEOUT_S >= 30.0 and _WRITE_TIMEOUT_S >= 30.0 and _POOL_TIMEOUT_S >= 10.0
 
 
 def test_the_send_wait_outlasts_the_transports_own_budget():
-    """ORDERING CONSTRAINT. The outer ``asyncio.wait_for`` must not pre-empt httpx: if it fires first,
-    every slow send is journalled as an anonymous TimeoutError instead of the ConnectTimeout /
-    ReadTimeout that names the broken leg — the exact ambiguity that took three days to resolve."""
+    """The outer ``asyncio.wait_for`` must not pre-empt httpx, or slow sends journal as an anonymous
+    TimeoutError instead of the ConnectTimeout / ReadTimeout that names the broken leg."""
     transport_worst_case = _POOL_TIMEOUT_S + _CONNECT_TIMEOUT_S + _WRITE_TIMEOUT_S + _READ_TIMEOUT_S
     assert _SEND_TIMEOUT_S > transport_worst_case
 
 
 def test_build_request_carries_the_budget_into_httpx():
-    """Not just declared — actually threaded into the httpx client the send flies on. Read off
-    ``_client.timeout`` (the httpx.Timeout the request builds) rather than trusting the kwargs."""
+    """The budget is threaded into the httpx client (read off ``_client.timeout``, not the kwargs)."""
     timeout = _build_request()._client.timeout
     assert (timeout.connect, timeout.read, timeout.write, timeout.pool) == (
         _CONNECT_TIMEOUT_S, _READ_TIMEOUT_S, _WRITE_TIMEOUT_S, _POOL_TIMEOUT_S
@@ -678,10 +639,8 @@ def test_build_request_carries_the_budget_into_httpx():
 
 @pytest.mark.asyncio
 async def test_start_hands_both_roles_their_own_widened_request(conn, clock, monkeypatch):
-    """The wiring itself: ``start()`` must pass an explicit HTTPXRequest for BOTH the bot and the
-    long-poll updater, and they must be DISTINCT objects — a BaseRequest is initialized/shut down by
-    the bot that owns it, so sharing one instance breaks teardown. Asserted off the builder's own
-    slots, which is where the wiring is observable."""
+    """``start()`` passes an explicit HTTPXRequest for both the bot and the long-poll updater, as DISTINCT
+    objects (a BaseRequest is shut down by its owner, so sharing breaks teardown)."""
     from engine.notify import telegram as tg_mod
 
     seen: list = []
@@ -721,7 +680,7 @@ def test_notifications_route_requires_a_bearer_token(conn, clock):
 
 
 def test_notifications_route_returns_the_day_ascending(conn, clock):
-    """The day's transcript, read top-to-bottom: ascending, day-scoped, all columns."""
+    """Ascending, day-scoped, all columns."""
     _insert(conn, "b", "2026-06-17T11:30:00+05:30", title="second")
     _insert(conn, "a", "2026-06-17T09:15:00+05:30", title="first", status="delivered", attempts=1,
             delivered_at="2026-06-17T09:15:01+05:30")
@@ -741,8 +700,7 @@ def test_notifications_route_returns_the_day_ascending(conn, clock):
 
 
 def test_notifications_route_defaults_to_today_ist(conn):
-    """No ``?d=`` ⇒ today off the app's clock, never the UTC day: at 02:00 IST on 06-18 the UTC date is
-    still 06-17, so a UTC default would serve yesterday's transcript."""
+    """No ``?d=`` ⇒ today off the app's clock, never the UTC day (at 02:00 IST the UTC date is still yesterday)."""
     ist_clock = Clock(time_source=lambda: datetime(2026, 6, 18, 2, 0, tzinfo=IST))
     _insert(conn, "a", "2026-06-17T23:00:00+05:30", title="yesterday")
     _insert(conn, "z", "2026-06-18T01:00:00+05:30", title="today")
@@ -754,7 +712,7 @@ def test_notifications_route_defaults_to_today_ist(conn):
 
 
 def test_notifications_route_rejects_a_malformed_date(conn, clock):
-    """A garbled ``?d=`` must be an error, never a silent empty day the owner reads as "nothing fired"."""
+    """A garbled ``?d=`` is an error, never a silent empty day."""
     r = _client(conn=conn, clock=clock).get("/notifications?d=17-06-2026", headers=AUTH)
     assert r.status_code == 422 and "17-06-2026" in r.text
 
@@ -766,8 +724,7 @@ def test_notifications_route_degrades_without_a_state_store(clock):
 
 @pytest.mark.asyncio
 async def test_journal_row_written_by_send_is_what_the_route_serves(conn, clock):
-    """The one-mechanism claim, end to end: the retry outbox and the dashboard read the SAME row, so
-    the page can never show a "delivered" the wire never saw."""
+    """The outbox and the dashboard read the same row, so the page never shows a "delivered" the wire never saw."""
     bot, _ = _bot(conn, clock, _ScriptedBot(fail_forever=True))
     await bot.send(catalog.catalyst_disabled("feed outage"))
     await bot.send(catalog.feed_stale(6.0))
@@ -816,9 +773,7 @@ def test_notifications_page_exists_and_parses():
 
 
 def test_notifications_page_is_self_contained_and_calls_the_route():
-    """LAN/offline by construction: the box's flaky path to the outside world is the very reason this
-    page exists, so a page that needed a CDN to render an outage report would be broken exactly when
-    it is needed. No off-box URL of any kind may appear in it."""
+    """The page must render offline (it reports outages): no off-box URL of any kind."""
     html = UI_HTML.read_text(encoding="utf-8")
     assert "/notifications?d=" in html                       # it reads the real route
     assert 'Authorization": "Bearer ' in html                # bearer-authed
@@ -829,17 +784,14 @@ def test_notifications_page_is_self_contained_and_calls_the_route():
 
 
 def test_static_page_is_reachable_without_the_bearer_header(conn, clock):
-    """Confirms the mount posture the page depends on: auth here is PER-ROUTE
-    (``Depends(_require_owner)``), there is no auth middleware, and a ``StaticFiles`` mount carries no
-    dependency — so a browser navigation (which cannot set a header) reaches the shell, and the shell
-    prompts for the token itself. The page holds no data; every row comes from the 401-gated route."""
+    """Auth is per-route (no middleware) and a ``StaticFiles`` mount carries no dependency, so a browser
+    navigation reaches the shell, which prompts for the token; every row comes from the 401-gated route."""
     client = _client(conn=conn, clock=clock)
-    # BOTH spellings: the catch-all dashboard mount at "/" always matches, so Starlette never issues
-    # its add-the-slash redirect — the bare path the owner types has to be a real route or it 404s.
+    # Both spellings: the catch-all "/" dashboard mount means Starlette never adds the slash redirect.
     for path in ("/notifications-ui", "/notifications-ui/"):
         r = client.get(path)
         assert r.status_code == 200, path
         assert "MT Notifications" in r.text
-    # ...and the API route it calls is NOT shadowed by that route or by the "/" dashboard mount.
+    # The API route is not shadowed by that route or the "/" mount.
     assert client.get("/notifications").status_code == 401
     assert client.get("/notifications", headers=AUTH).status_code == 200

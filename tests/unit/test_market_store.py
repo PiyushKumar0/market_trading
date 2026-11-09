@@ -125,8 +125,7 @@ def test_bars_1m_upsert_official_replaces_self(store, clock):
 
 
 def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monkeypatch):
-    """The late-tick amendment seam: only ``src='self'`` rows are amendable, only
-    high/low ever move, and a decision taken against a STALE row loses the CAS instead of writing."""
+    """Only ``src='self'`` rows are amendable, only high/low move, and a decision against a stale row loses the CAS."""
     minute = clock.combine(clock.today(), time(11, 0))
     window = (minute, minute + timedelta(minutes=1))
     store.insert_bars_1m([_bar(minute)])                       # self: high 2340.00 / low 2337.05
@@ -160,8 +159,8 @@ def test_amend_bar_1m_extremes_is_a_guarded_compare_and_swap(store, clock, monke
 
 
 def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
-    """``corrections_log.reason`` round-trips, and a DB created before the column existed gets it
-    added exactly once on open (CREATE TABLE IF NOT EXISTS never alters an existing table)."""
+    """``corrections_log.reason`` round-trips, and a legacy DB gets the column added once on open
+    (CREATE TABLE IF NOT EXISTS never alters an existing table)."""
     db = tmp_path / "legacy.duckdb"
     con = duckdb.connect(str(db))
     con.execute("SET TimeZone='Asia/Kolkata'")
@@ -191,8 +190,7 @@ def test_correction_reason_persists_and_legacy_db_is_migrated(tmp_path, clock):
 
 
 def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
-    """A pre-2026-09-24 ``results_filings`` gets ``line_items_at`` on open; legacy rows read back as
-    never attempted, i.e. line-item candidates."""
+    """A legacy ``results_filings`` gets ``line_items_at`` on open; legacy rows read back as never attempted, i.e. candidates."""
     db = tmp_path / "legacy.duckdb"
     con = duckdb.connect(str(db))
     con.execute(                                               # the stage-1 shape, verbatim
@@ -218,10 +216,9 @@ def test_results_filings_legacy_db_gains_line_items_at(tmp_path, clock):
 
 
 def test_universe_daily_legacy_db_gains_core_index_and_null_reads_as_core(tmp_path, clock):
-    """Owner decision 2026-10-08: a pre-widening ``universe_daily`` gets ``core_index`` on open. Legacy rows
-    (NULL) count as CORE — every pre-widening index was a subset of NIFTY 500 — so hi52/ins/cat keep
-    their population across the migration; an explicit False is non-core; the eligible predicate
-    (included or watchlist_cap alone) still applies on top."""
+    """A legacy ``universe_daily`` gets ``core_index`` on open. NULL counts as CORE (every earlier index was a
+    subset of NIFTY 500) so hi52/ins/cat keep their population; an explicit False is non-core; the eligible
+    predicate (included or watchlist_cap alone) still applies."""
     db = tmp_path / "legacy.duckdb"
     con = duckdb.connect(str(db))
     con.execute(                                               # the pre-widening shape, verbatim
@@ -292,10 +289,8 @@ def test_last_bar_time_and_coverage_gap_check(store, clock):
 
 
 def test_no_trade_minutes_count_as_covered(store, clock):
-    """2026-09-18: a minute in which NOTHING traded has no bar and never will — no tick to build
-    from, no Kite candle to fetch (PTCIL 13:36 on 09-16 refused the symbol for the whole session).
-    An UPSTREAM-CONFIRMED no-trade minute is an observation, not a hole: ``coverage_gaps`` unions
-    ``bars_1m_no_trade`` into the present set, and no synthetic bar is ever written."""
+    """A minute with no trades has no bar and never will. An upstream-confirmed no-trade minute is an
+    observation, not a hole: ``coverage_gaps`` unions ``bars_1m_no_trade`` in, and no synthetic bar is written."""
     start = clock.combine(clock.today(), time(13, 30))
     end = start + timedelta(minutes=5)
     traded = [start, start + timedelta(minutes=1), start + timedelta(minutes=4)]
@@ -377,21 +372,13 @@ def _slow_events(caplog) -> list:
 
 
 def test_slow_statement_default_threshold_is_5s():
-    """The threshold is pinned at 5 s; the telemetry tests below force it
-    to 0.0/1e9 to be deterministic, so the shipped default needs its own assertion."""
+    """The tests below force the threshold to 0.0/1e9, so the shipped default needs its own assertion."""
     assert store_module._SLOW_STATEMENT_S == 5.0
 
 
 def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplog):
-    """Store slow-statement telemetry: the 2026-09-08 11:47 stall's
-    thread-by-thread dump could not tell whether a feature_snapshot INSERT (_execute) or a tick-flush
-    COPY (_flush_locked) held ``_lock`` for 59 s. Every ``_lock`` hold is now timed and a hold >=
-    _SLOW_STATEMENT_S logs ``store_slow_statement``.
-
-    2026-09-09 review: ``_lock`` is an RLock and the read helpers used to call the LOGGING ``_execute``
-    from inside their own hold, so one read emitted TWO events under identical labels while the hold
-    was still held, and each phase was timed separately (a 3 s execute + 2.5 s fetch went unreported).
-    One hold, ONE event — asserted by count, not by 'any'."""
+    """Every ``_lock`` hold is timed and a hold >= _SLOW_STATEMENT_S logs ``store_slow_statement``.
+    ``_lock`` is an RLock, so a read must emit exactly ONE event per hold (execute + fetch timed together)."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     ts = clock.now()
     with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
@@ -427,9 +414,8 @@ def test_slow_statement_one_event_per_lock_hold(store, clock, monkeypatch, caplo
 
 
 def test_slow_statement_reports_a_statement_that_raises(store, monkeypatch, caplog):
-    """A hold that ends in an exception is exactly the one worth naming (a 30 s batch that then rolls
-    back starved every other caller for 30 s), so elapsed is captured in a ``finally`` and the note is
-    emitted after the release either way, with ``failed=True``. Re-raise semantics are unchanged."""
+    """A hold that ends in an exception is still reported (elapsed captured in a ``finally``, emitted after
+    release) with ``failed=True``, and the exception re-raises."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     with caplog.at_level(logging.WARNING, logger="engine.marketdata.store"):
         with pytest.raises(duckdb.Error):
@@ -441,9 +427,8 @@ def test_slow_statement_reports_a_statement_that_raises(store, monkeypatch, capl
 
 
 def test_slow_statement_flush_paths_and_silence_below_threshold(store, clock, monkeypatch, caplog):
-    """The tick-flush pair (``_bulk_write`` stage load + per-partition ``copy_ticks`` COPY) names
-    itself, and nothing is logged below the threshold. The silence phase uses a 1e9 s sentinel rather
-    than the real 5.0: on a slow volume a genuine multi-second flush would otherwise make this flap."""
+    """The tick-flush pair (``_bulk_write`` stage load + per-partition ``copy_ticks`` COPY) names itself, and
+    nothing is logged below the threshold (1e9 s sentinel, so a slow volume cannot make this flap)."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     ts = clock.now()
     store.buffer_tick(_tick(ts))
@@ -464,12 +449,9 @@ def test_slow_statement_flush_paths_and_silence_below_threshold(store, clock, mo
 
 
 def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypatch, caplog):
-    """The statement helpers were instrumented first; the 2026-09-09 review found the coverage claim
-    overstated, because four methods take their OWN ``with self._lock:`` and run SQL inside it —
-    ``amend_bar_1m_extremes`` (live late-tick path), the ``_tick_stage`` DELETE at the head of a
-    flush, ``insert_news`` and ``set_news_cluster``. Each is ONE hold (``insert_news`` loops MANY
-    statements inside one acquisition), so each must emit exactly ONE event naming the hold — not one
-    per statement, and not none at all."""
+    """Four methods take their own ``with self._lock:`` and run SQL inside it (``amend_bar_1m_extremes``, the
+    ``_tick_stage`` DELETE opening a flush, ``insert_news``, ``set_news_cluster``). Each is one hold and must
+    emit exactly one event naming it, not one per statement."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 0.0)
     ts = clock.now().replace(second=0, microsecond=0)
     store.insert_bars_1m([_bar(ts)])
@@ -496,8 +478,7 @@ def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypa
         store.flush_ticks()
         flush = [r.label for r in _slow_events(caplog)]
 
-    # One combined assertion so an uninstrumented hold shows up as a gap in the WHOLE census rather
-    # than short-circuiting on whichever site happens to be checked first.
+    # One combined assertion so a gap shows up across the whole census, not just the first site.
     assert {
         "amend": amend,
         "insert_news": news,
@@ -514,8 +495,7 @@ def test_slow_statement_covers_the_hand_rolled_lock_holds(store, clock, monkeypa
 
 
 def test_slow_statement_hand_rolled_holds_are_silent_below_threshold(store, clock, monkeypatch, caplog):
-    """The other half of the contract for the four holds above: below the threshold they say nothing.
-    The sentinel is 1e9 s rather than the real 5.0 so a slow CI volume cannot make this flap."""
+    """Below the threshold (1e9 s sentinel) the four holds above say nothing."""
     monkeypatch.setattr(store_module, "_SLOW_STATEMENT_S", 1e9)
     ts = clock.now().replace(second=0, microsecond=0)
     store.insert_bars_1m([_bar(ts)])
@@ -593,12 +573,11 @@ def test_retention_purges_expired_only(tmp_path):
 
 
 def test_store_keeps_no_secondary_index(tmp_path, clock):
-    """2026-09-24: the live store's secondary indexes had lost rows that lookups then skipped. A store
-    that still carries them loses them on open, and a fresh one never gets one."""
+    """Secondary indexes lose rows that lookups then skip: a store carrying one drops it on open, a fresh one never gets one."""
     s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
     try:
         assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
-        s._execute("CREATE INDEX idx_news_url ON news(url)")                     # a pre-fix store
+        s._execute("CREATE INDEX idx_news_url ON news(url)")
         s.init_schema()
         assert s._fetchall("SELECT index_name FROM duckdb_indexes()", []) == []
     finally:
@@ -769,8 +748,7 @@ def test_instruments_universe_features_roundtrip(store, clock):
 
 
 def test_get_universe_eligible_symbols_includes_watchlist_cap_only_rows(store, clock):
-    """The 2026-08-18 news-layer fix: ``included`` rows AND watchlist_cap-only exclusions are
-    eligible; any other exclusion reason (alone or alongside the cap) is not."""
+    """``included`` rows and watchlist_cap-only exclusions are eligible; any other exclusion reason (alone or with the cap) is not."""
     d = clock.today()
     store.upsert_universe_daily([
         {"d": d, "symbol": "RELIANCE", "included": True},
@@ -783,8 +761,7 @@ def test_get_universe_eligible_symbols_includes_watchlist_cap_only_rows(store, c
 
 
 def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
-    """The store cannot import ``engine.universe.builder`` (layering — builder imports the store),
-    so the ``watchlist_cap`` literal is duplicated; this test is the guard against the two drifting."""
+    """The store cannot import the builder (layering), so the ``watchlist_cap`` literal is duplicated; this guards drift."""
     from engine.marketdata.store import _EXCL_CAP, _EXCL_INDEX
     from engine.universe.builder import EXCL_CAP, EXCL_INDEX
 
@@ -793,10 +770,8 @@ def test_universe_eligible_symbols_literal_matches_builder_excl_cap():
 
 
 def test_batch_universe_reads_both_index_markers(store, clock):
-    """Owner decision 2026-09-04: the extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``
-    when the index became NIFTY 500. Rows written 2026-09-01…09-04 carry the LEGACY marker and
-    nothing rewrites history, so the batch view must honour both — otherwise every extended name
-    persisted before the rename silently leaves the news/advisory/shadow scan set."""
+    """The extended-leg marker was renamed ``not_nifty200`` → ``not_in_index``; history is not rewritten,
+    so the batch view must honour both or older extended names leave the news/advisory/shadow scan set."""
     from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
 
     assert (_EXCL_INDEX, _EXCL_INDEX_LEGACY) == ("not_in_index", "not_nifty200")
@@ -814,9 +789,8 @@ def test_batch_universe_reads_both_index_markers(store, clock):
 
 
 def test_replace_universe_daily_clears_both_index_markers(store, clock):
-    """The delete-then-insert hygiene of :meth:`replace_universe_daily` must clear LEGACY-marker
-    rows too: a 2026-09-04 build that rewrites the extended leg would otherwise leave the previous
-    build's ``not_nifty200`` rows alive in the batch view for the rest of the day."""
+    """:meth:`replace_universe_daily`'s delete-then-insert must clear legacy-marker rows too, or a rebuild
+    leaves the previous build's ``not_nifty200`` rows in the batch view."""
     from engine.marketdata.store import _EXCL_INDEX, _EXCL_INDEX_LEGACY
 
     d = clock.today()
@@ -851,17 +825,12 @@ async def test_async_wrappers_offload_sync_core(store, clock):
 # --------------------------------------------------------------------------- settings (additive keys)
 def test_settings_load_with_the_added_keys():
     s = load_settings()
-    # Per-feed RSS cadences; gdelt_poll_s 1800→3600 and request_timeout_s 10→30 on
-    # 2026-08-04 (persistent 429s at 30-min; 121 ConnectTimeouts at the old 10 s timeout).
     rss = s.news.feeds.rss
-    # 2026-08-05 pool widening: 3 new DOMAINS (hbl/cnbctv18/ndtvprofit) — corroboration pool 2 → 5.
-    # 2026-09-04 coverage widening: business-standard re-probed live (its 08-05 WAF 403 is gone) ⇒ 6.
     assert {n: f.poll_s for n, f in rss.items()} == {
         "et": 300, "livemint_markets": 900, "livemint_companies": 900,
         "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
         "bs_markets": 900, "bs_companies": 900,
     }
-    # The exchange as a feed (2026-09-04) — its own cadence and drop list.
     ann = s.news.feeds.nse_announcements
     assert (ann.enabled, ann.poll_s) == (True, 300) and "Trading Window" in ann.drop_subjects
     assert (s.news.gdelt_poll_s, s.news.request_timeout_s) == (3600, 30.0)
@@ -874,8 +843,7 @@ def test_settings_load_with_the_added_keys():
     assert s.lifecycle.active_period_starts == [time(8, 0)]
     assert (s.lifecycle.start_grace_s, s.lifecycle.catchup_grace_s) == (900, 900)
     assert s.lifecycle.crashloop_window_s == 600
-    # Owner decision 2026-09-04: the eligible universe is the CONFIGURED index. Owner decision 2026-10-08: NIFTY
-    # Total Market, with NIFTY 500 as the CORE (evidence-population) index.
+    # The eligible universe is the configured index (NIFTY Total Market); NIFTY 500 is the CORE (evidence-population) index.
     assert s.universe.index_name == "NIFTY Total Market"
     assert s.universe.index_seed_path == "config/universe/niftytotalmarket_seed.csv"
     assert s.universe.index_source_url.endswith("ind_niftytotalmarket_list.csv")
@@ -884,15 +852,12 @@ def test_settings_load_with_the_added_keys():
     assert s.universe.core_index_source_url.endswith("ind_nifty500list.csv")
     assert s.jobs.reconcile_ist == time(15, 50) and s.jobs.catalyst_digest_ist == time(8, 35)
     assert s.jobs.sector_map_weekly_day == "SUN"
-    # Pre-existing keys still load (additive-only change).
     assert s.trade_window.start_ist == dt.time(10, 0) and s.data.minute_candles_adjusted is True
 
 
 def test_retired_nifty200_universe_keys_are_rejected_not_ignored():
-    """Owner decision 2026-09-04: ``nifty200_source_url`` / ``nifty200_seed_path`` were REPLACED, not
-    aliased. ``UniverseCfg`` therefore forbids extras — a settings.yaml left on the old keys must
-    fail loudly at boot instead of silently falling through to the NIFTY 500 defaults and
-    presenting a stale config as live."""
+    """``nifty200_*`` keys were replaced, not aliased: ``UniverseCfg`` forbids extras so a stale settings.yaml
+    fails loudly at boot instead of silently using the defaults."""
     from engine.core.config import UniverseCfg
 
     with pytest.raises(ValidationError):
@@ -929,11 +894,9 @@ def test_new_catalog_messages_shapes():
         assert msg.data                                     # structured fields preserved for audit
 
 
-# --------------------------------------------------------------------------- torn-write guard (2026-07-21)
+# --------------------------------------------------------------------------- torn-write guard
 def test_upsert_rows_is_transactional_rollback_on_midbatch_failure(store, clock):
-    """2026-07-21: a taskkill mid-executemany left instruments_daily HALF-written (the index tail —
-    exactly the regime tokens — lost). _upsert_rows now wraps the batch in one transaction: a mid-batch
-    failure must leave the table exactly as before, and the connection must stay usable."""
+    """_upsert_rows wraps the batch in one transaction: a mid-batch failure leaves the table as before and the connection usable."""
     d = clock.today()
 
     def row(token, symbol, **kw):
@@ -962,7 +925,7 @@ def test_upsert_rows_is_transactional_rollback_on_midbatch_failure(store, clock)
     assert {r["tradingsymbol"] for r in store.get_instruments_daily(d)} == {"RELIANCE", "TCS"}
 
 
-# --------------------------------------------------------------------------- vectorized large-batch upsert (2026-07-21)
+# --------------------------------------------------------------------------- vectorized large-batch upsert
 def _ins_row(d, token, symbol, **kw):
     """One instruments_daily dict row (helper for the vectorized-path tests)."""
     return {
@@ -975,10 +938,8 @@ def _ins_row(d, token, symbol, **kw):
 
 
 def test_upsert_rows_vectorized_large_batch_is_lossless(store, clock):
-    """2026-07-21 third finding: >=2000-row batches take the _bulk_write path (executemany ground at
-    ~128 rows/s — the 08:15 persist held the writer lock ~12 min). The vectorized path must keep
-    executemany's EXACT semantics: sub-paisa Decimals, NULL-bearing index rows, int lot sizes, bools —
-    the precise type-fidelity class that caused the incident."""
+    """>=2000-row batches take the _bulk_write path, which must keep executemany's exact semantics:
+    sub-paisa Decimals, NULL-bearing index rows, int lot sizes, bools."""
     d = clock.today()
     rows = [_ins_row(d, 1000 + i, f"SYM{i}") for i in range(2400)]
     rows[7] = _ins_row(d, 1007, "SYM7", tick_size=Decimal("0.0025"), fno=True)      # sub-paisa CDS tick
@@ -1011,8 +972,7 @@ def test_upsert_rows_vectorized_large_batch_is_lossless(store, clock):
 
 
 def test_upsert_rows_vectorized_bad_row_aborts_whole_batch(store, clock):
-    """Statement atomicity on the vectorized path: a NOT NULL pk violation anywhere in a >=2000-row
-    batch aborts the WHOLE insert (torn-write guarantee, 8824ce6) and leaves the connection usable."""
+    """A NOT NULL pk violation anywhere in a >=2000-row batch aborts the whole insert and leaves the connection usable."""
     d = clock.today()
     assert store.upsert_instruments_daily([_ins_row(d, 408065, "RELIANCE")]) == 1
 

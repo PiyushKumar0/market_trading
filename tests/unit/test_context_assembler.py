@@ -1,16 +1,5 @@
-"""ContextAssembler: cache discipline, determinism, and fail-to-zero rendering.
-
-The load-bearing properties, in order of how expensive they are to get wrong:
-
-1. **Byte-stability.** The same inputs produce the same digest; changing only VOLATILE inputs
-   leaves the system prompt and the stable block byte-identical, so the cacheable prefix survives.
-2. **Digest sensitivity.** Any block change moves the digest — it is what a decision is replayed
-   against.
-3. **Fail to zero.** A missing feature snapshot, no bars, no day plan and an un-run sentiment
-   digest all render as explicit "unavailable" text instead of raising.
-4. **Per-trigger output restrictions.** Position-event contexts say in the prompt what the
-   caller enforces structurally.
-"""
+"""ContextAssembler: byte-stable cacheable prefix, digest sensitivity, fail-to-zero rendering,
+and per-trigger output restrictions."""
 
 from __future__ import annotations
 
@@ -108,10 +97,8 @@ def seed_bars(store: MarketStore, count: int = 50) -> None:
 def seed_daily_bars(store: MarketStore, symbol: str = SYMBOL, count: int = 60) -> None:
     """`count` consecutive-calendar-day daily bars ending YESTERDAY (2026-06-16), plus one for TODAY.
 
-    Deliberately wider than the assembler's ~45-day lookback and deliberately including today's row:
-    the tail must clip to the window (dropping the oldest bars) AND must never show today's forming
-    session — the same "completed sessions only" bound ops/main.py's brk20 sweep reads on.
-    Prices ramp with the index so the first/last rendered rows are literally assertable.
+    Wider than the assembler's ~45-day lookback and including today's row: the tail must clip to
+    the window and never show today's forming session. Prices ramp with the index.
     """
     yesterday = TODAY - timedelta(days=1)
     bars = [
@@ -231,8 +218,7 @@ def test_same_inputs_produce_the_same_digest(assembler, store, conn):
 
 
 def test_volatile_change_leaves_the_cacheable_prefix_identical(assembler, store, conn):
-    """Only the tail may move. A stable block that drifts with the candidate is a cache miss
-    on every call, which is the whole cost model for the intraday analyst."""
+    """Only the tail may move; a stable block that drifts with the candidate is a cache miss every call."""
     seed_bars(store)
     seed_day_plan(conn)
 
@@ -285,8 +271,7 @@ def test_day_plan_is_read_into_the_stable_block(assembler, conn):
 
 
 def test_stable_block_gains_no_bytes_from_the_plan_age_line(assembler, store, conn):
-    """Hard constraint: the day-plan-age line renders in VOLATILE only. Pins the exact literal
-    STABLE text so a future accidental addition to ``_stable_block`` fails loudly."""
+    """The day-plan-age line renders in VOLATILE only; pins the exact STABLE text."""
     seed_day_plan(conn, '{"regime": "trending up", "no_trade_today": false}')
     ctx = assembler.for_signal(CANDIDATE, **SIGNAL_KW)
 
@@ -374,8 +359,7 @@ def test_ew_line_stale_after_missed_evening_is_unavailable(assembler, store, con
 
 
 def test_stable_block_changes_only_when_inputs_advance(assembler, store, conn, calendar):
-    """A corrected close under the same last date leaves the prefix byte-identical; the morning
-    catch-up writing the missed EW row moves it once."""
+    """A corrected close under the same last date keeps the prefix byte-identical; a newly written EW row moves it once."""
     seed_index(store, calendar, UP)
     seed_ew(conn, calendar, [0.0] * 20, end=date(2026, 6, 15))
     first = assembler.for_signal(CANDIDATE, **SIGNAL_KW).stable_block
@@ -429,21 +413,16 @@ def test_catalyst_block_renders_watchlist_entry_and_sentiment(assembler, store):
     assert '"event_type":"order_win"' in v
     assert '"materiality":0.72' in v
     assert "confirm_trigger" not in v and "invalidation" not in v   # retired v1 levels stay out of prompts
-    # The catalyst block's as-of stamp is the sentiment digest's last run time (08:35,
-    # seed_catalyst) — the only genuinely-timestamped input this block has.
+    # as-of is the sentiment digest's last run time (08:35, seed_catalyst).
     assert "catalyst (sentiment as of 08:35):" in v
 
 
 # --------------------------------------------------------------------------- session + staleness
 def test_session_aggregates_line(assembler, store):
-    """Day H/L, %-from-open, %-from-VWAP (typical-price VWAP, matching features.py's
-    ``vwap_dist`` formula), session elapsed minutes. Hand-computable fixture: 3 round-number bars.
+    """Day H/L, %-from-open, %-from-VWAP (typical-price VWAP, as features.py's ``vwap_dist``), elapsed minutes.
 
-    day H = max(110,120,130) = 130; day L = min(90,95,100) = 90; open = bars[0].open = 100; last
-    close = bars[-1].close = 120 -> from_open = 120/100-1 = +20.00%. VWAP (typical price (H+L+C)/3,
-    weighted by volume) = (100*100 + 325/3*200 + 350/3*300) / 600 = (200000/3)/600 = 1000/9 ->
-    from_vwap = 120/(1000/9)-1 = 0.08 exactly -> +8.00%. Session open 09:15, frozen "now" 10:05 (the
-    tests/conftest.py FIXED_NOW) -> 50m elapsed.
+    Fixture arithmetic: from_open = 120/100-1 = +20%; VWAP = (100*100 + 325/3*200 + 350/3*300)/600
+    = 1000/9, so from_vwap = 120/(1000/9)-1 = +8%; open 09:15 to frozen now 10:05 = 50m.
     """
     bars = [
         Bar(symbol=SYMBOL, ts_minute=datetime(2026, 6, 17, 9, 15, tzinfo=IST),
@@ -460,9 +439,7 @@ def test_session_aggregates_line(assembler, store):
 
 
 def test_day_plan_age_line_in_volatile(assembler, store, conn):
-    """Explicit day-plan age line, VOLATILE only (STABLE stays byte-identical — see
-    ``test_stable_block_gains_no_bytes_from_the_plan_age_line``). 90 minutes authored-to-now = a clean 1.5h with no
-    banker's-rounding ambiguity (unlike the fixture default 08:50, which is 75min -> 1.25h)."""
+    """Day-plan age renders in VOLATILE only. 90 minutes gives a clean 1.5h (the default 08:50 is 1.25h, a rounding case)."""
     seed_bars(store)
     seed_day_plan(conn, created_at="2026-06-17T08:35:00+05:30")
     v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
@@ -503,11 +480,7 @@ def test_position_event_context_states_the_output_restriction(assembler):
 
 
 def test_position_event_context_names_the_closed_exit_codes(assembler):
-    """2026-09-03 to 09-10: 47 of 47 position-event exits failed validation on the first attempt
-    because the five contract codes appeared in NO prompt — the only place the model ever saw them
-    was the pydantic error the harness echoes on retry. They are named in the VOLATILE block: this
-    is per-call context for the one trigger that can exit, and the system prompt stays byte-stable.
-    The list is derived from the contract, so it cannot drift from what the parser accepts."""
+    """The exit codes are named in the VOLATILE block (the system prompt stays byte-stable), derived from the parser's contract."""
     ctx = assembler.for_position_event(
         {"position_id": "pos-9"}, "stop_proximity", "0.4 ATR", ltp_line="ltp 1399"
     )
@@ -520,8 +493,7 @@ def test_position_event_context_names_the_closed_exit_codes(assembler):
 
 
 def test_exit_codes_are_named_only_where_an_exit_is_legal(assembler, store):
-    """The codes belong to trigger (b). A signal-candidate call is an entry decision — adding the
-    line there would be dead prompt bytes on every call of the day."""
+    """A signal-candidate call is an entry decision; the exit-code line would be dead prompt bytes there."""
     seed_bars(store)
     assert "exit_reason" not in assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
 
@@ -582,10 +554,8 @@ def test_news_batch_rejects_more_than_thirty_clusters(assembler):
         assembler.for_news_batch(_clusters(31), [])
 
 
-# ------------------------------------------------- swing daily evidence (2026-08-17 live finding)
-# The analyst declined a 0.93 brk20 candidate (LGEINDIA) for "bar_count 0, no 1m bars this session".
-# brk20/ins sweep the FULL eligible universe; 1m bars exist only for the tick watchlist. So every
-# sub-watchlist swing candidate was judged on nothing at all. These tests pin the fix: swing
+# ------------------------------------------------- swing daily evidence
+# Swing rules sweep the full eligible universe but 1m bars exist only for the tick watchlist: swing
 # candidates carry a daily tail, an empty 1m tail is labelled structural, and intraday is untouched.
 
 UNWATCHED = "LGEINDIA"            # outside the tick watchlist: daily bars exist, 1m bars never will
@@ -604,8 +574,7 @@ WATCHED_SWING_CANDIDATE = SWING_CANDIDATE.model_copy(
     update={"signal_id": "sig-rsi2-1", "strategy_id": "rsi2", "symbol": SYMBOL}
 )
 
-# seed_daily_bars ramps prices by index off 2026-06-16. The ~45-calendar-day window opens 2026-05-03,
-# so the 20-row tail is 2026-05-28 .. 2026-06-16 — both ends asserted literally below.
+# The ~45-calendar-day window opens 2026-05-03, so the 20-row tail is 2026-05-28 .. 2026-06-16.
 DAILY_HEADER = (
     "bars_1d last 20 (date o h l c vol, oldest first; completed sessions through 2026-06-16):"
 )
@@ -615,12 +584,11 @@ STRUCTURAL_MARKER = "STRUCTURAL ABSENCE, NOT A DATA FAILURE"
 
 
 def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_tail(assembler, store):
-    """The exact live failure: swing candidate, zero 1m bars, full daily history available."""
+    """Swing candidate, zero 1m bars, full daily history available."""
     seed_daily_bars(store, symbol=UNWATCHED)
     v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
     lines = v.splitlines()
 
-    # The 1m tail still says unavailable — but is no longer bare.
     assert (
         f"bars_1m last {BAR_TAIL} (time o h l c vol, oldest first): unavailable "
         "(no completed 1m bars this session)"
@@ -642,13 +610,12 @@ def test_unwatched_swing_candidate_gets_a_structural_absence_note_and_a_daily_ta
     # ascending: ISO dates sort lexically (strict=False - the offset pairing is one short by design)
     assert all(a < b for a, b in zip(rows, rows[1:], strict=False))
 
-    # Today's forming bar (seeded at 999) is never shown — completed sessions only, ending yesterday.
+    # Today's forming bar (999) is never shown; the oldest seeded bar is outside the lookback.
     assert "2026-06-17" not in "\n".join(rows)
     assert "999" not in "\n".join(rows)
-    # Window bound: the oldest seeded bar (2026-04-18) is outside the ~45-day lookback.
     assert "2026-04-18" not in v
 
-    # Ordering: 1m line, then the absence note, then the daily header, then the session line.
+    # Order: 1m line, absence note, daily header, session line.
     bars_1m_at = next(i for i, ln in enumerate(lines) if ln.startswith("bars_1m last"))
     note_at = next(i for i, ln in enumerate(lines) if STRUCTURAL_MARKER in ln)
     session_at = next(i for i, ln in enumerate(lines) if ln.startswith("session:"))
@@ -677,19 +644,9 @@ def test_watched_swing_candidate_carries_both_tails_and_no_structural_wording(as
 
 
 # ------------------------------------------------------------------ (d) intraday is byte-untouched
-#: The intraday volatile block captured by running ``_intraday_pin_block`` at HEAD (e8ff7db), BEFORE
-#: the daily-tail change. The fixture seeds daily bars deliberately: an intraday candidate must not
-#: render them even when they are sitting right there in the store.
-#:
-#: The 2026-08-20 change added exactly ONE block to this pin — the two-line ``orb`` strategy contract,
-#: immediately after the candidate line. Nothing else about the intraday rendering moved: the
-#: rel_volume legend needs a ``rel_volume`` key this fixture does not carry, and the saturation label
-#: needs a railed sentiment value this fixture does not carry either.
-#:
-#: The rel_volume_tod change (2026-08-21) left it byte-identical for the same reason — the legend now names
-#: ``rel_volume_tod`` too, but this fixture's features carry neither key, so it renders nothing.
-#:
-#: The 2026-10-29 change removed the trailing regime-note-age line with the heartbeat.
+#: Pinned intraday volatile block from ``_intraday_pin_block``. The fixture seeds daily bars on
+#: purpose: an intraday candidate must not render them. Its features carry no rel_volume key and no
+#: sentiment value is railed, so neither legend nor saturation label appears.
 INTRADAY_VOLATILE_PIN = """== MARKET STATE (volatile) ==
 candidate: {"catalyst_ref":null,"features_snapshot_id":"fs-1","raw_levels":{"entry":"1400.00","stop":"1390.00","target":null},"score":0.7,"side":"BUY","signal_id":"sig-1","strategy_id":"orb","style":"intraday","symbol":"RELIANCE"}
 strategy contract (orb):
@@ -731,7 +688,7 @@ def _intraday_pin_block(assembler, store, conn) -> str:
 
 
 def test_intraday_volatile_block_is_byte_identical_to_pre_change(assembler, store, conn):
-    """The orb path pays nothing for the swing fix — not a byte, not a token, not a query."""
+    """The intraday path pays nothing for the swing daily tail."""
     assert _intraday_pin_block(assembler, store, conn) == INTRADAY_VOLATILE_PIN
 
 
@@ -752,11 +709,8 @@ def test_structural_wording_never_appears_for_an_intraday_candidate(assembler, s
 
 
 def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
-    """Token cost of the addition, chars/4 convention — reported, and capped so it cannot creep.
-
-    Measured as the same candidate rendered swing vs intraday; the two blocks differ only by the new
-    lines plus the 3-char ``"swing"``/``"intraday"`` literal in the candidate JSON.
-    """
+    """Token cost of the daily tail (chars/4), capped. Measured as the same candidate rendered swing vs
+    intraday; the blocks differ by the new lines plus the 3-char ``"swing"``/``"intraday"`` JSON literal."""
     seed_daily_bars(store, symbol=UNWATCHED)
     swing_v = assembler.for_signal(SWING_CANDIDATE, **SIGNAL_KW).volatile_block
     intraday_v = assembler.for_signal(
@@ -772,10 +726,7 @@ def test_daily_tail_token_delta_is_bounded(assembler, store, capsys):
     assert est_tokens < 400            # worst case; a watched swing candidate pays only the tail
 
 
-# ============================================ 2026-08-20: the contract frame + input honesty
-# The funnel autopsy: 63/63 analyst evaluations ended no_action, zero proposals ever created, the
-# risk gate never invoked. Two inputs lied (rel_volume's denominator, sentiment_agg's rail) and one
-# intraday rubric was applied to seven strategies. These tests pin the render-time half of the fix.
+# ============================================ the contract frame + input honesty
 
 INS_CANDIDATE = SignalCandidate(
     signal_id="sig-ins-1",
@@ -789,7 +740,7 @@ INS_CANDIDATE = SignalCandidate(
 
 
 def test_every_signal_context_carries_its_strategy_contract(assembler, store):
-    """The block exists at all, and sits directly under the candidate line it frames."""
+    """The contract block sits directly under the candidate line it frames."""
     seed_bars(store)
     v = assembler.for_signal(CANDIDATE, **SIGNAL_KW).volatile_block
     lines = v.splitlines()
@@ -813,9 +764,7 @@ def test_signal_context_carries_its_contract_as_template(assembler):
 
 
 def test_for_signal_fixed_text_matches_golden(assembler, store, conn, calendar):
-    """Any change to the assembler's wording fails here until the golden file AND
-    ``PROMPT_TEMPLATE_VERSION`` (its first line) are updated together. The index and EW rows render the
-    regime line's measured form, not its unavailable one."""
+    """Wording changes fail until the golden file and ``PROMPT_TEMPLATE_VERSION`` (its first line) are updated together."""
     seed_daily_bars(store, symbol=UNWATCHED)
     seed_day_plan(conn)
     seed_index(store, calendar, UP)
@@ -832,11 +781,8 @@ def test_for_signal_fixed_text_matches_golden(assembler, store, conn, calendar):
 
 
 def test_the_nightly_review_reads_back_the_candidate_line(assembler, store):
-    """A cross-module coupling with no type to protect it: the nightly review identifies a DECLINE by
-    grepping the archived prompt for the ``candidate:`` line ``for_signal`` writes
-    (``nightly_review._candidate_from_context``). Archived the way the harness archives it (gzip of
-    system prompt + prompt), the line must parse back to the candidate — a renamed or reformatted line
-    would not break anything loudly, the review would just render every decline as "unknown"."""
+    """The nightly review finds a DECLINE's candidate by parsing the ``candidate:`` line from the archived
+    prompt (``nightly_review._candidate_from_context``); a reformatted line would silently render every decline as "unknown"."""
     from engine.ops.nightly_review import _candidate_from_context
 
     seed_bars(store)
@@ -846,12 +792,8 @@ def test_the_nightly_review_reads_back_the_candidate_line(assembler, store):
 
 
 def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):
-    """The 2026-08-19 HCLTECH decline, answered in the context itself.
-
-    ``ins`` is the only validated edge; its crossings cluster in drawdowns, so a red tape and a
-    below-VWAP price ARE the validated entry population, and its ``target=None`` is design rather
-    than a missing reward. All three statements must arrive in the block the analyst reads.
-    """
+    """``ins`` crossings cluster in drawdowns, so a red tape and below-VWAP price are the validated entry
+    population, and ``target=None`` is design; all three statements must reach the analyst's block."""
     seed_daily_bars(store, symbol=UNWATCHED)
     v = assembler.for_signal(INS_CANDIDATE, **SIGNAL_KW).volatile_block
 
@@ -863,9 +805,7 @@ def test_the_ins_contract_reaches_the_prompt_verbatim(assembler, store):
 
 
 def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler, store, caplog):
-    """A scanner shipped without a contract costs the call its frame, never the call — and
-    the omission is a WARNING line, because silently thinner prompts are how this class of defect
-    survives for weeks."""
+    """A scanner without a contract costs the call its frame, never the call, and logs a WARNING."""
     import logging
 
     bare = CANDIDATE.model_copy(update={"strategy_id": "newleg"})
@@ -880,9 +820,8 @@ def test_an_unregistered_strategy_renders_the_unknown_frame_and_warns(assembler,
 
 # ------------------------------------------------------------------ the sentiment rail
 def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
-    """``sentiment_agg`` is a CLIPPED SUM: a handful of same-direction headlines reaches ±1.0. The
-    analyst read the rail as "the floor of the scale" in 46 of 63 declines, so the semantics are
-    stated where the number is. A row with NO saturation measures keeps this prose verbatim."""
+    """``sentiment_agg`` is a clipped sum, so a few same-direction headlines reach ±1.0; the semantics are
+    stated beside the number. A row with no saturation measures keeps this prose."""
     line = assembler._sentiment_line("symbol RELIANCE", {"value": -1.0})
 
     assert "SATURATED" in line
@@ -895,9 +834,7 @@ def test_a_railed_sentiment_value_is_labelled_saturated(assembler):
 
 
 def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
-    """The label is for the RAIL only: a normal reading must not grow an explanation it does not
-    need (every extra byte here is on the volatile path of every call). Measures present or
-    absent makes no difference off the rail."""
+    """The label is for the rail only; off the rail, measures present or absent make no difference."""
     assert assembler._sentiment_line("market", {"value": 0.5}) == "  sentiment market: +0.500"
     assert assembler._sentiment_line("market", {"value": -0.998}) == "  sentiment market: -0.998"
     assert assembler._sentiment_line("market", None) == (
@@ -907,10 +844,9 @@ def test_an_unrailed_sentiment_value_renders_exactly_as_before(assembler):
     assert assembler._sentiment_line("market", measured) == "  sentiment market: +0.500"
 
 
-# ------------------------------------------------------- 2026-08-21: the measured rail
+# ------------------------------------------------------- the measured rail
 def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
-    """With the digest's own ``raw_sum``/``n_clusters``, the rail stops being an annotation and
-    becomes a reading: how far past the clip the flow ran, and over how many clusters."""
+    """With ``raw_sum``/``n_clusters`` the rail reports how far past the clip the flow ran, over how many clusters."""
     line = assembler._sentiment_line(
         "market", {"value": -1.0, "raw_sum": -2.3149, "n_clusters": 9}
     )
@@ -929,24 +865,20 @@ def test_a_railed_sentiment_value_reports_its_measured_saturation(assembler):
 
 
 def test_a_railed_sum_over_a_large_corpus_reports_its_near_zero_mean(assembler):
-    """2026-09-03: the market row read -1.000 from raw -9.48 across 759 clusters — about -0.01 per
-    cluster, i.e. neutral flow — and both the planner and the analyst read the rail as a risk-off
-    regime all day. The per-cluster mean is the number that says otherwise, so it is printed."""
+    """A rail over a large corpus is near-neutral flow; the per-cluster mean is printed to show it."""
     line = assembler._sentiment_line("market", {"value": -1.0, "raw_sum": -9.48, "n_clusters": 759})
     assert "raw -9.48 across 759 clusters, mean -0.012 per cluster" in line
 
 
 def test_a_half_measured_rail_falls_back_to_the_plain_prose(assembler):
-    """Either measure missing ⇒ no measurement: an unmeasured rail must never borrow the credibility
-    of a measured one by printing half of it."""
+    """Either measure missing ⇒ no measurement; never print half of one."""
     for partial in ({"value": -1.0, "raw_sum": -2.31}, {"value": -1.0, "n_clusters": 9}):
         line = assembler._sentiment_line("market", partial)
         assert "SATURATED:" in line and "raw " not in line
 
 
 def test_the_catalyst_block_renders_the_measured_rail_end_to_end(assembler, store):
-    """The seam this WO threads: ``_catalyst_text`` must pass the FULL store row through, not the
-    bare value — otherwise the measures never reach the render."""
+    """``_catalyst_text`` must pass the full store row through, not the bare value, or the measures never render."""
     as_of = datetime(2026, 6, 17, 8, 35, tzinfo=IST)
     store.upsert_sentiment_agg([
         {"scope": "market", "scope_key": "market", "as_of": as_of, "value": -1.0,
@@ -959,8 +891,7 @@ def test_the_catalyst_block_renders_the_measured_rail_end_to_end(assembler, stor
 
 # --------------------------------------------------------- the rel_volume denominator
 def test_rel_volume_carries_its_full_day_denominator(assembler, store):
-    """cumulative session volume ÷ 20d median FULL-DAY volume, NOT time-adjusted — so 0.03 at 09:20
-    is an ordinary tape, not a dead one. Phantom thinness was cited in 44 of the 63 declines."""
+    """rel_volume is cumulative session volume ÷ 20d median FULL-DAY volume, not time-adjusted, so 0.03 at 09:20 is ordinary."""
     store.insert_feature_snapshot(
         "fs-rv", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
         '{"atr14":12.5,"rel_volume":0.03}',
@@ -975,9 +906,7 @@ def test_rel_volume_carries_its_full_day_denominator(assembler, store):
 
 # ------------------------------------------------- the corrected number ships beside it
 def test_both_relative_volume_keys_are_explained(assembler, store):
-    """``rel_volume_tod`` is the pace number (1.0 = typical for this time of day) and ``rel_volume``
-    is the legacy full-day ratio. Two ratios named alike on one page ⇒ the legend names BOTH
-    denominators, and points at the one to read."""
+    """``rel_volume_tod`` is the pace number and ``rel_volume`` the full-day ratio; the legend names both denominators."""
     store.insert_feature_snapshot(
         "fs-rvt", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
         '{"atr14":12.5,"rel_volume":0.03,"rel_volume_tod":1.12}',
@@ -995,8 +924,7 @@ def test_both_relative_volume_keys_are_explained(assembler, store):
 
 
 def test_the_legend_renders_when_only_the_tod_key_carries_a_number(assembler, store):
-    """Either key alone earns the legend: a lone ``rel_volume_tod`` still needs its denominator
-    named, and a null one beside it is itself information (too little 1m history to judge pace)."""
+    """Either key alone earns the legend; a null ``rel_volume`` beside a tod number is itself information."""
     store.insert_feature_snapshot(
         "fs-tod-only", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1,
         '{"atr14":12.5,"rel_volume":null,"rel_volume_tod":0.87}',
@@ -1016,7 +944,7 @@ def test_the_legend_renders_when_only_the_tod_key_carries_a_number(assembler, st
     ],
 )
 def test_no_rel_volume_legend_when_the_feature_is_absent_or_null(assembler, store, features_json):
-    """The legend annotates a number that is THERE. Absent or null ⇒ not a byte spent."""
+    """The legend annotates a number that is present; absent or null renders nothing."""
     store.insert_feature_snapshot(
         "fs-norv", SYMBOL, datetime(2026, 6, 17, 10, 4, tzinfo=IST), 1, features_json,
     )

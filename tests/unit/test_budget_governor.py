@@ -1,15 +1,13 @@
 """Token-budget governor: the WEEKLY quota window, pricing, trading-session pace, the
 degrade ladder, and the call-admission predicates consumers read.
 
-Every dollar figure here is produced through the real :meth:`BudgetGovernor.record` path. Exact
-threshold amounts are reached with ``haiku-4.5`` input tokens because that rate is $1/MTok — one input
-token is exactly one micro-dollar, so an arbitrary Decimal amount lands on the ledger EXACTLY and the
-``>`` vs ``>=`` boundary behaviour is testable rather than approximated.
+Every dollar figure goes through the real :meth:`BudgetGovernor.record` path. Exact thresholds use
+``haiku-4.5`` input tokens ($1/MTok, so one token is one micro-dollar) so ``>`` vs ``>=`` boundaries are exact.
 
-The 2026 calendar makes two windows worth naming, and both are used below:
+Two windows are used:
   * ``2026-06-11`` — an ordinary week: Thu(½) Fri Mon Tue Wed Thu(½) = 5.0 sessions;
-  * ``2026-01-15`` — the reset Thursday is itself a market holiday (Maharashtra election): the window
-    still opens at 14:00 that day (the reset is wall-clock) but contributes 0 sessions => 4.5.
+  * ``2026-01-15`` — the reset Thursday is itself a market holiday: the window still opens at 14:00
+    that day (the reset is wall-clock) but contributes 0 sessions => 4.5.
 """
 
 from __future__ import annotations
@@ -33,9 +31,8 @@ from engine.intelligence.governor import (
 )
 
 # conftest's FIXED_NOW: Wed 2026-06-17 10:05 IST, inside the window that opened Thu 2026-06-11 14:00.
-# 4.5 of its 5.0 trading sessions have elapsed (Thu½ + Fri + Mon + Tue + Wed), so at a $100 credit the
-# pace is $90 — DG1 needs >$99 and DG2-by-pace >$112.50, both ABOVE the $85 global rule. Pace-boundary
-# tests therefore run on the Friday clock below, where the pace is low enough for DG1 to be reachable.
+# 4.5 of its 5.0 sessions have elapsed, so at a $100 credit the pace is $90: DG1 needs >$99 and
+# DG2-by-pace >$112.50, both above the $85 global rule. Pace-boundary tests use the Friday clock below.
 JUN_WINDOW = "2026-06-11"
 JUN_SESSIONS_TOTAL = Decimal("5.0")
 JUN_SESSIONS_THROUGH_WED = Decimal("4.5")
@@ -53,12 +50,9 @@ def calendar(clock) -> NSECalendar:
     return NSECalendar(config_dir() / "calendar", clock, strict=False)
 
 
-#: PINNED worked-example config (the numbers as designed). The exact-boundary tests pin their
-#: arithmetic against THIS, deliberately NOT against config/agents.yaml — the live file is owner-tunable
-#: at will (the credit moved 100→120→550→200 across three rebalances and broke the old file-coupled
-#: suite), and a worked example that moves with owner edits proves nothing. ``prescreen_cap_per_day``
-#: DOES mirror the live 48 on purpose: the proportional degraded cap is only meaningful against a base
-#: big enough for the fraction to matter.
+#: Pinned worked-example config. The exact-boundary tests pin their arithmetic against THIS, not
+#: config/agents.yaml, which is owner-tunable. ``prescreen_cap_per_day`` mirrors the live 48 on purpose:
+#: the proportional degraded cap is only meaningful against a base big enough for the fraction to matter.
 PINNED_CFG: dict = {
     "llm": {
         "weekly_credit_usd": 100,
@@ -107,8 +101,7 @@ def fri_gov(conn, bus) -> BudgetGovernor:
 
 
 def test_real_agents_yaml_loads_and_prices(conn, clock, calendar, real_cfg) -> None:
-    """Schema smoke against the LIVE owner-tunable file: it must construct and price — no amount
-    assertions (owner edits must never fail the suite; the math is pinned above)."""
+    """Schema smoke against the live file: it must construct and price; no amount assertions (owner edits must not fail the suite)."""
     g = BudgetGovernor(conn, clock, calendar, real_cfg)
     assert g.credit() > 0
     assert g.allocations()
@@ -129,15 +122,14 @@ async def _collect(sink: list, event) -> None:
 
 # --------------------------------------------------------------------------- pricing
 async def test_price_miss_matches_worksheet_footnote(gov):
-    # Worksheet footnote †: intraday analyst on a cache MISS — 7k cacheable prefix written at 1.25× input, 3k
-    # remaining input, 1k output, sonnet-4.6 at $3/$15 per MTok.
+    # Intraday analyst on a cache MISS: 7k cacheable prefix written at 1.25× input, 3k input, 1k output, sonnet-4.6 at $3/$15 per MTok.
     cost = gov.price("sonnet-4.6", TokenUsage(in_tokens=3000, out_tokens=1000, cache_write=7000))
     assert cost == Decimal("0.05025")             # 7000×3.75 + 3000×3 + 1000×15 micro-dollars
-    assert cost.quantize(Decimal("0.001")) == Decimal("0.050")   # the published worksheet figure
+    assert cost.quantize(Decimal("0.001")) == Decimal("0.050")
 
 
 async def test_price_hit_matches_worksheet_footnote(gov):
-    # Worksheet footnote ‡: same call on a cache HIT — the 7k prefix is read at 0.1× input instead.
+    # The same call on a cache HIT: the 7k prefix is read at 0.1× input instead.
     cost = gov.price("sonnet-4.6", TokenUsage(in_tokens=3000, out_tokens=1000, cache_read=7000))
     assert cost == Decimal("0.0261")
     assert cost.quantize(Decimal("0.001")) == Decimal("0.026")
@@ -158,8 +150,7 @@ async def test_unpriced_model_fails_loud(gov):
 
 # --------------------------------------------------------------------------- config contract
 async def test_config_without_weekly_credit_fails_loud(conn, clock, calendar):
-    """A config still carrying the retired monthly key must not silently run a weekly ladder against a
-    monthly number (or a default) — it would simply never trip."""
+    """A config still carrying the retired monthly key must fail rather than run a weekly ladder against a monthly number (it would never trip)."""
     stale = {**PINNED_CFG, "llm": {"monthly_credit_usd": 550}}
     with pytest.raises(ValueError, match="weekly_credit_usd"):
         BudgetGovernor(conn, clock, calendar, stale)
@@ -186,24 +177,21 @@ def test_window_key_splits_on_the_thursday_1400_reset(at, expected):
 
 
 def test_window_key_is_wall_clock_not_calendar_aware():
-    """Thu 2026-01-15 is an NSE holiday; the SUBSCRIPTION still refills at 14:00 that day, so the key
-    must roll anyway. Only the pace denominator is allowed to know about holidays."""
+    """Thu 2026-01-15 is an NSE holiday but the subscription still refills at 14:00, so the key rolls anyway; only the pace denominator knows holidays."""
     assert _window_key(datetime(2026, 1, 15, 13, 59, tzinfo=IST), ANCHOR) == "2026-01-08"
     assert _window_key(datetime(2026, 1, 15, 14, 0, tzinfo=IST), ANCHOR) == "2026-01-15"
 
 
 def test_window_key_normalises_a_non_ist_stamp():
-    # 2026-09-10 08:29 UTC == 13:59 IST — still the OLD window. Keying off the raw UTC weekday/hour
-    # would put it in the new one.
+    # 08:29 UTC == 13:59 IST, still the old window; keying off the raw UTC weekday/hour would roll it.
     from datetime import UTC
 
     assert _window_key(datetime(2026, 9, 10, 8, 29, tzinfo=UTC), ANCHOR) == "2026-09-03"
 
 
 def test_window_key_rejects_a_naive_timestamp(gov):
-    """``astimezone`` on a naive value reads it as SYSTEM-local, so on a non-IST host the same instant
-    would key a different week here than through ``record`` — which refuses it. One contract, enforced
-    at the arithmetic."""
+    """``astimezone`` on a naive value reads it as system-local, so on a non-IST host it would key a different
+    week than ``record`` (which refuses it): the contract is enforced at the arithmetic."""
     with pytest.raises(ValueError, match="tz-aware"):
         _window_key(datetime(2026, 9, 10, 13, 59), ANCHOR)
     with pytest.raises(ValueError, match="tz-aware"):
@@ -230,7 +218,7 @@ def test_window_bounds_round_trips_the_key(gov, at):
 
 
 def test_window_bounds_rejects_an_off_weekday_key(gov):
-    # A key from anywhere but ``_window_key`` would define a week no ledger row is ever assigned to.
+    # A key not from ``_window_key`` would define a week no ledger row is assigned to.
     with pytest.raises(ValueError, match="Wednesday"):
         gov.window_bounds("2026-09-09")
 
@@ -250,8 +238,7 @@ async def test_record_appends_priced_ledger_row(gov, conn, clock):
 
 
 async def test_record_rejects_a_naive_timestamp(gov):
-    # ``at`` is range-scanned as an ISO string; a naive stamp sorts outside every window and its spend
-    # would silently vanish from the ladder.
+    # ``at`` is range-scanned as an ISO string; a naive stamp sorts outside every window and its spend would vanish from the ladder.
     with pytest.raises(ValueError, match="tz-aware"):
         await gov.record(
             "intraday_analyst", "haiku-4.5", TokenUsage(in_tokens=1, out_tokens=0),
@@ -270,9 +257,7 @@ async def test_window_and_agent_spend_sum_the_ledger(gov):
 
 
 async def test_window_agents_covers_spend_with_no_allocation(gov):
-    """The owner surfaces split the window total per agent; an agent that billed but was never
-    budgeted (``sdk_smoke`` is already in the live ledger) would otherwise sit inside the headline and
-    in no row, so the /budget table would not add up to the figure printed above it."""
+    """An agent that billed but was never budgeted (``sdk_smoke``) must still appear in the per-agent split, so the /budget table adds up to the headline."""
     await spend(gov, "1.25", agent="intraday_analyst")
     await spend(gov, "0.20", agent="sdk_smoke")
     assert gov.window_agents() == ["intraday_analyst", "sdk_smoke"]
@@ -283,8 +268,7 @@ async def test_window_agents_covers_spend_with_no_allocation(gov):
 
 
 async def test_spend_is_bounded_by_the_reset_instants(gov, conn):
-    """Half-open [start, end): a call at 13:59:59.999999 belongs to the window that ENDS, one at
-    exactly 14:00:00 to the window that opens."""
+    """Half-open [start, end): 13:59:59.999999 belongs to the window that ends, exactly 14:00:00 to the one that opens."""
     await spend(gov, "1.00", at=datetime(2026, 6, 11, 13, 59, 59, 999999, tzinfo=IST))
     await spend(gov, "2.00", at=datetime(2026, 6, 11, 14, 0, tzinfo=IST))
     await spend(gov, "4.00", at=datetime(2026, 6, 18, 13, 59, 59, 999999, tzinfo=IST))
@@ -304,7 +288,7 @@ async def test_record_keys_the_window_from_its_own_timestamp(gov, conn):
 # --------------------------------------------------------------------------- pace (sessions)
 async def test_boundary_thursdays_are_half_sessions(gov):
     assert gov.trading_sessions(JUN_WINDOW) == (JUN_SESSIONS_THROUGH_WED, JUN_SESSIONS_TOTAL)
-    # Calendar days would put Wed 06-17 at 6/7 of the window; sessions put it at 4.5/5.
+    # Sessions put Wed 06-17 at 4.5/5 (calendar days would say 6/7).
     assert gov.pro_rata_to_date() == Decimal(100) * Decimal("4.5") / Decimal("5.0") == Decimal(90)
 
 
@@ -323,8 +307,7 @@ async def test_pace_never_exceeds_the_credit_on_the_closing_thursday_morning(con
 
 
 async def test_pace_on_a_week_whose_reset_thursday_is_a_holiday(conn):
-    """Thu 2026-01-15 is an NSE holiday. The window still OPENS at 14:00 that day (wall-clock reset),
-    but the day contributes 0 sessions, so the denominator is 4.5 rather than 5.0."""
+    """The window opens at 14:00 on the holiday Thursday (wall-clock reset) but that day contributes 0 sessions, so the denominator is 4.5."""
     g = governor_at(conn, datetime(2026, 1, 19, 10, 5, tzinfo=IST))   # Mon of that window
     assert g.window_key() == "2026-01-15"
     # 01-15 holiday 0 + Fri 1 + Mon 1 elapsed; total adds Tue + Wed + Thu 01-22 (½).
@@ -336,15 +319,12 @@ async def test_pro_rata_is_none_without_a_calendar(conn, clock, real_cfg, tmp_pa
     bare = NSECalendar(tmp_path / "no_calendar", clock, strict=False)
     gov = BudgetGovernor(conn, clock, bare, real_cfg)
     assert gov.trading_sessions() == (Decimal(0), Decimal(0))
-    # None, NOT Decimal(0): a zero here is indistinguishable from "nothing should have been spent
-    # yet" and every consumer would read an unmeasurable pace as a 100%-over-pace one.
+    # None, not Decimal(0): zero is indistinguishable from "nothing should have been spent yet", so consumers would read it as over-pace.
     assert gov.pro_rata_to_date() is None
 
 
 async def test_pro_rata_is_none_for_a_year_with_no_calendar_file(conn):
-    """The no-calendar fail-safe against the REAL calendar directory rather than an empty one: ``config/calendar`` ships
-    2024/2025/2026 only, so a governor clocked in 2027 has no sessions at all — the same unmeasurable
-    state, reached the way it will actually be reached (the engine outliving its calendar files)."""
+    """The no-calendar fail-safe via the real calendar directory: ``config/calendar`` ships 2024-2026 only, so a governor in 2027 has no sessions."""
     g = governor_at(conn, datetime(2027, 1, 14, 20, 0, tzinfo=IST))   # a Thursday, no 2027.yaml
     assert g.trading_sessions() == (Decimal(0), Decimal(0))
     assert g.pro_rata_to_date() is None
@@ -353,9 +333,7 @@ async def test_pro_rata_is_none_for_a_year_with_no_calendar_file(conn):
 
 
 async def test_unmeasurable_pace_never_trips_a_pace_rung_without_a_calendar(conn, clock, tmp_path):
-    """A pace of 0 is UNMEASURABLE, not "nothing should have been spent yet": `spend > 1.25 × 0` is
-    `any spend at all`, so comparing against it would put a whole quota week at DG2 (news batching
-    coarsened) on one micro-dollar."""
+    """A pace of 0 is unmeasurable: `spend > 1.25 × 0` is any spend at all, which would put a whole week at DG2 on one micro-dollar."""
     bare = NSECalendar(tmp_path / "no_calendar", clock, strict=False)
     gov = BudgetGovernor(conn, clock, bare, PINNED_CFG)
     await spend(gov, "0.30", agent="nightly_reviewer")
@@ -368,9 +346,7 @@ async def test_unmeasurable_pace_never_trips_a_pace_rung_without_a_calendar(conn
 
 
 async def test_first_minute_of_a_holiday_opened_window_stays_dg0(conn):
-    """The earliest instant the new window can be billed in: 14:01 IST on a reset Thursday that is an
-    NSE holiday. Zero sessions have elapsed, so the pace is unmeasurable and a whole dollar — 1% of
-    the credit, one minute in — must still read DG0 rather than "infinitely over pace"."""
+    """At 14:01 on a holiday reset Thursday zero sessions have elapsed, so the pace is unmeasurable and a whole dollar still reads DG0."""
     g = governor_at(conn, datetime(2026, 1, 15, 14, 1, tzinfo=IST))
     assert g.window_key() == "2026-01-15"
     assert g.trading_sessions() == (Decimal(0), Decimal("4.5"))
@@ -381,9 +357,8 @@ async def test_first_minute_of_a_holiday_opened_window_stays_dg0(conn):
 
 
 async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_dg0(conn):
-    """Thu 2026-01-15 is an NSE holiday, and it is also a reset Thursday: the window OPENS at 14:00 on
-    a zero-session day, so ELAPSED is 0 while the denominator is 4.5. The news analyst's 19:00-22:00
-    sweep is not window-gated and bills that same evening — it must not trip DG2 on its first call."""
+    """On a holiday reset Thursday elapsed is 0 against a denominator of 4.5; the news analyst's 19:00-22:00 sweep
+    bills that evening and must not trip DG2 on its first call."""
     g = governor_at(conn, datetime(2026, 1, 15, 20, 0, tzinfo=IST))
     assert g.window_key() == "2026-01-15"
     assert g.trading_sessions() == (Decimal(0), Decimal("4.5"))
@@ -395,8 +370,7 @@ async def test_holiday_reset_thursday_evening_has_no_elapsed_session_and_stays_d
 
 
 async def test_pace_rungs_resume_once_the_first_session_elapses(conn):
-    """The skip is scoped to the unmeasurable case only: the Friday of that same holiday-opened window
-    has 1.0 of 4.5 sessions elapsed, so the pace is real again and the DG1 rung binds."""
+    """The skip covers the unmeasurable case only: the Friday of that window has 1.0 of 4.5 sessions elapsed, so the DG1 rung binds."""
     g = governor_at(conn, datetime(2026, 1, 16, 20, 0, tzinfo=IST))
     assert g.trading_sessions() == (Decimal("1.0"), Decimal("4.5"))
     pace = Decimal(100) * Decimal(1) / Decimal("4.5")       # $22.222...
@@ -409,8 +383,7 @@ async def test_pace_rungs_resume_once_the_first_session_elapses(conn):
 
 # --------------------------------------------------------------------------- ladder boundaries
 async def test_dg1_trips_on_pace_only(fri_gov):
-    """The per-agent test was removed from the platform tier (2026-09-12): $33 booked entirely to an
-    agent 175% over its own $12 allocation leaves the platform at DG0 until the PACE is exceeded."""
+    """The platform tier has no per-agent test: $33 booked to an agent 175% over its own $12 allocation leaves the platform at DG0 until the pace is exceeded."""
     assert fri_gov.pro_rata_to_date() == Decimal(30)
     await spend(fri_gov, "33.00")                            # exactly 110% of pace
     assert fri_gov.agent_degraded("weekly_researcher") is True
@@ -427,8 +400,7 @@ async def test_dg2_pace_boundary_is_strict(fri_gov):
 
 
 async def test_dg2_global_boundary_is_inclusive(gov):
-    # At the Wednesday clock the pace trips sit at $99/$112.50, so the $85 global rule is the binding
-    # one. Inclusive, matching DG3/DG4 — every global-percentage rung is `>=` (2026-09-12).
+    # At the Wednesday clock the pace trips sit at $99/$112.50, so the $85 global rule binds. Every global-percentage rung is `>=`.
     await spend(gov, "84.999999")
     assert gov.degrade_tier() == DegradeTier.DG0
     await spend(gov, "0.000001")                             # exactly $85.00 => DG2
@@ -455,12 +427,11 @@ async def test_billing_error_trips_dg4_from_dg0(gov):
 
 # --------------------------------------------------------------------------- per-agent decoupling
 async def test_agent_over_its_share_degrades_only_its_own_knobs(gov):
-    """The 08-28/09-09 failure, inverted: an agent at 90% of its own allocation must throttle ITSELF
-    and leave the platform (and every other agent's cadence) alone."""
+    """An agent at 90% of its own allocation throttles itself and leaves the platform and every other agent's cadence alone."""
     await spend(gov, "37.80", agent="intraday_analyst")      # 90% of the $42 allocation
     assert gov.degrade_tier() == DegradeTier.DG0             # platform untouched
     assert gov.agent_degraded("intraday_analyst") is True
-    assert gov.prescreen_forward_cap() == 32                 # floor(48 × 0.67), not the old flat 4
+    assert gov.prescreen_forward_cap() == 32                 # floor(48 × 0.67)
     assert gov.news_batch_cadence_min() == 30                # the news analyst is inside its share
     assert gov.can_invoke("intraday_analyst").allowed is True
 
@@ -488,8 +459,7 @@ async def test_dg2_still_admits_the_intraday_analyst(fri_gov):
 
 
 async def test_dg3_blocks_intraday_class_agents_only(gov):
-    # All $96 booked to the weekly researcher so the three agents under test are nowhere near their
-    # own allocations — the block must come from the tier, not from exhaustion.
+    # All $96 goes to the weekly researcher so the block comes from the tier, not from the tested agents' exhaustion.
     await spend(gov, "96.00")
     assert gov.degrade_tier() == DegradeTier.DG3
     for agent in ("intraday_analyst", "news_analyst", "preopen_planner"):
@@ -506,8 +476,7 @@ async def test_dg4_blocks_every_agent(gov):
 
 
 async def test_allocation_exhaustion_blocks_only_that_agent_at_100pct(gov):
-    """The hard stop stays at 100% of the allocation and stays per-agent: the platform is DG0, every
-    other agent is unaffected, and only the exhausted one is refused."""
+    """The hard stop is per-agent at 100% of the allocation: the platform stays DG0 and only the exhausted agent is refused."""
     await spend(gov, "4.999999", agent="preopen_planner")
     assert gov.can_invoke("preopen_planner").allowed is True   # degraded, not exhausted
     assert gov.agent_degraded("preopen_planner") is True
@@ -518,8 +487,7 @@ async def test_allocation_exhaustion_blocks_only_that_agent_at_100pct(gov):
 
 
 async def test_allocation_exhaustion_blocks_even_with_the_degrade_test_lifted(conn, clock, calendar):
-    # agent_alloc_pct raised to 100: the agent is not "degraded" and the tier is DG0, and the hard
-    # allocation stop still refuses it.
+    # With agent_alloc_pct at 100 the agent is not "degraded" and the tier is DG0, yet the hard allocation stop still refuses it.
     cfg = dict(PINNED_CFG)
     cfg["degrade_ladder"] = {
         **PINNED_CFG["degrade_ladder"],
@@ -548,8 +516,7 @@ async def test_behaviour_knobs_per_tier(fri_gov):
 
 
 async def test_degraded_forward_cap_is_proportional_and_floored(conn, clock, calendar):
-    # (0, …, 0): an owner-set base of 0 means "forward nothing" — the max(1, …) floor must not re-open
-    # it. config/settings.yaml parks max_per_strategy_day.orb at 0, so a zero cap is a live idiom.
+    # (0, …, 0): an owner-set base of 0 means "forward nothing"; the max(1, …) floor must not re-open it.
     for base, frac, expected in [(48, 0.67, 32), (6, 0.67, 4), (1, 0.67, 1), (48, 0.5, 24), (0, 0.67, 0)]:
         cfg = dict(PINNED_CFG)
         cfg["agents"] = {"intraday_analyst": {"prescreen_cap_per_day": base}}
@@ -566,8 +533,7 @@ async def test_degraded_forward_cap_is_proportional_and_floored(conn, clock, cal
 
 @pytest.mark.parametrize("frac", [67, 6.7, 0, -0.5, 1.5, "two thirds"])
 async def test_degraded_forward_cap_frac_out_of_range_fails_loud(conn, clock, calendar, frac):
-    """It is the one ladder knob a wrong value makes the ladder spend MORE on: ``67`` (read as a
-    percentage, like the pro_rata_pct/agent_alloc_pct keys beside it) would forward 48×67 a day."""
+    """A wrong value here makes the ladder spend more: ``67`` (read as a percentage like its sibling keys) would forward 48×67 a day."""
     cfg = {**PINNED_CFG, "degrade_ladder": {
         **PINNED_CFG["degrade_ladder"],
         "DG1": {"pro_rata_pct": 110, "agent_alloc_pct": 85, "degraded_forward_cap_frac": frac},
@@ -587,10 +553,9 @@ async def test_full_grade_knobs_come_from_agents_yaml(conn, clock, calendar, rea
 
 
 async def test_from_config_loads_agents_yaml(conn, clock, calendar):
-    # Amount-AGNOSTIC against the live owner-tunable file (credit is the owner's knob):
-    # whatever the shipped credit is, spending exactly that much in one window must reach DG4.
+    # Config-agnostic against the owner-tunable file: spending the shipped credit in one window must reach DG4,
+    # and every priced model must price > 0.
     gov = BudgetGovernor.from_config(conn, clock, calendar)
-    # Fully config-agnostic (owner tunes models AND rates): every priced model must price > 0.
     priced = load_yaml(config_dir() / "agents.yaml")["model_pricing_usd_per_mtok"]
     for name in priced:
         assert gov.price(name, TokenUsage(in_tokens=1_000_000, out_tokens=0)) > 0
@@ -637,8 +602,7 @@ async def test_raise_billing_error_publishes(conn, clock, calendar, real_cfg, bu
 
 # --------------------------------------------------------------------------- window rollover
 async def test_window_rollover_resets_the_tier_and_clears_the_dg4_latch(conn, bus):
-    """The whole point of keying DG4 on the window: the quota refills at Thursday 14:00, so the latch
-    must clear THEN, with no owner action."""
+    """The quota refills at Thursday 14:00, so the DG4 latch must clear then with no owner action."""
     now = [datetime(2026, 6, 17, 10, 5, tzinfo=IST)]
     clock = Clock(time_source=lambda: now[0])
     cal = NSECalendar(config_dir() / "calendar", clock, strict=False)
@@ -663,13 +627,13 @@ async def test_window_rollover_resets_the_tier_and_clears_the_dg4_latch(conn, bu
 
     await spend(gov, "0.50")
     assert gov.degrade_tier() == DegradeTier.DG0
-    # The recovery is a tier CHANGE and must alert like any other.
+    # The recovery is a tier change and alerts like any other.
     assert [(e.old_tier, e.new_tier) for e in seen] == [(DegradeTier.DG4, DegradeTier.DG0)]
     assert seen[0].window_key == "2026-06-18"
 
 
 async def test_dg4_latch_is_keyed_on_its_own_window(conn):
-    """The latch must not leak backwards onto a window the owner queries for history."""
+    """The latch must not leak onto a past window queried for history."""
     gov = governor_at(conn, datetime(2026, 6, 17, 10, 5, tzinfo=IST))
     gov.note_billing_error("credit_exhausted")
     assert gov.degrade_tier() == DegradeTier.DG4

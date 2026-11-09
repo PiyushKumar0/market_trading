@@ -1,13 +1,10 @@
-"""brk20 (2026-08-04) — 20d-high daily-close breakout, full eligible universe.
+"""brk20: 20d-high daily-close breakout, full eligible universe.
 
-PINNED worked example: 20 flat sessions with high 100.0, then a fresh close above. All math is
-hand-computed against the module's own DEFAULT_PARAMS-independent inputs (params passed
-explicitly — owner envelope changes must never break these tests).
+Pinned worked example: 20 flat sessions with high 100.0, then a fresh close above. Math is hand-computed
+with params passed explicitly (owner envelope changes must never break these tests).
 
-The overnight-gap stop-geometry floor was added 2026-08-19. The legacy fixtures deliberately
-carry a QUIET gap history (~0.05%/night ⇒ floor ~0.10% of entry) so the floor is never the thing
-under test there and the pre-floor geometry assertions stay field-exact; the floor's own fixtures
-build their gap histories explicitly."""
+The basic fixtures carry a quiet gap history (~0.05%/night ⇒ overnight-gap stop-geometry floor ~0.10% of
+entry) so the floor is not under test there; the floor's own fixtures build their gap histories explicitly."""
 
 from __future__ import annotations
 
@@ -38,12 +35,10 @@ def _series_with_breakout(breakout_volume: float = 2000.0) -> list[DailyRow]:
 
 
 def _gapped(rows: list[DailyRow], gap_pct: float) -> list[DailyRow]:
-    """Rewrite every row's ``open`` so EACH session-pair gaps by exactly ``gap_pct`` percent.
+    """Rewrite every row's ``open`` so each session-pair gaps by exactly ``gap_pct`` percent.
 
-    The window median is then ``gap_pct`` by construction and the stop-geometry floor is 2 x that — no
-    dependence on which pairs land inside the lookback, which is what makes the geometry fixtures
-    hand-computable. ``rows[0].open`` is untouched: it is only ever a pair's ``prev``, and a
-    ``prev`` contributes its CLOSE."""
+    The window median is then ``gap_pct`` and the floor 2 x that, whichever pairs fall in the lookback.
+    ``rows[0].open`` is untouched: a ``prev`` contributes its close."""
     out = [rows[0]]
     for prev, cur in zip(rows, rows[1:], strict=False):
         out.append(cur._replace(open=prev.close * (1.0 + gap_pct / 100.0)))
@@ -51,7 +46,7 @@ def _gapped(rows: list[DailyRow], gap_pct: float) -> list[DailyRow]:
 
 
 def _reopen(rows: list[DailyRow], idxs: range, gap_pct: float) -> list[DailyRow]:
-    """Re-gap only the pairs ENDING at ``idxs`` — used to place outliers in/outside the window."""
+    """Re-gap only the pairs ending at ``idxs`` (places outliers in/outside the window)."""
     out = list(rows)
     for i in idxs:
         out[i] = out[i]._replace(open=out[i - 1].close * (1.0 + gap_pct / 100.0))
@@ -67,9 +62,8 @@ def _breakout_at_risk_pct(risk_pct: float, *, gap_pct: float = 0.5) -> list[Dail
 
 
 def test_pinned_breakout_math():
-    """LIMIT-AT-LEVEL geometry: the plan is anchored on the BROKEN LEVEL (100), not on
-    yesterday's unobtainable close (103), with the rule's own risk unit R = close(y) - H20 = 3
-    translated down onto it."""
+    """Limit-at-level geometry: anchored on the broken level (100), not yesterday's unobtainable close
+    (103), with the rule's own risk unit R = close(y) - H20 = 3 translated down onto it."""
     cand = scan_daily("BPCL", _series_with_breakout(), today=TODAY, params=P)
     assert cand is not None
     assert cand.strategy_id == "brk20"
@@ -77,8 +71,7 @@ def test_pinned_breakout_math():
     assert cand.raw_levels.entry == Decimal("100.00")                      # the broken 20d high
     assert cand.raw_levels.stop == Decimal("97.00")                        # 100 - R, R = 103-100
     assert cand.raw_levels.target == Decimal("106.00")                     # 100 + 2 x (100-97)
-    # score = min(1, 0.5 + 5 x (103/100 - 1)) = 0.65 — scored off the breakout MARGIN, so the
-    # re-anchoring leaves it untouched.
+    # score = min(1, 0.5 + 5 x (103/100 - 1)) = 0.65, off the breakout margin (unaffected by the anchor).
     assert abs(cand.score - 0.65) < 1e-9
 
 
@@ -93,10 +86,7 @@ def test_fractional_rr_target_is_not_truncated():
 
 
 def test_entry_is_the_level_never_yesterdays_close():
-    """The defect this rule existed to carry: ``entry`` must never be ``close(y)``.
-
-    Swept over breakout margins so the assertion cannot pass by coincidence on one series, and the
-    ``levels_coherent`` shape (stop < entry < target) is asserted at every point."""
+    """``entry`` is never ``close(y)``; swept over breakout margins, with the ``levels_coherent`` shape (stop < entry < target) at each."""
     for close in (100.5, 101.0, 103.0, 107.5, 110.0):
         rows = _flat(21) + [DailyRow(high=close + 0.5, close=close, volume=2000.0, open=99.05)]
         cand = scan_daily("X", rows, today=TODAY, params=P)
@@ -117,8 +107,7 @@ def test_breakout_margin_lost_to_tick_rounding_emits_nothing():
 
 
 def test_volume_unconfirmed_breakout_refused():
-    """The BPCL 2026-08-03 shape: genuine 20d-high close but ~0.8x average volume ⇒ refused.
-    (Real numbers that day: close 329.95 > H20 321.90, volume 5.84M vs 7.32M avg.)"""
+    """A genuine 20d-high close on ~0.8x average volume is refused."""
     assert scan_daily("BPCL", _series_with_breakout(breakout_volume=800.0), today=TODAY, params=P) is None
     # At exactly vol_mult x avg it fires (>= comparison).
     assert scan_daily("BPCL", _series_with_breakout(breakout_volume=1200.0), today=TODAY, params=P) is not None
@@ -158,9 +147,8 @@ def test_sweep_orders_by_score_desc_then_symbol():
 
 
 def test_sweep_skips_unadjusted_history_symbols_and_counts_them():
-    """2026-09-09: stored bars_1d is never re-adjusted across an ex-date (the hi52 premise), so a
-    symbol with a structural corp action inside the window sits out — counted, never scanned, and
-    the clean symbol is unaffected."""
+    """Stored bars_1d is never re-adjusted across an ex-date (the hi52 premise), so a symbol with a
+    structural corp action inside the window sits out: counted, never scanned."""
     counts: dict[str, int] = {}
     out = sweep_daily(
         {"SPLITCO": _series_with_breakout(), "CLEAN": _series_with_breakout()},
@@ -178,21 +166,18 @@ def test_default_params_are_the_pinned_defaults():
 
 # ============================================================ stop-geometry floor (2026-08-19)
 def test_floor_knobs_are_structurally_outside_the_learnable_envelope():
-    """The separation is the governance mechanism, not a convention: a learner shrinking the floor
-    re-opens the IDEA/LENSKART degeneracy, so the knobs must not be reachable through the parameter
-    envelope dict at all."""
+    """A learner shrinking the floor would re-open degenerate two-tick stops, so the knobs must not be reachable through the parameter envelope."""
     assert brk20.FLOOR_PARAMS == {
         "gap_floor_mult": 2.0, "gap_lookback_sessions": 20, "gap_min_sessions": 10,
     }
     assert not (brk20.FLOOR_PARAMS.keys() & brk20.DEFAULT_PARAMS.keys())
-    # …and passing them as strategy params must not move the floor (they are not envelope rows).
+    # Passing them as strategy params must not move the floor.
     vetoed = _breakout_at_risk_pct(0.61)
     assert scan_daily("MFSL", vetoed, today=TODAY, params={**P, "gap_floor_mult": 0.0}) is None
 
 
 def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
-    """Regression: the pre-floor candidate is reproduced FIELD-EXACT on a realistic 0.5%/night
-    gap history — R = 3.00 = 3.0% of entry vs a 1.0% floor, so the floor is passed, not dodged."""
+    """The pre-floor candidate is reproduced field-exact on a 0.5%/night gap history: R = 3.0% of entry vs a 1.0% floor, passed not dodged."""
     rows = _gapped(_series_with_breakout(), 0.5)
     counts: dict[str, int] = {}
     cand = scan_daily("BPCL", rows, today=TODAY, params=P, veto_counts=counts)
@@ -205,12 +190,7 @@ def test_generous_risk_on_healthy_gap_history_is_field_exact_unchanged():
 
 
 def test_live_2026_08_19_geometries():
-    """The four live geometries that motivated the stop-geometry floor, on a 0.5%/night history ⇒ floor 1.0% of
-    entry, which lands between the survivor and the three degenerates.
-
-    BOSCHLTD-class R ~2.1% of entry ships; MFSL 0.61%, MCX 0.54% and LENSKART 0.17% — three of that
-    day's four brk20 candidates — are vetoed as `gap_floor`. (IDEA 2026-08-17's two-tick R is the
-    same shape, an order of magnitude further under.)"""
+    """On a 0.5%/night history the floor is 1.0% of entry: R ~2.1% of entry ships; 0.61%, 0.54% and 0.17% are vetoed as `gap_floor`."""
     counts: dict[str, int] = {}
     survivor = scan_daily(
         "BOSCHLTD", _breakout_at_risk_pct(2.1), today=TODAY, params=P, veto_counts=counts
@@ -226,14 +206,13 @@ def test_live_2026_08_19_geometries():
         rows = _breakout_at_risk_pct(risk_pct)
         assert scan_daily(symbol, rows, today=TODAY, params=P, veto_counts=counts) is None, symbol
         assert counts[brk20.VETO_GAP_FLOOR] == before + 1, symbol
-        # The tick-exact R the floor actually compared against (hand-computed off the 100.00 level).
+        # The tick-exact R the floor compared against.
         assert brk20.round_to_tick(rows[-1].close) - Decimal("100.00") == Decimal(expected_r), symbol
     assert counts == {brk20.VETO_GAP_FLOOR: 3}
 
 
 def test_floor_unavailable_on_short_history():
-    """A young listing: 9 session-pairs < gap_min_sessions(10) ⇒ no candidate. Reached with a
-    short ``lookback_days`` because the rule's own length guard otherwise keeps history >= 22."""
+    """A young listing: 9 session-pairs < gap_min_sessions(10) ⇒ no candidate (reached with a short ``lookback_days``; the length guard otherwise keeps history >= 22)."""
     p = {**P, "lookback_days": 5}
     rows = _gapped(_flat(9) + [DailyRow(high=103.5, close=103.0, volume=2000.0, open=99.05)], 0.1)
     counts: dict[str, int] = {}
@@ -246,10 +225,8 @@ def test_floor_unavailable_on_short_history():
 
 
 def test_floor_unavailable_on_dirty_rows():
-    """Full-length history, but NaN opens and zero closes interleaved knock 12 of the window's
-    20 pairs out — 8 valid < 10 ⇒ `floor_unavailable`, never a floor computed off the survivors.
-    A pair is dropped by EITHER member: a NaN open kills its own pair, a <=0 close kills the pair
-    it opens."""
+    """NaN opens and zero closes knock 12 of the window's 20 pairs out: 8 valid < 10 ⇒ `floor_unavailable`, never
+    a floor off the survivors. A pair is dropped by either member: a NaN open kills its own pair, a <=0 close the pair it opens."""
     rows = _gapped(_series_with_breakout(), 0.5)
     for i in range(2, 8):
         rows[i] = rows[i]._replace(open=math.nan)      # kills the pair ending at i
@@ -258,16 +235,15 @@ def test_floor_unavailable_on_dirty_rows():
     counts: dict[str, int] = {}
     assert scan_daily("DIRTY", rows, today=TODAY, params=P, veto_counts=counts) is None
     assert counts == {brk20.VETO_FLOOR_UNAVAILABLE: 1}
-    # The SAME series is a live candidate once the dirt is gone — the veto is the data, not the rule.
+    # The same series is a candidate once clean: the veto is the data, not the rule.
     assert scan_daily("DIRTY", _gapped(_series_with_breakout(), 0.5), today=TODAY, params=P) is not None
 
 
 def test_risk_exactly_at_the_floor_passes():
-    """Boundary: equality passes (the pinned comparison is R < floor ⇒ veto).
+    """Equality passes (the comparison is R < floor ⇒ veto).
 
-    Numbers chosen so the float gap is EXACT in binary — 100.78125/100.0 = 1.0078125 is
-    representable, so the division is exact — which is what makes an equality boundary assertable
-    at all: gap = 0.0078125/night, floor = 2 x that x entry(128.00) = 2.00, R = 130.00 - 128.00."""
+    The float gap is exact in binary (100.78125/100.0 = 1.0078125), which is what makes an equality boundary
+    assertable: gap = 0.0078125/night, floor = 2 x that x entry(128.00) = 2.00, R = 130.00 - 128.00."""
     flat = _flat(21, high=128.0, close=100.0, open=100.78125)
     counts: dict[str, int] = {}
     at_floor = flat + [DailyRow(high=130.5, close=130.0, volume=2000.0, open=100.78125)]
@@ -282,21 +258,18 @@ def test_risk_exactly_at_the_floor_passes():
 
 
 def test_floor_reads_only_the_last_20_pairs_ending_at_y():
-    """The gap window is the LAST gap_lookback_sessions(20) pairs ENDING AT y, not all history:
-    the floor must track CURRENT overnight behaviour. (No-lookahead is structural — the API is only
-    ever handed completed sessions <= y — so what is testable, and tested here, is the window.)
+    """The gap window is the last gap_lookback_sessions(20) pairs ending at y, so the floor tracks current
+    overnight behaviour (no-lookahead is structural: only completed sessions <= y are passed in).
 
-    45 sessions: 24 ancient 20%-gap nights then 20 quiet 0.5% ones. Over ALL 44 pairs the median
-    would be 20% (24 of them outliers) ⇒ a 40% floor that vetoes everything; over the window it is
-    0.5% ⇒ a 1.0% floor, and the 1.5% risk unit ships."""
+    45 sessions: 24 ancient 20%-gap nights then 20 quiet 0.5% ones. Over all 44 pairs the median would be
+    20% ⇒ a 40% floor vetoing everything; over the window it is 0.5% ⇒ a 1.0% floor, and 1.5% risk ships."""
     close_y = 101.5
     base = _gapped(_flat(44) + [DailyRow(high=102.0, close=close_y, volume=2000.0, open=99.05)], 0.5)
     outside = _reopen(base, range(1, 25), 20.0)      # window is rows[24:] ⇒ pairs ending at 25..44
     cand = scan_daily("X", outside, today=TODAY, params=P)
     assert cand is not None
     assert cand.raw_levels.entry - cand.raw_levels.stop == Decimal("1.50")
-    # Move the identical outliers INSIDE the window and the same series vetoes — proving the window
-    # placement is what mattered, not that outliers are ignored wherever they sit.
+    # The identical outliers INSIDE the window veto: window placement matters, outliers are not ignored everywhere.
     counts: dict[str, int] = {}
     inside = _reopen(base, range(25, 45), 20.0)
     assert scan_daily("X", inside, today=TODAY, params=P, veto_counts=counts) is None
@@ -304,8 +277,7 @@ def test_floor_reads_only_the_last_20_pairs_ending_at_y():
 
 
 def test_accumulator_defaults_to_none_and_scan_stays_pure():
-    """The observability seam is opt-in: with no accumulator the vetoes are silent, the verdicts
-    are identical, and repeated calls cannot drift (no module-global counter)."""
+    """The accumulator is opt-in: without it vetoes are silent, verdicts identical, repeated calls cannot drift (no module-global counter)."""
     vetoed = _breakout_at_risk_pct(0.17)
     passing = _breakout_at_risk_pct(2.1)
     for _ in range(3):
@@ -317,8 +289,7 @@ def test_accumulator_defaults_to_none_and_scan_stays_pure():
 
 
 def test_sweep_threads_the_accumulator_and_keeps_its_ordering():
-    """``sweep_daily``'s deterministic ordering is untouched by the new argument, and one accumulator
-    aggregates every symbol's veto classes — the counts ops/main.py logs per run."""
+    """``sweep_daily``'s ordering is unaffected by the accumulator, which aggregates every symbol's veto classes (the counts ops/main.py logs per run)."""
     dirty = _gapped(_series_with_breakout(), 0.5)
     for i in range(2, 8):
         dirty[i] = dirty[i]._replace(open=math.nan)
@@ -339,27 +310,16 @@ def test_sweep_threads_the_accumulator_and_keeps_its_ordering():
     assert [c.symbol for c in sweep_daily(histories, today=TODAY, params=P)] == ["MID", "ALPHA", "ZED"]
 
 
-# =================================== stop-geometry floor — adversarial-review coverage-gap closures (2026-08-19)
-# The review confirmed the production rule correct but found four test-coverage gaps in the fixtures
-# above: every floor fixture is an UP gap only, every floor fixture is a CONSTANT gap history (median
-# indistinguishable from mean), nothing proves veto_counts stays empty on non-floor refusals, and only
-# 2 of the dirty-pair filter's 4 clauses are individually exercised. One test per gap, closed below.
+# =================================== stop-geometry floor: direction, median, veto accounting, dirty-pair clauses
 
 
 def test_gap_floor_ignores_direction_up_and_down_gaps_produce_an_identical_floor():
-    """GAP-1: ``gaps = |open_t/close_{t-1} - 1|`` is an ABS — sign must not matter — but no fixture
-    above ever produces a DOWN gap (open_t < close_{t-1}); every ``_gapped``/``_breakout_at_risk_pct``
-    call above uses a positive ``gap_pct``. Mirror the BOSCHLTD-survivor and LENSKART-vetoed shapes
-    from ``test_live_2026_08_19_geometries`` onto histories where EVERY pair is a DOWN gap of
-    identical magnitude, and assert the outcome — levels on the passing side, veto_counts on both —
-    is IDENTICAL to the up-gap case.
-
-    gap magnitude 0.5%/night either way ⇒ floor = 2.0 x 0.5% = 1.0% of entry = 1.00.
-    """
+    """``gaps = |open_t/close_{t-1} - 1|`` is an abs, so sign must not matter: histories where every pair is a
+    DOWN gap of identical magnitude give identical levels and veto_counts to the up-gap case
+    (0.5%/night either way ⇒ floor = 1.0% of entry = 1.00)."""
     up_pass = _breakout_at_risk_pct(2.1, gap_pct=0.5)
     down_pass = _breakout_at_risk_pct(2.1, gap_pct=-0.5)
-    # Confirm the mirror really is a down gap, not just claimed: same prior close (99.0), opposite
-    # side, identical |gap| magnitude (0.5%).
+    # Same prior close (99.0), opposite side, identical |gap| (0.5%).
     assert up_pass[5].open > up_pass[4].close                          # up gap: open above prior close
     assert down_pass[5].open < down_pass[4].close                      # down gap: open below prior close
     gap_up = abs(up_pass[5].open / up_pass[4].close - 1.0)
@@ -387,17 +347,13 @@ def test_gap_floor_ignores_direction_up_and_down_gaps_produce_an_identical_floor
 
 
 def test_floor_uses_median_not_mean_and_resists_a_single_outlier():
-    """GAP-2: every floor fixture above uses a CONSTANT gap history, so the median is indistinguishable
-    from the mean/min/max. Build a HETEROGENEOUS gap window — 19 pairs at |gap| = 0.4%/night and ONE
-    outlier pair at 8% (a fake split-like night), among the 20-pair window — where median and mean
-    diverge sharply::
+    """A heterogeneous gap window (19 pairs at 0.4%/night, one 8% split-like outlier) separates median from mean::
 
-        median = 0.4%                    ⇒ floor = 2.0 x 0.4% = 0.8% of entry = 0.80
-        mean   = (19x0.4 + 8) / 20 = 0.78% ⇒ a MEAN-based floor would be 2.0 x 0.78% = 1.56% of entry
+        median = 0.4%                      ⇒ floor = 2.0 x 0.4% = 0.8% of entry = 0.80
+        mean   = (19x0.4 + 8) / 20 = 0.78% ⇒ a mean-based floor would be 1.56% of entry
 
-    R = 1.00 (1.00% of entry, close(y) = 101.0) PASSES the true median floor (1.00 >= 0.80) but would
-    FAIL a mean-based floor (1.00 < 1.56) — pinning both "median, not mean" and outlier-robustness (the
-    lone corp-action-like night must not move the floor)."""
+    R = 1.00 (close(y) = 101.0) passes the median floor but would fail a mean-based one: pins "median, not
+    mean" and outlier-robustness."""
     base = _gapped(_flat(21) + [DailyRow(high=101.5, close=101.0, volume=2000.0, open=99.05)], 0.4)
     rows = _reopen(base, range(12, 13), 8.0)            # ONE outlier pair (cur index 12), |gap| = 8%
     counts: dict[str, int] = {}
@@ -411,10 +367,9 @@ def test_floor_uses_median_not_mean_and_resists_a_single_outlier():
 
 
 def test_veto_counts_only_count_otherwise_shippable_plans():
-    """GAP-3: nothing above proves the accumulator counts only plans refused for NO other reason than
-    the floor — it must stay EMPTY when a fixture is refused earlier in the pipeline. One fixture per
-    earlier gate, each with a FRESH dict; none may add a `gap_floor`/`floor_unavailable` key."""
-    # (a) volume-unconfirmed: genuine 20d-high close, ~0.8x average volume (the BPCL 2026-08-03 shape).
+    """The accumulator counts only plans refused for no reason but the floor: it stays empty when an earlier
+    gate refuses. One fixture per earlier gate, each with a fresh dict."""
+    # (a) volume-unconfirmed: genuine 20d-high close, ~0.8x average volume.
     counts_vol: dict[str, int] = {}
     assert scan_daily(
         "BPCL", _series_with_breakout(breakout_volume=800.0), today=TODAY, params=P, veto_counts=counts_vol
@@ -435,11 +390,9 @@ def test_veto_counts_only_count_otherwise_shippable_plans():
 
 
 def test_floor_unavailable_dirty_pair_clauses_individually_load_bearing():
-    """GAP-4: ``_gap_floor_frac``'s skip condition has 4 clauses (``isfinite(prev.close)``,
-    ``isfinite(cur.open)``, ``prev.close > 0.0``, ``cur.open > 0.0``); ``test_floor_unavailable_on_dirty_rows``
-    only exercises ``isfinite(cur.open)`` (NaN opens) and ``prev.close > 0.0`` (zero closes). Exercise
-    the other two IN ISOLATION — each alone must be able to knock the 20-pair window below
-    ``gap_min_sessions`` (10)."""
+    """``_gap_floor_frac``'s skip condition has 4 clauses (``isfinite(prev.close)``, ``isfinite(cur.open)``,
+    ``prev.close > 0.0``, ``cur.open > 0.0``); ``test_floor_unavailable_on_dirty_rows`` covers two. This exercises
+    the other two in isolation: each alone can knock the 20-pair window below ``gap_min_sessions`` (10)."""
     # (i) cur.open <= 0.0 on an otherwise-finite row: 11 opens zeroed (cur indices 2..12, one clause
     # only) leaves 20 - 11 = 9 < 10 valid pairs.
     zero_open = _gapped(_series_with_breakout(), 0.5)
