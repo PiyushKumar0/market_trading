@@ -358,9 +358,9 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
   - **Supported** iff all of these hold on its confirmatory sample:
     - at least 30 trades;
     - mean net > 0 and median net > 0;
-    - `permutation_pvalue` < 0.05/9. Its population is every session's same-construct gross return over the same
+    - `permutation_pvalue` < 0.005 (0.05/10). Its population is every session's same-construct gross return over the same
       sample; for policy push, every (group, session) 10-session excess;
-    - CPCV fold-pass fraction ≥ `fold_pass_min(9)` on the net series, through the shared `cpcv_report` helper with
+    - CPCV fold-pass fraction ≥ `fold_pass_min(10)` on the net series, through the shared `cpcv_report` helper with
       purge = embargo = the holding period. At small n the helper falls back to contiguous purged folds; that is
       accepted. The margin floor (`promotable`) is reported as a diagnostic, because promotion re-applies the full
       research registration bar;
