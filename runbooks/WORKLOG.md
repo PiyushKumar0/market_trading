@@ -1,103 +1,20 @@
 # WORKLOG — autonomous operations log
 
-Newest first. About two weeks of entries are kept; older ones are in git history.
+Newest first. About two weeks of entries are kept; older ones are in git history. Log only what a future session
+needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
+refactors and doc or comment passes are not logged; git history has them.
 
-## 2026-11-09 20:15 — Comment pruning across the codebase (owner: "redundant, lengthy comments are not required")
+## 2026-11-09 — Owner-directed cleanup (citations, identifiers, comments); what still matters
 
-- **Scope:** every Python file with real comment weight (290 reviewed in 24 directory batches by Sonnet implementers
-  after two pilots; 250 changed, the rest already lean) plus settings.yaml and agents.yaml. Cut: incident timelines, measured figures from a day, "before the
-  fix" history, review provenance, repetition and test narration. Kept: purpose, invariants, contracts, the reason that
-  stops a wrong edit, fixture arithmetic, and every docstring point another file or test refers to.
-- **Size:** Python comments + docstrings 3,055 KB → 2,408 KB (−647 KB; `src/engine` share 45% → 39%); the two YAML
-  files' comments 40 KB → 30 KB. Second sweep: the 135 lean Python files (36 changed, 8 KB) and all 57 dashboard
-  files (8 changed, 0.7 KB; the rest document API fields and UI rules). Untouched: limits.yaml and envelope.yaml
-  (signed), the generated fill_model.yaml, and the calendar, alias and sector-override data comments.
-- **Verified:** per file, HEAD's AST equals the new one with every bare-string statement removed and every
-  noqa/type/pragma tag kept (one deleted `assert` was caught and restored); YAML parses to identical data; prompt
-  fingerprint identical to HEAD's; unit gate 4262 passed / 19 skipped, offline 521 passed; ruff findings as at the
-  start (one import-group blank line fixed in `a6dc713`). Engine not restarted: nothing it runs changed.
-- **Not comments, so not in this pass:** a few runtime strings carry dated history (owner alert bodies in pipeline.py
-  and filings_pit_fresh.py, printed report text in calibrate_fill_model.py and the backtest scripts). They are output
-  the owner reads, and rewording them changes program output.
-
-## 2026-11-09 17:20 — Second citation census: about 200 retired codes the earlier passes missed; engine restarted 17:17
-
-- **Why:** the earlier censuses skipped codes followed by a colon, letters outside a fixed set, identifier segments and
-  .csv/.json/.xml files. A census of every letter-and-number token in every tracked file found the rest; the analysts'
-  prompts and schemas carry none, so no `prompt_version` moved.
-- **Commits:** `c924892` the universe seed CSV headers, the clusterer and RSS fixtures (comment-only, same parsed data)
-  and a test variable; `17f8596` 142 "CODE:" prefixes in 87 files, about 20 identifiers (`why._SURVEILLANCE_CODES`,
-  test names, `_PROTECTION_SQL`, the latency probe's default report name), 27 case-list labels in test docstrings and
-  60 double-encoded lines in two tests; `813218f` one more docstring.
-- **Runtime text, live since the 17:17 restart:** the gate's trade-window detail "(exits unaffected)" and the
-  self-test's "non-trading day (skipped)".
-- **Verified:** per file, AST equal to HEAD's with docstrings (or all strings) blanked, renames mapped back; unit gate
-  4262 passed / 19 skipped, offline tier 521 passed; ruff findings are the ones at HEAD.
-- **Protected comment (owner: "Apply now"), commit `d593035`:** `limits.yaml`'s capital-anchor comment lost its code.
-  Nothing in flight; stopped 17:16:48 (`exit_clean`); one-line patch applied; reseeded (parsed data identical to HEAD,
-  signatures match, `protected_config_status.py` OK); started 17:17:34. Selftest PASS with both `protected_store`
-  checks, frozen []; catch-up failed nothing; `engine_ready` 17:19:46, `boot_contract_ok` 130.1 s; no ERROR lines.
-
-## 2026-11-09 16:20 — Leverage start key renamed after the close (owner: "Rename now"); engine restarted on the day's renames
-
-- **Commit `8bc45af`:** `max_leverage`'s start key is `live_auto_start_x` in limits.yaml, the `MaxLeverage` model and
-  the loader test; nothing reads it until live routing is built. The cap's comment no longer names an overlay file that
-  was never built.
-- **Deploy:** close jobs done (reco_expire 15:45, bar_reconcile 15:52), nothing in flight; stopped 16:06:20
-  (`exit_clean`); unit gate 4262 passed / 19 skipped, offline tier 521 passed; reseeded 16:17:22 (limits data equals HEAD
-  apart from the key, envelope unchanged, `protected_config_status.py` OK for both); started 16:17:48 on `8bc45af`, so
-  `c87703c` is live too. Selftest all PASS with both `protected_store` checks, frozen []; catch-up failed nothing; ticker
-  303 tokens; `engine_ready` 16:20:01, `boot_contract_ok` 135.1 s (a post-close boot first re-checks the day's minute
-  bars, 300 symbols); no ERROR lines. Ruff's two findings at `limits.py:299` are at HEAD too.
-
-## 2026-11-09 09:40 — Identifier cleanup and the brk20 report re-key; overnight outage was the lid closing
-
-- **Owner, answered ~09:2x:** rename the signed store's leverage start key to `live_auto_start_x`; keep migration
-  0003's filename (applied migrations are tracked by filename); re-key the registered 2026-09-12 brk20 report.
-- **Commit `c87703c`:** `forward_verdicts`' regime-gate arms are `RegimeGateArms` / `regime_gate`; the offline tests load
-  the study scripts as `exit_geometry` / `regime_filter` / `selection_filters`; the exit-geometry cost-of-stop keys
-  name the arms; dead section-sign folds removed; migration 0003's filename no longer repeated in its header or
-  `causes.py`; this log and FABLE_HANDOFF say "the working branch". 175 affected tests pass; ruff clean.
-- **brk20 report:** re-keyed to the script's current names; all 1811 numbers unchanged; original bytes in
-  `data\backups\backtest_brk20_2026-09-12.original.json`; the rec card's brk20 evidence line renders identically.
-- **Outage 02:02–09:03 (not the deploy):** the 01:31 boot ran 30 min with no errors. At 02:01:58 the ticker lost its
-  connection and the engine took a graceful SIGINT stop (`exit_clean` 02:02:07); Kernel-Power 506 at 02:02:22, "entering
-  Modern Standby, Reason: Lid"; asleep 06:52–09:03. Started 09:03 on `8c6fdea` (the 01:31 code); Kite login 09:04:17,
-  post-login recovery ok. `c87703c` goes live at the next restart.
-
-## 2026-11-09 01:35 — Cleanup finished: study labels named, analyst prompts and protected configs cleaned (owner: "Apply now", "Clean both now"); engine restarted 01:31
-
-- **Commits:** `97bf032` study labels and the remaining citations (four Sonnet agents renamed the research labels, the
-  rest inline; JSON keys, CLI choices and report text follow, while stored reports keep their keys); `4f62873` this
-  log's labels; `2b1d50e` analyst prompts and the re-registration; `3cf3c21` protected configs.
-- **Prompts:** the intraday strategy contracts (template `2026-11-09.1`), the news schema descriptions and the pre-open
-  and nightly schema wording lost their citations; no instruction, field or enum changed. The analyst-value verdict is
-  re-registered from 2026-11-09 (`forward_verdicts.ANALYST_REGISTERED_FROM`); the kill rules keep 2026-11-02. The cat v2
-  and cat_reversal plan entries record the wording-only news change inside their windows.
-- **Ledger:** `config/research_trials.yaml` names studies; three memory pointers broken by the memory renames fixed;
-  the registered rules point at `scripts/forward_verdicts.py`.
-- **Deploy:** nothing in flight; stopped 01:30:30 (`exit_clean`); patch applied and reseeded (parsed data identical,
-  signatures match the files); started 01:31:25. Selftest all PASS, both `protected_store` checks included; frozen [];
-  ticker 303 tokens; `engine_ready` 01:32:02; `boot_contract_ok` 37.1 s; no ERROR lines.
-- **Verified:** unit gate 4261 passed / 19 skipped plus one failure that passes alone (the replay heartbeat test's 1 s
-  wall-clock bound under 8 workers); offline tier 521 passed; ruff findings are the ones at HEAD.
-
-## 2026-11-09 00:10 — Repo-wide cleanup of retired plan citations; memory, docs and this log pruned (owner: "clean up redundant memory, comments, text and work history")
-
-- **Commits:** `50ca381` comments and docstrings (4,581 blocks in 415 files, comment-only: same Python AST with
-  docstrings blanked, same YAML/TOML data); `3448212` runtime strings (464 blocks, same AST with string text blanked)
-  plus renamed scripts, tests and identifiers; `0cd0c2a` docs; `2814b77` the owner's 11-08 muhurat timings, which were
-  on disk but uncommitted. Engine not restarted: the new wording (alerts, log hints) goes live at the next boot.
-- **Verified:** LLM fingerprint (system prompts, output schemas, template version) identical; unit gate 4260 passed /
-  19 skipped; offline + chaos 591 / 19; dashboard tsc + 95 node tests; ruff findings unchanged (13, pre-existing).
-- **Renamed scripts:** `kite_candle_adjustment_check.py`, `entity_resolution_sample.py`,
-  `recommend_gate_evidence.py`, `kite_candle_latency_probe.py` (were named after plan IDs).
-- **Left for the owner, finished in the entry above:** the analyst prompt text, the protected-config comments and the
-  research study labels.
-- **Memory:** 66 files → 60 (merged, renamed, condensed; backup `~/.claude/backups/memory-before-cleanup-2026-11-08.zip`);
-  index 12.9 KB → 8.3 KB. **This log:** entries before 2026-10-26 dropped; the one still-open item (ranking the tick cap
-  over the NIFTY 500 core) moved to IMPLEMENTATION_PLAN's open questions. **graphify:** the stale 10-28 graph moved to
-  `~/.claude/backups/graphify-out-2026-10-28`.
+- **Analyst-value verdict re-registered from 2026-11-09** (`forward_verdicts.ANALYST_REGISTERED_FROM`): the analyst
+  prompt wording changed (no instruction, field or enum). The kill rules keep 2026-11-02.
+- **Protected store, owner-approved, reseeded at 01:31, 16:17 and 17:17** (selftest `protected_store` PASS each boot):
+  comment-only patches to limits.yaml and envelope.yaml, and the leverage start key renamed `live_auto_start_x`
+  (limits.yaml, `MaxLeverage`, the loader test).
+- **brk20 report:** the registered 2026-09-12 report was re-keyed to the script's names, numbers unchanged; original
+  bytes in `data\backups\backtest_brk20_2026-09-12.original.json`.
+- **Outage 02:02–09:03:** the laptop lid (Kernel-Power 506, "Reason: Lid"; graceful stop), not a deploy.
+- **Memory before the cleanup:** `~/.claude/backups/memory-before-cleanup-2026-11-08.zip`.
 
 ## 2026-11-08 00:28 — Claude login death 11-06 19:06 → owner re-login 11-08 00:16 (owner: "Check the claude login failure")
 
@@ -218,47 +135,6 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 - **Rollback:** with the engine stopped, copy the backup over `data\state.db`; `git revert 2b16551` plus a reseed for
   the caps.
 
-## 2026-11-05 01:40 — Fibonacci retracement study run: pullback clustering and the deeper brk20 entry supported, the pullback edge null, the brk20 confluence filter refuted; nothing wired (owner: "Do test with the retracement logic as well included with the analysis, especially for swing trades")
-
-- **Question:** stock picking uses Fibonacci retracement nowhere (no scanner, rule or prompt). The analyst cited a
-  61.8% retracement once, as commentary (PATANJALI brk20, 2026-09-29).
-- **Registered** `73e6ef1` before any code or data run: the pullback edge `edge/fib_pullback` (N 3), pullback
-  clustering `price_structure/fib` (N 1), the confluence filter `selection_filter/{brk20,hi52,ins}` (N 6, 6, 1), the
-  deeper brk20 entry `entry_mechanism/brk20` (N 6). The rules live in the script.
-- **Built** `ba0540f`: `scripts/backtest_fib.py` and 90 synthetic tests, by one Opus agent started 12:35 in market
-  hours on the owner's "Now". Audited; 112 passed, ruff clean.
-- **Run** 2026-11-04 15:31–15:33, as registered (COMMANDS "Fibonacci retracement study"). Report
-  `data\reports\fib_retracement_2026-11-02.{json,md}`.
-  - Pullback edge NOT SUPPORTED (null): limits at 38.2/50/61.8% did no better than the neighbouring non-Fibonacci depths
-    (permutation p 0.36/0.49/0.25). Every depth had median net +0.95% to +1.65% over the whole sample; in 2026 the
-    depths up to 56% are negative, the deeper ones about +0.2%.
-  - Pullback clustering SUPPORTED: pullbacks ended within ±1 pp of a Fibonacci level 639 times against 558 expected (ratio 1.145,
-    CI [1.033, 1.266]; placebo 1.004). It comes from 50% (1.24) and 61.8% (1.38); 38.2% has none (1.03).
-  - Confluence filter: brk20 REFUTED (confluence n 411, median net −1.40% against FULL +0.61%, p 1.0); hi52 (n 13) and ins (n 7)
-    INSUFFICIENT.
-  - Deeper brk20 entry SUPPORTED, winner 61.8%: median net +1.53% (n 978, fill rate 12%) against the five-session
-    limit's +0.61% (n 5,025, 59%).
-- **Post-hoc checks (descriptive; they change no verdict).** Scripts and logs in `..\mt_build_notes\section3\fib_*`.
-  - Both scripts reproduce the registered numbers exactly. Seven sampled trades and legs (2022–2026), re-derived
-    from raw `bars_1d` by independent code, all match.
-  - The clustering excess survives a symbol-clustered bootstrap (CI [1.041, 1.260]) and legs ≥ ₹50 wide (1.12, placebo 0.98), and beats 97.7% of
-    random centre triplets. But it is no sharper at ±0.5 pp (1.09, placebo 1.10), and it fades by year: 1.24 in
-    2023, 1.03 in 2025. The excess is 81 legs out of 13,707.
-  - The deeper entry is a depth effect, not a Fibonacci one: median net rises with depth through the non-Fibonacci
-    depths, and 67.8% (+2.00%, n 701) beats 61.8%. Strict trade-through fills change almost nothing (61.8% +1.50%,
-    five-session limit +0.60%). 61.8% led the five-session limit in every signal year, by +1.56, +0.87, +1.52, +0.49 and +0.15 pp (2022–2026); in 2026
-    every depth lost 1.9–2.7%.
-  - The five-session limit's trades on the signals the 61.8% limit filled had median net −2.93% (n 968); the rest
-    +1.39% (n 4,057). Net per admitted signal: five-session limit +1.02%, 61.8% +0.33%.
-  - Confluent brk20 fills sit at least 4.3% (median 8.6%) under the 60-session high; the rest a median 4.1%.
-- **Recorded:** the six ledger rows (null, supported, refuted, insufficient, insufficient, supported); IMPLEMENTATION_PLAN "Pending verdicts"
-  holds the owner decision (whether a deeper brk20 entry gets its own registration once the kill rule reads);
-  memory `fib-retracement-study-2026-11-04`. The analyst prompt is untouched: a change would stop the analyst-value
-  population.
-- **Not mine, left alone:** at 01:35 the live tree had uncommitted edits to `src/engine/oms/prep.py` (01:24) and
-  `tests/unit/test_paper_no_stop.py` (01:22) from another session (paper no-stop test time-only positions skip the prep
-  walk). The engine loads them at its next boot.
-
 ## 2026-11-03 20:50 — Silent connected feed: respawn fix built, reviewed and deployed (autonomy directive; diagnosis in the 16:20 entry)
 
 - **Change (`4d822db`, built on `wip/feed-respawn`, fast-forwarded onto the working branch):**
@@ -336,30 +212,6 @@ Newest first. About two weeks of entries are kept; older ones are in git history
     11-02 13:04–14:07, 10-30 11:48–12:14 and 10-26 15:06–15:30. Today the same request held until its 15:30:01
     release. So `ES_SYSTEM_REQUIRED` alone is unreliable on this host, and no request override is set
     (`powercfg /requestsoverride` is empty). The host-power choice stays with the owner.
-
-## 2026-11-03 11:10 — `/taken JINDALSTEL` refused as ambiguous: fixed and validated, not yet deployed (owner: "Fix the issue, review and validate.")
-
-- **What happened:** at ~10:30 `/taken jindalstel 12 1102.80` replied "2 recommendations match JINDALSTEL — nothing done".
-  The second match was `01M1ZP2K8JS6W1F8A1HW6EN0A6`, delivered and expired 2026-09-08, listed as a bare "10:27".
-  The owner then recorded today's rec by its full id.
-- **Cause:**
-  - `/taken` resolved a ticker against the open recs plus EVERY expired rec, with no age bound.
-  - `/veto`'s rule that a single live rec wins over expired ones did not apply to `/taken`.
-  - `_rec_line` added the day only when delivery and expiry fell on different days.
-- **Fix:**
-  - `/taken` now resolves against `/veto`'s set: `decision_candidates`, live or expired inside the 3-session veto window.
-    The new `include_skipped` flag keeps expired recs that already carry a skip reason, because `take` clears it.
-    The single-live rule now applies to `/taken` too. The `decision` and `include_expired` flags are gone.
-  - Side effect, intended: a lapsed entry the 15:45 sweep has not labelled yet is now `/taken`-able by ticker.
-    Before, it became resolvable only after the sweep.
-  - A listed row carries its day unless both its stamps are today.
-- **Validated:**
-  - Unit suite: 4113 passed. ruff is clean. mypy shows no new errors in the touched lines.
-  - The new `/taken` tests failed before the fix: an out-of-window rec resolved, live plus expired gave the ambiguous list,
-    and an earlier day's rec rendered a bare "10:27".
-  - Replayed the real resolver and book over a snapshot of `state.db`, with today's row reopened in the snapshot only:
-    `jindalstel` resolves to `01M6FWB6VEVQ4N9HPED5VPBFX1`, and `tipsmusic` (Mon expired plus today live) resolves to today's rec.
-- **Deploy:** live on the next `mt-engine` start. No mid-session restart.
 
 ## 2026-11-02 17:09 — Tick compaction, failing since 10-26: diagnosed, fixed, deployed and validated (owner: "Tick compaction has been failing for more than 4 days now. Check, review, validate and fix.")
 
@@ -480,119 +332,7 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   - The market-pause study run, which needs a research snapshot at a later engine stop.
   - No `git push`.
 
-## 2026-10-30 01:50 — Review actions built and validated on `wip/review-actions`: not merged, not deployed (owner: "Implement and validate the planned changes … You can start implementation right now, without waiting for market closure. Trade window has been closed.")
-
-- **Branch:** `wip/review-actions` in the worktree `..\mt_review`, on the working branch at `aab0133` (a fast-forward). It covers all 21
-  tasks of the review-actions plan.
-- **How it was built:**
-  - Ten file-locality packages. Each was built by an implementer agent and checked by a separate reviewer, with one
-    or two fix rounds.
-  - Three of the packages ran in a second worktree and were cherry-picked in with no conflicts.
-  - A whole-branch review from three angles followed: line-by-line, removed behaviour, and a cross-file tracer. Its
-    findings are fixed or listed under "Left open".
-- **What changed:**
-  - Migrations: 0018 (analyst decision journal), 0019 (prompt_version), 0020 (`signal_outcomes`,
-    `brk20_regime_blocked`) and 0021 (notification buttons).
-  - The nightly `signal_outcomes` job runs at 18:40.
-  - The pre-registered verdicts: `engine.learning.forward_verdicts` and `scripts/forward_verdicts.py`.
-  - One NIFTY 50 regime predicate. The brk20 regime filter applies at brk20 origination (`brk20.regime_filter: true`). The retest window
-    is now y+1..y+5.
-  - The heartbeat is retired in favour of a deterministic regime line, and `no_trade_today` is dropped.
-  - Prompts now say "unavailable (<reason>)" when a source is absent.
-  - trend is parked.
-  - `analyst_confidence_min` is optional. The owner patch is prepared, not applied.
-  - The card gains a cost line and a same-ticker history line.
-  - Time exits skip positions sold outside the ledger.
-  - One-tap skip buttons, with a 3-session reason window.
-  - The scorecard gains a signals block, the dashboard a Performance card, and the weekly summary an analyst line
-    (soft dependency).
-  - A research trial ledger with the registration bar.
-  - Scripts: the market-pause study (registered, not run) and the LLM scorecard.
-- **Registered:**
-  - IMPLEMENTATION_PLAN "Pending verdicts" holds the analyst-value verdict, the brk20 and ins kill rules and the market-pause study,
-    registered 2026-10-29.
-  - They were amended on 2026-10-30, before the registration date. The amendment covers renames, terminal rules for delisted and halted
-    names, a failed-data guard, the scope of the prompt key, and the brk20 regime filter rollback.
-  - The registration date = 2026-11-02 (`forward_verdicts.REGISTERED_FROM`). A deploy after 09:15 IST on 11-02 moves it.
-- **Validation at the tip:**
-  - Full gate: 4213 passed, 19 skipped. Offline tier: 430 passed, 1 skipped. Dashboard `npm test`: 95/95.
-  - Replay smoke: 10/10 valid, 0 schema_invalid, intraday actions match live 3/3 (`mt_review\data\reports\replays\20261030T000235`).
-  - The Performance card at 390 px on the fixture server; dom-checks clean.
-- **Found during the build:**
-  - A build agent wrote an empty untracked `tests/unit/test_prompt_integrity.py` into the LIVE tree at 23:09. It
-    would have aborted the deploy's ff-merge. It is removed; live `git status` shows only `graphify-out/`.
-  - A worktree replay needs the pinned CLI junctioned in. COMMANDS is updated.
-  - The host sat in Modern Standby 17:48–21:21 with the keep-awake helper running (lid or power button), and the
-    agents stalled.
-- **Owner:**
-  - Approve the merge and deploy per COMMANDS "Deploy a reviewed tip":
-    - `git status` is clean;
-    - back up `pre_0018.db`;
-    - ff-merge;
-    - rebuild the dashboard;
-    - the boot log shows 0018–0021 and `engine_ready`.
-  - Then, optionally, apply `runbooks/patches/limits-drop-analyst-confidence-min.patch` (COMMANDS "Protected config").
-- **Left open:**
-  - The brk20 regime filter labels on the planner and `/why` previews.
-  - The regime line's store read on the event loop in position events.
-  - A double-crossing brk20 re-offer is costed from the latest resting row.
-  - The market-pause study run. It needs a fresh research snapshot, taken with the engine stopped.
-- **Not touched:** mt-engine (running throughout) and both protected stores. The live tree was touched only to remove
-  the stray file.
-
-## 2026-10-29 15:40 — Implementation plan for the review's recommendations: plan only, nothing built or deployed (owner: "Based on the recommended changes of the report, Plan the entire change process …")
-
-- **Plan:** 21 tasks in six phases.
-  - It covers four migrations (0018–0021), one nightly hindsight job (`signal_outcomes`), pre-registered verdicts
-    and kill rules, the brk20 regime filter, the heartbeat's retirement, absent-vs-empty markers, one-tap skip
-    reasons, a dashboard card, a trial ledger, and two research scripts.
-  - Every change to the analyst's prompt or to a verdict population lands before one registration date.
-- **Read from the code; this changes the report's recommendations:**
-  - The exit-rec noise was already fixed (2026-09-12). One gap remains: `time_exit_check` lacks
-    the sold-outside screen.
-  - The live brk20 retest window offers y+1..y+6, one session more than the registered five-session limit's y+1..y+5
-    (`retest.py:182-183`, `:474-483`).
-  - Owner-facing wording problems, none fixed yet:
-    - catalyst, earnings and breakout prompt sections print "none" when their job never ran;
-    - exit and adjust cards print "edge 0x";
-    - re-tapping a reason on an expired rec overwrites it.
-  - The `reply_keyboard` seam was never wired.
-- **Review:** one read-only Opus builder check (owner: "Run it now", asked at 14:13 during market hours). It
-  returned 21 findings, one of them a blocker: the analyst verdict had no fixed cohort. All were folded in except
-  merging two of the tasks.
-- **Owner:** the plan's open calls. Nothing is implemented until the owner approves the plan.
-- **Not touched:** mt-engine (running), `src/`, `config/` and both protected stores.
-
-## 2026-10-27 13:10 — TradingAgents review and system check: report only, nothing deployed (owner: "Review the provided trading agent branch … Check where we can improve our system or what we are currently doing wrong")
-
-- **Report:** deleted when its work shipped. Evidence scripts are in
-  `data/reports/tradingagents_review_2026-10-27/`; COMMANDS has a new "LLM analyst scorecard" entry.
-- **Method:**
-  - TauricResearch/TradingAgents v0.7.0 (e8f5503) was cloned read-only into the session scratchpad, and its core was
-    read in full.
-  - Our side: read-only queries of state.db (`mode=ro`), with forward returns from the 10-26 nightly export. The live
-    DuckDB was never opened.
-- **Agents** (owner: "Run agents now", asked at 12:21, inside the 10:30–14:30 trade window):
-  - one Sonnet research pass covering the paper, independent evaluations and all 1,547 GitHub issues and PRs;
-  - three read-only maps: the LLM layer, the decision pipeline, and learning plus data;
-  - a state.db pull sent to `log-digger` came back BLOCKED. Its definition forbids DB access (memory
-    `log-digger-no-db-access`), so those queries ran inline instead.
-- **Headlines:**
-  - TradingAgents is a research scaffold. It models no costs and has no risk limits or universe. Its paper's result
-    (AAPL +26.6%, Sharpe 8.21, one quarter) has never been reproduced, and costed independent tests find no edge over
-    buy-and-hold.
-  - On our side, the intraday analyst's enter/decline showed no selection skill on 585 candidates. Within-day,
-    approved minus declined was about 0 at T+5 and T+10, and −1.5 pp at T+20.
-  - The gate's 0.55 confidence floor is never shown to the model.
-  - For brk20, rsi2 and trend, the gate's edge check prices the LLM's own target, and the card shows the result as
-    "edge Nx".
-  - Live closed recs: 2 of 24 hit, median net −4.5%, median excess −2.8%, while the equal-weight benchmark fell
-    11.8%.
-  - brk20 and ins have no forward kill rule.
-- **Not touched:** mt-engine (running), the code, `config/` and both protected stores.
-- **Owner:** the report's owner decisions. None was applied.
-
-## 2026-10-26 07:05 — Section-3 fixes merged (c887080) and deployed; boot verified (owner: "Merge the changes and deploy")
+## 2026-10-26 07:05 — The plan's open fixes merged (c887080) and deployed; boot verified (owner: "Merge the changes and deploy")
 
 - **Before:** the clock read 06:57, the log tail held only news polling and health pulses, and the tree was clean.
   `protected_config_status` showed both stores OK. The branch has no migration, dependency or config change, and
@@ -616,63 +356,6 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   - The dashboard serves the new bundle, and `/paper` answers 401 without a token.
 - **Cleanup:** the `..\mt_s3` worktree was removed (junctions unlinked first; the live venv and node_modules were
   verified intact), and the `wip/section3` branch deleted. Not pushed.
-
-## 2026-10-26 05:10 — The plan's open fixes built on `wip/section3`, reviewed and validated; NOT merged (owner asked for them built, reviewed and validated)
-
-- **Branch `wip/section3`** (worktree `..\mt_s3`): 11 commits on the working branch at 3f82c40 (8678428..193457f). Nothing is
-  merged, pushed or deployed. It touches the paper OMS (`on_reject`), so it waits for owner review.
-  - 8678428 DG4: a billing error publishes its tier change on `budget.state`.
-  - deaa2dd, fc0b647 `daily_bars`: `BackfillReport.ok` is the watermark verdict. Retryable failures and an
-    all-unmapped token map fail the day; one unmapped symbol does not.
-  - aa62d90, fc0b647 boot watchdog: the arming contract is due 180 s after startup recovery returns, with a
-    3,600 s startup ceiling. The old 420 s rule falsely paged on 09-15, 10-20 and 10-23. One page per phase,
-    truthful texts, and an all-clear after a page.
-  - 6f163ef: the mid-day token breaker ignores a superseded token (the 10-21 race, live path).
-  - d2d8cd7, fc0b647 health: `feed_stopped_in_session` (armed, in session, 30 contiguous minutes), labelled
-    during startup recovery.
-  - c29ab67 paper rejection storm: ≥3 broker rejects in 60 s latch a daily FROZEN paper halt. The real path
-    waits for live AUTO.
-  - 196d4ec, d80a87c `scripts/cat_shadow_verdict.py`: the pre-registered `cat` v2 rule, with entry after the
-    news, duplicate stories, renames and voids. `store.symbol_renames` is extracted, unchanged.
-  - 434f14d: tests closing the plan's test gaps.
-  - 193457f: IMPLEMENTATION_PLAN, RUNBOOK and COMMANDS.
-- **Build:** five agents (2 Opus, 3 Sonnet), each in its own worktree, plus two fixes inline.
-  - Audits found a UTF-8 BOM and fully mangled non-ASCII in two agent-written test files; both repaired.
-  - The `cat` script went back twice: first for a copied cost function, then for the review's fixes.
-  - The agent worktrees and branches are removed.
-- **Review:** three independent reviewers covered the whole branch (line by line, cross-file, behaviour and text).
-  - Fixed:
-    - `cat` lookahead: a post-open age-0 story was entered at open(d), before the news.
-    - duplicate stories;
-    - renamed symbols;
-    - the void window running past the hold;
-    - an empty token map recording success;
-    - the feed alarm during a slow startup;
-    - the startup page text and the all-clear;
-    - RUNBOOK gaps.
-  - Recorded in IMPLEMENTATION_PLAN "Known defects and test gaps" instead: the 08:40 `token_check` superseded-token page, the DG4 latch's
-    restart gap, and the `cat` scanner's double origination.
-- **Validation:**
-  - full gate 3,956 passed, 19 skipped (3 min 11 s);
-  - changed offline tests 117 passed;
-  - dashboard 92/92, both `tsc` clean.
-  - One gate run under agent load failed `test_run_never_blocks_the_event_loop` (a 2.9 s loop stall). It
-    passes alone and passed both later gates.
-- **`cat` verdict smoke run** (live state.db read-only, plus a scratch copy of the 10-24 market export):
-  INSUFFICIENT, 16 admitted signals.
-  - 2 duplicates: TCS 08-31 repeats an 08-28 story; PERSISTENT 09-24 repeats 09-23.
-  - 7 of 14 measured.
-  - Interim only, decides nothing: T+20 median net −10.5% (n=7); excess vs EW −4.9%.
-- **Not touched:** `mt-engine` (running, healthy), the live tree's code, `data/`, `config/limits.yaml`,
-  `config/envelope.yaml`.
-- **Host:** the keep-awake helper was refused by the auto-mode classifier, and the host slept ~03:42–04:18.
-- **Owner:**
-  - Merge and deploy, outside 09:15–15:30.
-  - The `cat` verdict's review-driven clarifications (entry timing; duplicates, including against the
-    excluded 08-18..28 span) were made after interim numbers had been seen: accept or amend them before the
-    cohort forms.
-  - The cost floor's equity basis: the smallest snapshot in the window is ₹19,154, from the 20k-base era, so
-    the floor is 0.64%.
 
 ## 2026-10-26 01:15 — ICICIPRULI's history moved to ICICILIFE (stage 2, f7e5bb6); HEG left in place by design
 
