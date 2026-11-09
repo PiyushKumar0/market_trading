@@ -182,8 +182,8 @@ def test_looks_fixed_and_look2_only_at_40():
 
 
 def test_a_look_waits_for_an_earlier_fill_instead_of_reforming_around_it(calendar):
-    """An early fill that finishes late (shipped exit still open, or T+20 awaiting a backfill) is in
-    look 1 from the start. Look 1 must not form without it and then change members when it lands."""
+    """An early fill that finishes late is in look 1 from the start: look 1 must not form without it and
+    then change members when it lands."""
     early = {**_eligible(1, d=-40.0, e=-9.0)[0], "rec_id": "early", "fill_d": "2026-08-31"}
     pending = [{**early, "status": "open", "net_pct": None}, *_eligible(20)]
     assert nsv.registered_looks(pending)["look1"] is None              # 20 eligible, first fill not final

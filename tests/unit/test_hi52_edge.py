@@ -60,12 +60,9 @@ def test_a_failing_derivation_keeps_the_registered_edge():
 
 
 def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
-    """The registered edge and the kill criterion's cost floor must come from ONE derivation or they
-    drift apart silently — a stale `expected_edge_pct` is an edge the arithmetic no longer supports,
-    read on every candidate for months. So `settings.yaml` carries only the OUTPUT of
-    `registered_edge_pct()`, and this test is the pin: a change to limits.yaml, to hi52's stop or to
-    the cost tables fails HERE instead of leaving the gate multiplying against a number nobody
-    re-derived."""
+    """The registered edge and the kill criterion's cost floor must come from one derivation: settings.yaml
+    carries only the output of `registered_edge_pct()`, and a change to limits.yaml, hi52's stop or the
+    cost tables fails here instead of leaving the gate on a stale edge."""
     import re
 
     from engine.core.config import load_settings
@@ -77,9 +74,8 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
     spec.loader.exec_module(fv)
     limits = config_dir() / "limits.yaml"
 
-    # Pinned at the REGISTRATION inputs (base 40,000), not the live file: the runtime cap
-    # (`engine.strategy.hi52_edge.StrategyEdges`) now carries the live-limits guard (the owner's dashboard capital change), so a
-    # capital change must not break this pin.
+    # Pinned at the registration inputs (base 40,000), not the live file, so a capital change does not
+    # break this pin (the runtime cap in StrategyEdges follows live limits).
     pinned = tmp_path / "limits.yaml"
     pinned.write_text(
         re.sub(r"^capital_base_inr:.*$", "capital_base_inr: 40000",

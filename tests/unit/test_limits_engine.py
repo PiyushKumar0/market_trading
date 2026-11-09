@@ -23,8 +23,7 @@ REAL_LIMITS_PATH = config_dir() / "limits.yaml"
 
 @pytest.fixture
 def store(tmp_path, conn, clock):
-    """A ProtectedStore over a config/ dir seeded with the REAL limits.yaml (copies the
-    registration fixture pattern from tests/unit/test_protected_store.py)."""
+    """A ProtectedStore over a config/ dir seeded with the REAL limits.yaml."""
     cfg = tmp_path / "config"
     cfg.mkdir()
     (cfg / "limits.yaml").write_bytes(REAL_LIMITS_PATH.read_bytes())
@@ -109,8 +108,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
 
 def test_floor_limits_from_threads_the_signed_table(registered_store):
     """The signed table is the ladder's single source: ``rolling_sessions`` reaches
-    ``FloorLimits.weekly_drawdown_sessions`` (the window ``evaluate_floors`` uses), beside the pcts
-    and the base. At the signed 5 it equals the code default, so behaviour is unchanged."""
+    ``FloorLimits.weekly_drawdown_sessions``, beside the pcts and the base."""
     from engine.risk.exposure import WEEKLY_DRAWDOWN_SESSIONS
     from engine.risk.limits import floor_limits_from
 
@@ -128,9 +126,8 @@ def test_floor_limits_from_threads_the_signed_table(registered_store):
 def test_resigned_rolling_sessions_reaches_the_ladder(
     store, tmp_path, caplog, sessions, expected
 ):
-    """A re-signed window flows through; a signed value < 1 parses (no boot crash outside the
-    IntegrityError fallback) and ``floor_limits_from`` clamps it to the default with an ERROR, so
-    the weekly rung stays live and the day-loss rungs are still evaluated."""
+    """A re-signed window flows through; a signed value < 1 parses and ``floor_limits_from`` clamps it
+    to the default with one ERROR, so the weekly rung stays live."""
     from engine.risk import limits as limits_mod
     from engine.risk.limits import floor_limits_from
 

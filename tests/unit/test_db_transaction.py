@@ -1,8 +1,7 @@
 """core.db.transaction(): every way out of the block leaves the shared connection outside a transaction.
 
-The defect this pins (parked during the owner's dashboard capital change, fixed 2026-10-18): a COMMIT that failed was raised from the
-``else`` branch with no ROLLBACK, and SQLite keeps the transaction open after such a COMMIT. Every later
-``BEGIN`` on the shared connection then failed, the kill switch's persist included.
+SQLite keeps the transaction open after a failed COMMIT, so without a ROLLBACK every later ``BEGIN`` on
+the shared connection fails (the kill switch's persist included).
 """
 
 from __future__ import annotations

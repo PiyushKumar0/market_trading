@@ -1,14 +1,8 @@
-"""The routing-agnostic broker surface (2026-09-10).
+"""The routing-agnostic broker surface: the OMS must not know whether ``ModeManager.routing()`` handed it
+Kite or the PaperBroker, so every method of :class:`~engine.paper.surface.BrokerSurface` must exist on
+both, be a coroutine function, and carry identical parameter names / kinds / defaults.
 
-The OMS must not know whether it is talking to Kite or to the PaperBroker -- ``ModeManager.routing()``
-picks one and hands it over. That is only safe if the two are structurally
-interchangeable, so this test asserts it MECHANICALLY rather than by convention: every method of
-:class:`~engine.paper.surface.BrokerSurface` must exist on BOTH ``KiteClient`` and ``PaperBroker``,
-be a coroutine function, and carry identical parameter names / kinds / defaults.
-
-Annotations are deliberately NOT compared: ``KiteClient`` types its request payload as its own
-``ReqLike`` alias and returns broker-shaped ``Any``; what has to match is the CALL shape, which is
-what a routing-agnostic caller depends on.
+Annotations are not compared (``KiteClient`` uses its own ``ReqLike`` alias); the call shape is what matters.
 """
 
 from __future__ import annotations
@@ -104,8 +98,8 @@ def test_paper_broker_satisfies_the_protocol_at_runtime(paper: PaperBroker) -> N
 
 
 def test_order_intent_defaults_match_kite(paper: PaperBroker) -> None:
-    # The intent defaults are load-bearing: they route the rate-limiter split (7.1 order_rate) and
-    # the order-surface guard (3.5.3). Paper must not quietly default an entry to risk_reducing.
+    # The intent defaults route the rate-limiter split and the order-surface guard: paper must not
+    # quietly default an entry to risk_reducing.
     assert inspect.signature(PaperBroker.place_order).parameters["intent"].default == "entry"
     assert inspect.signature(KiteClient.place_order).parameters["intent"].default == "entry"
     for meth in ("modify_order", "cancel_order"):

@@ -1,7 +1,5 @@
-"""KiteClient market-data passthrough coverage: instruments() + the TokenException
-circuit breaker (2026-07-21 fix): a rejected-token broker call fires ``on_token_rejected`` exactly
-once and ALWAYS re-raises (never swallow); a non-token error leaves the hook untouched; a
-hook that itself raises never masks the original TokenException."""
+"""KiteClient: instruments() passthrough and the TokenException breaker (``on_token_rejected`` fires
+once and the exception always re-raises; a raising hook never masks it)."""
 
 from __future__ import annotations
 
@@ -83,8 +81,7 @@ class _ReadKC:
 
 @pytest.mark.asyncio
 async def test_order_class_reads_never_spend_the_entry_budget(clock, rate_limiter) -> None:
-    """More than 70 reads on the "orders" class leave the entry counters at zero and never raise
-    EntryBudgetExhausted; an entry placement is still counted against the cap afterwards."""
+    """Reads on the "orders" class never count against the entry cap; a placement afterwards still does."""
     client = KiteClient(_ReadKC(), rate_limiter, clock, orders_enabled=True)
 
     for _ in range(15):
@@ -119,8 +116,7 @@ _TO = datetime(2026, 6, 17, 15, 30, tzinfo=IST)
 
 @pytest.mark.asyncio
 async def test_token_exception_fires_hook_once_and_reraises(clock, rate_limiter) -> None:
-    """A TokenException on the historical (_call) path AND the order (_order_call) path each fire the
-    breaker exactly once, and the exception always propagates."""
+    """A TokenException on the _call and _order_call paths each fires the breaker once and propagates."""
     fired: list[int] = []
 
     async def hook(token: str | None) -> None:
@@ -181,8 +177,8 @@ class _SwapTokenKC:
 
 @pytest.mark.asyncio
 async def test_hook_receives_the_token_the_request_was_sent_with(clock, rate_limiter) -> None:
-    """The token is captured BEFORE the executor runs, so a login landing mid-call cannot relabel the
-    rejected request as the new token — on both the _call and the _order_call path."""
+    """The token is captured before the executor runs, so a mid-call login cannot relabel the rejected
+    request as the new token (both paths)."""
     seen: list[str | None] = []
 
     async def hook(token: str | None) -> None:

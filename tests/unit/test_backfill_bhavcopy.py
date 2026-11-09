@@ -1,8 +1,4 @@
-"""scripts/backfill_bhavcopy.py: archive URL selection/fallback/holiday, checkpoint resume, and
-failure isolation (worklog 2026-09-01 follow-up — full-market bars_1d history for backtest_hi52.py).
-
-Loose-script import mechanism copied from tests/offline/test_backtest_cli.py (spec_from_file_location).
-"""
+"""scripts/backfill_bhavcopy.py: archive URL selection/fallback/holiday, checkpoint resume, and failure isolation."""
 
 from __future__ import annotations
 
@@ -170,8 +166,7 @@ def _udiff_csv_text(d: date) -> str:
 
 
 async def test_non_404_error_fails_the_date_and_loop_continues(conn, clock, monkeypatch):
-    """Friday fails on a non-404; Saturday and Sunday are ATTEMPTED (NSE holds weekend sessions) and
-    404 on both formats -> holidays; Monday ingests. The failed date carries no checkpoint."""
+    """A non-404 fails its date (no checkpoint); weekend dates are attempted and 404 to holidays; the loop goes on."""
     d1 = date(2025, 8, 1)  # Friday - first (UDiFF) URL raises a non-404 error, date fails outright
     d2 = date(2025, 8, 4)  # Monday - succeeds on its first (UDiFF) URL
     urls1 = mod._candidate_urls(d1)
@@ -221,9 +216,8 @@ async def test_a_non_404_status_on_the_first_url_never_tries_the_fallback(conn, 
 
 
 async def test_a_holiday_streak_stops_the_leg_and_clears_its_checkpoints(conn, clock, monkeypatch):
-    """An archive outage (or a wrong URL era) answers 404 to everything. NSE never closes for
-    _MAX_HOLIDAY_STREAK consecutive days, so the leg stops there and hands the streak back to the
-    next run instead of leaving a permanent 'holiday' verdict on real sessions."""
+    """NSE never closes for _MAX_HOLIDAY_STREAK consecutive days: a 404 streak stops the leg and leaves
+    the streak un-checkpointed for the next run, not a permanent 'holiday' verdict."""
     async def fake_nse_get(http, url, *, timeout):
         raise _http_404(url)
 
@@ -288,8 +282,7 @@ async def test_corp_actions_windows_checkpoint_with_rows_and_fail_empty(conn, cl
 
 
 async def test_a_served_file_with_zero_eq_rows_fails_the_date(conn, clock, monkeypatch):
-    """A 200 that parses to nothing (header-only / corrupt member) is a failure, not an ingested day --
-    the live job raises on it too (bhavcopy.py: 'parsed to zero EQ rows'); no checkpoint, so it retries."""
+    """A 200 that parses to zero EQ rows is a failure (as in the live job), not an ingested day; no checkpoint."""
     d = date(2025, 8, 1)
 
     async def fake_nse_get(http, url, *, timeout):
@@ -308,8 +301,7 @@ async def test_a_served_file_with_zero_eq_rows_fails_the_date(conn, clock, monke
 
 # --------------------------------------------------------------------------- (5) legacy TIMESTAMP format
 def test_parse_bhavcopy_csv_accepts_legacy_uppercase_timestamp():
-    """Pins that the EXISTING bhavcopy._parse_date already handles '01-AUG-2023' (via its %d-%b-%Y
-    format, which strptime matches case-insensitively) - no source change was needed for this script."""
+    """bhavcopy._parse_date handles '01-AUG-2023' (strptime %b matches case-insensitively)."""
     d = date(2023, 8, 1)
     bars = parse_bhavcopy_csv(_legacy_csv_text(d), d)
     assert len(bars) == 1

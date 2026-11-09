@@ -1,10 +1,7 @@
-"""Pre-registered filings experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness) (``scripts/filings_experiments.py``).
+"""Filings experiments (catalyst_orb, rsi2_catalyst_veto, insider_robustness; ``scripts/filings_experiments.py``).
 
-PURE flag/slice builder tests (cluster-active window edges, results T+1/T+2 incl. after-hours shift,
-adverse-pledge 90d window, person-category value-share dominance, liquidity terciles, crossing
-contributors) + one tmp-store glue smoke per experiment (tiny synthetic frames/filings -> runs
-end-to-end with honest empty/populated sections). The real ``data/market.duckdb`` is NEVER opened;
-every fixture is synthetic on a temp MarketStore.
+Pure flag/slice builder tests plus one tmp-store glue smoke per experiment. The real
+``data/market.duckdb`` is never opened.
 """
 
 from __future__ import annotations
@@ -257,8 +254,7 @@ def test_catalyst_orb_runs_end_to_end_honest_empty(tmp_path, clock):
         assert res["round_trip_pct"] > 0.0                     # a real MIS round trip was modelled
         md = fe.render_catalyst_orb(res)
         assert "Cohort stats" in md and "Discriminator" in md
-        # The name promises an EMPTY run: if the fixture ever yields trades this fails loudly instead
-        # of silently skipping the honest-n=0 check.
+        # The name promises an empty run: fail loudly if the fixture ever yields trades.
         assert res["n_trades_total"] == 0
         assert "honest n=0" in md                              # empty cohorts reported honestly
     finally:

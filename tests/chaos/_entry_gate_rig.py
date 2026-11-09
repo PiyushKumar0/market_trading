@@ -1,13 +1,10 @@
-"""Shared plumbing for chaos cases 3 / 14 / 18: the ENTRY gate exactly as ``engine.ops.main``
-composes it (``main.py`` ``ctx_builder = GateContextBuilder(...)`` + ``gate = RiskGate(...)``) — the
-real :class:`GateContextBuilder` over a temp :class:`MarketStore` and the migrated temp SQLite, the
-real :class:`RiskGate` over the SHIPPED ``config/limits.yaml`` / ``config/costs.yaml`` (read-only).
+"""Shared plumbing for chaos cases 3 / 14 / 18: the ENTRY gate as ``engine.ops.main`` composes it — the
+real :class:`GateContextBuilder` over a temp :class:`MarketStore` and migrated temp SQLite, the real
+:class:`RiskGate` over the shipped ``config/limits.yaml`` / ``config/costs.yaml`` (read-only).
 
-The seams main.py injects as closures (``ltp_fn`` / ``tick_age_fn`` / ``warmup_status_fn`` /
-``clock_skew_ok_fn``) are passed in by each case, which is precisely what each case perturbs. A case
-asserts on named checks of the verdict (``stale_data_guard``, ``clock_skew``, ``warmup_ready``,
-``regime_data_ready``, ``mode_risk_state``) — the other rules depend on universe/instrument data the
-chaos stores deliberately do not carry, so a whole-verdict ``approve`` is never the assertion.
+The closure seams (``ltp_fn`` / ``tick_age_fn`` / ``warmup_status_fn`` / ``clock_skew_ok_fn``) are
+passed in by each case, which is what it perturbs. Cases assert on named checks of the verdict, never a
+whole-verdict ``approve``: the other rules need universe/instrument data the chaos stores do not carry.
 """
 
 from __future__ import annotations

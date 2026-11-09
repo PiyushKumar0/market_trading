@@ -53,8 +53,8 @@ def test_excludes_split_and_outlier_and_averages_rest(store, cal, clock):
 
 
 def test_averages_over_the_core_subset_only(store, cal):
-    """Owner decision 2026-10-08: an eligible but non-core (microcap) name never enters the benchmark, so the
-    series stays one population across the NIFTY Total Market widening."""
+    """An eligible but non-core (microcap) name never enters the benchmark: the series stays one population
+    across the universe widening."""
     _universe(store, WED, ["A"])
     store.upsert_universe_daily([{"d": WED, "symbol": "MICRO", "included": True,
                                   "exclusion_reasons": None, "median_traded_value": Decimal("1"),
