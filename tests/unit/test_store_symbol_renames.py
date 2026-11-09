@@ -1,6 +1,5 @@
-"""MarketStore.get_symbol_renames — NSE equity renames derived from ``instruments_daily`` token
-continuity (2026-10-23 ICICIPRULI→ICICILIFE: Kite kept token 4774913 while the NSE index lists and
-the Zerodha MIS file still named the retired symbol)."""
+"""MarketStore.get_symbol_renames — NSE equity renames derived from ``instruments_daily`` token continuity
+(ICICIPRULI→ICICILIFE: Kite kept the token while other lists still named the retired symbol)."""
 
 from __future__ import annotations
 
@@ -51,8 +50,8 @@ def test_retired_symbol_maps_to_its_tokens_current_symbol(store):
 
 
 def test_rename_across_a_token_absence_gap(store):
-    """HEG→HEGAM (2026-09-22) kept token 342017 across a 17-day suspension: a day-over-day diff
-    misses it; the windowed derivation does not. effective_d is the first new-symbol day."""
+    """HEG→HEGAM kept its token across a suspension: a day-over-day diff misses it, the windowed derivation does not.
+    effective_d is the first new-symbol day."""
     snapshots(store, {D - timedelta(days=3): [(342017, "HEG")],
                       D - timedelta(days=2): [],
                       D - timedelta(days=1): [(342017, "HEGAM")],

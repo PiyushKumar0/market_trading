@@ -1,10 +1,7 @@
 """Pre-open Kite token validity check.
 
-2026-08-20: the daily access token was already stale at the open and NOTHING looked at it — the
-first rejection surfaced at 09:50 as a mid-session TokenException → FROZEN, ~108 minutes of the
-trade window gone. These tests pin the four outcomes of the 08:40 probe: ok (silent), rejected
-(CRITICAL + critical alert naming /token and the login link), any other error (WARNING + warning
-alert, and NEVER a raise — the check must not be load-bearing), and a non-trading-day skip.
+Pins the four outcomes of the 08:40 probe: ok (silent), rejected (CRITICAL + critical alert naming /token
+and the login link), any other error (WARNING + warning alert, never a raise), and a non-trading-day skip.
 """
 
 from __future__ import annotations

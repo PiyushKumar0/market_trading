@@ -73,8 +73,7 @@ async def test_a_listed_strategy_without_a_known_hold_keeps_its_stop(conn, make_
 
 
 async def test_a_listed_strategy_whose_exit_date_is_beyond_the_calendar_keeps_its_stop(conn, make_rig) -> None:
-    """From 2026-12-04 the 20th session is past the loaded 2026 calendar: a time-only position would have
-    no exit date, so it opens on the shipped levels instead (and is outside the no-stop population)."""
+    """With the exit date past the loaded calendar a time-only position would have none, so it opens on the shipped levels (outside the no-stop population)."""
     rig = make_rig(no_stop={"hi52"})
 
     def beyond_calendar(_d: dt.date, _n: int) -> dt.date:

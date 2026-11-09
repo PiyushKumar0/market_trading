@@ -303,7 +303,6 @@ def test_a_restore_failure_propagates_and_leaves_the_mismatch_detectable(store, 
     assert _no_tmp_left(path)
 
 
-# Fix round 1: the restore target comes from durable state, temp names carry the pid.
 class _CommitThenInterrupt:
     """COMMIT really commits, then a KeyboardInterrupt lands (a SIGINT pending during COMMIT)."""
 
@@ -365,8 +364,7 @@ def _proxied_store(tmp_path, conn, clock, proxy_cls):
 
 
 def test_an_interrupt_after_a_landed_commit_keeps_the_new_bytes(tmp_path, conn, clock):
-    # Review probe A: the signature committed, so the new bytes must stay (restoring the old ones would
-    # leave old bytes under the new signature).
+    # The signature committed, so the new bytes must stay (restoring would leave old bytes under the new signature).
     plain, store, path = _proxied_store(tmp_path, conn, clock, _CommitThenInterrupt)
     _, sha = plain.read_verified_bytes("limits.yaml")
     with pytest.raises(KeyboardInterrupt):
@@ -378,7 +376,7 @@ def test_an_interrupt_after_a_landed_commit_keeps_the_new_bytes(tmp_path, conn, 
 
 
 def test_an_interrupt_during_the_rollback_still_restores_the_old_bytes(tmp_path, conn, clock):
-    # Review probe B: a BaseException raised by the ROLLBACK must not skip the restore.
+    # A BaseException raised by the ROLLBACK must not skip the restore.
     plain, store, path = _proxied_store(tmp_path, conn, clock, _CommitFailsThenRollbackInterrupted)
     before = _state(plain, conn, path)
     with pytest.raises(KeyboardInterrupt):

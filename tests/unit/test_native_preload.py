@@ -45,9 +45,8 @@ def test_guard_loads_sklearn_only_on_first_guarded_import() -> None:
 
 @pytest.mark.parametrize("name", ["numba", "llvmlite", "vectorbt", "cvxpy", "skfolio"])
 def test_every_native_package_loads_through_the_sklearn_first_loader(name: str) -> None:
-    """The five packages of the crash table: a fresh finder (``pending`` full, whatever this process has
-    imported) hands each the sklearn-first loader. Locating a spec imports nothing. Installed is decided
-    by the plain path finder: the guard's own ``None`` is also what dropping a name from GUARDED returns."""
+    """A fresh finder (``pending`` full) hands each guarded package the sklearn-first loader; locating a spec imports nothing.
+    Installed is decided by the plain path finder, since the guard's own ``None`` is also what a name dropped from GUARDED returns."""
     if importlib.machinery.PathFinder.find_spec(name) is None:
         pytest.skip(f"{name} not installed")
     spec = _preload._SklearnFirst().find_spec(name)

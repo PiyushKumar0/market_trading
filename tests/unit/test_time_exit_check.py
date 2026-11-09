@@ -143,8 +143,8 @@ async def test_the_exit_fires_on_the_exit_session_not_before(
 async def test_the_no_entry_rec_fallback_does_not_count_the_muhurat_session(
     conn, ticker, pclock, pipeline
 ):
-    """Live calendar (include_special=False): the 2026-11-08 muhurat session is a closed day, so it
-    is not a held session. Opened 10-12, cap 20 -> due 11-12 (10-13 is session 1)."""
+    """Live calendar (include_special=False): the 2026-11-08 muhurat session is a closed day, not a held session.
+    Opened 10-12, cap 20 -> due 11-12 (10-13 is session 1)."""
     pipeline._calendar = NSECalendar(CALENDAR_DIR, pclock, sqlite_conn=conn, include_special=False)
     opened = _at(date(2026, 10, 12))
     conn.execute(

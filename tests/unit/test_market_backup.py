@@ -1,10 +1,7 @@
-"""DuckDB leg (2026-10-11): ``MarketStore.export_snapshot`` and the ``market_backup`` lane job.
+"""``MarketStore.export_snapshot`` and the ``market_backup`` lane job.
 
-Nothing backed up ``market.duckdb`` (5.96 GB, 25 tables, several irreplaceable: LLM-scored news
-clusters, feature snapshots the learning ledger references, point-in-time universe history). Windows
-cannot copy the open file, so the backup is an ``EXPORT DATABASE`` on a cursor of the live store —
-no store lock — written to a tmp dir and renamed into place once complete; ``IMPORT DATABASE``
-restores it with its primary keys.
+Windows cannot copy the open file, so the backup is an ``EXPORT DATABASE`` on a cursor of the live store
+(no store lock), written to a tmp dir and renamed into place once complete; ``IMPORT DATABASE`` restores it.
 """
 
 from __future__ import annotations
@@ -203,8 +200,7 @@ def test_interrupt_ends_an_export_and_removes_its_tmp(store, tmp_path) -> None:
 
 
 def test_close_interrupts_an_in_flight_export_instead_of_waiting_for_it(tmp_path) -> None:
-    """Closing the parent connection waits for a cursor's EXPORT to finish (measured): a ~45 s export
-    on the stop path would outlast NSSM's 30 s grace. close() interrupts it first."""
+    """close() interrupts the export first: closing the parent connection otherwise waits for it, outlasting NSSM's 30 s grace."""
     s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", MovableClock(NIGHT)).open()
     _big_table(s)
     dest = tmp_path / "market-x"
@@ -285,8 +281,7 @@ async def test_job_refuses_inside_session_window(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_an_unfinished_run_records_no_watermark_in_the_lane_runner(tmp_path, conn) -> None:
-    """``CatchUpRunner._run_latest`` honours ``unfinished`` like the date-keyed and scheduled runners:
-    a refused export leaves the day missed for the first lane pass after the window."""
+    """``CatchUpRunner._run_latest`` honours ``unfinished``: a refused export leaves the day missed for the first pass after the window."""
     clock = MovableClock(datetime(2026, 6, 18, 8, 50, tzinfo=IST))   # Thu, inside the window
     calendar = _calendar(clock)
     fake = FakeStore()
@@ -383,9 +378,7 @@ async def test_a_restart_allows_one_fresh_export_attempt(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_a_stuck_export_failure_is_neither_retried_nor_reported_every_sweep(tmp_path, conn) -> None:
-    """Through the lane's real runner: the first failure records ``failed`` and reports once; the
-    sweeps inside the hold export nothing, record nothing, report nothing; the retry after it
-    fails again quietly (unchanged failure set); the first pass after the next hold succeeds."""
+    """A failure records ``failed`` and reports once; sweeps inside the hold do nothing; the retry fails quietly (unchanged failure set)."""
     clock = MovableClock(datetime(2026, 6, 19, 22, 0, tzinfo=IST))      # Fri 22:00
     calendar = _calendar(clock)
     store = FailingStore()
@@ -470,8 +463,7 @@ async def test_first_export_needs_the_database_size_free(tmp_path, monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_job_on_a_real_store_writes_logs_and_prunes(tmp_path, caplog) -> None:
-    """Producer and consumer at their seam: the job drives the real export, the next run's disk
-    floor reads the export it wrote, and retention keeps the newest."""
+    """The job drives the real export, the next run's disk floor reads it, and retention keeps the newest."""
     clock = MovableClock(NIGHT)
     real = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock).open()
     try:

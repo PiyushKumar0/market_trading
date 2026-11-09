@@ -16,10 +16,9 @@ from engine.notify.telegram import (
 )
 
 
-# --------------------------------------------------------------------------- rendering (regression)
+# --------------------------------------------------------------------------- rendering
 def test_catalog_message_renders_clean_owner_text() -> None:
-    """Regression: ``send`` must render a title+body message, never leak the raw Pydantic model
-    (``kind=<…> title=… data={…} buttons=None``) to the owner — the old ``str(model)`` fallback."""
+    """A catalog message renders as title+body, never as the raw Pydantic model repr."""
     msg = engine_started(mode="OFF", version="0.0.0")
     rendered = msg.render()
     assert "Engine started" in rendered and msg.body in rendered
@@ -158,8 +157,7 @@ def test_menu_advertises_only_live_commands() -> None:
     menu = _menu_commands()
     assert {bc.command for bc in menu} == {c.name for c in _COMMANDS if c.live}
     assert all(bc.description for bc in menu)                   # non-empty descriptions
-    # Assert the SOURCE summary fits Telegram's 256-char cap so the [:256] slice never silently
-    # truncates mid-word — asserting on the already-sliced bc.description would be a tautology.
+    # Assert the SOURCE summary fits the 256-char cap; the already-sliced bc.description would be a tautology.
     for c in _COMMANDS:
         if c.live:
             assert len(c.summary) <= 256

@@ -1,14 +1,12 @@
 """SQLite migrations v1: the full table set is created, singletons are seeded, and re-applying
-is idempotent. Guards against a future migration omitting a table (the engine_lifecycle regression
-that this test would have caught)."""
+is idempotent. Guards against a migration omitting a table."""
 
 from __future__ import annotations
 
 from engine.core.db import connect
 from engine.core.migrations import apply_migrations
 
-# The complete table inventory (migrations v1). Adding a table to the schema without adding it here
-# fails CI, and vice-versa — the two must stay in lockstep so an omission cannot pass silently.
+# The complete table inventory; schema and this set must stay in lockstep.
 EXPECTED_TABLES = {
     "proposals", "verdicts", "orders", "order_events", "positions", "gtts",
     "mode_state", "kill_state", "engine_lifecycle", "trade_window_state", "job_runs",
@@ -48,10 +46,7 @@ def test_engine_lifecycle_singleton_seeded(db_path):
 
 
 def test_funnel_raw_counts_table_upserts_absolute_values(db_path):
-    """2026-08-21: the RAW pre-screen counters get a DB home so a restart stops zeroing them
-    (the nightly review reported ``raw=None`` on 4 of the last 6 trade days). The PK is
-    (d, strategy_id) precisely because the flush re-writes the day's ABSOLUTE total whenever it
-    changes — the write has to be idempotent no matter how many times the engine bounced."""
+    """PK (d, strategy_id): the flush re-writes the day's absolute total, so the write must be idempotent across restarts."""
     conn = connect(db_path)
     try:
         apply_migrations(conn)
@@ -74,9 +69,7 @@ def test_funnel_raw_counts_table_upserts_absolute_values(db_path):
 
 
 def test_notifications_journal_table_and_status_machine(db_path):
-    """2026-08-21: the owner-notification journal that is simultaneously the Telegram retry
-    outbox and the dashboard's data source. ``status`` is the state machine and the CHECK constraint
-    is what keeps a fourth, undefined state from ever reaching the drainer or the page."""
+    """The notification journal (Telegram retry outbox and dashboard source): the ``status`` CHECK keeps an undefined state out."""
     import sqlite3
 
     conn = connect(db_path)

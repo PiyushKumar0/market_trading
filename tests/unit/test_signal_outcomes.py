@@ -431,7 +431,7 @@ def _statuses(conn, symbol) -> dict[str, str]:
 
 
 async def test_a_rename_mid_hold_is_followed_and_a_closed_row_never_moves(conn, store, cost_model, job, sess):
-    """2026-10-23 shape: the journal keeps OLD; rekey_symbol moves the bars and the resting row to NEW."""
+    """A renamed symbol: the journal keeps OLD; rekey_symbol moves the bars and the resting row to NEW."""
     _slot(conn, sess[0], "OLD")                                   # hi52: closed before the rename
     _resting(conn, sess[3], sess[8], symbol="OLD")
     _slot(conn, sess[3], "OLD", "brk20")                          # filled on sess[3], open at the rename

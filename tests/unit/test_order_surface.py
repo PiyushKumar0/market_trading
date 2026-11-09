@@ -1,8 +1,6 @@
-"""Order-surface guard: position-opening broker calls must be
-structurally impossible outside AUTO ∧ NORMAL ∧ in-window. ``KiteClient`` never imports
-``engine.risk`` — the guard is a plain callback the wiring layer injects; here we use the composition
-root's own ``make_order_guard`` and prove every gated path routes through it before the rate limiter
-is even touched. A client built without ``orders_enabled`` refuses every order/GTT call outright."""
+"""Order-surface guard: position-opening broker calls are impossible outside AUTO ∧ NORMAL ∧ in-window.
+``KiteClient`` takes the guard as an injected callback (``make_order_guard``); every gated path hits it before the
+rate limiter. A client built without ``orders_enabled`` refuses every order/GTT call."""
 
 from __future__ import annotations
 
@@ -80,10 +78,7 @@ def kill(conn, clock) -> KillSwitch:
 
 @pytest.fixture
 def rate_limiter(clock) -> RateLimiter:
-    # burst=100: the conftest clock is FROZEN, so the token bucket never refills — with the
-    # production burst of 2, any test making a 3rd order call sleeps forever waiting for tokens
-    # (the 2026-07-27 full-suite wedge). Same idiom as test_rate_limiter.py; pacing itself is
-    # exercised there with a ticking clock, not here.
+    # burst=100: the conftest clock is frozen, so the bucket never refills and a 3rd order call would sleep forever.
     return RateLimiter(clock, burst=100)
 
 
@@ -175,8 +170,7 @@ async def test_entry_succeeds_in_auto_normal_in_window(conn, clock, rate_limiter
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start_mode", [None, Mode.RECOMMEND], ids=["off", "recommend"])
 async def test_risk_reducing_bypasses_mode_gate(conn, clock, rate_limiter, mm, kill, start_mode) -> None:
-    """Mode invariant: risk-reducing place/modify/cancel succeed regardless of mode — OFF and
-    RECOMMEND included — even outside the window and with no mode transition to AUTO."""
+    """Risk-reducing place/modify/cancel succeed in any mode, outside the window."""
     if start_mode is not None:
         await mm.request_transition(start_mode, Actor.OWNER)
     fake_kc = _FakeKC()
@@ -218,10 +212,7 @@ async def test_no_guard_wired_entry_passes(clock, rate_limiter) -> None:
 # --------------------------------------------------------------------------- GTT paths: no special-casing
 @pytest.mark.asyncio
 async def test_gtt_calls_route_through_the_guard_with_their_own_intent(conn, clock, rate_limiter, mm, kill) -> None:
-    """place_gtt/modify_gtt/delete_gtt carry ``intent='risk_reducing'`` already — KiteClient does not
-    special-case GTT-as-opening; the guard sees the same intent string it always would and decides.
-    Proven here in OFF mode (would block ``intent='entry'``) where the calls still succeed because the
-    guard receives ``'risk_reducing'``, and the guard is provably invoked (recorded) for each of them."""
+    """GTT calls reach the guard with ``intent='risk_reducing'`` (not special-cased as opening), so they succeed in OFF mode."""
     seen_intents: list[str] = []
     base_guard = _guard(conn, mm, kill, _OUTSIDE)
 

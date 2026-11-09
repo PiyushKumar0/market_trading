@@ -1,5 +1,5 @@
 """Moving a renamed symbol's history: ``MarketStore.rekey_symbol`` and ``scripts/rekey_symbol.py``
-(2026-10-23 NSE rename ICICIPRULI→ICICILIFE; Kite kept the token, every symbol-keyed row did not move)."""
+(ICICIPRULI→ICICILIFE: Kite kept the token, every symbol-keyed row did not move)."""
 
 from __future__ import annotations
 
@@ -362,9 +362,8 @@ def test_script_apply_refuses_a_live_position_on_the_old_symbol(env, capsys):
 
 
 def test_script_apply_refuses_a_rename_with_a_trading_gap(env, capsys, clock):
-    """HEG→HEGAM (2026-09-22) came with a 10-session suspension around its demerger: moved history would
-    carry that hole, and the warm-up would refuse the new symbol for a gapped window instead of treating
-    it as a fresh listing."""
+    """A rename around a multi-session suspension (HEG→HEGAM): moved history would carry the hole and the warm-up
+    would refuse the new symbol, instead of treating it as a fresh listing."""
     s = MarketStore(env.duckdb_path(), env.parquet_dir(), clock).open()
     bar = {"open": 1, "high": 1, "low": 1, "close": 1, "volume": 1}
     insert(s, "bars_1d", {"symbol": "OTHER", "d": D - timedelta(days=2), **bar},

@@ -65,8 +65,7 @@ async def test_set_cause_applies_state_and_records_detail(conn, clock, latch):
 
 @pytest.mark.asyncio
 async def test_normal_is_not_a_latching_cause(latch):
-    """NORMAL is the ABSENCE of causes — latching it would be a contradiction (and the table's CHECK
-    constraint rejects it too)."""
+    """NORMAL is the absence of causes; the table's CHECK rejects it too."""
     with pytest.raises(ValueError, match="not a latching state"):
         await latch.set_cause("bogus", RiskState.NORMAL, "", Actor.RISK_GATE)
 
@@ -165,8 +164,7 @@ async def test_latch_survives_a_restart(conn, clock, db_path, latch):
 
 @pytest.mark.asyncio
 async def test_state_changes_are_published_and_audited(conn, clock, bus):
-    """The latch delegates persistence/publish to ModeManager, so the ``risk.state`` event and
-    the config_audit row come for free — assert they actually do."""
+    """A latch change publishes ``risk.state`` and writes the config_audit row (via ModeManager)."""
     seen = []
 
     async def handler(event):
@@ -191,8 +189,7 @@ async def test_state_changes_are_published_and_audited(conn, clock, bus):
 
 
 async def test_clear_inactive_cause_never_relaxes_an_out_of_ledger_state(conn, clock):
-    """2026-07-28 review: /resume_entries (clear of causes that are NOT active) must not re-arm
-    NORMAL over a freeze some latch-less path wrote directly (e.g. token-rejected)."""
+    """/resume_entries (clearing causes that are not active) must not re-arm NORMAL over a freeze a latch-less path wrote directly."""
     from engine.core.calendar import NSECalendar
     from engine.core.config import config_dir
     from engine.core.enums import Actor, RiskState

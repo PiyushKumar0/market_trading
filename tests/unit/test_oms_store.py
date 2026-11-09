@@ -1,10 +1,8 @@
-"""OrderStore unit tests (2026-09-10).
+"""OrderStore unit tests.
 
-The load-bearing property under test is **persist-before-side-effect**: :meth:`OrderStore.record`
-commits the new order row AND its ``order_events`` row in ONE transaction, so a caller that only acts
-after ``record`` returns can never act on an unpersisted state (a crash in the gap leaves the DB
-consistent). Proven with a SECOND connection to the same file (only committed data is visible there)
-and with a mid-record failure asserting neither half landed.
+Core property, persist-before-side-effect: :meth:`OrderStore.record` commits the order row AND its
+``order_events`` row in ONE transaction. Proven with a second connection (sees only committed data) and a
+mid-record failure asserting neither half landed.
 """
 
 from __future__ import annotations
@@ -158,11 +156,7 @@ def test_record_is_committed_before_it_returns(store: OrderStore, conn, db_path:
 
 
 class _FailOnEventInsert:
-    """Connection proxy that fails the order_events INSERT — the second half of ``record``.
-
-    ``sqlite3.Connection.execute`` is a read-only C attribute (monkeypatching it raises), so the
-    injection goes through a proxy; ROLLBACK still reaches the real connection.
-    """
+    """Connection proxy that fails the order_events INSERT (``Connection.execute`` is read-only, so no monkeypatch); ROLLBACK reaches the real connection."""
 
     def __init__(self, real: sqlite3.Connection) -> None:
         self._real = real
@@ -212,9 +206,7 @@ def test_terminal_order_rejects_further_records(store: OrderStore) -> None:
 
 
 def test_record_noop_audits_a_postback_against_a_terminal_row(store: OrderStore) -> None:
-    """EVERY postback must be recorded; ``record`` refuses terminal rows, so no-ops need
-    their own door (2026-09-10 review finding: a replayed postback on a FILLED order was unrecordable
-    and the audit chain lost the frame — an unrecorded broker action is an unexplained one)."""
+    """Every postback is recorded: ``record`` refuses terminal rows, so a replay on a FILLED order goes through ``record_noop``."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     store.insert(order)
     filled, ev = transition(order, OrderState.FILLED, payload={"status": "COMPLETE"}, at=AT)
@@ -247,9 +239,8 @@ def test_record_noop_works_on_a_live_row_too(store: OrderStore) -> None:
 
 
 def test_record_noop_refuses_an_unannotated_self_edge(store: OrderStore) -> None:
-    """2026-09-10 round-3 review (major): a no-op is an event ANNOTATED with a NOOP flag, not merely
-    one whose states match — the PARTIALLY_FILLED accretion self-edge is a REAL transition,
-    and routing it here would audit a clean event while the fill never reached the orders row."""
+    """A no-op is an event annotated with a NOOP flag, not merely one whose states match: the PARTIALLY_FILLED
+    accretion self-edge is a real transition and must not be audited here while the fill never reaches the orders row."""
     order = make_order(OrderState.PARTIALLY_FILLED, filled_qty=40)
     store.insert(order)
     accretion, ev = transition(

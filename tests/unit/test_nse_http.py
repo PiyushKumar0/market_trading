@@ -1,8 +1,7 @@
 """engine.core.nse_http: cookie priming, anti-bot re-prime, and bounded backoff retry.
 
-Every case drives :func:`nse_get` through an ``httpx.MockTransport`` that records the exact request
-sequence, so the priming/re-prime/backoff contract is asserted on observed traffic — not internals.
-``_sleep`` is monkeypatched to a recorder so the backoff schedule is observed without waiting.
+Cases drive :func:`nse_get` through an ``httpx.MockTransport`` recording the request sequence; ``_sleep`` is a
+recorder so the backoff schedule is observed without waiting.
 """
 
 from __future__ import annotations
