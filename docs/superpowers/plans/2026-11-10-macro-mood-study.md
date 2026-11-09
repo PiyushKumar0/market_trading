@@ -323,7 +323,10 @@ Build this second, so content starts accruing as early as possible.
   - `clusters(cluster_key TEXT PRIMARY KEY, first_captured_at TEXT, representative_url TEXT, member_urls TEXT)`;
   - `llm_calls(call_id TEXT PRIMARY KEY, at TEXT, purpose TEXT CHECK(purpose IN ('score_H','score_C','map_headline','map_content')), model TEXT, prompt_sha256 TEXT, ok INTEGER, error TEXT)`;
   - `scores(cluster_key TEXT, variant TEXT CHECK(variant IN ('H','C')), scope TEXT, event_type TEXT, sentiment REAL, materiality REAL, novelty REAL, call_id TEXT, PRIMARY KEY(cluster_key, variant))`;
-  - `mappings(candidate_key TEXT, source TEXT CHECK(source IN ('headline','content')), groups TEXT, call_id TEXT, PRIMARY KEY(candidate_key, source))`, where a headline candidate's key is the engine's `cluster_id`.
+  - `mappings(candidate_key TEXT, source TEXT CHECK(source IN ('headline','study_h','content')), groups TEXT, call_id TEXT, PRIMARY KEY(candidate_key, source))`.
+    - A `headline` candidate's key is the engine's `cluster_id`.
+    - A `study_h` candidate is a study cluster whose H score meets the policy bars. It is mapped from the headline only and feeds the headlines-versus-content comparison.
+    - A `content` candidate is a study cluster whose C score meets the bars.
 - **Function and constants:**
   - `run_night(content_db: Path, state_db: Path, llm: StudyLLM, now: datetime) -> dict`.
   - `VOCAB`: the 23 sector labels and 7 themes exactly as in `mapper_prompt.md`, in that order.
@@ -337,6 +340,7 @@ Build this second, so content starts accruing as early as possible.
   2. Score H then C for unscored clusters (Haiku).
   3. Map headline candidates from `agent_calls` scored since the last run, with `event_type` in {govt_program, sector_policy}, sentiment ≥ 0.4 and materiality ≥ 0.6, using the headline from that call's context (Sonnet).
   4. Map the same bars on C scores, with headline, summary and excerpt (Sonnet).
+  5. Map the same bars on the study's H scores, headline only (Sonnet), into `source='study_h'`.
 - **Stopping and priority:** the night stops on `CallCapReached` or `LLMStopped` and resumes from what is left the next night.
   - Priority is forward-window work first: clusters and candidates from 09:00 IST on 2026-11-10 onward, oldest first.
   - The seen-period backlog comes after that: headline candidates from 2026-07-16 until then, reported as seen.
@@ -386,7 +390,7 @@ Build this second, so content starts accruing as early as possible.
   - **Verdict timing:** a verdict forms at the 30th closed trade. With fewer than 30 closed trades at `REGISTERED_FROM` + 18 months, the label is insufficient. Before either, the report says "accruing n/30".
 - **Comparison** (decides nothing):
   - Tone: the Spearman rank correlation of tone(D) with NIFTY open(D)→close(D+4), for C minus H, with a moving-block bootstrap 95% CI (block 5, 2,000 draws, seed `PERM_SEED`).
-  - Policy: the mean 10-session excess of C-identified minus H-identified events, with a bootstrap 95% CI.
+  - Policy: the mean 10-session excess of C-identified events (`mappings.source='content'`) minus H-identified ones (`source='study_h'`), with a bootstrap 95% CI.
   - The answer is "content adds leverage", "content hurts" or "no measurable difference", per the spec.
 
 - [ ] **Step 1: Write the failing tests:**
