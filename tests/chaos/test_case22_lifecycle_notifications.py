@@ -1,31 +1,20 @@
 """Chaos case 22 — Lifecycle notifications: (a) clean planned stop, (b) crash mid-active-
 period, (c) crash during intentional-off.
 
-Drill-catalog row (case 22), "Must hold":
+Must hold: (a) a clean stop sends exactly one ENGINE_STOPPED, the watchdog stays silent across the idle gap
+and the restart sends ENGINE_STARTED then a clean STARTUP_REPORT; (b) kill -9 while intending to run makes
+the watchdog send one ENGINE_DOWN within ``down_stale_s`` (edge-triggered), and the restart reports
+``crash_recovered``; (c) a kill while intentionally off stays silent. Alerts are operational, not capital
+emergencies.
 
-    "(a) clean stop ⇒ exactly one ENGINE_STOPPED (reason + positions-protected); intend_to_run=false;
-    watchdog then silent — no ENGINE_DOWN, no false alarm across the idle gap ("off is normal");
-    restart ⇒ ENGINE_STARTED then clean STARTUP_REPORT (no crash notice). (b) kill -9 while
-    intend_to_run=true ⇒ watchdog fires one ENGINE_DOWN within down_stale_s (~90 s) — positions
-    broker-protected; NSSM restart (gated to the true sentinel) ⇒ ENGINE_STARTED +
-    STARTUP_REPORT(crash_recovered); no duplicate ENGINE_DOWN on the next poll (edge-triggered).
-    (c) engine killed while intend_to_run=false ⇒ watchdog stays silent (it should be off). All three:
-    capital protection unaffected; alerts are operational, not capital emergencies"
+``intend_to_run`` is ``engine_lifecycle.state``: ``RUNNING``/``STOPPING`` = intends to run, ``STOPPED`` =
+intentional off (the watchdog's predicate is ``state != 'STOPPED'``). Every scenario composes the real
+lifecycle + heartbeat thread + ``scripts/watchdog.py`` over one on-disk state.db
+(``tests/chaos/_lifecycle_rig.py``). The NSSM restart policy lives in the service manager, not engine
+code; the restart is modelled as the next boot of the same data dir.
 
-``intend_to_run`` is carried by ``engine_lifecycle.state`` in the shipped schema (migration 0001):
-``RUNNING``/``STOPPING`` = intends to run, ``STOPPED`` = intentional off (the watchdog's predicate
-is ``state != 'STOPPED'``). Every scenario composes the real lifecycle + heartbeat thread + the real
-``scripts/watchdog.py`` IO shell over one on-disk state.db (``tests/chaos/_lifecycle_rig.py``); the
-watchdog's Telegram sender and the OS process table are the faked boundary.
-
-Clauses covered: all of (a), (b), (c) as quoted, except the two below.
-
-Real-side only / out of process scope (skipped, ``test_case22_capital_protection_unaffected``):
-"positions broker-protected" / "capital protection unaffected" needs broker-resident SL-M/GTT
-orders, which RECOMMEND does not place (the paper ProtectionManager covers paper positions only); the alerts'
-positions-protected WORDING is asserted here. "NSSM restart (gated to the true sentinel)" is the
-service manager's ``AppExit`` config (scripts/nssm_install.ps1), not engine code — the restart is
-modelled as the next boot of the same data dir.
+Skipped: "capital protection unaffected" needs broker-resident SL-M/GTT orders, which RECOMMEND does not
+place; the alerts' positions-protected wording is asserted here.
 """
 
 from __future__ import annotations
@@ -49,8 +38,7 @@ def _t(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
 
 async def _env_after_previous_evening(tmp_path, monkeypatch) -> RigEnv:
     env = RigEnv(tmp_path, monkeypatch, start=_t(TUE, 22, 45))
-    # Scenario premise on the configured lifecycle: every expected active-period start is a morning
-    # start covered by the 09:00/10:00 Wed boots below, so any page seen here is a lifecycle page.
+    # Every expected start is a morning start covered by the Wed boots below, so no missed-start page is owed.
     starts = env.settings.lifecycle.active_period_starts
     assert starts and all(s <= time(9, 0) for s in starts), f"scenario assumes morning starts, got {starts}"
     await run_session(env, _t(TUE, 22, 45), _t(TUE, 22, 50))   # watermarks + a committed clean stop
@@ -77,8 +65,7 @@ async def test_case22a_clean_stop_one_engine_stopped_then_silent_idle_gap(tmp_pa
     assert row["state"] == "STOPPED"                           # intend_to_run = false
     assert row["last_clean_stop_at"] == _t(WED, 15, 40).isoformat()
 
-    # Idle gap: the non-wake watchdog polls whenever the PC is awake — every 20 min overnight, up to
-    # Thu's scheduled start, which fires on time (inside start_grace_s, so nothing is owed).
+    # Idle gap: the watchdog polls every 20 min up to Thu's scheduled start, which fires inside start_grace_s.
     restart_at = datetime.combine(THU, min(env.settings.lifecycle.active_period_starts), tzinfo=IST)
     restart_at += timedelta(minutes=5)
     assert timedelta(minutes=5) < timedelta(seconds=env.settings.lifecycle.start_grace_s)
@@ -128,7 +115,7 @@ async def test_case22b_kill9_pages_once_edge_triggered_then_crash_recovered_rest
     assert env.lifecycle_row()["state"] == "RUNNING"           # intend_to_run stays TRUE — no clean stop
     assert MessageKind.ENGINE_STOPPED not in [m.kind for m in env.messages()[-3:]]
 
-    # Watchdog polls on its ~60 s cadence: ONE ENGINE_DOWN, then edge-triggered silence.
+    # ONE ENGINE_DOWN, then edge-triggered silence.
     summaries = []
     for secs in (30, 90, 150):
         env.at(killed_at + timedelta(seconds=secs))
@@ -141,7 +128,7 @@ async def test_case22b_kill9_pages_once_edge_triggered_then_crash_recovered_rest
     assert (page.at - killed_at).total_seconds() <= env.settings.lifecycle.down_stale_s
     assert env.force_kills == []                               # a crash is already dead — nothing to kill
 
-    # NSSM restart (crash exit ⇒ AppExit Default Restart): ENGINE_STARTED + STARTUP_REPORT(crash_recovered).
+    # NSSM restart: ENGINE_STARTED + STARTUP_REPORT(crash_recovered).
     env.at(killed_at + timedelta(seconds=165))
     sent_b = len(env.sent)
     b = EngineProcess(env)
@@ -176,9 +163,8 @@ async def test_case22b_kill9_pages_once_edge_triggered_then_crash_recovered_rest
 
 # --------------------------------------------------------------------------- (c) killed while intentionally off
 async def test_case22c_killed_after_intentional_stop_stays_silent(tmp_path, monkeypatch):
-    """The owner stopped the engine (STOPPED committed = intend_to_run false) and the process is then
-    killed before it exits (e.g. hung in the post-commit teardown — Telegram stop / API unbind — and
-    ``taskkill /F``'d). The watchdog must stay silent: it SHOULD be off."""
+    """STOPPED is committed, then the process is killed before it exits (e.g. hung in post-commit teardown
+    and ``taskkill /F``'d). The watchdog must stay silent: it should be off."""
     env = await _env_after_previous_evening(tmp_path, monkeypatch)
     env.at(_t(WED, 9, 0))
     a = EngineProcess(env)
@@ -208,7 +194,5 @@ async def test_case22c_killed_after_intentional_stop_stays_silent(tmp_path, monk
 
 
 def test_case22_capital_protection_unaffected() -> None:
-    """'positions broker-protected' / 'capital protection unaffected' across (a)/(b)/(c),
-    including a kill -9: real positions have no resting SL-M/GTT in RECOMMEND, and paper protection
-    across process death is the in-process GTT book plus the paper session-prep catch-up (case 03 skips the same)."""
+    """Real positions have no resting SL-M/GTT in RECOMMEND; paper protection across process death is the in-process GTT book plus the session-prep catch-up."""
     pytest.skip(f"case 22 capital-protection clause: {BROKER_RESIDENT_PROTECTION}")

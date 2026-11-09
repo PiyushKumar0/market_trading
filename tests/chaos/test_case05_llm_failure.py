@@ -1,42 +1,16 @@
 """Chaos case 5 — LLM timeout / garbage output / credit (quota) exhaustion.
 
-"Must hold" for case 5:
+Failure injected: the LLM times out, returns garbage, or runs out of credit/quota. Must hold: no
+proposal + owner alert; DG4 takes the same path; deterministic exits are unaffected (square-offs are
+skipped: MIS is out of paper scope).
 
-    no-proposal + alert; DG4 ⇒ same path; exits/square-offs unaffected
-
-Composition (as ``engine.ops.main`` wires the RECOMMEND-mode decision plane, main.py:446-553 / 718-806): the
-REAL ``AgentHarness`` → REAL ``BudgetGovernor`` (pinned worked-example budget, the degrade ladder) → REAL
-``RecommendationPipeline`` + ``RecommendationBook`` + ``RiskGate`` (hash-verified ``LimitsEngine`` over
-a tmp copy of the shipped ``config/limits.yaml``) + real ``ContextAssembler`` over a tmp ``MarketStore``,
-real ``ModeManager``/``KillSwitch``/``ExposureTracker``, and a REAL ``TelegramBot`` journalling every
-owner message into ``notifications`` (attached to the bus like main.py:3894; main's ``alert`` and
-``notify`` closures reproduced). Faked, and only at the boundary:
-
-* the Claude Agent SDK — ``query``/options injected into the harness (the harness's own seam), each
-  test scripting what the SDK does: hang, emit prose / out-of-schema JSON, raise a billing error, or
-  report the subscription session limit;
-* the Telegram transport (``app.bot.send_message``) — records what reached the owner's phone;
-* the gate-context DATA seam (``GateContextBuilder`` needs the live tick cache + instruments dump):
-  a builder returning the all-rules-pass context the gate suite uses — the gate itself is real.
-
-Clauses asserted:
-
-* **timeout ⇒ no-proposal + alert** — ``test_llm_timeout_fails_to_no_proposal_and_alerts``
-* **garbage output ⇒ no-proposal + alert; ≤ 2 schema retries, prose never salvaged** —
-  ``test_garbage_output_fails_to_no_proposal_and_alerts`` (prose / out-of-schema JSON)
-* **credit/quota exhaustion ⇒ no-proposal + alert; a billing error latches DG4, Telegram-alerted as a
-  tier change ⇒ zero further SDK calls** — ``test_quota_exhaustion_fails_to_no_proposal_and_alerts``
-  (SDK billing error / the subscription "session limit" result of 2026-09-03)
-* **DG4 ⇒ same path** (spend ≥ the weekly credit): tier change Telegram-alerted, every Tier-1 path
-  refused with ZERO SDK calls, no proposal — ``test_dg4_takes_the_same_no_proposal_path``
-* **deterministic tiers unaffected**: mode/risk-state/kill untouched by every failure above, and
-  the ``max_holding`` time-stop EXIT recommendation is still issued with the SDK dead AND DG4 —
-  ``test_deterministic_exit_unaffected_with_the_llm_dead`` (+ the tier asserts in every test)
-* control (non-vacuity): the same world with a healthy SDK DOES produce a recommendation —
-  ``test_healthy_llm_control_produces_a_recommendation``
-
-Skipped: **square-offs unaffected** — ``SquareOffScheduler`` / window-end MIS square-off; MIS is out of
-paper scope, so no platform position exists to square off.
+Composition as ``engine.ops.main`` wires the RECOMMEND-mode decision plane: real ``AgentHarness`` →
+``BudgetGovernor`` → ``RecommendationPipeline`` + ``RecommendationBook`` + ``RiskGate`` (hash-verified
+limits over a tmp copy of the shipped ``config/limits.yaml``), ``ContextAssembler`` over a tmp
+``MarketStore``, and a real ``TelegramBot`` journalling owner messages into ``notifications``. Faked only
+at the boundary: the Claude SDK (``query`` injected into the harness, each test scripts a hang, prose /
+out-of-schema JSON, a billing error or the subscription session limit), the Telegram transport, and the
+gate-context data seam (an all-rules-pass context; the gate itself is real).
 """
 
 from __future__ import annotations
@@ -171,7 +145,7 @@ class _App:
 
 # =========================================================================== world
 def _passing_ctx(**overrides: Any) -> GateContext:
-    """Every risk-gate enter rule passes (the gate suite's baseline, test_reco_pipeline.passing_ctx)."""
+    """Every risk-gate enter rule passes (the gate suite's baseline)."""
     base: dict[str, Any] = {
         "now": NOW, "mode": Mode.RECOMMEND, "risk_state": RiskState.NORMAL,
         "trade_window": TradeWindow(start=time(9, 30), end=time(15, 0), squareoff_buffer_min=5),
@@ -184,7 +158,7 @@ def _passing_ctx(**overrides: Any) -> GateContext:
 
 
 class _GateContextSeam:
-    """The gate-context DATA seam (see module docstring) — returns a fixed all-pass context."""
+    """The gate-context data seam: returns a fixed all-pass context."""
 
     def __init__(self, ctx: GateContext) -> None:
         self.ctx = ctx
@@ -222,7 +196,7 @@ class _World:
         self.calendar = NSECalendar(config_dir() / "calendar", self.clock, sqlite_conn=conn)
         self.mode = ModeManager(conn, self.clock, self.bus, self.calendar)
         self.kill = KillSwitch(conn, self.clock, self.bus)
-        # Protected limits: a tmp copy of the SHIPPED limits.yaml, owner-registered (hash-verified load).
+        # Protected limits: a tmp copy of the shipped limits.yaml, owner-registered.
         cfg = tmp_path / "config"
         cfg.mkdir(parents=True)
         shutil.copyfile(config_dir() / "limits.yaml", cfg / "limits.yaml")
@@ -236,15 +210,15 @@ class _World:
         self.bot = TelegramBot("t", owner_chat_id=OWNER_CHAT, clock=self.clock, mode_manager=self.mode,
                                kill_switch=self.kill, bus=self.bus, governor=self.governor, conn=conn)
         self.bot._app = _App(self.phone)
-        self.bot.attach_bus(self.bus)              # main.py:3894 — budget/risk/kill/mode alerts
+        self.bot.attach_bus(self.bus)              # budget/risk/kill/mode alerts
 
-        async def alert(severity: str, message: str) -> None:        # main.py:480-492
+        async def alert(severity: str, message: str) -> None:        # as main.py's alert closure
             await self.bot.send(CatalogMessage(
                 kind=MessageKind.LIMIT_BREACH, title="alert", body=message,
                 severity=severity if severity in ("info", "warning", "critical") else "warning",
             ))
 
-        async def notify(msg: CatalogMessage) -> None:               # main.py:494-505
+        async def notify(msg: CatalogMessage) -> None:               # as main.py's notify closure
             await self.bot.send(msg)
 
         self.sdk = sdk
@@ -297,8 +271,7 @@ class _World:
         assert self.count("recommendations") == 0
 
     def assert_owner_alerted(self, reason: str) -> None:
-        """The owner hears of the failure — the pipeline's "Intraday analyst unavailable" and the
-        harness's per-call Failed alert, both journalled AND on the phone."""
+        """The pipeline's "Intraday analyst unavailable" and the harness's per-call alert are both journalled and sent."""
         msgs = self.owner_messages()
         unavailable = [m for m in msgs if m[1] == "Intraday analyst unavailable"]
         assert unavailable and reason in unavailable[0][2], msgs
@@ -331,8 +304,7 @@ async def world_factory(conn, tmp_path):
 
 # =========================================================================== control
 async def test_healthy_llm_control_produces_a_recommendation(world_factory) -> None:
-    """Non-vacuity: with a healthy SDK this exact world turns the candidate into a delivered
-    recommendation — so every "no proposal" below is the failure path, not broken wiring."""
+    """Non-vacuity: with a healthy SDK this world delivers a recommendation, so every "no proposal" below is the failure path."""
     w = await world_factory(_SDK([_StructuredMessage(ENTER_JSON), _ResultMessage(usage=USAGE)]))
 
     assert await w.offer(_candidate()) is True
@@ -344,7 +316,7 @@ async def test_healthy_llm_control_produces_a_recommendation(world_factory) -> N
 
 # =========================================================================== LLM failure modes
 async def test_llm_timeout_fails_to_no_proposal_and_alerts(world_factory) -> None:
-    """A hung SDK call is abandoned at the agent timeout — one call, no retry, no proposal, alert."""
+    """A hung SDK call is abandoned at the agent timeout: one call, no retry, no proposal, alert."""
     w = await world_factory(_SDK([5.0, _StructuredMessage(ENTER_JSON)]), timeout_s=0.1)
 
     assert await w.offer(_candidate()) is True           # the analyst WAS reached, then timed out
@@ -365,8 +337,8 @@ async def test_llm_timeout_fails_to_no_proposal_and_alerts(world_factory) -> Non
     ids=["prose_wrapped_json", "out_of_schema_json"],
 )
 async def test_garbage_output_fails_to_no_proposal_and_alerts(world_factory, garbage) -> None:
-    """Prose (even around valid JSON) and out-of-schema JSON are schema violations: at most TWO
-    fresh retries (3 SDK calls, each audited), never a salvaged action, then no-proposal + alert."""
+    """Prose (even around valid JSON) and out-of-schema JSON are schema violations: at most two retries,
+    never a salvaged action, then no-proposal + alert."""
     w = await world_factory(_SDK([garbage, _ResultMessage(usage=USAGE)]))
 
     await w.offer(_candidate())
@@ -390,9 +362,9 @@ async def test_garbage_output_fails_to_no_proposal_and_alerts(world_factory, gar
 async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
     world_factory, sdk_failure, reason, latches_dg4
 ) -> None:
-    """Credit/quota exhaustion is a no-retry LLM failure. A BILLING error additionally latches DG4 for
-    the quota window (the ledger can read healthy at the moment the credit ran out), so the next
-    candidate is refused by the governor with no SDK call at all; the transient session limit does not."""
+    """Credit/quota exhaustion is a no-retry failure. A BILLING error also latches DG4 for the quota window
+    (the ledger can read healthy as the credit runs out), so the next candidate makes no SDK call; the
+    transient session limit does not."""
     w = await world_factory(_SDK(sdk_failure))
 
     await w.offer(_candidate())
@@ -414,9 +386,8 @@ async def test_quota_exhaustion_fails_to_no_proposal_and_alerts(
 
 
 async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
-    """DG4 by spend (window spend ≥ the weekly credit): the tier change is Telegram-alerted
-    and every Tier-1 path — a queued candidate at the drain, a new arrival, a position event — resolves
-    to no proposal WITHOUT an SDK call. The governor-blocked refusal is audited."""
+    """DG4 by spend (≥ the weekly credit): the tier change is alerted and every Tier-1 path (queued
+    candidate, new arrival, position event) resolves to no proposal without an SDK call; the refusal is audited."""
     w = await world_factory(_SDK([_StructuredMessage(ENTER_JSON), _ResultMessage(usage=USAGE)]))
     await w.pipeline.on_signal_candidate(_candidate())    # queued BEFORE the budget runs out
 
@@ -445,9 +416,8 @@ async def test_dg4_takes_the_same_no_proposal_path(world_factory) -> None:
 
 # =========================================================================== exits unaffected
 async def test_deterministic_exit_unaffected_with_the_llm_dead(world_factory, conn) -> None:
-    """Three-tier rule: the ``max_holding`` time-stop is built in Python — with the SDK raising on every call
-    AND the ladder at DG4, an aged swing position still gets its gate-approved EXIT recommendation
-    delivered to the owner, and the SDK is never called."""
+    """The ``max_holding`` time-stop is built in Python: with the SDK dead and the ladder at DG4, an aged
+    swing position still gets its gate-approved EXIT recommendation, and the SDK is never called."""
     w = await world_factory(_SDK([RuntimeError("claude CLI process died (exit 1)")]))
     await w.offer(_candidate())                                  # the LLM is dead...
     w.assert_owner_alerted("sdk_error")

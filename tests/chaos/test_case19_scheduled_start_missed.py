@@ -1,34 +1,21 @@
 """Chaos case 19 — Scheduled active-period start FAILS to fire (PC asleep / task disabled / power
 loss).
 
-Drill-catalog row (case 19), "Must hold":
+Failure injected: the scheduled active-period start never fires (PC asleep / task disabled / power loss).
+Must hold: the watchdog detects the missing start and alerts the owner exactly once.
 
-    "watchdog detects no readiness report at expected start + alerts owner; an open MIS
-    rides to the broker 15:25 backstop; on eventual manual start, full reconcile adopts the broker
-    square-off"
+Scenario: Tue 2026-06-16 ran and stopped cleanly; on Wed 06-17 the 08:00 wake task never fires and the
+owner starts the engine by hand at 09:30. The real ``scripts/watchdog.py`` IO shell polls the on-disk
+state.db and its private debounce file (``tests/chaos/_lifecycle_rig.py``; only the Telegram sender and the
+OS process table are faked). Silent before the start and inside ``start_grace_s``; one
+``SCHEDULED_START_MISSED`` once the grace lapses, edge-triggered via the per-(day, start) debounce in
+``watchdog_state.json``; silent once the manual start lands; the next day's miss is a new alert; silent on
+weekends and NSE holidays.
 
-Scenario: Tue 2026-06-16 the engine ran and was stopped cleanly after the session. On Wed 2026-06-17
-(a trading day) the 08:00 wake task never fires. The real ``scripts/watchdog.py`` IO shell polls the
-on-disk state.db and its private debounce file on its ~60 s cadence (``tests/chaos/_lifecycle_rig.py``;
-only the Telegram sender and the OS process table are faked). The owner starts the engine by hand at
-09:30.
+The watchdog keys readiness on ``engine_lifecycle.started_at`` (committed at the very start of boot): a
+started boot covers the period; a wedged one is the separate ``ENGINE_DOWN(reason=wedged)`` path.
 
-Clauses covered:
-
-* "watchdog detects no readiness … at expected start + alerts owner" — silent before the start and
-  inside ``start_grace_s``; exactly ONE ``SCHEDULED_START_MISSED`` once the grace lapses; edge-triggered
-  (the per-(day, start) debounce persisted in ``watchdog_state.json`` suppresses every later poll that
-  day); silent again once the manual start lands (``started_at`` ≥ the expected start); the NEXT day's
-  missed start is a new alert. The real calendar YAML keeps it silent on a weekend and on an NSE
-  holiday (2026-06-26 Muharram) — no expectation, no alert.
-
-"Readiness report" resolution: the shipped watchdog keys the check on ``engine_lifecycle.started_at``
-(committed at the very start of boot, before recovery) — a boot that has started covers the period; a boot that
-started but wedged is the separate ``ENGINE_DOWN(reason=wedged)`` path.
-
-Skipped (``test_case19_open_mis_rides_backstop_and_reconcile_adopts``): "an open MIS rides to the broker
-15:25 backstop; on eventual manual start, full reconcile adopts the broker square-off" — MIS is out of
-paper scope, and the broker square-off it adopts exists only for MIS.
+Skipped: an open MIS riding to the broker backstop (MIS is out of paper scope).
 """
 
 from __future__ import annotations
@@ -51,8 +38,7 @@ def _t(d: date, hh: int, mm: int, ss: int = 0) -> datetime:
 
 
 def _start_and_grace(env: RigEnv) -> tuple[time, timedelta]:
-    """The configured expected start + grace (settings.yaml lifecycle). The scenario models the single
-    configured morning start; a second active-period start would owe its own alert."""
+    """The configured expected start + grace; the scenario models a single start (a second would owe its own alert)."""
     starts = env.settings.lifecycle.active_period_starts
     assert len(starts) == 1, f"scenario models one configured start, got {starts}"
     return starts[0], timedelta(seconds=env.settings.lifecycle.start_grace_s)
@@ -69,7 +55,7 @@ async def test_case19_missed_start_alerts_once_then_manual_start_covers_it(tmp_p
     assert env.lifecycle_row()["state"] == "STOPPED"
     s_wed = datetime.combine(WED, start, tzinfo=IST)
 
-    # Wed: the wake task never fires. Before the start and inside the grace: silent.
+    # Before the start and inside the grace: silent.
     for t in (s_wed - timedelta(minutes=1), s_wed + grace / 3, s_wed + grace - timedelta(minutes=1)):
         env.at(t)
         assert env.watchdog_poll() == SILENT, f"early alert at {t.isoformat()}"
@@ -90,7 +76,7 @@ async def test_case19_missed_start_alerts_once_then_manual_start_covers_it(tmp_p
     assert len(env.pages) == 1
     assert _key(WED, start) in env.watchdog_state_path.read_text(encoding="utf-8")
 
-    # Manual start (75 min after the grace lapsed): a clean (not crash) boot; the watchdog is satisfied.
+    # Manual start: a clean (not crash) boot; the watchdog is satisfied.
     env.at(s_wed + grace + timedelta(minutes=75))
     sent_b = len(env.sent)
     b = EngineProcess(env)
@@ -135,6 +121,5 @@ async def test_case19_no_expected_start_on_weekend_or_nse_holiday(tmp_path, monk
 
 
 def test_case19_open_mis_rides_backstop_and_reconcile_adopts() -> None:
-    """'an open MIS rides to the broker 15:25 backstop; on eventual manual start, full reconcile
-    adopts the broker square-off' — needs a platform MIS and the adopting Reconciler."""
+    """Needs a platform MIS and the adopting Reconciler."""
     pytest.skip(f"case 19 MIS/reconcile clauses: {MIS_OUT_OF_PAPER_SCOPE}")

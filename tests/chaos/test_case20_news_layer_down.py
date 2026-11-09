@@ -1,49 +1,21 @@
 """Chaos case 20 — news feeds dead / News Analyst down / DG3 during pre-open.
 
-Drill-catalog row (case 20), "Must hold", verbatim:
+Failure injected: news feeds dead / News Analyst down / DG3 during pre-open. Two distinct rungs:
+(i) feeds/scorer dead but the digest RUNS ⇒ an empty-but-fresh digest, ``CATALYST_WATCHLIST(0, 0)`` (plus
+the scorer's own per-call Failed alert) and ``cat`` simply originates nothing; (ii) digest STALE
+(> ``digest_stale_max_h``) or MISSING ⇒ ``cat`` disabled + ``CATALYST_DISABLED(reason)``. Either way all
+other scanners, agents and recommendations are unaffected and nothing FROZENs (news is never
+load-bearing); non-``cat`` candidate ranking is identical with the news layer up-but-quiet vs down
+(neutral feature defaults); the next healthy pre-open restores ``cat`` with no owner action.
 
-    **Two distinct rungs, one convention:** feeds/scorer dead but digest RUNS ⇒
-    empty-but-fresh digest, `CATALYST_WATCHLIST(0, 0)` (+ the per-call Failed alert from the
-    scorer itself), `cat` simply originates nothing; digest STALE (> `digest_stale_max_h`) or MISSING
-    ⇒ `cat` disabled + `CATALYST_DISABLED(reason)`. Either way: **all other scanners, agents, and
-    recommendations unaffected; no FROZEN state** — news is never load-bearing; **non-`cat`
-    candidate ranking is identical with the news layer up-but-quiet vs down (neutral feature
-    defaults)**; next healthy pre-open restores `cat` with no owner action
-
-Composition — :class:`NewsWorld`, the news pipeline exactly as ``engine.ops.main`` runs it at
-pre-open: REAL ``NewsIngest`` (RSS + GDELT) → ``HeadlineClusterer.run`` → ``EntityResolver.aload/run``
-→ ``NewsScoringJob.run_batch(force=True)`` (the ``job_news_chain`` closure, main.py:1133-1158) →
-``CatalystDigestJob.run`` + the CATALYST_* owner messages (the ``job_catalyst_digest`` closure,
-main.py:1160-1171) → the window-open ``cat`` sweep leg (``_read_cat_watchlist`` /
-``_watchlist_rows_for_symbols`` / ``cat.sweep_watchlist`` / ``SignalPreScreen.admit``,
-main.py:1788-1865, with the shipped settings and the hash-verified ``catalyst_guard``). Underneath:
-a tmp ``MarketStore`` (DuckDB), the migrated tmp SQLite, the REAL ``AgentHarness`` +
-``BudgetGovernor`` + ``ContextAssembler``, ``ModeManager``/``RiskStateLatch``/``KillSwitch``, and a
-REAL journalling ``TelegramBot`` (notifications table + main's ``alert``/``notify`` closures).
-Faked, only at the boundary: the HTTP feeds (``httpx.MockTransport``), the Claude SDK (the
-News Analyst's answers), and the Telegram transport. Storage faults are injected at the DuckDB read.
-
-Clauses asserted:
-
-* rung (i) — feeds dead / scorer dead / DG3: digest RUNS empty-but-FRESH, ``CATALYST_WATCHLIST(0, 0)``,
-  the scorer's own Failed alert (scorer-dead variant), ``cat`` originates nothing, no FROZEN,
-  other agents still admitted — ``test_feeds_or_scorer_dead_digest_runs_empty_but_fresh``
-* rung (ii) — digest MISSING / STALE because today's run failed: ``CATALYST_DISABLED(reason)``,
-  ``cat`` originates nothing, no FROZEN — ``test_digest_failure_disables_cat_with_catalyst_disabled``
-* rung (ii) — a STALE digest that nobody re-ran (late boot: the window-open sweep beats the catch-up
-  digest) still originates nothing — ``test_stale_digest_at_sweep_time_originates_nothing`` — and the
-  sweep sends ``CATALYST_DISABLED`` once a day — ``test_stale_digest_at_sweep_time_alerts_catalyst_disabled``
-  (fixed 2026-09-24)
-* non-``cat`` ranking identical, news up-but-quiet vs down (neutral defaults), the other
-  scanners unaffected — ``test_non_cat_candidates_identical_news_quiet_vs_down`` (real
-  ``LiveScanContextProvider`` + ``FeatureEngine`` + the enabled per-bar scanners over identical bars)
-* next healthy pre-open restores ``cat`` with no owner action —
-  ``test_next_healthy_preopen_restores_cat_without_owner_action``
-* control (non-vacuity): a healthy pre-open DOES originate — ``test_healthy_preopen_control_originates_cat``
-
-Not asserted here: "recommendations unaffected" end-to-end through the RECOMMEND pipeline (case 5's
-world covers the pipeline; news-down changes none of its inputs — asserted above as scanner output +
-governor admission + risk state).
+:class:`NewsWorld` runs the news pipeline as ``engine.ops.main`` does at pre-open: real ``NewsIngest`` →
+``HeadlineClusterer`` → ``EntityResolver`` → ``NewsScoringJob.run_batch(force=True)`` →
+``CatalystDigestJob`` + the CATALYST_* owner messages → the window-open ``cat`` sweep leg, with the shipped
+settings and the hash-verified ``catalyst_guard``; over a tmp ``MarketStore``, real ``AgentHarness`` /
+``BudgetGovernor`` / ``ContextAssembler``, and a journalling ``TelegramBot``. Faked only at the boundary:
+the HTTP feeds (``httpx.MockTransport``), the Claude SDK and the Telegram transport; storage faults are
+injected at the DuckDB read. "Recommendations unaffected" end-to-end is case 5's world; here it is
+asserted as scanner output + governor admission + risk state.
 """
 
 from __future__ import annotations
@@ -114,7 +86,7 @@ CAL_DIR = config_dir() / "calendar"
 SETTINGS = load_settings()
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="chaos news seed")
 
-# Real 2026 trading days (config/calendar/2026.yaml): Mon 15 / Tue 16 / Wed 17 / Thu 18 / Fri 19 June.
+# Real trading days in config/calendar/2026.yaml.
 TUE, WED, THU, FRI = date(2026, 6, 16), date(2026, 6, 17), date(2026, 6, 18), date(2026, 6, 19)
 
 ET_FEED = "https://economictimes.indiatimes.com/markets/rssfeeds/chaos.cms"
@@ -164,7 +136,7 @@ class _Options:
             allowed_tools, disallowed_tools, output_schema)
 
 
-#: One ``for_news_batch`` prompt entry: the id line, then the headline line (context.py:357-362).
+#: One ``for_news_batch`` prompt entry: the id line, then the headline line.
 _CLUSTER_LINE = re.compile(r"cluster_id=(\S+) [^\n]*\n\s+headline: ([^\n]*)")
 
 #: The analyst's canned behaviour: (cluster_id, headline) -> the raw JSON score items it emits.
@@ -229,7 +201,7 @@ class _App:
 
 # =========================================================================== world
 class NewsWorld:
-    """One engine's news layer + the ``cat`` sweep leg over temp stores (see module docstring)."""
+    """One engine's news layer + the ``cat`` sweep leg over temp stores."""
 
     def __init__(self, conn, root: Path, sdk: NewsSDK, *, now: datetime,
                  universe: tuple[str, ...] = UNIVERSE, aliases: dict[str, str] | None = None) -> None:
@@ -257,21 +229,21 @@ class NewsWorld:
         self.bot = TelegramBot("t", owner_chat_id=1, clock=self.clock, mode_manager=self.mode,
                                kill_switch=self.kill, bus=self.bus, governor=self.governor, conn=conn)
         self.bot._app = _App(self.phone)
-        self.bot.attach_bus(self.bus)                           # main.py:3894
+        self.bot.attach_bus(self.bus)
 
-        async def alert(severity: str, message: str) -> None:  # main.py:480-492
+        async def alert(severity: str, message: str) -> None:  # as main.py's alert closure
             await self.bot.send(CatalogMessage(
                 kind=MessageKind.LIMIT_BREACH, title="alert", body=message,
                 severity=severity if severity in ("info", "warning", "critical") else "warning",
             ))
 
-        self.notify = self.bot.send                             # main.py:494-505 (log mirror aside)
+        self.notify = self.bot.send                             # as main.py's notify closure
         self.catalyst_disabled = _CatalystDisabledAlert(self.notify, self.clock)
         self.sdk = sdk
         self.harness = AgentHarness({"news_analyst": NEWS_DEF}, self.governor, self.clock, conn,
                                     query_fn=sdk, alert=alert, options_cls=_Options)
 
-        # HTTP feeds: two RSS outlets + GDELT (empty); ``feeds_up=False`` makes every fetch fail.
+        # Two RSS outlets + GDELT (empty); ``feeds_up=False`` makes every fetch fail.
         self.feeds_up = True
         self.items: dict[str, list[tuple[str, str, datetime]]] = {ET_FEED: [], MINT_FEED: []}
         self.http = httpx.AsyncClient(transport=httpx.MockTransport(self._serve))
@@ -296,7 +268,7 @@ class NewsWorld:
             max_candidates_per_day=pre.max_candidates_per_day,
             max_per_strategy_day=pre.max_per_strategy_day,
             admission_mode=pre.admission_mode,
-            catalyst_cap_fn=lambda: self.limits.catalyst_guard().max_catalyst_entries_day,  # main.py:836
+            catalyst_cap_fn=lambda: self.limits.catalyst_guard().max_catalyst_entries_day,
             displacement_margin=pre.displacement_margin,
             cap_release_schedule=pre.cap_release_schedule,
         )
@@ -326,8 +298,8 @@ class NewsWorld:
 
     # ------------------------------------------------------------------ seeding (the market side)
     def _seed_market(self) -> None:
-        """Universe rows for every test day, curated aliases, and 30 weekdays of bars_1d per symbol
-        (the digest's levels and the sweep's prior-session reference close both read them)."""
+        """Universe rows, curated aliases and 30 weekdays of bars_1d per symbol (the digest's levels and
+        the sweep's reference close read them)."""
         days = (TUE, WED, THU, FRI)
         self.store.upsert_universe_daily(
             [{"d": d, "symbol": s, "included": True} for d in days for s in self.universe]
@@ -353,7 +325,7 @@ class NewsWorld:
         self.now[0] = when
 
     async def news_chain(self) -> None:
-        """``job_news_chain`` (main.py:1133-1158): backfill → cluster → resolve → forced scoring batch."""
+        """As main.py's ``job_news_chain``: backfill → cluster → resolve → forced scoring batch."""
         inserted = await self.ingest.backfill()
         seen = {h.headline_id for h in inserted}
         orphans = [
@@ -372,12 +344,12 @@ class NewsWorld:
                 await self.resolver.run(touched)
         try:
             await self.scoring.run_batch(force=True, lock=self.chain_lock)
-        except Exception:  # noqa: BLE001 - main.py:1157: unscored clusters stay off the watchlist
+        except Exception:  # noqa: BLE001 - unscored clusters stay off the watchlist
             pass
 
     async def digest_job(self) -> Any:
-        """``job_catalyst_digest`` (main.py:1160-1171), verbatim semantics: CATALYST_WATCHLIST on
-        every successful run (incl. an empty-but-fresh (0, 0)); CATALYST_DISABLED + re-raise on failure."""
+        """As main.py's ``job_catalyst_digest``: CATALYST_WATCHLIST on every successful run (incl. an
+        empty-but-fresh (0, 0)); CATALYST_DISABLED + re-raise on failure."""
         try:
             result = await self.digest.run(self.clock.today())
         except Exception as exc:
@@ -387,8 +359,7 @@ class NewsWorld:
         return result
 
     async def preopen(self, d: date) -> Any:
-        """The day's pre-open: news chain ~08:25, digest ~08:35. Returns the digest result,
-        or the exception the digest job raised (the job watermark records it as failed)."""
+        """The day's pre-open: news chain 08:25, digest 08:35. Returns the digest result or the exception it raised."""
         self.set_time(at(d, 8, 25))
         await self.news_chain()
         self.set_time(at(d, 8, 35))
@@ -398,7 +369,7 @@ class NewsWorld:
             return exc
 
     def cat_sweep(self, d: date) -> list[SignalCandidate]:
-        """The window-open sweep's ``cat`` leg (main.py:1788-1807) + the ranked admission (1859-1865)."""
+        """The window-open sweep's ``cat`` leg + the ranked admission."""
         self.set_time(at(d, 10, 5))
         start, end = self.calendar.trade_window(d)
         in_window = start <= self.clock.now() <= end
@@ -442,7 +413,7 @@ class NewsWorld:
 
 
 def publish_reliance_story(w: NewsWorld) -> None:
-    """A genuine, two-outlet order-win story the evening before WED's pre-open (story-level corroboration)."""
+    """A genuine two-outlet order-win story the evening before WED's pre-open (story-level corroboration)."""
     w.publish(ET_FEED, "Reliance Industries bags Rs 12,000 crore green hydrogen order from NTPC",
               "https://economictimes.indiatimes.com/markets/ril-hydrogen-order/1.cms", at(TUE, 18, 10))
     w.publish(MINT_FEED, "NTPC picks Reliance Industries for large hydrogen supply contract",
@@ -476,8 +447,7 @@ async def make_world(conn, tmp_path):
 
 # =========================================================================== control
 async def test_healthy_preopen_control_originates_cat(make_world) -> None:
-    """Non-vacuity: with feeds, scorer and digest healthy the same world grades the corroborated
-    story ``originating`` and the sweep admits exactly one ``cat`` candidate for it."""
+    """Non-vacuity: with everything healthy the corroborated story grades ``originating`` and the sweep admits one ``cat`` candidate."""
     w = await make_world()
     publish_reliance_story(w)
 
@@ -496,10 +466,9 @@ async def test_healthy_preopen_control_originates_cat(make_world) -> None:
 # =========================================================================== rung (i)
 @pytest.mark.parametrize("failure", ["feeds_dead", "scorer_dead", "dg3"])
 async def test_feeds_or_scorer_dead_digest_runs_empty_but_fresh(make_world, failure: str) -> None:
-    """Rung (i): the digest still RUNS and yields an EMPTY-but-FRESH watchlist — owner told
-    ``CATALYST_WATCHLIST(0, 0)``, never ``CATALYST_DISABLED`` — so ``cat`` simply originates nothing.
-    The scorer-dead variant also carries the scorer's own per-call Failed alert; under DG3 the
-    news analyst is refused by the governor before any SDK call."""
+    """Rung (i): the digest RUNS and yields an empty-but-FRESH watchlist (``CATALYST_WATCHLIST(0, 0)``,
+    never ``CATALYST_DISABLED``), so ``cat`` originates nothing. Under DG3 the governor refuses the news
+    analyst before any SDK call."""
     sdk = NewsSDK(dead=RuntimeError("claude CLI process died (exit 1)")) if failure == "scorer_dead" else NewsSDK()
     w = await make_world(sdk)
     publish_reliance_story(w)
@@ -540,9 +509,8 @@ async def test_feeds_or_scorer_dead_digest_runs_empty_but_fresh(make_world, fail
 # =========================================================================== rung (ii)
 @pytest.mark.parametrize("prior_digest", [False, True], ids=["missing", "stale"])
 async def test_digest_failure_disables_cat_with_catalyst_disabled(make_world, prior_digest: bool) -> None:
-    """Rung (ii): today's digest run FAILS (a DuckDB read fault injected at the store) — with no
-    digest ever (MISSING) or only yesterday's (STALE, > digest_stale_max_h). The owner gets
-    ``CATALYST_DISABLED(reason)``; ``cat`` originates nothing; nothing freezes."""
+    """Rung (ii): today's digest run FAILS (injected DuckDB read fault) with no digest ever (MISSING) or only
+    yesterday's (STALE): ``CATALYST_DISABLED(reason)``, ``cat`` originates nothing, nothing freezes."""
     w = await make_world()
     if prior_digest:
         await w.preopen(TUE)                                    # yesterday's digest ran fine
@@ -575,9 +543,8 @@ async def test_digest_failure_disables_cat_with_catalyst_disabled(make_world, pr
 
 
 async def _late_boot_stale_world(make_world) -> NewsWorld:
-    """TUE's digest ran; the evening chain ingested + scored an originating-quality story; WED the
-    engine boots late and the window-open sweep runs BEFORE the catch-up digest has (not failed —
-    simply not yet) run: the digest is STALE at use time."""
+    """TUE's digest ran and an originating-quality story was scored; on WED the engine boots late and the
+    window-open sweep runs BEFORE the catch-up digest (not failed, just not yet run): the digest is STALE at use time."""
     w = await make_world()
     await w.preopen(TUE)
     publish_reliance_story(w)
@@ -599,8 +566,7 @@ async def test_stale_digest_at_sweep_time_originates_nothing(make_world) -> None
 
 
 async def test_stale_digest_at_sweep_time_alerts_catalyst_disabled(make_world) -> None:
-    """Rung (ii): STALE ⇒ ``cat`` disabled **+ ``CATALYST_DISABLED(reason)``** — the owner is told
-    (fixed 2026-09-24: only a raising digest run used to alert)."""
+    """Rung (ii): STALE ⇒ ``cat`` disabled AND the owner gets ``CATALYST_DISABLED(reason)``, not only on a raising digest run."""
     w = await _late_boot_stale_world(make_world)
     assert await w.window_open_sweep(WED) == []
     disabled = w.messages(MessageKind.CATALYST_DISABLED)
@@ -609,9 +575,8 @@ async def test_stale_digest_at_sweep_time_alerts_catalyst_disabled(make_world) -
 
 # =========================================================================== recovery
 async def test_next_healthy_preopen_restores_cat_without_owner_action(make_world) -> None:
-    """WED: the scorer is dead AND the digest run faults ⇒ nothing originates. THU: everything is
-    healthy again ⇒ ``cat`` originates the new story with NO owner command in between (no mode
-    change, no re-arm, no /resume — the test issues none)."""
+    """WED: scorer dead AND digest faults ⇒ nothing originates. THU: healthy again ⇒ ``cat`` originates the
+    new story with NO owner command in between."""
     w = await make_world(NewsSDK(dead=RuntimeError("claude CLI process died (exit 1)")))
     publish_reliance_story(w)
     real_run = w.digest.run
@@ -648,8 +613,8 @@ def _weekdays_before(d: date, n: int) -> list[date]:
     return list(reversed(out))
 
 
-#: rsi2 set-ups (test_scanners.test_rsi2_hand_computed_signal shape): 198 rising closes, one −2.00
-#: session, then today's 10:05 bar lower again — RSI(2) deep in oversold, far above the 200-DMA.
+#: rsi2 set-ups: 198 rising closes, one −2.00 session, then today's 10:05 bar lower again — RSI(2) deep
+#: in oversold, far above the 200-DMA.
 RSI2_SETUPS = {"TCS": (194.50,), "INFY": (193.90,), "HDFCBANK": (195.10,)}
 
 
@@ -667,9 +632,9 @@ def _seed_scanner_market(store: MarketStore) -> None:
 
 
 async def _scan_world(conn, root: Path, *, news_quiet: bool) -> tuple[list[SignalCandidate], dict[str, dict]]:
-    """One world's per-bar scan at WED 10:05 through the live ``bar.1m`` path (main.py:812-852): the
-    enabled per-bar scanners (the shipped settings park ``orb``), the real provider + FeatureEngine,
-    the real pre-screen. ``news_quiet``: the digest ran on an empty corpus; else no digest ever ran."""
+    """One world's per-bar scan at WED 10:05 through the live ``bar.1m`` path: the enabled scanners, the
+    real provider + FeatureEngine and pre-screen. ``news_quiet``: the digest ran on an empty corpus;
+    else no digest ever ran."""
     root.mkdir(parents=True, exist_ok=True)
     now = [at(WED, 8, 35)]
     clock = Clock(time_source=lambda: now[0])
@@ -716,9 +681,8 @@ async def _scan_world(conn, root: Path, *, news_quiet: bool) -> tuple[list[Signa
 
 
 async def test_non_cat_candidates_identical_news_quiet_vs_down(conn, tmp_path) -> None:
-    """The non-``cat`` scanners publish the SAME candidates in the SAME order with the SAME
-    scores and levels whether the news layer is up-but-quiet or down, and every candidate's feature
-    snapshot carries the pinned neutral news block (only ``sentiment_available`` records which)."""
+    """Non-``cat`` scanners publish the SAME candidates, order, scores and levels whether the news layer is
+    up-but-quiet or down; snapshots carry the neutral news block (only ``sentiment_available`` differs)."""
     quiet, quiet_feats = await _scan_world(conn, tmp_path / "quiet", news_quiet=True)
     down, down_feats = await _scan_world(conn, tmp_path / "down", news_quiet=False)
 
@@ -738,5 +702,5 @@ async def test_non_cat_candidates_identical_news_quiet_vs_down(conn, tmp_path) -
         assert down_feats[sym]["sentiment_available"] is False      # no digest at all
         non_news = {k for k in quiet_feats[sym] if k not in ABSENT_NEWS_DEFAULTS}
         assert {k: quiet_feats[sym][k] for k in non_news} == {k: down_feats[sym][k] for k in non_news}
-    # sanity: the snapshots really are JSON-clean scalars (never NaN)
+    # Snapshots are JSON-clean scalars (never NaN).
     json.dumps(quiet_feats, allow_nan=False)

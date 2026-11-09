@@ -1,29 +1,17 @@
 """Chaos case 14 — Clock skew beyond 2 s.
 
-Must hold: "FROZEN entries until resync; alert".
+Failure injected: the engine boots while the host clock is 3.5 s off NTP (or NTP is unreachable). Must
+hold: entries FROZEN until resync, and the owner is alerted. The skew limit is 2 s; exactly 2.0 s is
+within it.
 
-Scenario: the engine boots while the host clock is 3.5 s off NTP (or NTP is unreachable). Composed
-as ``engine.ops.main`` wires it: the real ``SessionLifecycle.startup(check_skew=True)`` → the real
-``SelfTest`` clock-skew check → the cause ledger (``RiskStateLatch``); the boot-scoped skew
-verdict main.py derives from the startup report (main.py ``skew_holder["ok"] = "clock_skew" not in
-report.frozen_reasons``) feeding the real ``GateContextBuilder`` → real ``RiskGate``; and the real
-60 s warm-up refresh (``engine.ops.main.refresh_and_lift_warmup``, armed as
-``warmup_status_refresh``). Faked: ONLY the NTP server (``ntplib.NTPClient.request`` — the external
-time source) and the owner's Telegram sink. Warm-up coverage is READY throughout (not this case's
-subject), so the only thing between a boot and open entries is the clock.
+Composed as ``engine.ops.main`` wires it: ``SessionLifecycle.startup(check_skew=True)`` → ``SelfTest``
+clock-skew check → ``RiskStateLatch``; the boot-scoped skew verdict derived from the startup report feeds
+the real ``GateContextBuilder`` → ``RiskGate``; the 60 s ``refresh_and_lift_warmup`` runs for real. Faked:
+only the NTP server and the Telegram sink. Warm-up is READY throughout, so only the clock stands between
+a boot and open entries.
 
-Clauses:
-* "FROZEN entries" at boot (> 2 s, or NTP unverifiable) + "alert" —
-  ``test_boot_with_skew_beyond_limit_freezes_entries_and_alerts`` (2.0 s = the boundary control).
-* "until resync" — entries stay REFUSED while skewed even across the warm-up lift:
-  ``test_entries_stay_refused_while_skewed_even_after_the_warmup_lift``; resync plus the restart the
-  RECOMMEND-mode design requires re-opens them: ``test_resync_then_restart_reopens_entries``.
-* ``test_skew_freeze_holds_until_resync`` — the risk-state FROZEN survives the 60 s warm-up refresh
-  while NTP still reports the skew (fixed 2026-09-24).
-* Skipped (an accepted gap in the current RECOMMEND-mode design, not gated on the live order path): mid-session skew detection and in-session resync —
-  ``test_mid_session_skew_detection_and_in_session_resync``.
-
-Gated on the live order path: none.
+Skipped, an accepted gap: skew is measured at boot only, so mid-session drift detection and in-session
+resync are not built.
 """
 
 from __future__ import annotations
@@ -57,8 +45,7 @@ READY = WarmupStatus(ready=True, blockers=[])
 
 
 class _FakeNtpServer:
-    """The NTP boundary. ``offset_s`` is what the pool answers (signed, as ntplib reports it);
-    ``reachable=False`` makes every server time out like a blocked UDP/123."""
+    """The NTP boundary. ``offset_s`` is the signed pool answer; ``reachable=False`` times out like a blocked UDP/123."""
 
     def __init__(self) -> None:
         self.offset_s = 0.0
@@ -82,7 +69,7 @@ def skew_rig(conn, tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))
     settings = load_settings()
-    assert settings.clock.max_skew_s == 2                      # the shipped clock-skew limit this case is about
+    assert settings.clock.max_skew_s == 2                      # the shipped limit
 
     ntp = _FakeNtpServer()
     monkeypatch.setattr(ntplib.NTPClient, "request",
@@ -136,7 +123,7 @@ def skew_rig(conn, tmp_path, monkeypatch):
         rig.lifecycle = new_lifecycle()
         await mode.request_transition(Mode.RECOMMEND, Actor.OWNER)
         report = await rig.lifecycle.startup(check_skew=True)
-        rig.skew_holder["ok"] = "clock_skew" not in report.frozen_reasons   # verbatim main.py wiring
+        rig.skew_holder["ok"] = "clock_skew" not in report.frozen_reasons   # as main.py wires it
         return report
 
     async def warmup_refresh():                  # the 60 s `warmup_status_refresh` job body
@@ -171,24 +158,21 @@ async def test_boot_with_skew_beyond_limit_freezes_entries_and_alerts(skew_rig, 
         assert checks["clock_skew"].passed and checks["mode_risk_state"].passed
         assert "frozen: none" in startup.body
         return
-    # FROZEN entries: through the cause ledger (never a bare risk_state write) ...
+    # Frozen through the cause ledger, and refused twice at the gate: risk-state rule AND clock_skew rule.
     assert "clock_skew" in report.frozen_reasons
     assert rig.mode.risk_state() == RiskState.FROZEN
     causes = {c: d for c, _s, d in rig.latch.active_causes()}
     assert "clock_skew" in causes.get("startup_selftest", "")
-    # ... and at the gate, twice over: the risk-state rule AND the clock_skew rule refuse.
     assert verdict == "reject"
     assert not checks["mode_risk_state"].passed
     assert not checks["clock_skew"].passed and "no entries until resync" in checks["clock_skew"].headroom
-    # Alert: the owner's boot report names the cause.
     assert "frozen: clock_skew" in startup.body
     assert startup.data["frozen_reasons"] == ["clock_skew"]
 
 
 # ------------------------------------------------------------------------ until resync (entries)
 async def test_entries_stay_refused_while_skewed_even_after_the_warmup_lift(skew_rig):
-    """The gate's own backstop, independent of the risk state: the boot-scoped skew verdict keeps the
-    clock_skew rule refusing every entry while skewed."""
+    """The gate's backstop, independent of risk state: the boot-scoped skew verdict keeps refusing entries while skewed."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
     await rig.boot()
@@ -207,8 +191,7 @@ async def test_resync_then_restart_reopens_entries(skew_rig):
     await rig.boot()
     assert rig.mode.risk_state() == RiskState.FROZEN
 
-    # Resync (owner fixes the Windows time service), then the restart the
-    # RECOMMEND-mode design needs (the skew verdict is measured at boot only).
+    # Resync, then the restart the design needs (the skew verdict is measured at boot only).
     await rig.lifecycle.shutdown(reason="owner")
     rig.ntp.offset_s = 0.2
     report = await rig.boot()
@@ -223,8 +206,7 @@ async def test_resync_then_restart_reopens_entries(skew_rig):
 
 # ----------------------------------------------------------------------- until resync (risk state)
 async def test_skew_freeze_holds_until_resync(skew_rig):
-    """Fixed 2026-09-24: the 60 s warm-up lift used to clear the 'startup_selftest' cause that
-    carries clock_skew — its self-test skips the NTP check. It now holds on the boot's skew verdict."""
+    """The 60 s warm-up lift must not clear the 'startup_selftest' cause carrying clock_skew (its self-test skips NTP); it holds on the boot's skew verdict."""
     rig = skew_rig
     rig.ntp.offset_s = 3.5
     await rig.boot()
@@ -233,8 +215,8 @@ async def test_skew_freeze_holds_until_resync(skew_rig):
 
     await rig.warmup_refresh()                                # warm-up is ready; the clock is NOT
 
-    assert rig.ntp.requests == requests_at_boot               # (no resync was even attempted)
-    assert rig.mode.risk_state() == RiskState.FROZEN          # FROZEN until resync
+    assert rig.ntp.requests == requests_at_boot
+    assert rig.mode.risk_state() == RiskState.FROZEN
     assert any(c == "startup_selftest" for c, _s, _d in rig.latch.active_causes())
 
 

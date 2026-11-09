@@ -1,48 +1,17 @@
 """Chaos case 6 — broker rejection storm (incl. 429s).
 
-"Must hold" for case 6:
+Failure injected: a storm of broker rejections / HTTP 429s. Must hold: no order spam (every attempt
+paced inside the rate budget); ≥3 rejects/60 s ⇒ FROZEN + alert; with the 70/day entry budget exhausted,
+kill-flatten / square-off / exit still places from the uncapped-but-paced risk-reducing lane.
 
-    retry/backoff inside rate budget; ≥3 rejects/60 s ⇒ FROZEN + alert; no order spam;
-    with the 70/day entry budget exhausted, a triggered kill-flatten/square-off/exit still places
-    from the uncapped-but-paced risk-reducing lane — never starved
+Composition as ``engine.ops.main`` wires it: real ``RateLimiter`` (1 order call/s, burst 2, 70 entry
+calls/day), ``KiteClient`` (``orders_enabled=True``, which production never passes), ``ModeManager`` /
+``KillSwitch`` / ``RiskStateLatch`` with the kill→latch bridge, and ``make_order_guard``. The only fake is
+the pykiteconnect ``KiteConnect`` answering from a script. ``asyncio.sleep`` advances a controllable
+clock, so pacing is asserted on simulated time.
 
-Composition (as ``engine.ops.main`` wires it, main.py:601-626): the REAL ``RateLimiter(clock)`` with
-its shipped defaults (1 order call/s, burst 2, 70 entry calls/day), the REAL ``KiteClient`` facade,
-the REAL ``ModeManager`` / ``KillSwitch`` / ``RiskStateLatch`` (incl. the main.py:524-530 kill→latch
-bridge) and the composition root's own ``make_order_guard``. The client is built with
-``orders_enabled=True``, which production never passes. The ONLY fake is the pykiteconnect ``KiteConnect``
-object — the broker HTTP boundary — which answers from a script (429s, rejections, order ids).
-Time is a ticking controllable clock; ``asyncio.sleep`` advances it (the ``test_rate_limiter``
-idiom), so pacing is asserted on simulated time without real waits.
-
-Clauses asserted here:
-
-* **no order spam / "inside rate budget"** — a caller hammering through a 429 storm
-  reaches the broker exactly once per attempt (KiteClient never retries or amplifies internally),
-  every attempt is admitted by the order bucket (≤ burst 2, then ≥ 1 s apart) and counted against
-  the entry budget: ``test_429_storm_every_attempt_is_paced_and_never_amplified``.
-* **entry budget exhausted ⇒ the risk-reducing lane is never starved** — 70 entries
-  spend the budget, the 71st is budget-rejected before the broker is touched, the kill switch is
-  thrown, and exit / square-off / cancel / GTT calls still reach the broker, paced behind the SAME
-  1/s bucket, including a retry after a 429: ``test_entry_budget_exhausted_flatten_lane_never_starved``.
-* **≥3 rejects/60 s ⇒ FROZEN + alert, paper path** — the real ``PaperBroker`` rejects three
-  entries inside 60 s, the real paper ``OrderManager`` reports each broker rejection to the real
-  ``PaperRisk``, which latches the daily ``rejection_storm`` paper halt (FROZEN; the alert is the
-  ``paper_halt_set`` WARNING); the next entry is refused by ``paper_order_guard``
-  before the broker while an exit still places, and the real risk latch is untouched:
-  ``test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place``.
-
-Clauses skipped (with the reason printed by ``-rs``):
-
-* **≥3 rejects/60 s ⇒ FROZEN + alert, real path** — lands with the live AUTO OMS:
-  ``CAUSE_REJECTION_STORM`` on the real ``RiskStateLatch``, its owner ``/resume_entries`` clear, and the
-  ≥3-storms-per-session kill (see ``test_three_rejects_in_60s_freeze_entries_and_alert``).
-* **retry/backoff policy** — UNBUILT: ``KiteClient`` re-raises every broker error and nothing above
-  it retries; the pacing half of the clause is asserted above.
-
-Current reality: RECOMMEND mode places zero broker orders, so the KiteClient scenarios run the
-order surface in AUTO(paper routing) exactly as the AUTO-mode OMS will drive it; nothing here depends on
-an unbuilt component except the two skipped clauses.
+Skipped: the real-path storm freeze (``CAUSE_REJECTION_STORM`` on the real latch) and a retry/backoff
+policy wait for the live AUTO OMS; ``KiteClient`` re-raises every broker error and nothing retries.
 """
 
 from __future__ import annotations
@@ -78,21 +47,21 @@ from engine.risk.kill import KillSwitch, KillSwitchEngaged
 from engine.risk.mode import ModeManager
 from tests.chaos.conftest import LIVE_ORDER_PATH_GATED
 
-#: Wed 2026-06-17 10:05 IST — inside the seeded 10:00–10:30 trade window (NSECalendar default seed).
+#: Inside the seeded 10:00–10:30 trade window (NSECalendar default seed).
 START = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True, note="chaos case 6")
 ENTRY_REQ = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "transaction_type": "BUY", "quantity": 1,
              "order_type": "LIMIT", "product": "MIS", "price": 1420.5}
 EXIT_REQ = {"tradingsymbol": "RELIANCE", "exchange": "NSE", "transaction_type": "SELL", "quantity": 1,
             "order_type": "MARKET", "product": "MIS", "market_protection": -1}
-#: The shipped ``order_rate`` numbers the default ``RateLimiter(clock)`` carries (main.py:625).
+#: The shipped ``order_rate`` numbers the default ``RateLimiter(clock)`` carries.
 ENTRY_BUDGET = 70
 BURST = 2
 ONE_S = timedelta(seconds=1)
 
 
 def _http_429() -> NetworkException:
-    """What pykiteconnect raises for a Kite HTTP 429 (connect.py maps ``error_type`` + status code)."""
+    """What pykiteconnect raises for a Kite HTTP 429."""
     return NetworkException("Too many requests", code=429)
 
 
@@ -111,12 +80,11 @@ class _Ticker:
 
 
 class _ScriptedKiteConnect:
-    """Stand-in for pykiteconnect ``KiteConnect`` — the only faked boundary.
+    """Stand-in for pykiteconnect ``KiteConnect``.
 
     Each call pops the next scripted outcome (an exception to raise, or the id to return; an empty
-    script answers with a fresh id) and records ``(op, sim_time, params)`` at the moment the broker
-    was actually hit. Calls arrive strictly one at a time (sequential awaits), so reading the ticker
-    from the executor thread is race-free.
+    script answers with a fresh id) and records ``(op, sim_time, params)``. Calls arrive strictly one at
+    a time, so reading the ticker from the executor thread is race-free.
     """
 
     def __init__(self, ticker: _Ticker, script: list[Any] | None = None) -> None:
@@ -152,7 +120,7 @@ class _World:
         self.mode = ModeManager(conn, self.clock, self.bus, self.calendar, paper_only=False)
         self.latch = RiskStateLatch(conn, self.clock, self.mode)
         self.kill = KillSwitch(conn, self.clock, self.bus)
-        # main.py:524-530 — the kill ⇄ cause-latch bridge, so risk_state reads KILLED after a kill.
+        # The kill ⇄ cause-latch bridge (as main.py), so risk_state reads KILLED after a kill.
 
         async def _kill_to_latch(evt: Any) -> None:
             if evt.killed:
@@ -161,7 +129,7 @@ class _World:
                 await self.latch.clear_cause("kill", evt.actor)
 
         self.bus.subscribe(TOPIC_KILL_STATE, _kill_to_latch)
-        self.limiter = RateLimiter(self.clock)          # main.py:625 — shipped risk-limit defaults
+        self.limiter = RateLimiter(self.clock)          # shipped risk-limit defaults
         self.kc = _ScriptedKiteConnect(ticker, script)
         self.client = KiteClient(
             self.kc, self.limiter, self.clock,
@@ -190,8 +158,7 @@ def _broker_times(kc: _ScriptedKiteConnect, *ops: str) -> list[datetime]:
 
 
 def _assert_paced(times: list[datetime], *, already_drained: bool = False) -> None:
-    """Order-bucket pacing: after the burst, consecutive broker hits are ≥ 1 s apart, and
-    no rolling 1-s window ever holds more than the burst — far under the 10-ops/s ceiling."""
+    """After the burst, consecutive broker hits are ≥ 1 s apart and no rolling 1-s window holds more than the burst."""
     slack = timedelta(milliseconds=1)             # float refill arithmetic, never a real gap
     first_paced = 1 if already_drained else BURST
     for i in range(first_paced, len(times)):
@@ -203,9 +170,8 @@ def _assert_paced(times: list[datetime], *, already_drained: bool = False) -> No
 
 # --------------------------------------------------------------------------- clauses
 async def test_429_storm_every_attempt_is_paced_and_never_amplified(conn, ticker) -> None:
-    """A caller that keeps retrying through a solid wall of HTTP 429s produces exactly one
-    broker hit per attempt, each one admitted by the shared 1/s order bucket and charged to the entry
-    budget — the storm can never turn into spam, whatever the caller's retry loop does."""
+    """A caller retrying through a wall of 429s produces exactly one broker hit per attempt, each paced
+    by the shared 1/s order bucket and charged to the entry budget: the storm never becomes spam."""
     attempts = 12
     world = _World(conn, ticker, script=[_http_429() for _ in range(attempts)])
     await world.go_auto()
@@ -224,10 +190,9 @@ async def test_429_storm_every_attempt_is_paced_and_never_amplified(conn, ticker
 
 
 async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -> None:
-    """A churny day spends the 70/day entry budget; the owner then kills. Every
-    risk-reducing broker call — the square-off/exit orders, the cancels of resting entries and the
-    GTT protection — still places (a 429 on the way is retried and admitted), paced behind the same
-    1/s bucket, never budget-rejected, never blocked by the kill switch that blocks entries."""
+    """With the 70/day entry budget spent and the kill thrown, every risk-reducing call (exits, cancels,
+    GTT; a 429 retry included) still places, paced behind the same 1/s bucket, never budget-rejected
+    or blocked by the kill switch."""
     world = _World(conn, ticker)
     await world.go_auto()
 
@@ -238,19 +203,18 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
     assert entry_hits == ENTRY_BUDGET
     _assert_paced(_broker_times(world.kc))
 
-    # The 71st entry is refused BY THE BUDGET, before the broker is touched.
+    # The 71st entry is refused by the budget, before the broker.
     with pytest.raises(EntryBudgetExhausted):
         await world.client.place_order(ENTRY_REQ, intent="entry")
     assert len(world.kc.calls) == entry_hits
 
-    # The owner kills; the kill latches KILLED and every opening call is now refused at the guard.
     await world.kill.trigger("chaos case 6: rejection storm", actor=Actor.OWNER, flatten=False)
     assert world.mode.risk_state() == RiskState.KILLED
     with pytest.raises(KillSwitchEngaged):
         await world.client.place_order(ENTRY_REQ, intent="entry")
     assert len(world.kc.calls) == entry_hits
 
-    # The flatten lane. The first square-off order meets a 429 and the caller retries it.
+    # Flatten lane: the first square-off meets a 429 and the caller retries it.
     world.kc.script = [_http_429()]
     flatten_started = world.ticker.at
     with pytest.raises(NetworkException):
@@ -264,8 +228,7 @@ async def test_entry_budget_exhausted_flatten_lane_never_starved(conn, ticker) -
     lane = [(op, at) for op, at, _ in world.kc.calls[entry_hits:]]
     assert [op for op, _ in lane] == ["place_order"] * 5 + ["cancel_order"] * 3 + ["place_gtt"]
     assert world.limiter.orders_today() == (ENTRY_BUDGET, 9)      # uncapped lane, still counted
-    # Paced behind the SAME bucket the entries drained: no burst left, so ≥ 1 s between every hit,
-    # including the 429-then-retry pair (the retry stays inside the rate budget).
+    # Same bucket the entries drained: no burst left, so ≥ 1 s between every hit, the 429 retry included.
     lane_times = [at for _, at in lane]
     assert lane_times[0] >= flatten_started
     _assert_paced(lane_times, already_drained=True)
@@ -278,9 +241,8 @@ _RATE = 0.9
 
 
 def _seed_rejecting_first(n: int) -> int:
-    """A PaperBroker seed whose injected-rejection draws reject placements 1..n and accept n+1. The
-    broker draws once per placement that passes its guard (``PaperBroker.place_order``), so the
-    sequence is a pure function of (seed, placement count)."""
+    """A PaperBroker seed whose injected-rejection draws reject placements 1..n and accept n+1 (the broker
+    draws once per placement that passes its guard)."""
     for seed in range(10_000):
         rng = random.Random(seed)
         draws = [rng.random() for _ in range(n + 1)]
@@ -322,9 +284,8 @@ def _never(*_args: Any) -> Any:
 async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_still_place(
     conn, bus, caplog
 ) -> None:
-    """On the paper OMS: three broker rejects inside 60 s ⇒ the daily ``rejection_storm`` paper
-    halt (FROZEN) + its WARNING; the next entry never reaches the broker, an exit still places, and
-    the real risk latch never moves (paper never writes it)."""
+    """Three broker rejects inside 60 s ⇒ the daily ``rejection_storm`` paper halt (FROZEN) + its WARNING; the
+    next entry never reaches the broker, an exit still places, and the real risk latch never moves."""
     ticker = _Ticker(START)
     clock = Clock(time_source=ticker)
     mode = ModeManager(conn, clock, paper_only=False)
@@ -356,7 +317,7 @@ async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_
         assert mode.risk_state() is RiskState.NORMAL
         assert conn.execute("SELECT COUNT(*) FROM risk_state_causes").fetchone()[0] == 0
 
-        # The next entry is refused by the paper guard before the broker: no fourth placement.
+        # The paper guard refuses the next entry before the broker: no fourth placement.
         ticker.at = START + timedelta(seconds=55)
         blocked = await orders.submit(*_seed_verdict(conn, STORM_REJECTS))
         assert blocked.state is OrderState.REJECTED and "FROZEN" in (blocked.reject_reason or "")
@@ -364,7 +325,7 @@ async def test_paper_three_broker_rejects_in_60s_freeze_paper_entries_and_exits_
             (OrderState.DRAFT, OrderState.REJECTED)]
         assert len(await broker.orders()) == STORM_REJECTS
 
-        # A risk-reducing exit still passes the guard, reaches the broker and rests there.
+        # A risk-reducing exit still passes the guard and rests at the broker.
         conn.execute(
             "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, stop, state, "
             "protection_state, is_paper, origin, opened_at) VALUES ('POS1', 'TCS', 'BUY', 'CNC', 10, '100', '95', "

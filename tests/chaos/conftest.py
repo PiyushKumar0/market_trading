@@ -1,12 +1,11 @@
-"""Chaos suite. Every test under tests/chaos is marked ``chaos`` (``pytest -m chaos`` runs the
-suite before a phase gate). One file per case, ``test_case<NN>_<slug>.py``; the case number is the
-drill-catalog row, so runbooks/CHAOS_DRILLS.md can map drill -> test. Cases or sub-assertions that need live order-path
-components (real AUTO routing and broker-resident protection) are skip-marked with ``LIVE_ORDER_PATH_GATED`` or
-a classification below so the gap stays visible in every run instead of being absent.
+"""Chaos suite. Every test under tests/chaos is marked ``chaos``. One file per case,
+``test_case<NN>_<slug>.py``; the case number is the drill-catalog row in runbooks/CHAOS_DRILLS.md.
+Cases that need live order-path components are skip-marked with ``LIVE_ORDER_PATH_GATED`` or a
+classification below so the gap stays visible in every run.
 
-Chaos tests never touch the live stores (data/state.db, data/market.duckdb), the engine's API port, or
-the network: they build real components over the root conftest's migrated temp SQLite db and frozen
-clock, and fake only the external boundary (Kite HTTP/websocket, the Claude SDK, Telegram).
+Chaos tests never touch the live stores, the engine's API port, or the network: they build real
+components over the root conftest's migrated temp SQLite db and frozen clock, and fake only the external
+boundary (Kite HTTP/websocket, the Claude SDK, Telegram).
 """
 
 from __future__ import annotations

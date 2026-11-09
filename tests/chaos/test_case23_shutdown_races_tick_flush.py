@@ -1,37 +1,19 @@
 """Chaos case 23 — Shutdown races an in-flight tick flush (teardown order / hot-path
 invariant).
 
-Drill-catalog row (case 23), "Must hold":
+Failure injected: a clean stop races a due tick batch mid-flush on a background thread. Must hold: no
+deadlock (lock order: flush-serialization → store; ``close()`` flushes before taking the store lock) and no
+crash; the flush completes or degrades gracefully (batch restaged + an explicit
+``tick_flush_skipped_store_closed`` log, never a swallowed traceback); event-bus handlers are drained
+before store close; ENGINE_STOPPED is still emitted.
 
-    "with a due tick batch mid-flush on a background thread, a concurrent clean stop neither deadlocks
-    (lock order: flush-serialization → store; close() flushes before taking the store lock) nor
-    crashes: the flush completes or degrades gracefully (batch restaged + explicit
-    tick_flush_skipped_store_closed log — never a swallowed traceback); event-bus handlers are drained
-    before store close; ENGINE_STOPPED still emitted"
-
-Composition (``tests/chaos/_lifecycle_rig.py``): the live tick path exactly as main.py wires it — a
-real ``MarketStore`` (``from_settings``: the store defaults, 60 s / 30,000-tick batching) with a real ``BarBuilder``
-subscribed to ``"tick"`` on the real ``EventBus``; ticks arrive by fire-and-forget ``bus.publish`` (as
-``TickerSupervisor`` publishes them), so the due flush runs through ``BarBuilder.on_tick_event`` →
-``MarketStore.aflush_ticks`` on the store's ``mt-flush`` thread. The flush is held mid-flight inside
-its batch write (the unit tests' ``_bulk_write`` seam) and the clean stop runs main.py's teardown
-order: scheduler down → post-arm cancelled → ``bar_builder.flush_all`` → ticker stop →
-``lifecycle.shutdown`` (ENGINE_STOPPED) → ``bus.drain`` → ``store.close()`` → conn close. The whole scenario runs on
-its own event-loop thread joined with a hard bound, so a deadlock FAILS the test instead of hanging it.
-
-Tests:
-
-* ``…_completes_without_deadlock`` — the in-flight flush is released only once ``store.close()`` is
-  waiting on it: no deadlock, no crash, the in-flight batch AND the tick staged behind it both reach
-  parquet, no error/traceback logged, ENGINE_STOPPED once, state STOPPED. (passes)
-* ``…_late_flush_after_close_restages_with_explicit_log`` — a size-due burst whose bus handlers only
-  run after ``store.close()`` (the undrained-handler hazard): the orphaned flush restages the batch and
-  logs ``tick_flush_skipped_store_closed``; nothing raises. (passes)
-* ``…_bus_handlers_drained_before_store_close`` — the teardown drains the bus
-  (``_SHUTDOWN_BUS_DRAIN_S``) before ``store.close()``, so no delivery is pending at close (fixed 2026-09-24).
-* ``…_flush_wedged_past_close_bound_degrades_gracefully`` — a flush still mid-flight when both
-  bounds (the drain and ``close()``'s ``_CLOSE_FLUSH_WAIT_S``) expire restages its unwritten batch with
-  ``tick_flush_skipped_store_closed`` instead of crashing (fixed 2026-09-24).
+Composition (``tests/chaos/_lifecycle_rig.py``): the live tick path as main.py wires it: a real
+``MarketStore`` (store defaults, 60 s / 30,000-tick batching) with a real ``BarBuilder`` on ``"tick"``;
+ticks arrive by fire-and-forget ``bus.publish``, so the due flush runs through
+``BarBuilder.on_tick_event`` → ``MarketStore.aflush_ticks`` on the store's ``mt-flush`` thread. The flush
+is held mid-flight inside its batch write (the ``_bulk_write`` seam) and the clean stop runs main.py's
+teardown order. Each scenario runs on its own event-loop thread joined with a hard bound, so a deadlock
+FAILS the test instead of hanging it.
 """
 
 from __future__ import annotations
@@ -50,10 +32,9 @@ from tests.chaos._lifecycle_rig import EngineProcess, FakeTicker, RigEnv
 
 WED = date(2026, 6, 17)
 BOOT_AT = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
-#: Every deliberately-held flush self-releases after this long (belt and braces under RACE_BOUND_S).
+#: Every deliberately-held flush self-releases after this long.
 SLOW_FLUSH_MAX_S = 8.0
-#: Hard bound on a whole scenario (boot + race + teardown). close()'s own bounded wait is 15 s and is
-#: never reached in the passing tests; a real deadlock would hold the scenario thread forever.
+#: Hard bound on a whole scenario; close()'s own 15 s bounded wait is never reached in the passing tests.
 RACE_BOUND_S = 40.0
 STORE_LOGGER = "engine"
 
@@ -66,8 +47,7 @@ def _tick(ts: datetime, vol: int) -> Tick:
 
 
 def _run_bounded(scenario) -> dict:
-    """Run ``scenario()`` on a dedicated event-loop thread; a thread still alive after
-    ``RACE_BOUND_S`` is a DEADLOCK and fails the test (the daemon thread is abandoned)."""
+    """Run ``scenario()`` on a dedicated event-loop thread; one still alive after ``RACE_BOUND_S`` is a DEADLOCK."""
     out: dict = {}
 
     def target() -> None:
@@ -92,8 +72,7 @@ def _bus_deliveries(loop: asyncio.AbstractEventLoop) -> list[asyncio.Task]:
 
 
 def _hold_the_live_flush(store: MarketStore) -> tuple[threading.Event, threading.Event]:
-    """Park the FIRST batch write made on the ``mt-flush`` thread (the live aflush path) until
-    ``release`` is set. Returns (started, release)."""
+    """Park the FIRST batch write on the ``mt-flush`` thread until ``release`` is set. Returns (started, release)."""
     started, release = threading.Event(), threading.Event()
     real_bulk = store._bulk_write
 
@@ -108,14 +87,14 @@ def _hold_the_live_flush(store: MarketStore) -> tuple[threading.Event, threading
 
 
 async def _boot_and_start_in_flight_flush(env: RigEnv) -> tuple[EngineProcess, threading.Event]:
-    """Boot at 10:05; at 10:06:05 a tick makes the batch due (60 s since the store's last flush) and
-    its handler's flush parks mid-batch-write on mt-flush; a second tick is staged behind it."""
+    """At 10:06:05 a tick makes the batch due (60 s since the last flush) and its flush parks mid-write on
+    mt-flush; a second tick is staged behind it."""
     env.at(BOOT_AT)
     proc = EngineProcess(env, bar_builder=True, ticker=FakeTicker())
     await proc.boot()
     started, release = _hold_the_live_flush(proc.store)
     env.at(BOOT_AT + timedelta(seconds=65))
-    proc.bus.publish("tick", _tick(env.clock.now(), vol=100))        # fire-and-forget, as the supervisor
+    proc.bus.publish("tick", _tick(env.clock.now(), vol=100))        # fire-and-forget
     loop = asyncio.get_running_loop()
     assert await loop.run_in_executor(None, started.wait, SLOW_FLUSH_MAX_S), "flush never went in flight"
     proc.bus.publish("tick", _tick(env.clock.now() + timedelta(seconds=1), vol=101))
@@ -140,9 +119,11 @@ def _tracebacks(caplog) -> list[str]:
 
 # --------------------------------------------------------------------------- the race: completes
 def test_case23_clean_stop_during_in_flight_flush_completes_without_deadlock(tmp_path, monkeypatch, caplog):
+    """The in-flight flush is released only once ``close()`` waits on it: no deadlock or crash, the in-flight
+    batch and the tick behind it both reach parquet, ENGINE_STOPPED once."""
     import tests.chaos._lifecycle_rig as rig_mod
 
-    # The bus drain gives up first, so close() meets the in-flight flush — the race this test is about.
+    # The bus drain gives up first, so close() meets the in-flight flush.
     monkeypatch.setattr(rig_mod, "_SHUTDOWN_BUS_DRAIN_S", 0.1)
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
@@ -181,9 +162,8 @@ def test_case23_clean_stop_during_in_flight_flush_completes_without_deadlock(tmp
 
 # --------------------------------------------------------------------------- the race: degrades gracefully
 def test_case23_late_flush_after_close_restages_with_explicit_log(tmp_path, monkeypatch, caplog):
-    """A size-due tick burst whose bus handlers only get to run AFTER ``store.close()`` — the hazard an
-    undrained bus leaves (see the drain DEFECT below). The orphaned flush must degrade gracefully:
-    batch restaged, one explicit ``tick_flush_skipped_store_closed`` warning, nothing raises."""
+    """A size-due burst whose bus handlers only run AFTER ``store.close()`` (the undrained-bus hazard): the
+    orphaned flush restages the batch with one ``tick_flush_skipped_store_closed`` warning; nothing raises."""
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> dict:
@@ -230,7 +210,7 @@ def test_case23_late_flush_after_close_restages_with_explicit_log(tmp_path, monk
 
 # --------------------------------------------------------------------------- bus drained before close
 def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
-    """Fixed 2026-09-24: teardown now awaits ``bus.drain`` before ``store.close()``."""
+    """Teardown awaits ``bus.drain`` before ``store.close()``, so no delivery is pending at close."""
     env = RigEnv(tmp_path, monkeypatch, start=BOOT_AT)
 
     async def scenario() -> list[str]:
@@ -256,7 +236,7 @@ def test_case23_bus_handlers_drained_before_store_close(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- wedged past the bound
 def test_case23_flush_wedged_past_close_bound_degrades_gracefully(tmp_path, monkeypatch, caplog):
-    """Fixed 2026-09-24: the flush close() gave up on used to raise and lose its batch."""
+    """A flush still mid-flight when both the drain and ``close()`` bounds expire restages its unwritten batch instead of crashing."""
     import engine.marketdata.store as store_mod
     import tests.chaos._lifecycle_rig as rig_mod
 

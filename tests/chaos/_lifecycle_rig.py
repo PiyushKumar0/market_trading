@@ -1,33 +1,18 @@
 """Shared scenario rig for the lifecycle / stop-start chaos cases (15, 16, 17, 19, 22, 23).
 
-Not a test module (no ``test_`` prefix, so pytest does not collect it). It composes the REAL engine
-components the way ``engine.ops.main.run`` wires them — ``SessionLifecycle`` + ``SelfTest`` + the
-``RiskStateLatch`` cause ledger, a ``CatchUpRunner`` over the real ``build_job_registry`` inventory
-(``deferred=POST_ARM_JOB_IDS``) with the ``LANE_JOB_IDS`` in their own ``CompactionLane``, the
-dedicated-thread ``HeartbeatWriter``, the ``Scheduler`` armed by
-``_arm_registry_jobs`` and started by ``start_scheduler_and_fire_post_arm``, the real
-``_snapshot_backup`` shutdown hook, optionally a ``MarketStore`` + ``BarBuilder`` on the ``EventBus``
-— and drives the REAL ``scripts/watchdog.py`` IO shell (``read_snapshot`` → ``run_tick`` →
-``save_debounce``) against the same on-disk ``state.db``.
+Not a test module (not collected). It composes the REAL engine components the way
+``engine.ops.main.run`` wires them (lifecycle, self-test, risk latch, catch-up runner over the real job
+registry, compaction lane, heartbeat thread, scheduler, shutdown backup hook, optionally MarketStore +
+BarBuilder) and drives the REAL ``scripts/watchdog.py`` IO shell against the same on-disk ``state.db``.
 
 Each :class:`EngineProcess` is one engine process: its own sqlite connection and component graph over
-the SHARED temp data dir, exactly as consecutive boots of ``python -m engine.ops.main`` share
-``data/``. A clean stop replays main.py's teardown order; :meth:`EngineProcess.kill_9` is a process
-death (nothing after it runs).
+the SHARED temp data dir, as consecutive boots of ``python -m engine.ops.main`` share ``data/``. A clean
+stop replays main.py's teardown order; :meth:`EngineProcess.kill_9` is a process death.
 
-Only external boundaries are faked:
-
-* job BODIES (Kite / NSE / LLM work) — recorded per ``(job_id, run_for)`` instead of performed;
-  ``market_backup`` runs the real ``_market_backup`` (start gate, retry hold) and fakes only the
-  DuckDB export (:class:`FakeExportStore`);
-* Telegram — the notify/alert sinks and the watchdog's direct Bot-API sender record messages;
-* the DPAPI secrets store — :class:`FakeSecrets`;
-* the OS process table the watchdog probes (:class:`ProcessTable`) — every rig "process" runs inside
-  the pytest process, so liveness is tracked per boot/exit instead of by pid.
-
-Everything lives under ``tmp_path`` (``MT_DATA_DIR`` points there; the protected-store config dir is
-a temp copy) — the live ``data/state.db`` / ``data/market.duckdb`` / ``config/`` are never written.
-Time is a :class:`MovableTime` shared by every Clock in the rig, so a multi-day off-gap costs nothing.
+Only external boundaries are faked: job BODIES (recorded per ``(job_id, run_for)``; ``market_backup``
+runs the real ``_market_backup`` over a fake DuckDB export), Telegram sinks, the DPAPI secrets store,
+and the OS process table the watchdog probes. Everything lives under ``tmp_path``; the live stores and
+``config/`` are never written. Time is a :class:`MovableTime` shared by every Clock in the rig.
 """
 
 from __future__ import annotations
@@ -84,15 +69,14 @@ from engine.risk.mode import ModeManager
 
 OWNER_OK = OwnerConfirmation(actor=Actor.OWNER, confirmed=True)
 
-#: Heartbeat write cadence inside the rig (the live 20 s would make every clock jump look stale; the
-#: rig instead re-syncs the beat to the movable clock before each watchdog poll, see heartbeat_synced).
+#: Heartbeat write cadence in the rig; the beat is re-synced to the movable clock before each
+#: watchdog poll (see heartbeat_synced).
 HEARTBEAT_INTERVAL_S = 0.02
 
-#: Bound on every "wait for a background thing" loop in the rig — a regression fails, never hangs.
+#: Bound on every "wait for a background thing" loop — a regression fails, never hangs.
 WAIT_BOUND_S = 5.0
 
-#: Kinds that would be FALSE alarms on a clean stop/restart (case 15 "no spurious FEED_STALE/
-#: incident alerts", case 22 (a) "no false alarm across the idle gap").
+#: Kinds that would be FALSE alarms on a clean stop/restart.
 INCIDENT_KINDS = frozenset({
     MessageKind.FEED_STALE, MessageKind.FEED_DEGRADED, MessageKind.FEED_WEDGED,
     MessageKind.FEED_SILENT_UNRECOVERED, MessageKind.ENGINE_CRASHLOOP, MessageKind.DATA_FRESHNESS_FROZEN,
@@ -156,10 +140,8 @@ class FakeSecrets:
 
 
 class ProcessTable:
-    """OS process-liveness boundary for the out-of-band watchdog (its ``is_pid_alive`` seam).
-
-    Every rig process shares the pytest pid, so liveness is tracked per boot: ``spawn`` when a
-    process starts, ``reap`` when it exits (clean or killed)."""
+    """The watchdog's ``is_pid_alive`` seam. Every rig process shares the pytest pid, so liveness is
+    tracked per boot: ``spawn`` at start, ``reap`` at exit (clean or killed)."""
 
     def __init__(self) -> None:
         self._alive: set[int] = set()
@@ -212,9 +194,8 @@ class Page:
 
 
 class FakeExportStore:
-    """The ``MarketStore`` seams ``_market_backup`` uses (``arun`` + ``export_snapshot``). A STARTED
-    export is the job call the ledger records (``market_backup``, ``run_for=None``); ``fail`` makes it
-    raise the way an incomplete ``EXPORT DATABASE`` does."""
+    """The ``MarketStore`` seams ``_market_backup`` uses. A STARTED export is the job call the ledger
+    records (``market_backup``, ``run_for=None``); ``fail`` makes it raise like an incomplete export."""
 
     def __init__(self, env: RigEnv) -> None:
         self._env = env
@@ -282,8 +263,7 @@ class RigEnv:
 
     # ---- job bodies (Kite / NSE / LLM boundary): recorded, not performed
     def job_fns(self) -> dict[str, Callable[..., Awaitable[object]]]:
-        """A runner for every registry id. DATE_KEYED runs receive ``run_for``;
-        the others take no argument — ``*args`` serves both call shapes."""
+        """A recorder for every registry id; ``*args`` serves both the DATE_KEYED (``run_for``) and no-arg shapes."""
 
         def recorder(job_id: str) -> Callable[..., Awaitable[None]]:
             async def run(*args: Any) -> None:
@@ -296,9 +276,8 @@ class RigEnv:
         return fns
 
     def _market_backup_fn(self) -> Callable[[], Awaitable[MarketBackupResult]]:
-        """``market_backup`` as run() builds it: the REAL ``_market_backup`` (the 06:00-15:45
-        trading-day start gate, a per-process 6 h retry hold) over :class:`FakeExportStore`. Called
-        once per :class:`EngineProcess`, so the hold is process state, as in main.py."""
+        """The REAL ``_market_backup`` (06:00-15:45 trading-day start gate, per-process 6 h retry hold)
+        over :class:`FakeExportStore`; called once per :class:`EngineProcess`, so the hold is process state."""
         calendar = NSECalendar(config_dir() / "calendar", self.clock, strict=False)
         retry = MarketBackupRetry()
 
@@ -312,9 +291,8 @@ class RigEnv:
 
     # ---- the out-of-band watchdog (scripts/watchdog.py), one Scheduled-Task tick
     def watchdog_poll(self) -> dict:
-        """One ``scripts/watchdog.py`` tick exactly as its ``main()`` runs it — settings-derived config,
-        strictly read-only ``read_snapshot`` of state.db, the private debounce file, the real calendar
-        YAML predicate — with the Telegram sender and the OS probes/killer as the faked boundary."""
+        """One ``scripts/watchdog.py`` tick as its ``main()`` runs it; only the Telegram sender and the
+        OS probes/killer are faked."""
         wd = load_watchdog()
         lc = self.settings.lifecycle
         cfg = wd.WatchdogConfig(
@@ -439,8 +417,7 @@ class EngineProcess:
         self.heartbeat = HeartbeatWriter(s.sqlite_path(), clock, interval_s=HEARTBEAT_INTERVAL_S)
         self.scheduler = Scheduler(clock, self.calendar)
         self.ticker = ticker
-        #: Test seam: runs at the top of the shutdown backup hook — where a repeat stop signal landed
-        #: in every 2026-09-02..23 ``nssm stop`` (``stop_forced`` mid shutdown-backup).
+        #: Test seam: runs at the top of the shutdown backup hook (where a repeat stop signal can land).
         self.during_backup: Callable[[], None] | None = None
         self.backups_written: list[Path] = []
 
@@ -457,7 +434,7 @@ class EngineProcess:
             if self.ticker is not None:
                 await self.ticker.resume()
 
-        #: The startup backfill hook; kept on the process because the post-login re-trigger re-runs the SAME one.
+        #: Kept on the process: the post-login re-trigger re-runs the SAME hook.
         self.backfill_hook = backfill_hook_factory(self) if backfill_hook_factory is not None else None
         self.lifecycle = SessionLifecycle(
             conn=self.conn, clock=clock, calendar=self.calendar, settings=s,
@@ -474,18 +451,16 @@ class EngineProcess:
 
     # ------------------------------------------------------------------ boot (main.py order)
     async def boot(self) -> StartupReport:
-        """``_arm_registry_jobs`` → ``lifecycle.startup`` → ``start_scheduler_and_fire_post_arm`` →
-        the compaction lane. Both post-arm tasks run in the background in main.py; the rig awaits them
-        so a scenario's job ledger is complete when the boot returns."""
+        """main.py's boot order. The post-arm tasks are background in main.py; the rig awaits them so the
+        job ledger is complete when the boot returns."""
         self.env.processes.spawn(self.pid)
         _arm_registry_jobs(self.scheduler, self.registry, self.catch_up, self.env.clock,
                            lane=self.compaction_lane)
         self.report = await self.lifecycle.startup(check_skew=False)
         self.post_arm = start_scheduler_and_fire_post_arm(self.scheduler, self.catch_up, armed=asyncio.Event())
         self.compaction_lane.spawn("post_arm")
-        # APScheduler triggers run on the REAL wall clock; the scenario runs on the movable one.
-        # Paused (still armed, still ``is_running()``) so a real-world cron minute can never fire a
-        # job mid-test — scenarios fire jobs explicitly through fire_scheduled().
+        # APScheduler triggers run on the REAL wall clock; paused (still armed) so a real cron minute
+        # never fires mid-test — scenarios fire jobs through fire_scheduled().
         self.scheduler._sched.pause()
         if self.post_arm is not None:
             await asyncio.wait_for(asyncio.shield(self.post_arm), timeout=WAIT_BOUND_S)
@@ -493,8 +468,7 @@ class EngineProcess:
         return self.report
 
     async def sweep(self) -> CatchUpResult:
-        """One 30-min catch-up sweep exactly as scheduled, with the compaction lane pass it may start
-        awaited too (a background task in main.py)."""
+        """One 30-min catch-up sweep, awaiting any compaction lane pass it starts."""
         result = await _catchup_sweep_once(self.catch_up, self.latch, self.kill, self.compaction_lane)
         await self._compaction_settled()
         return result
@@ -505,17 +479,14 @@ class EngineProcess:
             await asyncio.wait_for(asyncio.shield(task), timeout=WAIT_BOUND_S)
 
     async def fire_scheduled(self, job_id: str) -> None:
-        """Invoke the job exactly as APScheduler would at its fire-time: the armed job's own
-        callable (calendar guard + ``_scheduled_runner`` watermark wrapper; a lane job's fire starts
-        a lane pass, awaited here like the boot's)."""
+        """Invoke the armed job's own callable as APScheduler would (calendar guard + watermark wrapper)."""
         job = self.scheduler._sched.get_job(job_id)
         assert job is not None, f"{job_id} is not armed"
         await job.func()
         await self._compaction_settled()
 
     async def heartbeat_synced(self) -> None:
-        """Wait (bounded) until the heartbeat THREAD has written the current movable-clock time —
-        the rig's stand-in for 'the engine has been beating continuously up to now'."""
+        """Wait (bounded) until the heartbeat THREAD has written the current movable-clock time."""
         want = self.env.clock.now().isoformat()
         deadline = time_mod.monotonic() + WAIT_BOUND_S
         while time_mod.monotonic() < deadline:
@@ -526,9 +497,7 @@ class EngineProcess:
 
     # ------------------------------------------------------------------ clean stop (main.py order)
     async def stop(self) -> None:
-        """main.py's graceful teardown: scheduler down → post-arm cancelled → bars flushed → ticker
-        stopped → ``lifecycle.shutdown()`` (backup hook, STOPPED commit, heartbeat join,
-        ENGINE_STOPPED) → bus drained → store.close → conn.close → process exit."""
+        """main.py's graceful teardown order."""
         self.scheduler.shutdown()
         await cancel_post_arm(self.post_arm)
         await self.compaction_lane.cancel()
@@ -546,9 +515,8 @@ class EngineProcess:
 
     # ------------------------------------------------------------------ process death
     async def kill_9(self) -> None:
-        """``kill -9`` / power loss: the process and all its threads vanish; NOTHING of the teardown
-        runs (no STOPPING, no STOPPED commit, no ENGINE_STOPPED). The resource releases below are test
-        hygiene only — the OS does the equivalent for a real process."""
+        """``kill -9`` / power loss: NOTHING of the teardown runs (no STOPPING, no STOPPED commit, no
+        ENGINE_STOPPED). The resource releases below are test hygiene only."""
         self.env.processes.reap(self.pid)
         self.heartbeat.stop()                   # its thread died with the process
         if self.scheduler.is_running():

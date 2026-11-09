@@ -1,33 +1,18 @@
 """Chaos case 13 — Platform starts on an exchange holiday.
 
-Must hold: "calendar guard: no session, no LLM calls (governor), jobs skip,
-heartbeat-only health".
+Failure injected: the engine boots at 09:40 IST on an exchange holiday (Fri 2026-06-26, Muharram; the
+calendar is STRICT as in prod). Must hold: no session, no LLM calls, jobs skip and are never replayed,
+health is heartbeat-only. Every guard assertion is paired with a trading-day CONTROL through the same
+object, so a guard that stopped guarding fails loudly.
 
-Scenario: the engine boots at 09:40 IST on Fri 2026-06-26 — "Muharram", a full-day holiday in
-``config/calendar/2026.yaml`` (the calendar is loaded STRICT, as ``engine.ops.main`` does in prod).
-The real ``SessionLifecycle.startup`` runs with the real ``SelfTest`` (incl. the SDK smoke
-seam), the real ``build_job_registry`` inventory behind a real ``CatchUpRunner``, the real
-``HeartbeatWriter`` thread and the real ``HealthMonitor``. Only the external edges are faked: the SDK
-smoke call and every job body are recorders, and anything that would reach an LLM / the store is a
-tripwire that fails the test on first touch.
+Real ``SessionLifecycle.startup`` + ``SelfTest``, ``build_job_registry`` behind a ``CatchUpRunner``,
+``HeartbeatWriter`` and ``HealthMonitor``; the SDK smoke call and job bodies are recorders, and anything
+that would reach an LLM / the store is a tripwire.
 
-Clauses covered (one test each):
-* "no session"               — ``test_holiday_boot_has_no_session_and_opens_no_entries``
-* "no LLM calls (governor)"  — ``test_holiday_makes_no_llm_calls``
-* "jobs skip"                — ``test_holiday_jobs_skip_and_are_never_replayed``
-* "heartbeat-only health"    — ``test_holiday_health_is_heartbeat_only``
-Every guard assertion is paired with a trading-day CONTROL through the same object, so a guard that
-stopped guarding (or a test that stopped exercising it) fails loudly.
-
-Gated on the live order path: none — every clause is observable in RECOMMEND mode.
-
-Resolved ambiguity: "(governor)" — the ``BudgetGovernor.can_invoke`` is deliberately NOT
-calendar-aware (its module docstring: "No burn on holidays is emergent — no calls fire"); the holiday
-guard lives at every LLM dispatch site (calendar-guarded scheduler, catch-up fire-days, the
-pipeline's trade-window seam, the news scorer's market-hours leg, the SDK smoke skip). The test
-therefore asserts each dispatch site refuses AND that the governor's spend ledger — which every SDK
-call is priced into — stays empty. The 19:00–22:00 news sweep deliberately scores on holidays
-too (news_scoring.py "Spec ambiguities resolved"); it is outside a 09:40 boot and not asserted here.
+``BudgetGovernor.can_invoke`` is deliberately NOT calendar-aware: the holiday guard lives at every LLM
+dispatch site (scheduler, catch-up fire-days, the pipeline's trade-window seam, the news scorer's
+market-hours leg, the SDK smoke skip), so the test asserts each refuses and that the governor's spend
+ledger stays empty. The 19:00–22:00 news sweep deliberately scores on holidays; it is outside a 09:40 boot.
 """
 
 from __future__ import annotations
@@ -60,8 +45,7 @@ from engine.risk.kill import KillSwitch
 from engine.risk.mode import ModeManager
 from tests.unit.test_lifecycle_selftest import OWNER_OK, FakeSecrets
 
-#: A real full-day holiday read from config/calendar/2026.yaml (a Friday, so the weekend rule cannot
-#: be what makes it a non-trading day).
+#: A full-day holiday from config/calendar/2026.yaml (a Friday, so the weekend rule is not the cause).
 HOLIDAY = date(2026, 6, 26)
 HOLIDAY_NAME = "Muharram"
 BOOT_AT = datetime(2026, 6, 26, 9, 40, tzinfo=IST)          # mid-"session" on any normal day
@@ -98,8 +82,7 @@ class _Tripwire:
 
 
 class _StaleTicker:
-    """Duck-typed ``TickerSupervisor.health()`` (the HealthMonitor unit tests' shape): the WORST feed
-    state — STALE — so any session-scoped alarm that leaks onto the holiday shows up."""
+    """Duck-typed ``TickerSupervisor.health()`` in the worst state (STALE), so any session-scoped alarm leaking onto the holiday shows up."""
 
     def health(self) -> FeedHealth:
         return FeedHealth(state="STALE", last_tick_age_s=99_999.0)
@@ -202,16 +185,14 @@ async def test_holiday_boot_has_no_session_and_opens_no_entries(holiday_engine):
 
     report = await _boot(rig)
 
-    # The boot itself completes cleanly — a holiday start is NOT a fault ("no action").
+    # A holiday start is NOT a fault.
     assert report.frozen_reasons == [] and report.killed is False
     assert any(str(m.kind) == "startup_report" for m in rig.notified)
-    # Calendar guard: no session, no trade window, so nothing can be in-window.
     assert rig.calendar.is_trading_day(HOLIDAY) is False
     assert rig.calendar.session(HOLIDAY) is None
     with pytest.raises(ValueError, match="not a trading day"):
         rig.calendar.trade_window(HOLIDAY)
-    # The order-surface / entry predicate the composition root builds: not a trading day ⇒ never
-    # in-window (main.order_guard's ValueError branch) ⇒ no entry and no opening order in any mode.
+    # Not a trading day ⇒ never in-window (main.order_guard's ValueError branch) ⇒ no entry or opening order.
     assert rig.mode.risk_state() == RiskState.NORMAL
     assert rig.mode.entries_allowed(in_window=False) is False
     assert rig.mode.opening_orders_allowed(in_window=False) is False
@@ -230,14 +211,13 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
         report = await rig.self_test.run(check_skew=False, include_freshness=False)
         return next(c for c in report.checks if c.name == "sdk_smoke")
 
-    # (1) SDK boot smoke — the one SDK call every startup may make — is skipped on a holiday.
+    # (1) The SDK boot smoke is skipped.
     assert rig.sdk_smoke_calls == []
     smoke = await smoke_check()
     assert smoke.status.value == "SKIP" and "non-trading day" in smoke.detail
     assert rig.sdk_smoke_calls == []
 
-    # (2) The LLM-dispatching registry jobs (pre-open planner, nightly reviewer, news chain → digest)
-    #     never fire: not from the boot catch-up, not from the armed scheduler, not from the sweep.
+    # (2) The LLM-dispatching registry jobs never fire: not from the catch-up, the scheduler or the sweep.
     llm_jobs = {opsmain.JOB_PREOPEN_PLANNER, opsmain.JOB_NIGHTLY_REVIEW, opsmain.JOB_NEWS_CHAIN,
                 opsmain.JOB_CATALYST_DIGEST}
     scheduler = Scheduler(rig.clock, rig.calendar)
@@ -250,8 +230,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
     assert [c for c in rig.job_calls if c[0] in llm_jobs] == []
     rig.now.at = BOOT_AT
 
-    # (3) Intraday analyst: every entry-seeking trigger gates on the pipeline's trade-window seam,
-    #     which has no window on a holiday.
+    # (3) Intraday analyst: entry triggers gate on the pipeline's trade-window seam, which has no window.
     pipeline = RecommendationPipeline.__new__(RecommendationPipeline)
     pipeline._calendar = rig.calendar
     assert pipeline._window(HOLIDAY) is None
@@ -266,13 +245,12 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
     assert result.skipped_reason == SKIP_OUTSIDE_WINDOWS and result.scored == 0
     assert hits == []
 
-    # (governor) Every SDK call is priced into the governor's ledger — the holiday left it empty.
+    # (governor) Every SDK call is priced into the ledger; the holiday left it empty.
     governor = BudgetGovernor.from_config(rig.conn, rig.clock, rig.calendar)
     assert governor.window_spend() == 0
     assert rig.conn.execute("SELECT COUNT(*) FROM budget_ledger").fetchone()[0] == 0
 
-    # CONTROLS on a trading day (same objects, clock moved): each guard really is the thing that
-    # stopped the call — past it, the tripwire is hit.
+    # CONTROLS on a trading day (same objects, clock moved): past each guard the tripwire is hit.
     assert pipeline._window(TRADING_CONTROL_AT.date()) is not None
     rig.now.at = TRADING_CONTROL_AT
     with pytest.raises(_Tripped):
@@ -284,7 +262,7 @@ async def test_holiday_makes_no_llm_calls(holiday_engine):
 # ------------------------------------------------------------------------------------ jobs skip
 async def _lane_pass(rig) -> None:
     task = rig.compaction_lane.spawn("sweep")
-    assert task is not None                 # a holiday, and 23:30, are outside the tick_compact no-run window
+    assert task is not None                 # a holiday and 23:30 are outside the tick_compact no-run window
     await task
 
 
@@ -293,16 +271,15 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     report = await _boot(rig)
     assert report.jobs_caught_up == [] and report.jobs_failed == []
 
-    # The live scheduler: every calendar-guarded trading-day fire is a logged no-op on the holiday.
+    # Every calendar-guarded trading-day fire is a logged no-op.
     scheduler = Scheduler(rig.clock, rig.calendar)
     opsmain._arm_registry_jobs(scheduler, rig.registry, rig.catch_up, rig.clock)
     guarded = [s.job_id for s in rig.registry.specs() if s.job_id != opsmain.JOB_SECTOR_MAP]
     for job_id in guarded:
         await scheduler._sched.get_job(job_id).func()
-    # Safety-critical jobs are not "stale" on a holiday — so no data_freshness FROZEN either.
+    # Safety-critical jobs are not "stale" on a holiday, so no data_freshness FROZEN either.
     assert rig.catch_up.stale_safety_jobs() == []
-    # The post-arm one-shot + a late-evening sweep, after every fire-time of the day has passed —
-    # each followed by the compaction lane pass run() starts behind it.
+    # Post-arm one-shot + a late-evening sweep, each followed by the compaction lane pass.
     await rig.catch_up.catch_up(scope=CatchUpScope.DEFERRED)
     await _lane_pass(rig)
     rig.now.at = datetime(2026, 6, 26, 23, 30, tzinfo=IST)
@@ -315,8 +292,7 @@ async def test_holiday_jobs_skip_and_are_never_replayed(holiday_engine):
     ).fetchone()[0] == 0
     assert rig.mode.risk_state() == RiskState.NORMAL          # nothing latched a freeze
 
-    # Next trading day, after the EOD block: the sweep runs each date-keyed job for Mon ONLY — the
-    # holiday is never replayed as a "missed" day (fire-days are NSE trading days).
+    # Next trading day: date-keyed jobs run for Monday ONLY; the holiday is never replayed as missed.
     rig.now.at = datetime(2026, 6, 29, 23, 30, tzinfo=IST)
     await rig.catch_up.catch_up(scope=CatchUpScope.ALL)
     await _lane_pass(rig)
@@ -331,7 +307,7 @@ async def test_holiday_health_is_heartbeat_only(holiday_engine):
     rig = holiday_engine
     await _boot(rig)
 
-    # The liveness heartbeat (dedicated thread, own sqlite connection) IS running on the holiday.
+    # The liveness heartbeat thread runs on the holiday.
     for _ in range(200):
         if rig.heartbeat.writes >= 1:
             break
@@ -340,8 +316,7 @@ async def test_holiday_health_is_heartbeat_only(holiday_engine):
     row = rig.conn.execute("SELECT state, last_alive_at FROM engine_lifecycle WHERE id=1").fetchone()
     assert row["state"] == "RUNNING" and row["last_alive_at"] == BOOT_AT.isoformat()
 
-    # ...and nothing session-scoped raises: a STALE feed, a FROZEN book held for 3 h in an armed
-    # mode and a funnel that never forwarded — every one an incident on a trading day — are silent.
+    # Nothing session-scoped raises: a STALE feed, a FROZEN book held 3 h and a dead funnel are silent.
     await rig.latch.set_cause(CAUSE_OWNER_PAUSE, RiskState.FROZEN, "chaos-13 worst case", Actor.OWNER)
     alerts: list[tuple[str, str]] = []
 
@@ -367,7 +342,7 @@ async def test_holiday_health_is_heartbeat_only(holiday_engine):
     assert [a for a in alerts if any(s in a[1] for s in session_scoped)] == []
     assert keep_awake.calls and not any(keep_awake.calls)       # OS keep-awake released all day
 
-    # The tick-silence DEGRADED guard is out-of-session too: a HEALTHY-but-tickless feed stays quiet.
+    # The tick-silence DEGRADED guard is also out-of-session.
     degraded_notes: list = []
 
     async def feed_notify(msg) -> None:
@@ -378,7 +353,7 @@ async def test_holiday_health_is_heartbeat_only(holiday_engine):
     await sup._check_tick_silence(float(rig.settings.ticker.tick_silence_degrade_s))
     assert sup.health().state == "HEALTHY" and degraded_notes == []
 
-    # CONTROL on a trading day: the very same checks DO fire, so the silence above is the calendar's.
+    # CONTROL on a trading day: the same checks fire.
     trading = _Now(TRADING_CONTROL_AT)
     tclock = Clock(time_source=trading)
     tcal = NSECalendar(config_dir() / "calendar", tclock, strict=True)
