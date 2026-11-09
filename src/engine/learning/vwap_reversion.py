@@ -1,9 +1,8 @@
 """PRE-REGISTERED experiment: intraday VWAP-deviation reversion at the 15–60-min horizon.
 
-**Research-only experiment. STOPS FOR OWNER REVIEW. No live wiring of any kind** (the pre-registration's own words). This
-module is research machinery only: nothing here is imported by a scanner, the gate, the OMS or any
-scheduled job, and the experiment deliberately writes NO ``param_sets`` row (see "Persistence" below)
-so no downstream promotion path can ever pick its output up.
+**Research-only experiment. STOPS FOR OWNER REVIEW. No live wiring of any kind.** Nothing here is
+imported by a scanner, the gate, the OMS or any scheduled job, and it writes NO ``param_sets`` row
+(see "Persistence"), so no promotion path can pick its output up.
 
 THE PRE-REGISTRATION (quoted — this module may not deviate from it)
 -----------------------------------------------------------------------------------------------
@@ -19,11 +18,11 @@ THE PRE-REGISTRATION (quoted — this module may not deviate from it)
     Abort criterion: if the UNCONDITIONED 15-60-min reversion base rate after costs is <= 0 in the
     first full-window pass, stop -- do not tune the condition until something clears zero.
 
-THE MORNING-WINDOW MODE (owner-directed 2026-08-14, after the experiment's abort)
----------------------------------------------------------------------------------
-The experiment aborted at stage 1 (unconditioned base rate −0.12742%/trade ≈ the cost floor, gross ≈ 0) — but
-its 10m-ATR warm-up meant only **11:36–14:00** was ever measured; the 10:00–11:35 morning window was
-never observed. The morning-window mode is pre-registered as a MODE of this same harness, not a fork (quoted):
+THE MORNING-WINDOW MODE (owner-directed 2026-08-14)
+---------------------------------------------------
+The unseeded run's 10m-ATR warm-up means only **11:36–14:00** is ever measured; the 10:00–11:35
+morning window is never observed. The morning-window mode is pre-registered as a MODE of this same
+harness, not a fork (quoted):
 
     the stop unit's ATR seeds from the PRIOR session — the Wilder ATR(14) recursion continues from
     the previous session's final 10m-ATR value, with the current session's FIRST bucket's true range
@@ -36,126 +35,88 @@ never observed. The morning-window mode is pre-registered as a MODE of this same
     pre-registration.
 
 Switched by ``--seed-atr-prior-session`` / ``VwapReversionExperiment(seed_atr_prior_session=True)``.
-**Default OFF ⇒ unseeded behaviour is byte-identical** — the flag supplies an ATR seed and nothing else;
-no other code path branches on it. The seeding is a per-SYMBOL chain, so sessions are walked in DATE
-ORDER (:func:`simulate_symbol` sorts rather than assumes). The abort criterion remains the OVERALL
-stage-1 number; the window splits are REPORTING ONLY and no decision reads them.
+**Default OFF ⇒ unseeded behaviour is byte-identical**: the flag supplies an ATR seed and nothing
+else. The seeding is a per-SYMBOL chain, so sessions are walked in DATE ORDER
+(:func:`simulate_symbol` sorts rather than assumes). The abort criterion remains the OVERALL
+stage-1 number; the window splits are REPORTING ONLY.
 
 The grid is the **stretch axis only** (3 points ⇒ N = 3). ``rel_vol_max`` (1.5), the entry window
 (10:00–14:00), the exit ladder (VWAP-touch / 60-min timeout / 1.5 × 10-min ATR stop) and the long-only
-direction are **FIXED constants, never swept** — that is what keeps the multiplicity contained, which
-is the whole point of a pre-registration. Adding an axis here silently would invalidate the N.
+direction are **FIXED constants, never swept** — that contains the multiplicity; adding an axis
+silently would invalidate the N.
 
-DESIGN REQUIREMENTS (manager-specified, beyond the pre-registration text — each stated here as required)
------------------------------------------------------------------------------------------
+DESIGN REQUIREMENTS
+-------------------
 1. **TWO-STAGE, per the abort criterion.** Stage 1 measures the UNCONDITIONED reversion base rate
    after costs over the full window — every symbol-session, **no stretch and no relative-volume
    condition** (:data:`STAGE1_STRETCH_MIN_PCT` = 0.0, :data:`STAGE1_REL_VOL_MAX` = ``None``); the
-   entry window, the exit ladder, the fill mechanics and the cost charge are IDENTICAL to stage 2, so
-   stage 1 is exactly "the same trade with the condition switched off". If that base rate is <= 0 (or
-   there were no unconditioned trades at all to take a base rate of), the run writes an **ABORTED**
-   report stating the number and STOPS — exit code 0, clearly labelled, stage 2 never computed.
-   Stage 2 runs the 3 × 1 grid (stretch axis only) and only then.
-2. **Fills: next-bar OPEN, never the signal bar.** The stretch/rel-vol condition is evaluated on bar
-   *t*'s COMPLETED values; the entry fills at bar *t+1*'s **open**. Exits work the same way: a
-   VWAP-touch or stop trigger observed on bar *i* fills at bar *i+1*'s open. A signal on a session's
-   last usable bar is DROPPED (there is no bar left in that session to fill it in) — never carried
-   into the next session. Every timestamp comparison is session-aware: bars are grouped by IST
-   session date and clamped to 09:15 <= t < 15:30 before anything is computed.
-   The ONE clock-driven exit — the 60-minute timeout — is defined by TIMESTAMP, not bar count: the
-   fill is the open of the first bar at or after ``entry_ts + 60 min``, i.e. the position is held for
-   exactly 60 minutes and the last bar fully held (the trigger bar) is the one before it. Those two
-   readings coincide exactly; the house precedent for a clock-driven exit filling on its own schedule
-   is ``sweep.py``'s forced MIS square-off (``_Signals.shift_exits=False``).
-3. **VWAP = session-cumulative.** ``sum(typical_price x volume) / sum(volume)`` accumulated from the
-   session's FIRST bar, where typical price = (H+L+C)/3. This is exactly what
-   :func:`engine.strategy.indicators.vwap` already computes ("cumulative from the FIRST input bar…
-   the caller owns session slicing"), so it is REUSED unchanged — this module owns only the session
-   slicing. There is no divergence to declare.
-4. **Costs.** ``product = MIS``, per-trade notional ₹20,000, and the charge is
-   ``CostModel.breakeven_pct(20000, "MIS")`` — the corrected cost surface **INCLUDING the measured
-   spread** (``round_trip`` = fees + spread; NOT ``fee_breakeven_pct``, which is the spread-excluded
-   contract-note anchor the vectorbt sweeps use because they charge spread separately as slippage).
-   The FULL round trip is charged on EVERY simulated trade: ``net_return_pct = gross_return_pct −
-   cost_floor_pct``. There is no vectorbt here, so there is nothing to double-count.
-5. **Report.** JSON + MD to ``data/reports/vwap_reversion_<ts>.{json,md}`` in the sweep-report style,
-   carrying the stage-1 base rate, per-grid-point trade count / expectancy / win rate, the CPCV fold
-   results + margin-floor verdict + ``promotable``, a ``modelling_notes`` block stating every
-   pre-registered choice and every interpretation made, and the :data:`BANNER` at the top.
-6. **Unit-tested on synthetic 1m fixtures only** (``tests/offline/test_vwap_reversion.py``) — the trigger
-   threshold, the next-bar-open fill (pinned so a same-bar fill produces a detectably different
-   number), each of the three exits, the entry-window boundary, the session-last-bar drop, and the
-   abort path.
+   entry window, exit ladder, fills and costs are IDENTICAL to stage 2. If that base rate is <= 0 (or
+   there were no trades), the run writes an **ABORTED** report stating the number and STOPS (exit
+   code 0, stage 2 never computed). Stage 2 runs the 3 × 1 grid only after that.
+2. **Fills: next-bar OPEN, never the signal bar.** The condition is evaluated on bar *t*'s COMPLETED
+   values and the entry fills at bar *t+1*'s **open**; a VWAP-touch or stop trigger on bar *i* fills
+   at bar *i+1*'s open. A signal on a session's last usable bar is DROPPED, never carried into the
+   next session. Bars are grouped by IST session date and clamped to 09:15 <= t < 15:30 before
+   anything is computed. The ONE clock-driven exit, the 60-minute timeout, is defined by TIMESTAMP:
+   the fill is the open of the first bar at or after ``entry_ts + 60 min`` (house precedent: the
+   sweep's forced MIS square-off, ``_Signals.shift_exits=False``).
+3. **VWAP = session-cumulative** ``sum(typical_price x volume) / sum(volume)`` from the session's
+   FIRST bar, typical price = (H+L+C)/3 — :func:`engine.strategy.indicators.vwap` REUSED unchanged;
+   this module owns only the session slicing.
+4. **Costs.** MIS, per-trade notional ₹20,000, ``CostModel.breakeven_pct(20000, "MIS")`` — INCLUDING
+   the measured spread (NOT ``fee_breakeven_pct``, which the vectorbt sweeps use because they charge
+   spread separately as slippage). The FULL round trip is charged on EVERY trade:
+   ``net_return_pct = gross_return_pct − cost_floor_pct``.
+5. **Report.** JSON + MD to ``data/reports/vwap_reversion_<ts>.{json,md}`` carrying the stage-1 base
+   rate, per-grid-point trade count / expectancy / win rate, the CPCV fold results + margin-floor
+   verdict + ``promotable``, a ``modelling_notes`` block, and the :data:`BANNER`.
+6. **Unit-tested on synthetic 1m fixtures only** (``tests/offline/test_vwap_reversion.py``).
 
 PROMOTION — the house rule, applied unchanged
 ---------------------------------------------
-Each grid point produces a **cost-adjusted DAILY net-return series** in exactly the shape
-:class:`engine.learning.validate.ValidationPipeline` consumes (``pd.Series`` of floats, ascending
-``datetime.date`` index, one observation per session): per (symbol, session) the net trade returns are
-compounded, and the strategy's daily return is the cross-sectional MEAN over the symbols that had bars
-that session (0 for a symbol that was flat) — the same equal-weight convention
-``SweepRunner._daily_returns`` uses. The pipeline therefore applies CPCV + ``fold_pass_min(N=3)`` +
-the margin floor with NO modification. ``ParamSet.cost_floor_pct`` is passed explicitly as the
-**MIS** round trip so the floor cannot silently fall back to ``default_cost_floor_pct``'s CNC default
-(``PRODUCT_BY_STRATEGY`` has no ``vwap_reversion`` row, by design — adding one would be live wiring).
+Each grid point produces a **cost-adjusted DAILY net-return series** in the shape
+:class:`engine.learning.validate.ValidationPipeline` consumes (floats, ascending ``datetime.date``
+index, one observation per session): per (symbol, session) the net trade returns are compounded, and
+the daily return is the cross-sectional MEAN over the symbols that had bars that session (0 for a
+flat symbol) — ``SweepRunner._daily_returns``' convention. The pipeline applies CPCV +
+``fold_pass_min(N=3)`` + the margin floor with NO modification. ``ParamSet.cost_floor_pct`` is passed
+explicitly as the **MIS** round trip so the floor cannot fall back to ``default_cost_floor_pct``'s CNC
+default (``PRODUCT_BY_STRATEGY`` has no ``vwap_reversion`` row, by design — a row would be live wiring).
 
-**Persistence: none.** The pipeline is constructed with ``conn=None`` and ``reports_dir=None``, so it
-writes no ``param_sets`` candidate row and no separate validation artifact. The single self-contained
-experiment report is the entire deliverable — "STOP for owner review after the experiment report; no
-live wiring of any kind".
+**Persistence: none.** The pipeline runs with ``conn=None`` and ``reports_dir=None``: no ``param_sets``
+row, no separate validation artifact. The experiment report is the entire deliverable.
 
 INTERPRETATIONS — where the pre-registration text was under-determined
---------------------------------------------------------
-Recorded here, in :data:`PRE_REGISTRATION_INTERPRETATIONS`, and reprinted in every report's
-``modelling_notes`` so a reader can audit them against the pre-registration. They are named constants,
-not inline literals, precisely so that changing one is a visible diff.
+----------------------------------------------------------------------
+Recorded in :data:`PRE_REGISTRATION_INTERPRETATIONS` (named constants, so a change is a visible diff)
+and reprinted in every report's ``modelling_notes``. In short:
 
-* **"base rate … <= 0"** — a *rate* (a win fraction) is bounded below by 0 and could essentially never
-  trip a "<= 0" abort, so the abort quantity must be SIGNED: it is the **mean per-trade net return
-  after the full round-trip cost, in percent** (:func:`Stage1Result.base_rate_pct`). The win fraction
-  is reported alongside it for context but is NOT the abort criterion.
-* **"unconditioned"** — the task pins the relaxation to "no stretch/volume condition", so the entry
-  window, exit ladder, direction and costs are held fixed. The residual condition ``close < vwap``
-  is the DIRECTION requirement, not a tuning knob: a long whose exit is a VWAP touch is already
-  exited if it enters above VWAP, so bars at or above VWAP are not reversion candidates at all.
-* **"relative volume"** — the house definition, reused from the ``orb`` baseline: the bar's volume
-  divided by the median of the :data:`REL_VOL_WINDOW` (20) bars BEFORE it, within the session
-  (``indicators.rolling_median_volume`` shifted one bar). A bar with a non-finite or zero median is
-  not eligible while the filter is active (``orb`` skips those identically).
-* **"the 10-min ATR"** (manager ruling, 2026-08-13 — a PRE-REGISTRATION decision made BEFORE any real
-  data run) — Wilder ATR(:data:`ATR_PERIOD` = 14) computed on session-local **10-MINUTE** bars: the
-  1m frame is aggregated to 10-minute OHLC within the session, ATR(14) runs on that series, and the
-  result is carried onto the 1m grid for the stop calculation at entry. **Not** ATR(10) on 1m bars:
-  that measures 1-MINUTE noise scale (median ~0.07% per the audit's measurement), putting the stop at
-  ~0.10% — BELOW the 0.126% cost floor. A stop smaller than the round-trip cost is the exact ORB
-  death geometry, so that reading would pre-doom
-  the experiment by construction. The 10-minute-timescale reading yields a stop proportionate to the
-  15–60-min holding horizon and above the floor. The stop level is
-  ``entry_fill_price − 1.5 × ATR_10m(at the signal bar)`` — anchored at the FILL price, matching the
-  house ``stop_entry_price='fillprice'`` convention the next-open fill correction pinned.
-  **Warm-up consequence, stated deliberately**: ATR(14) on 10-minute bars needs 14 completed buckets,
-  and a bucket's ATR is only available from the NEXT bucket (no lookahead), so on a 09:15 session the
-  first bar carrying a defined ATR is **11:35** and the first possible entry FILL is **11:36**. Bars
-  before that produce **NO trade** rather than an unstopped one. The pre-registered 10:00 window
-  opening is therefore DOMINATED by this warm-up: no entry can ever fill between 10:00 and 11:35, and
-  the effective entry window is 11:36–14:00.
-* **"entries 10:00–14:00"** — the constraint is on the ENTRY, and under next-bar-open mechanics the
-  entry IS the fill, so the **fill** timestamp must satisfy ``10:00 <= t <= 14:00`` (inclusive both
-  ends). Signal bars therefore run 09:59–13:59.
-* **"revert … by more than 2x the full cost floor"** — this is the hypothesis' effect-size claim, not
-  a gate: the pre-registration names the promotion bar separately (CPCV + ``fold_pass_min`` + the margin
-  floor). The ``2 x cost floor`` comparison is REPORTED per grid point
-  (``GridPointResult.clears_2x_cost_floor``) and never enforced.
-* **Overlap / re-entry** — one position per symbol at a time; a signal that fires while a position is
-  open is ignored, and the next entry can fill no earlier than the bar after the exit fill. Without
-  this an unconditioned pass would book ~240 massively overlapping "trades" per symbol-session and
-  the expectancy would be a statistic about nothing.
-* **Simultaneous stop and VWAP touch inside one bar** — 1m bars carry no intrabar path, so the
-  ADVERSE event is assumed first: the stop wins the tie.
-* **Session ends before the timeout** — the position is squared off at the session's LAST bar's open
-  (MIS obligation) and the exit is labelled ``session_end``, distinct from ``timeout``. With entries
-  capped at 14:00 and a 60-min timeout this cannot occur on a full session; it exists so degenerate
-  or truncated sessions have defined, visible behaviour instead of a silent drop.
+* **"base rate … <= 0"**: a win fraction is bounded below by 0 and could never trip "<= 0", so the
+  abort quantity is SIGNED — the **mean per-trade net return after the full round-trip cost, in
+  percent** (:func:`Stage1Result.base_rate_pct`); the win fraction is context only.
+* **"unconditioned"**: no stretch/volume condition; entry window, exit ladder, direction and costs
+  fixed. The residual ``close < vwap`` is the DIRECTION requirement, not a tuning knob (a long
+  entered at or above VWAP is already past its VWAP-touch exit).
+* **"relative volume"**: the ``orb`` definition — bar volume over the median of the
+  :data:`REL_VOL_WINDOW` (20) bars BEFORE it, within the session; a non-finite or zero median is
+  ineligible while the filter is active.
+* **"the 10-min ATR"** (pre-registered before any data run): Wilder ATR(:data:`ATR_PERIOD` = 14) on
+  session-local **10-MINUTE** OHLC aggregated from the 1m frame and carried onto the 1m grid. **Not**
+  ATR(10) on 1m bars: that is 1-minute noise scale, putting the stop below the round-trip cost floor
+  (the ORB death geometry) and pre-dooming the experiment. Stop = ``entry_fill_price − 1.5 ×
+  ATR_10m(at the signal bar)``, anchored at the FILL. **Warm-up**: ATR(14) needs 14 completed
+  buckets and a bucket's ATR is available only from the NEXT bucket (no lookahead), so on a 09:15
+  session the first defined ATR bar is **11:35** and the first possible FILL **11:36**; earlier bars
+  produce **NO trade** rather than an unstopped one, so the effective entry window is 11:36–14:00.
+* **"entries 10:00–14:00"** constrains the ENTRY = the **fill** timestamp, ``10:00 <= t <= 14:00``
+  inclusive; signal bars run 09:59–13:59.
+* **"revert … by more than 2x the full cost floor"** is the hypothesis' effect-size claim, not a
+  gate: REPORTED per grid point (``GridPointResult.clears_2x_cost_floor``), never enforced.
+* **Overlap**: one position per symbol at a time; the next entry can fill no earlier than the bar
+  after the exit fill (else an unconditioned pass books ~240 overlapping "trades" per session).
+* **Stop and VWAP touch in one bar**: no intrabar path, so the stop wins the tie.
+* **Session ends before the timeout**: squared off at the LAST bar's open, labelled ``session_end``;
+  unreachable on a full session, defined for truncated ones.
 
 The module top level is pandas/numpy/pydantic + stdlib only (``MarketStore``/``CostModel`` are
 TYPE_CHECKING-only, like :mod:`engine.learning.sweep`), so the pure test tier imports it cheaply.
@@ -213,26 +174,22 @@ TIMEOUT_MINUTES = 60                    #: "60-min timeout" — the upper end of
 STOP_ATR_MULT = 1.5                     #: "fixed stop 1.5x the 10-min ATR"
 DIRECTION = "long_only"                 #: "long side only" (the shorts gate is shut)
 
-#: "the 10-min ATR" (manager ruling 2026-08-13, pre-registered before any data run): the ATR is
-#: measured on **10-MINUTE** bars aggregated from the session's 1m frame, at Wilder period 14 — NOT
-#: ATR(10) on 1m bars, which measures 1-minute noise scale (~0.07% median) and would put the stop
-#: (~0.10%) BELOW the 0.126% round-trip cost floor. A stop smaller than its own round trip is the ORB
-#: death geometry; see the module docstring.
+#: "the 10-min ATR" (pre-registered): Wilder period 14 on **10-MINUTE** bars aggregated from the
+#: session's 1m frame — NOT ATR(10) on 1m bars, whose stop would sit below the round-trip cost floor
+#: (the ORB death geometry); see the module docstring.
 ATR_RESAMPLE_MINUTES = 10
 ATR_PERIOD = 14
 
-#: Minutes from a session's FIRST bar before the 10m ATR(14) exists on the 1m grid, in UNSEEDED
-#: mode. 14 completed 10-minute buckets, and a bucket's ATR is only available from the NEXT
-#: bucket (no lookahead) ⇒ 14 x 10 = 140 min. On a 09:15 session: first defined ATR bar 11:35, first
-#: possible FILL 11:36. Bars before it produce NO trade rather than an unstopped one, so this
-#: warm-up — not the pre-registered 10:00 opening — is what bounds the entry window from below.
-#: The morning-window mode's prior-session seeding removes it (one bucket instead: ATR from 09:25).
+#: Minutes from a session's FIRST bar before the 10m ATR(14) exists on the 1m grid, UNSEEDED:
+#: 14 completed 10-minute buckets, each published from the NEXT bucket (no lookahead) ⇒ 140 min (first
+#: defined ATR bar 11:35, first possible FILL 11:36 on a 09:15 session). Earlier bars produce NO
+#: trade rather than an unstopped one, so this warm-up bounds the entry window from below.
+#: Prior-session seeding removes it (one bucket: ATR from 09:25).
 ATR_WARMUP_MINUTES = ATR_RESAMPLE_MINUTES * ATR_PERIOD
 
-#: Morning-window mode (owner-directed 2026-08-14, pre-registered): the split boundary for reporting the MORNING
-#: increment against the unseeded run's midday answer. Entries whose FILL is at or before this time are the
-#: morning split (10:00–11:35 — the window the unseeded warm-up could never reach); later fills are the
-#: midday split (11:36–14:00 — exactly what the unseeded run measured). REPORTING ONLY, never a gate.
+#: Morning-window mode (pre-registered): the split boundary for reporting the MORNING increment.
+#: Fills at or before it are the morning split (10:00–11:35, unreachable unseeded); later fills the
+#: midday split (11:36–14:00, what the unseeded run measured). REPORTING ONLY, never a gate.
 MORNING_SPLIT_END = time(11, 35)
 SPLIT_MORNING = "morning_1000_1135"
 SPLIT_MIDDAY = "midday_1136_1400"
@@ -259,8 +216,8 @@ _CLOSE_MIN = SESSION_CLOSE.hour * 60 + SESSION_CLOSE.minute
 
 EXIT_REASONS: tuple[str, ...] = ("vwap_touch", "stop", "timeout", "session_end")
 
-#: Every place the WO text was under-determined and this module had to choose. Reprinted verbatim into
-#: each report's ``modelling_notes`` (design requirement 5) so the choices are auditable, not implicit.
+#: Every place the pre-registration text was under-determined and this module had to choose;
+#: reprinted verbatim into each report's ``modelling_notes``.
 PRE_REGISTRATION_INTERPRETATIONS: tuple[str, ...] = (
     "ABORT QUANTITY: 'the unconditioned 15-60-min reversion base rate after costs <= 0' is read as a "
     "SIGNED number — the MEAN PER-TRADE NET RETURN after the full round-trip cost, in percent — "
@@ -336,9 +293,8 @@ class ReversionConfig:
 
     @property
     def params(self) -> dict[str, float]:
-        """The ``ParamSet.params`` view. ``rel_vol_max`` is a FIXED constant carried for the record,
-        never a swept axis; it is omitted entirely when the filter is off so no ``NaN`` can reach the
-        report JSON (``NaN`` is not valid JSON)."""
+        """The ``ParamSet.params`` view. ``rel_vol_max`` is a FIXED constant carried for the record;
+        omitted when the filter is off so no ``NaN`` reaches the report JSON."""
         params = {"stretch_min_pct": float(self.stretch_min_pct)}
         if self.rel_vol_max is not None:
             params["rel_vol_max"] = float(self.rel_vol_max)
@@ -378,8 +334,7 @@ class SessionFeatures:
     atr_10m: np.ndarray
     rel_vol: np.ndarray                 # volume / median(previous REL_VOL_WINDOW bars)
     stretch_pct: np.ndarray             # (vwap - close) / vwap * 100 — POSITIVE means below VWAP
-    #: Morning-window mode: this session's FINAL 10m-bucket ATR — what the NEXT session seeds its recursion from.
-    #: ``None`` ⇒ this session produced no ATR at all, so the chain stays fail-closed.
+    #: This session's FINAL 10m-bucket ATR — the NEXT session's seed. ``None`` ⇒ no ATR, chain stays fail-closed.
     atr_10m_final: float | None = None
 
     @property
@@ -411,14 +366,10 @@ def _seeded_wilder_atr(
     bucket's true range computed high−low only (no prev-close term: the overnight gap must never
     enter the stop unit)"*.
 
-    So there is no SMA seeding period at all: ``atr[0] = (seed x (period-1) + (high[0] - low[0])) /
-    period`` and the ordinary Wilder recursion from there. The first bucket's ``high - low`` form is
-    the same convention :func:`engine.strategy.indicators.wilder_atr` documents for a series' first
-    bar ("the first bar (no previous close) uses plain high−low"); it is recomputed here only because
-    the seeded recursion needs the TR array, which ``wilder_atr`` does not expose. Excluding the
-    prev-close term is load-bearing, not incidental: with it, an overnight gap of G would put
-    ``|high[0] − prev_session_close| ≈ G`` into the stop unit and a gap-down morning would silently
-    widen every stop that day.
+    No SMA seeding period: ``atr[0] = (seed x (period-1) + (high[0] - low[0])) / period``, then the
+    ordinary Wilder recursion. The TR array is rebuilt here because ``wilder_atr`` does not expose it.
+    Excluding the prev-close term is load-bearing: an overnight gap G would put ``≈ G`` into the stop
+    unit and silently widen every stop on a gap-down morning.
     """
     n = len(bar_cl)
     tr = np.empty(n, dtype="float64")
@@ -454,31 +405,26 @@ def session_atr_10m(
     NEXT session passes back in as ``seed``; ``None`` when this session never produced an
     ATR at all, which keeps the chain fail-closed.
 
-    The manager's 2026-08-13 pre-registration ruling (see the module docstring): "the 10-min ATR" is
-    measured at the 10-MINUTE timescale, not as ATR(10) over 1m bars. Steps, all session-local:
+    "The 10-min ATR" is measured at the 10-MINUTE timescale, not as ATR(10) over 1m bars (module
+    docstring). Steps, all session-local:
 
-    1. **Bucket** the session's 1m bars into ``resample_minutes``-wide buckets anchored at the
-       session's OWN FIRST BAR (not a fixed wall-clock grid), so a late-opening or truncated session
-       still yields whole buckets and nothing is carried in from another session.
-    2. **Aggregate** each bucket to OHLC — ``high = max``, ``low = min``, ``close = last`` — via
-       run-boundary ``reduceat`` (buckets are contiguous runs of an ascending index). A bucket that no
-       bar falls into simply does not exist; the series is over the buckets PRESENT, in order.
-    3. **Wilder ATR(period)** on that aggregated series. Two modes:
+    1. **Bucket** the 1m bars into ``resample_minutes``-wide buckets anchored at the session's OWN
+       FIRST BAR (not a wall-clock grid), so a late-opening or truncated session still yields whole
+       buckets and nothing carries in from another session.
+    2. **Aggregate** each bucket to OHLC (``high = max``, ``low = min``, ``close = last``) via
+       run-boundary ``reduceat``. An empty bucket does not exist; the series is over the buckets PRESENT.
+    3. **Wilder ATR(period)** on that series:
 
-       * ``seed is None`` (the default) — :func:`engine.strategy.indicators.wilder_atr` reused
-         unchanged: SMA-seeded over the first ``period`` buckets, so the first ATR lands on bucket
-         ``period-1`` and fewer than ``period`` buckets yields nothing at all;
-       * ``seed`` given — :func:`_seeded_wilder_atr`, which continues the recursion from the
-         prior session's final value and therefore has an ATR on bucket 0.
-    4. **Availability lag**: bucket *k*'s ATR is only KNOWN once bucket *k* has closed, so it is
-       published to the 1m bars of bucket *k+1* onward. Without this shift a bar at 11:26 would be
-       using its own bucket's 11:34 high — lookahead, and exactly the class of defect the next-open fill correction removed.
-       This applies identically in both modes; seeded, it costs one bucket (ATR from 09:25), not 140
-       minutes.
+       * ``seed is None``: :func:`engine.strategy.indicators.wilder_atr` unchanged — SMA-seeded over
+         the first ``period`` buckets (first ATR on bucket ``period-1``; fewer buckets ⇒ nothing);
+       * ``seed`` given: :func:`_seeded_wilder_atr`, continuing from the prior session's final value,
+         so there is an ATR on bucket 0.
+    4. **Availability lag**: bucket *k*'s ATR is only KNOWN once it has closed, so it is published to
+       the 1m bars of bucket *k+1* onward (else a bar at 11:26 would use its own bucket's 11:34 high:
+       lookahead). Identical in both modes; seeded, it costs one bucket (ATR from 09:25), not 140 min.
 
-    Result: ``NaN`` through the warm-up — ``resample_minutes x period`` minutes unseeded, one bucket
-    seeded — then the stop unit for every later bar. Bars with ``NaN`` here cannot signal: an entry we
-    could not stop is not booked. Pure and deterministic.
+    Result: ``NaN`` through the warm-up, then the stop unit for every later bar. ``NaN`` bars cannot
+    signal: an entry we could not stop is not booked. Pure and deterministic.
     """
     n = len(close)
     out = np.full(n, np.nan, dtype="float64")
@@ -516,9 +462,8 @@ def compute_session_features(
     the volume median can never be contaminated by a pre-open or after-hours row. Returns ``None`` if
     fewer than two in-session bars survive (nothing can be both signalled and filled).
 
-    ``atr_seed`` is the morning-window mode's prior-session 10m-ATR carry (``None`` ⇒ the unseeded behaviour,
-    byte-identical). ONLY the stop unit is affected — VWAP, stretch, relative volume, the entry
-    window, the exit ladder, the fills and the costs are untouched by the mode.
+    ``atr_seed`` is the prior-session 10m-ATR carry (``None`` ⇒ unseeded, byte-identical). ONLY the
+    stop unit is affected.
     """
     if len(frame) == 0:
         return None
@@ -540,9 +485,7 @@ def compute_session_features(
     high_np = high.to_numpy(dtype="float64")
     low_np = low.to_numpy(dtype="float64")
     close_np = close.to_numpy(dtype="float64")
-    # The STOP unit — Wilder ATR(14) on session-local 10-MINUTE bars (manager ruling 2026-08-13),
-    # NOT ATR(10) on 1m bars: see :func:`session_atr_10m` and the module docstring. ``atr_seed``
-    # carries the prior-session value; ``None`` reproduces the unseeded run exactly.
+    # The STOP unit: Wilder ATR(14) on session-local 10-MINUTE bars (see ``session_atr_10m``).
     atr_10m, atr_10m_final = session_atr_10m(
         high_np, low_np, close_np, minute_of_day, seed=atr_seed
     )
@@ -600,21 +543,18 @@ def simulate_session(
 
     Mechanics (design requirement 2, pinned by ``tests/offline/test_vwap_reversion.py``):
 
-    * signal on bar ``t`` (its CLOSE is at least ``stretch_min_pct`` below the session VWAP, and — when
-      the filter is active — its relative volume is under ``rel_vol_max``);
-    * entry fills at bar ``t+1``'s **OPEN**, and only if that bar's timestamp is inside the
-      10:00–14:00 entry window. ``t = n-1`` (the session's last usable bar) is DROPPED;
-    * the stop level is ``entry_fill − STOP_ATR_MULT × ATR_10m[t]`` — Wilder ATR(14) on session-local
-      10-MINUTE bars (:func:`session_atr_10m`), anchored at the FILL price. Bars inside that ATR's
-      warm-up (the session's first 140 minutes ⇒ before 11:35) have ``NaN`` there and are therefore
-      NOT eligible: an entry we could not stop is not booked;
+    * signal on bar ``t`` (its CLOSE at least ``stretch_min_pct`` below the session VWAP and, when the
+      filter is active, relative volume under ``rel_vol_max``);
+    * entry fills at bar ``t+1``'s **OPEN**, only if inside the 10:00–14:00 entry window;
+      ``t = n-1`` (the last usable bar) is DROPPED;
+    * stop = ``entry_fill − STOP_ATR_MULT × ATR_10m[t]`` (:func:`session_atr_10m`), anchored at the
+      FILL. Bars inside the ATR warm-up have ``NaN`` there and are NOT eligible;
     * from the entry bar onward, the first bar whose LOW <= stop (adverse, wins ties) or whose HIGH >=
       that bar's running session VWAP is the trigger; the exit fills at the NEXT bar's OPEN;
     * the 60-minute timeout is a TIMESTAMP: the exit fills at the open of the first bar at or after
-      ``entry_ts + TIMEOUT_MINUTES`` — exactly 60 minutes of holding — and no trigger later than that
-      is considered. If the session ends first, the exit is the session's last bar's open
-      (``session_end``, an MIS obligation);
-    * one position at a time: the next signal is only considered from the exit-fill bar onward.
+      ``entry_ts + TIMEOUT_MINUTES``; no later trigger is considered. If the session ends first the
+      exit is the last bar's open (``session_end``, an MIS obligation);
+    * one position at a time: the next signal is considered only from the exit-fill bar onward.
 
     Every trade is charged the FULL round trip: ``net = gross − cost_floor_pct`` (requirement 4).
     """
@@ -632,8 +572,7 @@ def simulate_session(
         )
         if config.rel_vol_max is not None:
             eligible = eligible & np.isfinite(features.rel_vol) & (features.rel_vol < config.rel_vol_max)
-    # NaN never survives a comparison as True, so ``eligible`` is already a clean bool mask: a bar
-    # whose VWAP/ATR/rel-vol is undefined (session warm-up) is simply not a signal.
+    # NaN never survives a comparison as True: a bar with undefined VWAP/ATR/rel-vol is not a signal.
 
     timeout_ns = np.int64(TIMEOUT_MINUTES) * np.int64(60_000_000_000)
     cursor = 0
@@ -711,12 +650,11 @@ def simulate_symbol(
     Returns ``({config: trades}, sessions_with_bars)``. The session list is the denominator input for
     the equal-weight daily series (a symbol that had bars but no trade contributes a 0.0 return).
 
-    ``seed_atr_prior_session`` turns the stop unit into a **per-symbol chain**: each session
-    seeds its 10m-ATR recursion from the previous session's final value, so sessions MUST be walked in
-    date order — the frame is sorted here rather than assumed, because a chain fed out of order would
-    produce plausible-looking but wrong stops with no visible symptom. Day 1 of a symbol's history has
-    no prior ATR and therefore falls back to the unseeded warm-up (fail-closed, the unseeded rule); a
-    session that yields no ATR at all leaves the carry untouched rather than clearing it.
+    ``seed_atr_prior_session`` makes the stop unit a **per-symbol chain**: each session seeds its
+    10m-ATR recursion from the previous session's final value, so sessions MUST be walked in date
+    order — the frame is sorted here, since an out-of-order chain gives plausible but wrong stops with
+    no visible symptom. Day 1 has no prior ATR and falls back to the unseeded warm-up (fail-closed); a
+    session yielding no ATR leaves the carry untouched rather than clearing it.
     """
     out: dict[ReversionConfig, list[Trade]] = {c: [] for c in configs}
     sessions: list[date] = []
@@ -739,12 +677,8 @@ def simulate_symbol(
 
 # --------------------------------------------------------------------------- accumulation → daily series
 def split_of(entry_ts: pd.Timestamp) -> str:
-    """Morning-window mode reporting split for a trade, by its ENTRY-FILL time (pure).
-
-    :data:`SPLIT_MORNING` for fills at or before :data:`MORNING_SPLIT_END` (10:00–11:35 — the window
-    the unseeded ATR warm-up could never reach), :data:`SPLIT_MIDDAY` after it (11:36–14:00 —
-    exactly what the unseeded run measured). The boundary is on the FILL, consistently with the entry window.
-    """
+    """Reporting split for a trade by its ENTRY-FILL time (consistent with the entry window):
+    :data:`SPLIT_MORNING` at or before :data:`MORNING_SPLIT_END`, else :data:`SPLIT_MIDDAY`. Pure."""
     minute = entry_ts.hour * 60 + entry_ts.minute
     return SPLIT_MORNING if minute <= _MORNING_END_MIN else SPLIT_MIDDAY
 
@@ -764,8 +698,8 @@ class ConfigAccumulator:
     gross_returns: list[float] = field(default_factory=list)
     exit_reasons: Counter = field(default_factory=Counter)
     sum_by_date: dict[date, float] = field(default_factory=dict)
-    #: Morning-window split accounting, keyed by :data:`SPLIT_MORNING` / :data:`SPLIT_MIDDAY` (by ENTRY FILL
-    #: time). REPORTING ONLY — the abort criterion is the OVERALL number, as pre-registered.
+    #: Split accounting keyed by :data:`SPLIT_MORNING` / :data:`SPLIT_MIDDAY` (ENTRY FILL time).
+    #: REPORTING ONLY — the abort criterion is the OVERALL number.
     split_net: dict[str, list[float]] = field(default_factory=dict)
     split_gross: dict[str, list[float]] = field(default_factory=dict)
 
@@ -809,9 +743,8 @@ class ConfigAccumulator:
     def daily_returns(self, symbols_by_date: Mapping[date, int]) -> pd.Series:
         """The cost-adjusted DAILY net-return series ``ValidationPipeline`` consumes.
 
-        Float values on an ascending ``datetime.date`` index, one observation per session that had ANY
-        symbol with bars — exactly the shape and semantics ``SweepRunner.returns_for`` hands the
-        pipeline, so CPCV + ``fold_pass_min`` + the margin floor apply unchanged.
+        Floats on an ascending ``datetime.date`` index, one observation per session with ANY symbol
+        bars — the shape ``SweepRunner.returns_for`` hands the pipeline.
         """
         days = sorted(symbols_by_date)
         if not days:
@@ -820,12 +753,10 @@ class ConfigAccumulator:
         return pd.Series(values, index=pd.Index(days), dtype="float64")
 
     def window_splits(self) -> list[WindowSplitStat]:
-        """Morning-window mode: the same per-trade statistics, cut by ENTRY-FILL time into the morning window
-        the unseeded run could never reach and the midday window it actually measured.
+        """The per-trade statistics cut by ENTRY-FILL time into the morning and midday windows.
 
-        Both splits are always emitted (``n_trades=0`` when empty) so the morning increment reads
-        directly against the unseeded run's answer without the reader having to notice a missing row. Pure
-        reporting — :func:`promotion_decision` and the abort criterion never see this.
+        Both splits are always emitted (``n_trades=0`` when empty) so a missing row is never the
+        signal. Pure reporting: the abort criterion never sees this.
         """
         out: list[WindowSplitStat] = []
         for key, label in (
@@ -849,7 +780,7 @@ class ConfigAccumulator:
 
 # --------------------------------------------------------------------------- report models
 class WindowSplitStat(BaseModel):
-    """Morning-window mode: per-trade statistics for one entry-time split. REPORTING ONLY, never a gate."""
+    """Per-trade statistics for one entry-time split. REPORTING ONLY, never a gate."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -879,10 +810,9 @@ class Stage1Result(BaseModel):
     cost_floor_pct: float
     aborted: bool
     abort_reason: str | None
-    #: Morning-window mode: the same base rate cut 10:00–11:35 vs 11:36–14:00 (by entry-fill time). Populated ONLY
-    #: in seeded mode — unseeded, the morning split is empty by construction (the ATR warm-up), so a
-    #: split table would be a row of zeros pretending to be a measurement. The ABORT CRITERION IS THE
-    #: OVERALL ``base_rate_pct`` in both modes, exactly as pre-registered; these are never a gate.
+    #: The base rate cut 10:00–11:35 vs 11:36–14:00 by entry-fill time. Populated ONLY in seeded mode
+    #: (unseeded, the morning split is empty by construction). The ABORT CRITERION IS THE OVERALL
+    #: ``base_rate_pct`` in both modes; these are never a gate.
     window_splits: list[WindowSplitStat] = Field(default_factory=list)
 
 
@@ -925,8 +855,8 @@ class VwapReversionReport(BaseModel):
     reference_notional: str = str(REFERENCE_NOTIONAL)
     cost_floor_pct: float
     fill_mechanics: str = FILL_MECHANICS
-    #: Morning-window mode. ``False`` = the unseeded run as shipped (unseeded ATR, effective window 11:36–14:00);
-    #: ``True`` = prior-session-seeded ATR (effective window 10:00–14:00 from day 2 of each symbol).
+    #: ``False`` = unseeded ATR (effective window 11:36–14:00); ``True`` = prior-session-seeded ATR
+    #: (effective window 10:00–14:00 from day 2 of each symbol).
     seed_atr_prior_session: bool = False
     #: ``"unseeded"`` | ``"prior_session_seeded"`` — which pre-registration this report answers.
     experiment_variant: str = "unseeded"
@@ -1063,8 +993,7 @@ class VwapReversionExperiment:
     ----------
     loader:
         ``symbol -> 1m OHLCV frame`` (tz-aware IST index, columns open/high/low/close/volume).
-        :meth:`from_store` builds the production loader over ``MarketStore.get_bars_1m_frame`` — the
-        same bulk read path ``SweepRunner``'s intraday branch uses (read-only, float frames).
+        :meth:`from_store` builds the read-only production loader over ``MarketStore.get_bars_1m_frame``.
     cost_floor_pct:
         The FULL round-trip friction at ₹20,000 MIS, in percent (fees + spread). Use
         :func:`cost_floor_pct_for` to derive it from the house ``CostModel``.
@@ -1074,9 +1003,8 @@ class VwapReversionExperiment:
         Optional CPCV splitter override, forwarded to ``ValidationPipeline`` (the offline test tier
         injects a deterministic splitter instead of importing skfolio).
     seed_atr_prior_session:
-        Morning-window mode. ``False`` (default) is the unseeded run exactly — no code path differs, the ATR seed is
-        simply never supplied. ``True`` chains each symbol's 10m-ATR across sessions so the morning
-        window becomes measurable.
+        ``False`` (default) is the unseeded run exactly (the ATR seed is never supplied). ``True``
+        chains each symbol's 10m-ATR across sessions so the morning window becomes measurable.
     """
 
     def __init__(
@@ -1161,8 +1089,7 @@ class VwapReversionExperiment:
             cost_floor_pct=self._cost_floor_pct,
             aborted=abort_reason is not None,
             abort_reason=abort_reason,
-            # Morning-window mode only: unseeded, the morning split is empty by construction (the ATR warm-up),
-            # so an all-zero split table would masquerade as a measurement.
+            # Seeded only: unseeded, an all-zero morning split would masquerade as a measurement.
             window_splits=stage1_acc.window_splits() if self._seed_atr else [],
         )
         _log.info(
@@ -1172,8 +1099,7 @@ class VwapReversionExperiment:
             aborted=stage1.aborted,
         )
         if stage1.aborted:
-            # "stop — do not tune the condition until something clears zero." Stage 2 is not
-            # computed at all, so no grid statistic can leak into the record.
+            # Stage 2 is not computed at all, so no grid statistic can leak into the record.
             return self._report(
                 status="ABORTED_STAGE1", requested=(start, end), span=span, symbols=seen,
                 symbols_by_date=symbols_by_date, stage1=stage1, grid=[], stage2_ran=False, notes=notes,
@@ -1324,9 +1250,8 @@ class VwapReversionExperiment:
 def cost_floor_pct_for(cost_model: CostModel) -> float:
     """FULL round-trip friction (fees + spread) at ₹20,000 MIS, in percent (requirement 4).
 
-    ``breakeven_pct`` — deliberately NOT ``fee_breakeven_pct``: the latter excludes the spread because
-    the vectorbt sweeps charge it separately as slippage; this harness has no vectorbt, so the spread
-    must come from the cost model or it is not charged at all.
+    ``breakeven_pct``, NOT ``fee_breakeven_pct``: the latter excludes the spread (the sweeps charge it
+    as slippage); this harness has no vectorbt, so the spread must come from here or is not charged.
     """
     return float(cost_model.breakeven_pct(REFERENCE_NOTIONAL, PRODUCT))
 

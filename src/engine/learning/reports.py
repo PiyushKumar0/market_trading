@@ -47,9 +47,8 @@ def _slug_ts(generated_at) -> str:
 
 
 def _margin_floor_txt(report: ValidationReport) -> str:
-    """The margin floor with the DENOMINATOR it was taken at — the horizon is a protocol choice
-    (20 sessions for a swing leg, the 120 for a positional one), so a report that printed only
-    the resulting %/day would not be reproducible from the artifact alone."""
+    """The margin floor with the denominator it was taken at (the horizon is a protocol choice), so the
+    artifact alone reproduces the %/day."""
     if report.margin_floor_pct_per_day is None:
         return "not evaluated (no round-trip cost floor supplied — fail-closed, see Reasons)"
     denom = (
@@ -71,13 +70,10 @@ def render_markdown(report: ValidationReport) -> str:
     lines.append("")
     lines.append(f"_Generated {report.generated_at.isoformat()} · param_set `{report.param_set_id}`_")
     lines.append("")
-    # Sweep-mechanics fix (2026-09-13): the sweep-mechanics stamp travels with the VERDICT too — a verdict is only
-    # comparable to another verdict produced the same way. Emitted ONLY when the ParamSet carries a
-    # stamp: this pipeline also validates returns that never came out of SweepRunner at all (the
-    # event-study harnesses build their own series and charge their own fills/costs), and printing
-    # "PRE-2026-09-13 (unstamped)" on one of those would assert three sweep biases it cannot have.
-    # Absence is the tell here, exactly as it is on the SweepReport side — with the difference that
-    # on THIS side absence means "pre-fix sweep OR no sweep", which COMMANDS.md says in words.
+    # The mechanics stamp travels with the verdict: verdicts are comparable only when produced the same
+    # way. Emitted ONLY when the ParamSet carries one — returns that never came out of SweepRunner
+    # (event-study harnesses) must not be labelled as an unstamped sweep. Absence here means
+    # "pre-stamp sweep OR no sweep".
     if report.sweep_mechanics:
         lines.append(f"_Sweep mechanics: `{report.sweep_mechanics}`_")
         lines.append("")
@@ -137,10 +133,9 @@ def render_markdown(report: ValidationReport) -> str:
     )
     lines.append("")
 
-    # ---- Realized-hold cells (REPORTING ONLY, 2026-09-12) ---------------------------------
-    # The bar above is quoted at a CAP (20 swing / 120 positional). These rows re-base the same
-    # round-trip floor on the horizon this run was actually held for, so "passes the floor" can
-    # never be read as comfortable without the reader seeing at what horizon.
+    # ---- Realized-hold cells (reporting only) -----------------------------------------------
+    # The bar above is quoted at a CAP (20 swing / 120 positional); these rows re-base the same
+    # floor on the horizon actually held.
     if report.realized_hold_cells:
         lines.append("### Margin floor at the MEASURED holding period (reporting only)")
         lines.append("")
@@ -299,18 +294,13 @@ def render_sweep_markdown(report: SweepReport) -> str:
         f"{report.per_side_fee_pct:.4f}%"
     )
     lines.append(f"- Best params (by CLOSED-trade expectancy): {report.best_params}")
-    # Sweep-mechanics fix (2026-09-13): the one-line mechanics stamp. A sweep number is only meaningful with the
-    # three settings it was produced under, and a pre-fix artifact carries no stamp at all — which
-    # is how the two are told apart.
+    # A sweep number is only meaningful with the settings it was produced under; an artifact with no
+    # stamp predates them.
     lines.append(f"- **Mechanics**: `{report.mechanics or 'PRE-2026-09-13 (unstamped)'}`")
     lines.append("")
 
-    # ---- Added 2026-09-12: what the winning config's trades actually looked like --------------
-    # The per-config table below reports one per-trade expectancy and no horizon at all, which is
-    # how a run could be promoted against a floor spread over 120 sessions without anyone knowing
-    # the median trade was held for 33 — and without the reader seeing that some of those "trades"
-    # were still open. Both go here, for the config the run selected. Since the sweep-mechanics fix the headline is
-    # the CLOSED-trade figure and the all-trades one is what is reported beside it.
+    # ---- the selected config's holding period and open-trade split (the per-config table below
+    # carries neither); headline = CLOSED-trade figure, all-trades beside it.
     best_stat = next(
         (s for s in report.stats if report.best_params is not None and s.params == report.best_params),
         None,
@@ -371,9 +361,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
     for s in report.stats:
         params = ", ".join(f"{k}={s.params[k]}" for k in sorted(s.params))
         win = "—" if s.win_rate is None else f"{s.win_rate:.0%}"
-        # Sweep-mechanics follow-up: the closed-only win rate sits FIRST, beside the closed-only expectancy it
-        # shares a population with — quoting "win rate X%, expectancy Y%" off this row must not mix
-        # a mark-to-market hit rate with a realized per-trade mean.
+        # Closed-only win rate sits beside the closed-only expectancy: same population.
         win_closed = "—" if s.win_rate_closed is None else f"{s.win_rate_closed:.0%}"
         sharpe = "—" if s.sharpe is None else f"{s.sharpe:.2f}"
         mdd = "—" if s.max_drawdown_pct is None else f"{s.max_drawdown_pct:.2f}%"
@@ -383,8 +371,7 @@ def render_sweep_markdown(report: SweepReport) -> str:
             f"{_pct(s.total_return_pct)} | {sharpe} | {mdd} |"
         )
     lines.append("")
-    # The ranked column is the CLOSED one; the all-trades column is the pre-fix
-    # headline, kept visible so the size of that bias is readable per config instead of asserted.
+    # The all-trades column stays visible so the size of the open-mark bias is readable per config.
     lines.append(
         "_`expectancy (CLOSED)` is the ranked/promotion statistic (mean net return over round trips "
         "that closed inside the window); `expectancy (all)` adds positions still open at the window "

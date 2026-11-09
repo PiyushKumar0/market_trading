@@ -16,84 +16,64 @@ guard, ``engine._preload`` — ``import engine`` makes the first numba/vectorbt 
 runtime first); the module top level is pandas/numpy + stdlib only, so ``import engine.learning.sweep``
 stays cheap for the pure-Python test tier.
 
-FILL MECHANICS — **next-bar OPEN** (2026-08-13; this is the one that invalidated every prior
-report). Signals are computed from bar *t*'s COMPLETED values, so no order derived from them can fill
-before bar *t+1*. Implementation, of the two options considered: **the signal frames are shifted forward
-one bar and an explicit price frame (``price=frames.open``) is passed to ``from_signals``** — so a
-signal computed on *t* becomes an order on row *t+1* and fills at *t+1*'s OPEN. (The alternative —
-leaving signals on *t* and passing ``open.shift(-1)`` as the price — fills at the same price but
-books the trade on row *t*, which back-dates the position into a session it was not held in, marks
-row *t*'s return with it, and evaluates row *t*'s high/low against a stop that did not exist yet.
-Shifting the signals keeps the trade, its return and its stop all in the session the fill happened.)
-Previously ``price`` was left ``None`` ⇒ ``np.inf`` ⇒ the SAME row's close (verified in the installed
-``vectorbt/portfolio/nb.py``: "upper bound is close"), i.e. a fill at the very close that generated
-the signal. Consequences pinned by ``tests/offline/test_sweep_smoke.py``:
+FILL MECHANICS — **next-bar OPEN**. Signals are computed from bar *t*'s COMPLETED values, so no
+order derived from them can fill before bar *t+1*: the signal frames are shifted forward one bar and
+an explicit price frame (``price=frames.open``) is passed to ``from_signals``, so a signal on *t*
+becomes an order on row *t+1* and fills at its OPEN. (Leaving signals on *t* and passing
+``open.shift(-1)`` as the price would back-date the position into a session it was not held in and
+test row *t*'s high/low against a stop that did not exist yet.) ``price=None`` would resolve to the
+SAME row's close, i.e. a fill at the close that generated the signal. Pinned by
+``tests/offline/test_sweep_smoke.py``:
 
-* signals on the LAST row of the frame are dropped — there is no bar left to fill them in;
+* signals on the LAST row of the frame are dropped — no bar left to fill them in;
 * for ``orb`` (intraday) the shift is **session-aware**: a signal on a session's last bar is dropped,
-  never carried into the next session's first bar. The forced MIS session-end square-off is the ONE
-  signal deliberately NOT shifted (shifting it would push the exit into the next session and the
-  position would ride overnight); it fills at the session's last bar's open;
-* stops/targets anchor at the FILL price (``stop_entry_price='fillprice'``), not at some other bar's
-  close — with next-open fills the entry bar's close is no longer the price paid.
+  never carried into the next session. The forced MIS session-end square-off is the ONE signal NOT
+  shifted (it would ride overnight); it fills at the session's last bar's open;
+* stops/targets anchor at the FILL price (``stop_entry_price='fillprice'``).
 
-Documented modelling choices (backtests here are **vectorbt-vectorized only**; the
-event-driven ``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in paper AUTO):
+Modelling choices (backtests here are **vectorbt-vectorized only**; the event-driven
+``ReplayHarness`` + ``PaperBroker`` re-validate these baselines in paper AUTO):
 
-* **Long-only.** Every baseline is long-only (the shorts gate is not open); ``orb``
-  models upside breakouts only. The scanner records SELL/short candidates for attribution, but
-  they are not tradeable and are not backtested here.
+* **Long-only.** The shorts gate is not open; ``orb`` models upside breakouts only.
 * **Per-symbol, equal-weight.** Each symbol is an independent single-name backtest (its own cash);
-  the strategy's daily return is the cross-sectional **mean** of the per-symbol daily returns (0 on a
-  day a name is flat) — the return of an equal-weight allocation running the rule across the frame.
-  Portfolio limits / concurrent-position caps / sizing are the gate + paper layer's job, deliberately NOT modelled in the raw-edge sweep.
+  the daily return is the cross-sectional **mean** of per-symbol daily returns (0 on a day a name is
+  flat). Portfolio limits / position caps / sizing are the gate + paper layer's job, NOT modelled.
 * **Costs — fees.** A constant proportional per-side fee = ½ × ``CostModel.fee_breakeven_pct`` (the
-  STATUTORY-fee breakeven, spread excluded — spread is charged separately as slippage, see below) at
-  a reference notional (``reference_notional``, default ₹20,000), charged by vectorbt on BOTH legs so
-  a round trip pays ≈ the full fee breakeven. This is an **approximation**: the fixed cost components
-  (DP flat, delivery brokerage flat, MIS per-order cap) do not scale linearly with notional, so the
-  fee is exact only near the reference book size — documented in every report's notes. ``orb`` is
-  priced MIS; ``rsi2``/``trend``/``mom`` are priced CNC (delivery).
-* **Costs — spread**. ``CostModel.half_spread_pct`` (½ of the measured ``costs.yaml``
-  ``spread_pct``) is passed to vectorbt as ``slippage``, so EVERY order fills half a spread against
-  itself and a round trip pays the full measured spread — on top of the fees. Before the spread correction the sweep
-  charged zero spread and zero slippage anywhere.
-* **Sizing**. ``init_cash`` defaults to ``reference_notional`` (₹20,000 — the live per-trade
-  notional), not the old fixed ₹100,000. Each per-symbol backtest opens one all-in position, so
-  trades are sized at the same notional the constant fee was calibrated at. (Fees/slippage here are
-  proportional, so the RETURN series is scale-invariant; what the old 100k-vs-20k mismatch broke was
-  the claim that the modelled constant fee was the right constant for the traded size.) Equity
-  compounds within a symbol, so later positions drift from the reference — the constant-fee
-  approximation is exact only near it.
-* **Stops/exits.** ``orb`` uses vectorbt ``sl_stop``/``tp_stop`` per-signal fractions (intrabar via
-  high/low) with risk anchored at the OPPOSITE opening-range edge (v2 2026-07-12:
-  ``stop_range_frac × (entry − range_low)``; sub-cost-floor breakouts — risk < 2× round-trip
-  breakeven — are skipped, mirroring the live cost gate) plus a forced session-end
-  square-off (MIS). ``rsi2`` exits on RSI>``rsi_exit`` OR a ``max_hold_days`` scheduled time-exit
-  (modelled 2026-07-12) with a constant ``stop_pct`` protective stop; ``trend`` exits on the 20/50
-  EMA death cross with an ATR-fraction trailing stop; ``mom`` turns the book over on the rebalance
-  cadence. The ex-date skip and ``flagged_instrument_days`` suppression are live/paper-AUTO
-  concerns (the sweep runs on corp-action-adjusted bars) — noted honestly, never silently
-  dropped.
+  STATUTORY-fee breakeven, spread excluded) at ``reference_notional`` (default ₹20,000), charged by
+  vectorbt on BOTH legs. An **approximation**: fixed components (DP flat, delivery brokerage flat,
+  MIS per-order cap) do not scale with notional, so it is exact only near the reference size.
+  ``orb`` is priced MIS; ``rsi2``/``trend``/``mom`` CNC.
+* **Costs — spread**. ``CostModel.half_spread_pct`` (½ of the measured ``costs.yaml`` ``spread_pct``)
+  is passed to vectorbt as ``slippage``, so EVERY order fills half a spread against itself and a
+  round trip pays the full spread on top of the fees.
+* **Sizing**. ``init_cash`` defaults to ``reference_notional`` (the live per-trade notional): each
+  per-symbol backtest opens one all-in position, so trades are sized at the notional the constant
+  fee was calibrated at. Equity compounds within a symbol, so later positions drift from it.
+* **Stops/exits.** ``orb``: ``sl_stop``/``tp_stop`` per-signal fractions (intrabar via high/low),
+  risk anchored at the OPPOSITE opening-range edge (``stop_range_frac × (entry − range_low)``;
+  sub-cost-floor breakouts — risk < 2× round-trip breakeven — are skipped, mirroring the live cost
+  gate), plus a forced session-end MIS square-off. ``rsi2``: RSI>``rsi_exit`` OR a ``max_hold_days``
+  scheduled time-exit, with a constant ``stop_pct`` protective stop. ``trend``: 20/50 EMA death cross
+  with an ATR-fraction trailing stop. ``mom``: turns the book over on the rebalance cadence. The
+  ex-date skip and ``flagged_instrument_days`` suppression are live/paper-AUTO concerns (the sweep
+  runs on corp-action-adjusted bars).
 
-SWEEP MECHANICS — **the 2026-09-13 fix**, three settings that
-every report now stamps (:data:`MECHANICS_STAMP`) because all three moved the numbers and all three
-previously moved them the SAME way, in the strategy's favour:
+SWEEP MECHANICS — three settings every report stamps (:data:`MECHANICS_STAMP`); all three used to
+move the numbers in the strategy's favour:
 
 1. the bar's full ``open``/``high``/``low`` are passed to vectorbt for DAILY frames too, so a stop is
-   decided **intrabar** (the live resting broker stop's behaviour) instead of on a close through the
-   level, AND filled where a resting stop would fill — at the gapped open when the bar opens through
-   the level, else at the level itself. ``open`` is part of item (i), not an extra: vectorbt
-   substitutes the close for any OHLC leg it is not given, and ``get_stop_price_nb`` tests the open
-   FIRST, so a fabricated ``open`` makes every bar that closes through the stop fill at that close;
+   decided **intrabar** and filled where a resting stop would fill (the gapped open, else the
+   level). ``open`` is not an extra: vectorbt substitutes the close for any OHLC leg not given and
+   ``get_stop_price_nb`` tests the open FIRST, so a fabricated ``open`` fills every
+   close-through-the-stop bar at that close;
 2. ``stop_exit_price='stopmarket'`` charges a stop exit the same per-leg half-spread as every other
-   exit (vectorbt's ``stoplimit`` default zeroes slippage on stop fills);
+   exit (``stoplimit`` zeroes slippage on stop fills);
 3. :attr:`ParamSetStat.expectancy_pct` — the RANKED per-trade statistic — averages **closed round
-   trips only**; the all-trades figure (which marks still-open positions at unrealized value and
-   pays no exit leg on them) is reported beside it as ``expectancy_all_pct``.
+   trips only**; the all-trades figure (open positions at unrealized value, no exit leg paid) is
+   reported beside it as ``expectancy_all_pct``.
 
-Every sweep/CPCV number produced before 2026-09-13 is on the pre-fix mechanics and is not
-comparable term-by-term with one produced after; the stamp is how the two are told apart.
+Sweep/CPCV numbers produced before these settings (2026-09-13) are not comparable term-by-term with
+later ones; the stamp tells them apart.
 """
 
 from __future__ import annotations
@@ -157,43 +137,29 @@ _TRADING_DAYS_Y = 252
 #: What every report's ``fill_mechanics`` field and modelling note declare.
 FILL_MECHANICS = "next_bar_open"
 
-# --- Sweep mechanics (2026-09-13). The three settings
-# --- registered here, as named constants so the report stamp and the code cannot drift.
-#: (i) stops are decided against the bar's OWN OHLC (``open``/``high``/``low`` are passed to vectorbt
-#: for DAILY frames too, not only intraday), so an intrabar breach stops out — the live resting
-#: broker stop's behaviour — and it fills where that stop would fill: at the OPEN when the bar gaps
-#: through the level, else at the level. Before 2026-09-13 the daily frames passed none of the three
-#: and vectorbt substituted the close for all of them, so a stop could only fire on a CLOSE through
-#: it (fewer stop-outs). ``open`` matters for the FILL as much as ``high``/``low`` do for the hit:
-#: ``get_stop_price_nb`` returns the open whenever the open is already through the level, so an
-#: ``open`` silently substituted by the close books every close-through-the-stop bar at that close
-#: rather than at the level (pessimistic on an ``sl_stop`` leg, optimistic on a ``tp_stop`` one).
-#: Two within-bar residues REMAIN, both in the strategy's favour, both unmeasured (re-review,
-#: 2026-09-13): (a) a TRAILING stop is checked against the PRIOR bar's high-water and only then
-#: ratcheted with the current bar's high (``portfolio/nb.py`` ~2025-2051: ``get_stop_price_nb``
-#: first, ``if _high > sl_curr_price: sl_curr_price = _high`` after), so a bar that makes a new high
-#: and gives back more than the trail inside the same session does NOT stop out where a live resting
-#: trail would — this touches ``trend`` (``sl_trail=True``), not ``rsi2``/``mom``; (b) the stop is
-#: armed from the bar AFTER the fill (the ``use_stops`` block runs before the bar's order and the
-#: current stop is still NaN on the entry bar), so the entry bar's own low is never tested —
-#: immaterial at ``trend``'s 4×ATR, potentially material on ``orb``.
+# --- Sweep mechanics: three settings as named constants so the report stamp and the code cannot drift.
+#: (i) stops are decided against the bar's OWN OHLC (``open``/``high``/``low`` passed to vectorbt for
+#: DAILY frames too), so an intrabar breach stops out like the live resting stop, filling at the
+#: OPEN when the bar gaps through the level, else at the level. vectorbt substitutes the close for
+#: any OHLC leg not given (stops then fire only on a CLOSE through the level).
+#: Two within-bar residues REMAIN, both in the strategy's favour, unmeasured: (a) a TRAILING stop is
+#: checked against the PRIOR bar's high-water before ratcheting with the current high
+#: (``portfolio/nb.py``), so a bar that makes a new high and gives back more than the trail does NOT
+#: stop out (touches ``trend``, ``sl_trail=True``); (b) the stop is armed from the bar AFTER the
+#: fill, so the entry bar's own low is never tested (potentially material on ``orb``).
 STOP_EVALUATION = "intrabar_ohlc"
-#: (ii) ``StopExitPrice.StopMarket`` — the installed vectorbt (1.0.0) resolves a stop fill in
-#: ``portfolio/nb.py resolve_stop_price_and_slippage_nb``: ``StopLimit`` (its default) returns
-#: ``(stop_price, 0.0)`` — slippage ZEROED, so a stop-exited round trip paid the fee but not the
-#: half-spread; ``StopMarket`` returns ``(stop_price, slippage)`` — the stop LEVEL is still the
-#: reference price (unlike ``Close``, which would also move WHERE the fill happens) and the per-leg
-#: half-spread is charged exactly as on every other exit. That is the one configuration that fixes
-#: the cost without changing the fill level, so it is the one registered here.
+#: (ii) ``StopExitPrice.StopMarket``: vectorbt's default ``StopLimit`` returns ``(stop_price, 0.0)``
+#: — slippage ZEROED, so a stop-exited round trip paid no half-spread; ``StopMarket`` keeps the stop
+#: LEVEL as the fill reference (``Close`` would also move the fill) and charges the per-leg
+#: half-spread as on every other exit.
 STOP_EXIT_PRICE = "stopmarket"
-#: (iii) the headline/ranked per-trade expectancy averages CLOSED round trips only. Trades still
-#: open at the window edge carry unrealized mark-to-market and have paid no exit leg; the all-trades
-#: figure is reported beside it as ``ParamSetStat.expectancy_all_pct``.
+#: (iii) the ranked per-trade expectancy averages CLOSED round trips only: open trades carry
+#: unrealized mark-to-market and no exit leg; the all-trades figure is ``expectancy_all_pct``.
 EXPECTANCY_BASIS = "closed_trades_only"
 
-#: One line naming all three, stamped into every sweep report (and threaded into the validation
-#: report) so a number produced before 2026-09-13 and one produced after can never be read as the
-#: same measurement. All three pre-fix settings biased results in the STRATEGY's favour.
+#: One line naming all three, stamped into every sweep report (and the validation report) so numbers
+#: from before these settings are never read as the same measurement; all three pre-fix settings
+#: biased results in the STRATEGY's favour.
 MECHANICS_STAMP = (
     f"stops={STOP_EVALUATION} · stop_exit_price={STOP_EXIT_PRICE} (half-spread charged on stop "
     f"exits) · expectancy={EXPECTANCY_BASIS} (all-trades figure reported beside it) · "
@@ -210,43 +176,29 @@ class ParamSetStat(BaseModel):
     params: dict[str, float]
     n_trades: int
     win_rate: float | None                 # fraction of ALL trades with net return > 0 (see below)
-    #: Mean per-trade net return over CLOSED round trips only, % (2026-09-13) — THE
-    #: ranking statistic (:meth:`SweepRunner._rank_best`) and the per-trade figure the promotion
-    #: packet quotes. ``None`` when the config closed no round trip (nothing realized to average)
-    #: or when the open/closed split could not be read — in both cases the config is NOT rankable,
-    #: deliberately: the all-trades number must never silently stand in for it.
-    #: Before 2026-09-13 this field averaged ALL trades, open ones included at their unrealized
-    #: mark-to-market — see ``expectancy_all_pct``, which is now that number, reported beside it.
+    #: Mean per-trade net return over CLOSED round trips only, % — THE ranking statistic
+    #: (:meth:`SweepRunner._rank_best`). ``None`` when the config closed no round trip or the
+    #: open/closed split was unreadable: NOT rankable, the all-trades number never stands in.
     expectancy_pct: float | None
     total_return_pct: float | None         # compounded net return of the equal-weight daily series, %
     sharpe: float | None                   # annualized (252) Sharpe of the daily series
     max_drawdown_pct: float | None         # positive magnitude
 
-    # --- Reporting additions (2026-09-12); the 2026-09-13 sweep-mechanics fix promoted the closed-only figure
-    # --- above to BE ``expectancy_pct``. What stays reporting-only: the holding distribution, the
-    # --- open/closed counts, and ``expectancy_all_pct`` — so the margin floor can be quoted at
-    # --- the horizon the strategy was actually held for instead of only at a cap, and so the
-    # --- pre-2026-09-13 headline remains readable beside the one that replaced it.
-    #: Open/closed split of the trades. vectorbt's per-trade ``Return`` includes STILL-OPEN
-    #: positions at their unrealized mark-to-market, so a window that ends on a run of winners
-    #: inflates ``expectancy_all_pct``; ``expectancy_pct`` excludes them.
+    # --- Reporting-only: holding distribution, open/closed counts and ``expectancy_all_pct``, so the
+    # --- margin floor can be quoted at the horizon actually held rather than only at a cap.
+    #: Open/closed split. vectorbt's per-trade ``Return`` includes STILL-OPEN positions at unrealized
+    #: mark-to-market, so a window ending on a run of winners inflates ``expectancy_all_pct``.
     n_closed: int = 0
     n_open: int = 0
-    #: Mean per-trade net return over CLOSED trades only, % — the SAME number as ``expectancy_pct``
-    #: since the sweep-mechanics fix, kept because it names its basis in the JSON and every consumer written between
-    #: 2026-09-12 and the fix reads it.
+    #: Same number as ``expectancy_pct``, kept because it names its basis in the JSON.
     expectancy_closed_pct: float | None = None
-    #: Mean per-trade net return over ALL trades, % — the pre-fix headline, kept as the figure
-    #: reported BESIDE ``expectancy_pct``. Reporting only: it ranks nothing and promotes nothing.
+    #: Mean per-trade net return over ALL trades, %. Reporting only: ranks and promotes nothing.
     expectancy_all_pct: float | None = None
-    #: Fraction of CLOSED round trips with net return > 0 — the same population ``expectancy_pct``
-    #: is computed over, so the two headline per-trade statistics of a promotion table share a
-    #: basis. ``win_rate`` above stays on ALL trades (still-open positions counted at their
-    #: unrealized mark); both are reported, neither is a promotion input.
+    #: Fraction of CLOSED round trips with net return > 0 — the population ``expectancy_pct`` is
+    #: over. ``win_rate`` above is over ALL trades; neither is a promotion input.
     win_rate_closed: float | None = None
-    #: Realized holding period in BARS — sessions for the daily baselines, 1-minute bars for ``orb``
-    #: (:attr:`SweepReport.bar_unit` names the unit). An OPEN trade contributes its AGE at the window
-    #: edge, not a realized hold, which is why the closed-only figures are reported beside them.
+    #: Realized holding period in BARS (:attr:`SweepReport.bar_unit` names the unit). An OPEN trade
+    #: contributes its AGE at the window edge, not a realized hold, hence the closed-only figures.
     hold_bars_mean: float | None = None
     hold_bars_median: float | None = None
     hold_bars_p90: float | None = None
@@ -274,18 +226,15 @@ class SweepReport(BaseModel):
     spread_pct: float = 0.0                # measured full quoted spread, % (costs.yaml)
     slippage_per_leg_pct: float = 0.0      # = spread_pct/2, charged by vectorbt on EVERY order
     cost_floor_pct: float = 0.0            # round-trip friction at the reference notional (fees+spread)
-    fill_mechanics: str = "next_bar_open"  # "same_bar_close" was the pre-2026-08-13 defect
-    #: Sweep-mechanics fix (2026-09-13): the one-line stamp of the three sweep-mechanics settings
-    #: (:data:`MECHANICS_STAMP`). Absent/"" on any artifact written before the fix — which is
-    #: exactly how a pre-fix report is told apart from a post-fix one.
+    fill_mechanics: str = "next_bar_open"
+    #: One-line stamp of the three sweep-mechanics settings (:data:`MECHANICS_STAMP`); ""/absent on
+    #: any artifact written before them.
     mechanics: str = ""
-    #: What one bar of ``ParamSetStat.hold_bars_*`` IS — "session" for the daily baselines, "1m bar"
-    #: for ``orb``. Recorded so a holding number in the JSON is never read in the wrong unit.
+    #: The unit of ``ParamSetStat.hold_bars_*``: "session" (daily baselines) or "1m bar" (``orb``).
     bar_unit: str = "session"
-    #: Added 2026-09-12: this platform stores NO point-in-time index membership, so EVERY universe a
-    #: caller can pass is a present-day list applied backwards — survivorship-tainted and optimistic
-    #: in LEVEL (comparisons between runs sharing one list are unaffected). There is deliberately no
-    #: code path that sets this False: it would be a claim the platform cannot currently support.
+    #: No point-in-time index membership is stored, so EVERY universe is a present-day list applied
+    #: backwards — optimistic in LEVEL (comparisons between runs on one list are unaffected). No code
+    #: path sets this False: the platform cannot support that claim.
     population_is_survivorship_tainted_proxy: bool = True
     stats: list[ParamSetStat]
     best_params: dict[str, float] | None   # ranked by CLOSED-trade expectancy_pct, then total return
@@ -376,8 +325,7 @@ def _wide(per_symbol: dict[str, pd.DataFrame], field: str) -> pd.DataFrame:
 
 
 def _daily_symbol_frame(store: MarketStore, symbol: str, start: date, end: date) -> pd.DataFrame | None:
-    # Bulk float read (get_bars_1d_frame) — NOT the pydantic get_bars_1d path: at backtest scale the
-    # per-row Bar construction + float(Decimal) passes measured ~50 µs/row (~7.5 min per 9M-row load).
+    # Bulk float read, NOT the pydantic get_bars_1d path: per-row Bar construction is far too slow at backtest scale.
     df = store.get_bars_1d_frame(symbol, start, end)
     return df if len(df) else None
 
@@ -406,9 +354,8 @@ class SweepRunner:
         Single "now" — stamps ``generated_at``.
     reference_notional / init_cash:
         The book size the constant per-side fee is calibrated at, and per-symbol backtest cash.
-        ``init_cash=None`` (the default) means "the same number": the pre-2026-08-13
-        default charged a fee calibrated at ₹20,000 to a ₹100,000 book. Pass an explicit
-        ``init_cash`` only to deliberately re-introduce that mismatch.
+        ``init_cash=None`` (the default) means "the same number"; pass an explicit ``init_cash``
+        only to deliberately decouple the fee calibration from the traded size.
     index_symbol:
         Optional reference-index symbol whose daily closes drive the ``rsi2`` regime filter. ``None``
         ⇒ the regime filter is DISABLED for the sweep (noted in the report); the live scanner always
@@ -502,10 +449,8 @@ class SweepRunner:
             notes.append("NO BARS for the requested symbols/window — every config scored zero trades.")
         for params in grid:
             stats.append(self._score(strategy_id, frames, params, fee))
-        # A config that traded but closed no round trip — or whose open/closed split
-        # could not be read (``_trade_split_stats`` degrades rather than raising) — has no realized
-        # per-trade expectancy and is excluded from the ranking. Say so in the artifact; a silently
-        # smaller candidate set is how a grid winner stops meaning what the reader thinks it means.
+        # Configs with no closed round trip (or an unreadable split) are excluded from the ranking;
+        # say so in the artifact — a silently smaller candidate set changes what a winner means.
         unrankable = sum(1 for s in stats if s.n_trades > 0 and s.expectancy_pct is None)
         if unrankable:
             notes.append(
@@ -616,12 +561,9 @@ class SweepRunner:
         n = int(len(trades))
         win_rate: float | None = None
         expectancy_all: float | None = None
-        # Added 2026-09-12: the open/closed split and the realized holding distribution of the trade
-        # records. Since 2026-09-13: the CLOSED-only mean IS ``expectancy_pct`` now — a still
-        # -open position is unrealized and has paid no exit leg, so it cannot sit inside the
-        # statistic the grid winner is ranked on. A config with no closed round trip (or whose split
-        # could not be read) scores ``None`` and drops out of the ranking rather than falling back
-        # to the all-trades number.
+        # The CLOSED-only mean IS ``expectancy_pct``: a still-open position is unrealized and has
+        # paid no exit leg. A config with no closed round trip (or an unreadable split) scores
+        # ``None`` and drops out of the ranking rather than falling back to the all-trades number.
         n_closed = n_open = 0
         expectancy_closed: float | None = None
         win_rate_closed: float | None = None
@@ -660,12 +602,10 @@ class SweepRunner:
     def _rank_best(stats: Sequence[ParamSetStat]) -> dict[str, float] | None:
         """Grid winner by CLOSED-trade expectancy, then total return, then shallowest DD.
 
-        A config that opened positions but closed NO round trip inside the window has no realized
-        per-trade expectancy, so it is not rankable — it is excluded rather than ranked on its
-        unrealized marks, and an all-``None`` grid returns ``None`` (the CLI then validates the
-        envelope default config, as it already does for an empty frame — flagging it on the console line
-        and on the ``ParamSet`` as ``params_are_grid_winner=False``, because a defaults verdict must
-        never render like a swept one).
+        A config that closed NO round trip inside the window is not rankable (never ranked on its
+        unrealized marks). An all-``None`` grid returns ``None``: the CLI then validates the envelope
+        defaults and flags ``params_are_grid_winner=False`` so a defaults verdict never renders like
+        a swept one.
         """
         traded = [s for s in stats if s.n_closed > 0 and s.expectancy_pct is not None]
         if not traded:
@@ -835,10 +775,8 @@ class SweepRunner:
     def _portfolio(self, frames: _Frames, sig: _Signals, fee: float):
         """Run one vectorbt backtest of already-built signals under the next-open fill mechanics.
 
-        This is where the NEXT-BAR-OPEN rule lives (module docstring): every signal frame is moved
-        one bar forward and ``price=frames.open`` makes the order fill at that bar's OPEN. Split out
-        of :meth:`_backtest` so the regression test can pin the fill price on hand-built signals
-        without going through a strategy's indicator math.
+        This is where the NEXT-BAR-OPEN rule lives (module docstring). Split out of :meth:`_backtest`
+        so a test can pin the fill price on hand-built signals.
         """
         import vectorbt as vbt  # function-level: engine._preload native import-order guard
 
@@ -859,11 +797,9 @@ class SweepRunner:
             # stops are fractions OF THE PRICE PAID; with next-open fills the signal bar's close is
             # no longer that price, so anchor them at the fill (vectorbt's default is "close").
             stop_entry_price="fillprice",
-            # A stop exit pays the half-spread like every other exit. vectorbt's default
-            # ``stoplimit`` returns (stop_price, 0.0) — fee charged, slippage ZEROED;
-            # ``stopmarket`` returns (stop_price, slippage), keeping the stop LEVEL as the fill
-            # reference while charging the per-leg half-spread (portfolio/nb.py
-            # resolve_stop_price_and_slippage_nb).
+            # A stop exit pays the half-spread like every other exit: vectorbt's default ``stoplimit``
+            # ZEROES slippage on stop fills; ``stopmarket`` keeps the stop LEVEL as the fill reference
+            # and charges it (portfolio/nb.py resolve_stop_price_and_slippage_nb).
             stop_exit_price=STOP_EXIT_PRICE,
             freq="1min" if frames.intraday else "1D",
         )
@@ -873,15 +809,11 @@ class SweepRunner:
             kwargs["tp_stop"] = _shift_stop_frame(sig.tp_stop, session_codes=session)
         if sig.sl_trail:
             kwargs["sl_trail"] = True
-        # The bar's OWN open/high/low go in for DAILY frames too (they were intraday-only),
-        # so a stop/trail is decided against the bar's range — an intrabar breach stops out, and a
-        # trail ratchets on highs. vectorbt substitutes the CLOSE for any of the three it is not
-        # given (portfolio/nb.py: `if np.isnan(_open): _open = _close`), and `get_stop_price_nb`
-        # returns the open whenever the open is already through the level BEFORE it checks the
-        # low/high range — so `open` decides the stop FILL exactly as high/low decide the HIT, and
-        # omitting it books every close-through-the-stop bar at that close instead of at the level.
-        # All three together are the live resting stop: gap through it ⇒ fill at the open, trade
-        # through it ⇒ fill at the level.
+        # The bar's OWN open/high/low go in for daily frames too, so a stop/trail is decided against
+        # the bar's range. vectorbt substitutes the CLOSE for any of the three it is not given, and
+        # `get_stop_price_nb` returns the open whenever it is already through the level BEFORE
+        # checking low/high — so `open` decides the stop FILL as high/low decide the HIT. Together
+        # they are the live resting stop: gap through ⇒ fill at the open, trade through ⇒ at the level.
         kwargs["open"] = frames.open
         kwargs["high"] = frames.high
         kwargs["low"] = frames.low
@@ -990,9 +922,7 @@ def _signals_rsi2(frames: _Frames, params: Mapping[str, float], fee: float = 0.0
     rsi_entry = float(params["rsi_entry"])
     rsi_exit = float(params["rsi_exit"])
     stop_pct = float(params["stop_pct"])
-    # The strategy rules pin "exit RSI(2) > rsi_exit OR max_hold_days" — the time-exit is MODELLED (2026-07-12;
-    # previously omitted, so the swept max_hold_days axis was a no-op and the reported expectancy
-    # belonged to a rule the strategy rules do not pin). 0/absent ⇒ no time-exit.
+    # The rule is "exit RSI(2) > rsi_exit OR max_hold_days"; the time-exit is modelled. 0/absent ⇒ none.
     max_hold = int(params.get("max_hold_days", 0) or 0)
     close = frames.close
     entries = _bool_like(close)
@@ -1025,11 +955,10 @@ def _signals_rsi2(frames: _Frames, params: Mapping[str, float], fee: float = 0.0
         entries[sym] = ent
         ex = (rsi > rsi_exit).fillna(False)
         if max_hold > 0:
-            # Time-exit scheduled max_hold SESSIONS after each entry signal. Approximation
-            # (documented in the report notes): the schedule is per-SIGNAL, so a signal that fired
-            # while already in position leaves a stale exit that can clip a subsequent re-entry
-            # early by ≤ max_hold sessions — rare (oversold signals cluster; vectorbt ignores exits
-            # while flat), and the true strategy-rule semantics live in the paper-AUTO position manager.
+            # Time-exit scheduled max_hold SESSIONS after each entry signal. Approximation (in the
+            # report notes): the schedule is per-SIGNAL, so a signal fired while in position leaves a
+            # stale exit that can clip a later re-entry by ≤ max_hold sessions (rare; vectorbt ignores
+            # exits while flat).
             ex_np = ex.to_numpy().copy()
             sched = np.flatnonzero(ent.to_numpy()) + max_hold
             sched = sched[sched < ex_np.size]
@@ -1095,12 +1024,9 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
     entries = _bool_like(close)
     exits = _bool_like(close)
 
-    # The ranking window must exclude the session actually TRADED. It does, by
-    # construction, once fills are next-session-open: the signal stamped on row t is shifted to row
-    # t+1 by ``_portfolio``, so the rank that fills on t+1 was computed from closes through t. In
-    # fill-row space that is ``momentum.shift(1)`` — the same "through d−1" window the live
-    # MomentumScanner ranks on (ScanContext loads daily bars through d−1). Do NOT additionally shift
-    # ``mom`` here: that would rank through t−1 and trade at t+1's open, a session staler than live.
+    # The ranking window excludes the session TRADED: the signal on row t is shifted to t+1 by
+    # ``_portfolio``, so the rank filling on t+1 uses closes through t — the live MomentumScanner's
+    # "through d−1" window. Do NOT shift ``mom`` again here: it would be a session staler than live.
     # Pinned by tests/offline/test_sweep_signals.py::test_mom_ranking_window_excludes_the_traded_session.
     mom = close / close.shift(_MOM_LOOKBACK) - 1.0
     first_valid = mom.dropna(how="all")
@@ -1125,12 +1051,10 @@ def _signals_mom(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
 def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0) -> _Signals:
     orb_minutes = int(params["orb_minutes"])
     vol_mult = float(params["vol_mult"])
-    frac = float(params["stop_range_frac"])   # v2 2026-07-12: stop at the opposite range edge
+    frac = float(params["stop_range_frac"])   # stop at the opposite range edge
     rr = float(params["rr_target"])
-    # v2 cost floor: a breakout whose risk cannot pay for itself twice is not a viable
-    # candidate — skip entries with risk/price < 2 × round-trip breakeven (round trip = 2 × the
-    # per-side fee). Live this suppression is the cost gate's job; modelling it here keeps the
-    # sweep aligned with the stack the signal actually flows through (scanner → gate).
+    # Cost floor: skip entries with risk/price < 2 × round-trip breakeven (round trip = 2 × the
+    # per-side fee); live this is the cost gate's job, modelled here to match scanner → gate.
     min_risk_frac = 4.0 * fee
     close = frames.close
     entries = _bool_like(close)
@@ -1140,10 +1064,8 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
 
     ts_index = pd.DatetimeIndex(close.index)
     session_dates = pd.Index([t.date() for t in ts_index])
-    # Hot path: this builder runs once per grid config over ~9M cells. Everything below is
-    # positional numpy on int64-ns timestamps — the original per-(symbol, day) index masks and
-    # boxed per-bar ``ts_index[p]`` comparisons cost ~8 min per config (~10 h per coarse sweep).
-    # Semantics are bit-identical to the loop it replaces (verified old-vs-new on real frames).
+    # Hot path: runs once per grid config over ~9M cells, so everything below is positional numpy
+    # on int64-ns timestamps (per-day index masks and boxed per-bar comparisons are far too slow).
     ts_i8 = ts_index.asi8
     day_codes, unique_days = pd.factorize(session_dates)
     day_positions = [np.flatnonzero(day_codes == k) for k in range(len(unique_days))]
@@ -1174,8 +1096,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
             entry_hi_i8 = pd.Timestamp(datetime.combine(day, _ORB_ENTRY_END, tzinfo=tzinfo)).value
 
             # Opening range over ``session_open <= t < range_end``. NaN bars (index-union rows this
-            # symbol has no bar for) are skipped — python's ``max(x, nan)`` in the old loop kept x,
-            # so a plain ``.max()`` (NaN-poisoning) would NOT be equivalent.
+            # symbol has no bar for) are skipped; a plain NaN-poisoning ``.max()`` would be wrong.
             in_range = day_i8 < range_end_i8
             seg_h = h_np[day_pos[in_range]]
             seg_lo = lo_np[day_pos[in_range]]
@@ -1190,8 +1111,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
             if not (np.isfinite(range_hi) and np.isfinite(range_lo)):
                 continue
 
-            # The rolling volume median is computed lazily: most (symbol, day) pairs never produce
-            # a breakout candidate, and the old loop's per-candidate Series build was a top-3 cost.
+            # Rolling volume median computed lazily: most (symbol, day) pairs never produce a candidate.
             med_arr: np.ndarray | None = None
             candidates = np.flatnonzero(
                 (day_i8 >= range_end_i8) & (day_i8 >= entry_lo_i8) & (day_i8 <= entry_hi_i8)
@@ -1212,8 +1132,7 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                     continue
                 if not float(c_np[p]) > range_hi:      # long-only upside breakout
                     continue
-                # v2 (2026-07-12): risk anchored at the opposite range edge — the structural
-                # invalidation level — instead of the sub-cost-floor ATR(14,1m) noise unit.
+                # risk anchored at the opposite range edge, the structural invalidation level.
                 price = float(c_np[p])
                 risk = frac * (price - range_lo)
                 if risk <= 0.0 or risk / price < min_risk_frac:
@@ -1224,23 +1143,16 @@ def _signals_orb(frames: _Frames, params: Mapping[str, float], fee: float = 0.0)
                 entered = True
                 break
             if entered:
-                # Forced session-end square-off (MIS): exit at the day's LAST bar, NOT the 14:30
-                # entry-window end. The strategy rules pin "squared off by window end" and this module's own notes
-                # say "forced session-end square-off"; a breakout still open at 14:30 that has hit
-                # neither its range-anchored stop nor its RR target rides to the end-of-session MIS
-                # square-off (~15:15–15:29). Truncating at 14:30 biased the CPCV baselines.
-                # The exit must sit on a bar THIS symbol actually has: union-index rows the symbol
-                # is missing carry NaN close, and vectorbt silently ignores NaN-price orders
-                # (OrderStatusInfo.PriceNaN), so an exit on the union last bar could be dropped and
-                # the position would ride overnight with a stale stop — breaking MIS semantics.
-                # Non-empty by construction: the entry bar's close was a real (non-NaN) price.
+                # Forced session-end square-off (MIS) at the day's LAST bar, NOT the 14:30 entry-window
+                # end: a breakout still open at 14:30 rides to the MIS square-off (~15:15–15:29).
+                # The exit must sit on a bar THIS symbol has: union-index rows it lacks carry NaN
+                # close and vectorbt silently ignores NaN-price orders, so the position would ride
+                # overnight with a stale stop. Non-empty: the entry bar's close was a real price.
                 sym_valid = day_pos[~np.isnan(c_np[day_pos])]
                 exits.iloc[sym_valid[-1], ex_col] = True
-    # shift_exits=False: the entry above IS subject to the same-bar-close defect the daily
-    # baselines had — it is stamped on the bar whose CLOSE cleared the range — so ``_portfolio``
-    # shifts it (and its sl/tp fractions) one 1m bar forward, session-aware. The square-off exit is
-    # the one signal that must stay put: it is a clock-driven MIS obligation on THIS session's last
-    # bar, and shifting it would push the exit into the next session (overnight ride, stale stop).
+    # shift_exits=False: the entry is stamped on the bar whose CLOSE cleared the range, so
+    # ``_portfolio`` shifts it (and its sl/tp fractions) one 1m bar forward, session-aware. The
+    # square-off is a clock-driven obligation on THIS session's last bar and must stay put.
     return _Signals(entries=entries, exits=exits, sl_stop=sl, tp_stop=tp, shift_exits=False)
 
 
@@ -1267,17 +1179,11 @@ def _trade_split_stats(
     """Reporting block for one config:
     ``(n_closed, n_open, expectancy_closed_pct, win_rate_closed, hold_all, hold_closed)``.
 
-    TOTAL BY CONSTRUCTION. It reads two vectorbt ``records_readable`` columns whose names are a
-    property of the installed vectorbt, not of this code. A column rename or an index shape this
-    function did not anticipate must degrade — never take the sweep, and never the promotion verdict
-    computed from it, down with it. The failure is logged, not swallowed silently.
-
-    Since the 2026-09-13 sweep-mechanics fix the degraded return is no longer merely "no holding figures": ``None``
-    here is also ``ParamSetStat.expectancy_pct``, so the config drops OUT of the grid ranking
-    (:meth:`SweepRunner._rank_best`) instead of being ranked on an all-trades mean that includes
-    unrealized marks. That is the fail-closed direction on purpose — an unreadable split must not
-    silently restore the statistic the fix removed — and :meth:`SweepRunner.run` counts the
-    excluded configs into the report's notes so the shrunken candidate set is never invisible.
+    TOTAL BY CONSTRUCTION: it reads vectorbt ``records_readable`` columns whose names belong to the
+    installed vectorbt, so a rename or unexpected index shape must degrade (logged), never take the
+    sweep or the promotion verdict down. The degraded ``None`` expectancy drops the config OUT of the
+    ranking (:meth:`SweepRunner._rank_best`) rather than falling back to the all-trades mean —
+    fail-closed on purpose; :meth:`SweepRunner.run` counts the excluded configs into the notes.
     """
     none3: tuple[float | None, float | None, float | None] = (None, None, None)
     try:
@@ -1286,8 +1192,7 @@ def _trade_split_stats(
         n_open = int(len(trades)) - n_closed
         ret_closed = tr_ret.to_numpy()[closed]
         expectancy_closed = float(ret_closed.mean() * 100.0) if n_closed else None
-        # Same population as ``expectancy_closed`` on purpose: the two per-trade statistics a
-        # promotion packet quotes together must not be computed over different trade sets.
+        # Same population as ``expectancy_closed`` on purpose.
         win_rate_closed = float((ret_closed > 0.0).mean()) if n_closed else None
         bars = _trade_hold_bars(trades, index)
         return (
@@ -1302,19 +1207,16 @@ def _trade_split_stats(
 def _trade_hold_bars(trades: pd.DataFrame, index: pd.Index) -> np.ndarray:
     """Holding duration of every trade in BARS: exit row position − entry row position.
 
-    ``records_readable`` carries TIMESTAMPS, not row positions, so the frame index is what converts
-    them back to a count of bars — calendar arithmetic would count weekends and holidays the market
-    never traded. An OPEN trade's ``Exit Timestamp`` is the frame's LAST bar, so its value is the
-    position's age at the window edge rather than a realized hold (hence the closed-only figures
-    reported beside it). Rows whose timestamps are not in ``index`` (never observed — defensive
-    against a future vectorbt returning a resampled stamp) score ``NaN`` and are dropped by
-    :func:`_hold_stats` rather than silently counted as a same-bar round trip. Pure.
+    ``records_readable`` carries TIMESTAMPS, so the frame index converts them back to bars (calendar
+    arithmetic would count non-trading days). An OPEN trade's ``Exit Timestamp`` is the frame's LAST
+    bar, so its value is the position's age at the window edge, not a realized hold. Timestamps not
+    in ``index`` score ``NaN`` and are dropped by :func:`_hold_stats`, never counted as a same-bar
+    round trip. Pure.
     """
     if trades.empty:
         return np.zeros(0, dtype="float64")
     if not index.is_unique:
-        # ``get_indexer`` raises on a non-unique index. A duplicated bar timestamp is a data defect
-        # the sweep has bigger problems with than its holding figures — report nothing, don't raise.
+        # ``get_indexer`` raises on a duplicated bar timestamp (a data defect): report nothing.
         return np.full(len(trades), np.nan)
     entry = index.get_indexer(pd.DatetimeIndex(trades["Entry Timestamp"]))
     exit_ = index.get_indexer(pd.DatetimeIndex(trades["Exit Timestamp"]))

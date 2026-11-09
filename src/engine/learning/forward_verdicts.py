@@ -22,13 +22,13 @@ from typing import cast
 #: caller's default.
 REGISTERED_FROM: date | None = date(2026, 11, 2)
 
-#: The analyst-value verdict's own R. The owner re-registered it on 2026-11-09, when cleaning retired-plan
-#: citations out of the analyst prompts moved every strategy's ``prompt_version``; the registered key is the one on
-#: each strategy's first decision on or after it. Only a caller's default.
+#: The analyst-value verdict's own R (re-registered 2026-11-09 when a prompt edit moved every strategy's
+#: ``prompt_version``); the registered key is the one on each strategy's first decision on or after it.
+#: Only a caller's default.
 ANALYST_REGISTERED_FROM: date | None = date(2026, 11, 9)
 
-#: Last journal session of each kill population; None while it accrues. Rolling back the regime gate sets brk20's to the
-#: last session the filter ran (amended 2026-10-30). Only a caller's default.
+#: Last journal session of each kill population; None while it accrues. Rolling back the regime gate sets
+#: brk20's to the last session the filter ran. Only a caller's default.
 KILL_POPULATION_UNTIL: dict[str, date | None] = {"brk20": None, "ins": None}
 
 KILL_RULES = ("brk20", "ins")

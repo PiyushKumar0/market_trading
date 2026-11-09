@@ -17,18 +17,14 @@ Semantics:
   A report with **no cited N is not promotable**. Promotable iff the CPCV fold-pass fraction
   ≥ ``fold_pass_min(N)`` — plus, when a champion max-DD is supplied (seam; ``ChampionChallenger`` not yet built), max DD
   ≤ 1.25× champion's.
-* **Margin floor** (2026-08-13) — a fold-pass FRACTION says how often the edge was positive,
-  never by how much. Four rsi2 runs passed at exactly 12/15 = 80.0% with every passing split under
-  0.02%/day (median ≈ 0.0006%/day): statistically "positive", economically indistinguishable from
-  zero. So promotion now ALSO requires the **median passing-split expectancy ≥ cost_floor /
-  MARGIN_FLOOR_DAYS per day** — see :data:`MARGIN_FLOOR_DAYS` for the constant's derivation. The
-  ``fold_pass_fraction`` comparison deliberately stays strict-``<`` (silently flipping it to ``<=``
-  would move a documented boundary invisibly; the margin floor is the real fix).
-* **Winner stability** — the sweep's winning config changed three times across near-identical
-  grid densities. The report records whether the adjacent density picked the same winner as a
-  **flag** (:class:`WinnerStability`), NOT an auto-fail: instability is evidence about the ranking
-  surface's flatness, and turning it into a hard gate would silently discard genuinely robust
-  strategies whose neighbouring configs are near-ties.
+* **Margin floor** — a fold-pass FRACTION says how often the edge was positive, never by how much,
+  so promotion ALSO requires the **median passing-split expectancy ≥ cost_floor /
+  MARGIN_FLOOR_DAYS per day** (see :data:`MARGIN_FLOOR_DAYS`). The ``fold_pass_fraction``
+  comparison stays strict-``<``: flipping it to ``<=`` would move a documented boundary invisibly.
+* **Winner stability** — the report records whether the adjacent grid density picked the same
+  winner as a **flag** (:class:`WinnerStability`), NOT an auto-fail: instability is evidence about
+  the ranking surface's flatness, and a hard gate would discard robust strategies whose
+  neighbouring configs are near-ties.
 * **Persistence** — every validated candidate is logged to SQLite ``param_sets``
   (``status='candidate'``, ``validation_report`` JSON citing N, ``evaluated_at``) for audit, and a
   report artifact (md + json) is written via :mod:`engine.learning.reports`.
@@ -75,27 +71,15 @@ CHAMPION_MAX_DD_MULT = 1.25            # max DD ≤ 1.25× champion's
 #: where ``cost_floor`` is the strategy's full round-trip friction (fees + spread) at the
 #: sweep's sizing — ``CostModel.breakeven_pct(reference_notional, product)``.
 #:
-#: DERIVATION OF THE 20. It is the risk-limit swing holding cap / the parameter-envelope ``rebalance_days``
-#: upper bound —
-#: 20 trading sessions ≈ one month. Read it as: **a position must, over the horizon it is actually
-#: held, earn at least the one round trip it costs to hold it.** Spread the round trip evenly across
-#: those 20 sessions and the per-day bar is ``cost_floor/20``. An edge that merely covers its own
-#: costs once per holding period sits exactly ON the floor; anything below it is paying the broker
-#: and the spread to take risk.
-#:
-#: CALIBRATION AGAINST THE RECORDED NUMBERS:
-#:   * CNC ₹20k cost floor = 0.2992% fees + 0.0200% spread = 0.3192% ⇒ floor 0.01596 %/day.
-#:   * rsi2's four "promotable" runs: median passing split ≈ 0.0006 %/day ⇒ ~27× BELOW the floor.
-#:     Even the best recorded baseline (mom, max passing split 0.0058 %/day) is ~3× below it.
-#:     Every recorded promotion from before the spread correction therefore fails, which is the intent.
-#:   * A genuinely cost-clearing edge passes: a swing rule that nets one round trip (0.3192%) per
-#:     20-session holding period lands exactly on 0.01596 %/day; anything better clears it.
-#: Intraday strategies (``orb``) round-trip far more often than once per 20 sessions, so for them
-#: this floor is a LOWER bound rather than the true bar — honest, and the sweep's own cost gate
-#: plus the fold-pass rule carry that case. The mirror case is ``trend``: a POSITIONAL leg whose
-#: risk-limit cap is ``max_holding.position_trading_days`` = 120, so the 20 overstates its per-day bar by
-#: 6× — the denominator must be the horizon the strategy is actually held for (pre-registered
-#: 2026-09-12). Overridable per call, never silently.
+#: The 20 is the risk-limit swing holding cap / the envelope ``rebalance_days`` upper bound (≈ one
+#: month): **a position must, over the horizon it is actually held, earn at least the one round trip
+#: it costs to hold it**, so the per-day bar is ``cost_floor/20``. An edge that merely covers its
+#: costs once per holding period sits exactly ON the floor (CNC ₹20k: 0.2992% fees + 0.0200% spread
+#: = 0.3192% ⇒ 0.01596 %/day).
+#: Intraday strategies (``orb``) round-trip far more often, so for them this is a LOWER bound; the
+#: sweep's cost gate plus the fold-pass rule carry that case. A POSITIONAL leg (``trend``) has cap
+#: ``max_holding.position_trading_days`` = 120, so 20 overstates its per-day bar 6×: the denominator
+#: must be the horizon the strategy is actually held for. Overridable per call, never silently.
 MARGIN_FLOOR_DAYS = 20
 
 #: The sweep sizing the cost floor is quoted at when the caller supplies none.
@@ -122,12 +106,10 @@ def fold_pass_min(n: int) -> float:
 class RealizedHold(BaseModel):
     """The sweep's MEASURED holding distribution + open/closed trade split for one config.
 
-    **Reporting only — nothing here reaches :func:`promotion_decision`.** It exists because the
-    margin floor's denominator is a *horizon*, and until 2026-09-12 no artifact recorded the horizon
-    a strategy was actually held for: the 20 is the risk-limit swing cap and the 120 the positional one,
-    both CAPS. A floor quoted at a cap that the backtest never enforced can read 4× more comfortable
-    than the same floor at the realized median hold — so the measured numbers travel with the
-    verdict, in the same JSON, and :func:`realized_hold_floor_cells` re-bases the floor on them.
+    **Reporting only — nothing here reaches :func:`promotion_decision`.** The margin floor's
+    denominator is a *horizon*, and 20 (swing) / 120 (positional) are CAPS; a floor quoted at a cap
+    can read far more comfortable than at the realized median hold, so the measured numbers travel
+    with the verdict and :func:`realized_hold_floor_cells` re-bases the floor on them.
 
     Durations are in SESSIONS. The caller must not build one from an intraday sweep, whose
     ``hold_bars_*`` are 1-minute bars (``SweepReport.bar_unit`` says which).
@@ -138,11 +120,9 @@ class RealizedHold(BaseModel):
     n_trades: int
     n_closed: int
     n_open: int
-    #: The sweep's per-trade net return over ALL trades (incl. open ones at their unrealized
-    #: mark-to-market, no exit leg paid) and the same figure over CLOSED round trips only. Since
-    #: the sweep-mechanics fix (2026-09-13) the CLOSED one is the sweep's headline and the statistic the grid winner
-    #: was ranked on; the all-trades one is reported beside it. Field MEANINGS are unchanged — only
-    #: which of the two the sweep promotes.
+    #: The sweep's per-trade net return over ALL trades (open ones at unrealized mark-to-market, no
+    #: exit leg paid) and over CLOSED round trips only. The CLOSED one is the headline and the
+    #: statistic the grid winner is ranked on.
     expectancy_per_trade_pct: float | None = None
     expectancy_per_trade_closed_pct: float | None = None
     mean_sessions: float | None = None
@@ -154,13 +134,11 @@ class RealizedHold(BaseModel):
 
 
 class MarginFloorCell(BaseModel):
-    """The margin floor re-based on ONE measured holding period (2026-09-12) — REPORTING ONLY.
+    """The margin floor re-based on ONE measured holding period — REPORTING ONLY.
 
-    ``headroom_x`` is the observed median passing-split expectancy divided by this cell's floor: the
-    multiple by which the edge clears the bar at THIS horizon. The promotion verdict continues to be
-    decided at the registered denominator alone — these cells never enter it, by design, because
-    moving a promotion threshold onto a statistic measured from the same run that is being judged
-    would make the bar a function of the result.
+    ``headroom_x`` is the observed median passing-split expectancy divided by this cell's floor. The
+    verdict is decided at the registered denominator alone: a threshold taken from a statistic
+    measured on the run being judged would make the bar a function of the result.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -193,24 +171,19 @@ class ParamSet(BaseModel):
     grid_density: str | None = None
     adjacent_density: str | None = None
     adjacent_winner: dict[str, float] | None = None
-    #: REPORTING-ONLY inputs (added 2026-09-12) — the measured holding distribution behind these
-    #: returns, and whether the population is a survivorship-tainted proxy. Both are rendered and
-    #: persisted; NEITHER is an input to :func:`promotion_decision`.
+    #: REPORTING-ONLY inputs: the measured holding distribution behind these returns, and whether the
+    #: population is a survivorship-tainted proxy. Rendered and persisted; NEITHER feeds
+    #: :func:`promotion_decision`.
     realized_hold: RealizedHold | None = None
     population_is_survivorship_tainted_proxy: bool | None = None
-    #: Sweep-mechanics fix (2026-09-13): the sweep's one-line mechanics stamp (``SweepReport.mechanics``), carried
-    #: into the validation artifact so a verdict names the mechanics its returns were produced
-    #: under. ``None`` ⇒ pre-fix (or a caller that ran no sweep); never an input to the promotion
-    #: rule, which is decided by the CPCV folds and the margin floor exactly as before.
+    #: The sweep's mechanics stamp (``SweepReport.mechanics``), carried into the artifact so a verdict
+    #: names the mechanics its returns came from. ``None`` ⇒ pre-stamp sweep or no sweep; never a
+    #: promotion input.
     sweep_mechanics: str | None = None
     #: False when ``params`` are NOT a grid winner — the sweep ranked nothing (every config closed no
-    #: round trip, or the open/closed split was unreadable for all of them) and the caller fell back
-    #: to the parameter envelope DEFAULTS. The sweep-mechanics fix widened that path: an
-    #: unrankable config is now
-    #: excluded instead of ranked on its unrealized marks, so a window shorter than the strategy's
-    #: realized hold can leave the whole grid unrankable. REPORTING ONLY — it does not gate the
-    #: verdict (that would be an unregistered promotion-rule change); it exists so a defaults
-    #: verdict can never RENDER as a grid-winner verdict. ``None`` ⇒ the caller ran no sweep.
+    #: round trip, or the open/closed split was unreadable) and the caller fell back to the envelope
+    #: DEFAULTS. REPORTING ONLY (gating on it would change the promotion rule); it exists so a
+    #: defaults verdict never RENDERS as a grid-winner verdict. ``None`` ⇒ the caller ran no sweep.
     params_are_grid_winner: bool | None = None
 
 
@@ -335,24 +308,18 @@ class ValidationReport(BaseModel):
     cost_floor_pct: float | None = None
     margin_floor_pct_per_day: float | None = None
     #: The denominator the floor was taken at, in sessions (:data:`MARGIN_FLOOR_DAYS` unless the
-    #: caller overrode it — a positional leg's risk-limit holding cap is 120, not the swing 20). Recorded
-    #: so the artifact alone reproduces the floor; None only on reports built before this field.
+    #: caller overrode it), so the artifact alone reproduces the floor.
     margin_floor_days: int | None = None
-    #: REPORTING-ONLY block (added 2026-09-12): the measured holding distribution behind these returns,
-    #: the same margin floor re-based on it, and whether the population is a survivorship-tainted
-    #: proxy. None of it feeds :func:`promotion_decision` — it exists so a reader of the verdict can
-    #: see the horizon and the population the verdict was earned on without re-running anything.
+    #: REPORTING-ONLY block: the measured holding distribution, the floor re-based on it, and the
+    #: survivorship flag. None of it feeds :func:`promotion_decision`.
     realized_hold: RealizedHold | None = None
     realized_hold_cells: list[MarginFloorCell] = Field(default_factory=list)
     population_is_survivorship_tainted_proxy: bool | None = None
-    #: Sweep-mechanics stamp (``SweepReport.mechanics``, added 2026-09-13) — reporting only, so a
-    #: verdict is never compared with one produced under different sweep mechanics. ``None`` ⇒ the
-    #: returns came from a pre-fix sweep or from a provider that stamps nothing.
+    #: ``SweepReport.mechanics`` — reporting only. ``None`` ⇒ pre-stamp sweep or a provider that
+    #: stamps nothing.
     sweep_mechanics: str | None = None
-    #: ``ParamSet.params_are_grid_winner`` mirrored onto the verdict: False ⇒ these params are the
-    #: parameter envelope DEFAULTS substituted because the grid ranked NO config, not a sweep winner.
-    #: Reporting only (it moves no threshold), but it is rendered as a banner and named in the notes
-    #: so such a verdict never reads like one the grid selected.
+    #: ``ParamSet.params_are_grid_winner`` mirrored onto the verdict: False ⇒ envelope DEFAULTS, not a
+    #: sweep winner. Reporting only; rendered as a banner and named in the notes.
     params_are_grid_winner: bool | None = None
     #: Winner-stability FLAG (never part of the promotion rule).
     winner_stability: WinnerStability | None = None
@@ -451,10 +418,9 @@ def margin_floor_pct_per_day(
     return float(cost_floor_pct) / float(margin_floor_days)
 
 
-#: The four REPORTING-ONLY horizons :func:`realized_hold_floor_cells` re-bases the floor on, as
-#: ``(label, RealizedHold attribute)``. All-trades first because that is the distribution the
-#: headline per-trade expectancy is averaged over; closed-only beside it because an open trade
-#: contributes its AGE at the window edge, not a realized hold.
+#: The REPORTING-ONLY horizons :func:`realized_hold_floor_cells` re-bases the floor on, as
+#: ``(label, RealizedHold attribute)``; closed-only too because an open trade contributes its AGE
+#: at the window edge, not a realized hold.
 _REALIZED_HOLD_CELLS: tuple[tuple[str, str], ...] = (
     ("realized MEDIAN hold (all trades)", "median_sessions"),
     ("realized MEAN hold (all trades)", "mean_sessions"),
@@ -468,17 +434,14 @@ def realized_hold_floor_cells(
     cost_floor_pct: float | None,
     median_passing_expectancy_pct: float | None,
 ) -> list[MarginFloorCell]:
-    """The margin floor re-based on each MEASURED holding period (2026-09-12) — REPORTING ONLY.
+    """The margin floor re-based on each MEASURED holding period — REPORTING ONLY.
 
-    Same arithmetic as :func:`margin_floor_pct_per_day` (``cost_floor / sessions``), same round-trip
-    floor, only the denominator changes: a CAP (20 swing / 120 positional) is an upper bound on the
-    hold, so a floor taken at the cap is the LOOSEST bar the horizon can justify, and the realized
-    median is the one a reader should weigh the verdict against. ``headroom_x`` is the observed
-    median passing-split expectancy over the cell's floor.
+    Same arithmetic as :func:`margin_floor_pct_per_day`, only the denominator changes: a CAP is an
+    upper bound on the hold, so a floor taken at the cap is the loosest bar. ``headroom_x`` is the
+    observed median passing-split expectancy over the cell's floor.
 
-    Pure and total: missing inputs and non-positive holds yield fewer cells, never an
-    exception — this is a reporting path and must not be able to fail a validation run. A zero or
-    negative hold is skipped because ``cost_floor / 0`` is not a per-day bar at all.
+    Pure and total: missing inputs and non-positive holds (``cost_floor / 0`` is no bar) yield fewer
+    cells, never an exception — a reporting path must not be able to fail a validation run.
     """
     if realized_hold is None or cost_floor_pct is None:
         return []
@@ -744,9 +707,8 @@ class ValidationPipeline:
             cost_floor_pct=cost_floor,
             margin_floor_days=self._margin_floor_days,
         )
-        # Reporting-only block (2026-09-12). Built AFTER promotion_decision above and fed into
-        # nothing but the artifact: the verdict must stay a function of the registered denominator,
-        # never of a horizon measured on the same run it is judging.
+        # Built AFTER promotion_decision and fed only into the artifact: the verdict stays a function
+        # of the registered denominator, never of a horizon measured on the run it judges.
         hold_cells = realized_hold_floor_cells(params.realized_hold, cost_floor, median_passing)
         notes = [stability.note()]
         if floor is not None:
@@ -760,10 +722,8 @@ class ValidationPipeline:
             )
         notes.extend(self._realized_hold_notes(params.realized_hold, hold_cells))
         if params.params_are_grid_winner is False:
-            # Reporting only — deliberately NOT a promotion gate: gating on it would move the
-            # promotion rule, which no registered change covers. What it must never do is render silently, because
-            # every other field here (the cited N, the sweep context, the stability flag) describes
-            # a grid the winner did not come out of.
+            # Reporting only, NOT a promotion gate; it must never render silently, because the cited
+            # N, sweep context and stability flag all describe a grid the params did not come from.
             notes.append(
                 "PARAMS ARE NOT A GRID WINNER: the sweep ranked NO configuration (every config "
                 "closed no round trip inside the window, or its open/closed split was unreadable), "
@@ -819,13 +779,7 @@ class ValidationPipeline:
     def _realized_hold_notes(
         self, hold: RealizedHold | None, cells: Sequence[MarginFloorCell]
     ) -> list[str]:
-        """Reporting-only notes: the measured hold, the re-based floors, open-vs-closed trades.
-
-        Rendered into the md artifact so a reader who only ever sees the report gets the two facts
-        that decide how comfortable the verdict actually is — the horizon the floor was quoted at
-        versus the one the strategy was held for, and how much of the headline per-trade number is
-        unrealized mark-to-market on positions that never paid an exit leg.
-        """
+        """Reporting-only notes: the measured hold, the re-based floors, open-vs-closed trades."""
         if hold is None:
             return []
         notes: list[str] = []
@@ -888,9 +842,8 @@ class ValidationPipeline:
     def _cpcv(self, values: np.ndarray) -> tuple[list[CPCVFold], float | None, float | None]:
         """Returns ``(folds, pass_fraction, median_passing_expectancy_pct)``.
 
-        The median is over the PASSING splits only: it answers "when this edge worked, by how
-        much?" — the question a pass FRACTION cannot answer, and the one four boundary-exact rsi2
-        promotions turned out to answer with ~0.0006%/day.
+        The median is over the PASSING splits only: "when this edge worked, by how much?" — the
+        question a pass FRACTION cannot answer.
         """
         splits = self._splitter(len(values))
         folds: list[CPCVFold] = []
