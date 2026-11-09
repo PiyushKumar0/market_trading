@@ -2,6 +2,23 @@
 
 Newest first. About two weeks of entries are kept; older ones are in git history.
 
+## 2026-11-09 20:15 — Comment pruning across the codebase (owner: "redundant, lengthy comments are not required")
+
+- **Scope:** every Python file with real comment weight (290 reviewed in 24 directory batches by Sonnet implementers
+  after two pilots; 250 changed, the rest already lean) plus settings.yaml and agents.yaml. Cut: incident timelines, measured figures from a day, "before the
+  fix" history, review provenance, repetition and test narration. Kept: purpose, invariants, contracts, the reason that
+  stops a wrong edit, fixture arithmetic, and every docstring point another file or test refers to.
+- **Size:** Python comments + docstrings 3,055 KB → 2,416 KB (−639 KB; `src/engine` share 45% → 39%); the two YAML
+  files' comments 40 KB → 30 KB. 135 lean files and the dashboard's TypeScript (17% comments, little history) were
+  left as they are; limits.yaml and envelope.yaml (signed) and the generated fill_model.yaml are untouched.
+- **Verified:** per file, HEAD's AST equals the new one with every bare-string statement removed and every
+  noqa/type/pragma tag kept (one deleted `assert` was caught and restored); YAML parses to identical data; prompt
+  fingerprint identical to HEAD's; unit gate 4262 passed / 19 skipped, offline 521 passed; ruff findings as at the
+  start (one import-group blank line fixed in `a6dc713`). Engine not restarted: nothing it runs changed.
+- **Left as code:** some runtime strings still carry dated history (owner alert bodies in pipeline.py and
+  filings_pit_fresh.py, report text in calibrate_fill_model.py and the backtest scripts); changing them is a code
+  change, not comment pruning.
+
 ## 2026-11-09 17:20 — Second citation census: about 200 retired codes the earlier passes missed; engine restarted 17:17
 
 - **Why:** the earlier censuses skipped codes followed by a colon, letters outside a fixed set, identifier segments and
