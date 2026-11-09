@@ -1,17 +1,11 @@
 """Mini end-to-end sweep smoke test (needs_heavy_deps — vectorbt + skfolio).
 
-Synthetic daily bars, a TINY grid (2 configs), one strategy: proves the sweep runs vectorbt, reports
-the trial count N = grid cardinality, feeds ``returns_for`` into the ValidationPipeline, and the
-report cites N. Must run in seconds (tiny data + tiny grid).
+Synthetic daily bars, a tiny grid (2 configs), one strategy: the sweep runs vectorbt, reports the trial
+count N = grid cardinality, feeds ``returns_for`` into the ValidationPipeline, and the report cites N.
 
-Also home to the 2026-08-13 **fill-mechanics regression test**: a synthetic price path where
-same-bar-close and next-bar-open fills differ MATERIALLY, pinning that the sweep produces the
-next-open number. That defect (``price=None`` ⇒ vectorbt's ``np.inf`` ⇒ the signal bar's own close)
-invalidated every sweep/CPCV report generated before 2026-08-13.
-
-And home to the **sweep-mechanics regression tests** (2026-09-13): intrabar daily
-stops, the half-spread on a stop exit, the closed-trade ranking statistic, and the report stamp that
-tells a pre-fix artifact from a post-fix one.
+Also pins the fill mechanics (next-bar-open, not the signal bar's close, on a path where they differ
+materially) and the sweep mechanics: intrabar daily stops, the half-spread on a stop exit, the
+closed-trade ranking statistic, and the report stamp.
 """
 
 from __future__ import annotations
@@ -155,10 +149,8 @@ def test_returns_for_requires_prior_run(store):
 # --------------------------------------------------------------------------- fill mechanics
 _SYM = "ZZ"
 
-#: A path built so the two mechanics disagree by ~11 percentage points on ONE trade.
-#: close is flat at 100 everywhere, so a same-bar-CLOSE fill buys at 100 and sells at 100 (0% gross);
-#: the next bar after the entry signal OPENS at 90, so a next-bar-OPEN fill buys at 90 and sells at
-#: 100 (+11.1% gross). Nothing else about the frame differs.
+#: Close is flat at 100, so a same-bar-close fill buys and sells at 100 (0% gross); the bar after the
+#: entry signal opens at 90, so a next-bar-open fill buys at 90 and sells at 100 (+11.1% gross).
 _FILL_CLOSE = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
 _FILL_OPEN = [100.0, 100.0, 90.0, 100.0, 100.0, 100.0]
 _ENTRY_SIGNAL_ROW = 1        # ⇒ order on row 2, filled at its open (90.0)
@@ -188,11 +180,7 @@ def _fill_signals(frames: _Frames) -> _Signals:
 
 
 def test_daily_sweep_fills_entries_and_exits_at_the_next_sessions_open():
-    """Regression pin: the fill price is the NEXT session's OPEN, not the signal bar's close.
-
-    Same-bar-close (the pre-2026-08-13 mechanics) would score this trade ~0% gross and NEGATIVE net;
-    next-bar-open scores ~+11% gross. The assertions below fail on the old mechanics.
-    """
+    """The fill price is the next session's open, not the signal bar's close (which would score ~0% gross)."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     cost_model = CostModel.from_config()
     runner = SweepRunner(None, cost_model, clock)          # _portfolio never touches the store
@@ -206,19 +194,17 @@ def test_daily_sweep_fills_entries_and_exits_at_the_next_sessions_open():
 
     half_spread = float(cost_model.half_spread_pct) / 100.0
     idx = frames.close.index
-    # the order lands on the bar AFTER the signal, and pays that bar's OPEN (± half the spread)
+    # The order lands on the bar after the signal and pays that bar's open ± half the spread.
     assert pd.Timestamp(trade["Entry Timestamp"]) == idx[_ENTRY_SIGNAL_ROW + 1]
     assert pd.Timestamp(trade["Exit Timestamp"]) == idx[_EXIT_SIGNAL_ROW + 1]
     assert float(trade["Avg Entry Price"]) == pytest.approx(90.0 * (1.0 + half_spread))
     assert float(trade["Avg Exit Price"]) == pytest.approx(100.0 * (1.0 - half_spread))
 
-    # and the gain is material (~+11% gross; the old same-bar-close mechanics scored ~0% gross, negative net)
     assert float(trade["Return"]) > 0.10
 
 
 def test_next_open_fill_charges_fees_and_half_the_spread_on_every_leg():
-    """Spread enters the sweep as vectorbt slippage — half the measured quoted spread per
-    leg, so a round trip pays the full spread ON TOP of the statutory fee."""
+    """Spread enters as vectorbt slippage, half the measured spread per leg, on top of the statutory fee."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     cost_model = CostModel.from_config()
     runner = SweepRunner(None, cost_model, clock)
@@ -250,8 +236,7 @@ def test_sizing_uses_the_reference_notional_the_fee_is_calibrated_at():
     notional = float(trade["Size"]) * float(trade["Avg Entry Price"])
     assert notional == pytest.approx(20_000.0, rel=0.01)      # all-in at the reference size
 
-    # the proportional cost surface makes the RETURN series scale-invariant — what the old
-    # 100k-vs-20k mismatch broke was the fee CONSTANT's calibration, not the arithmetic.
+    # The proportional cost surface makes the return series scale-invariant.
     big = SweepRunner(None, CostModel.from_config(), clock, init_cash=100_000.0)
     fee = 0.001
     r_small = runner._portfolio(frames, _fill_signals(frames), fee).returns()[_SYM].to_numpy()
@@ -260,19 +245,12 @@ def test_sizing_uses_the_reference_notional_the_fee_is_calibrated_at():
 
 
 # --------------------------------------------------------------- holding period + open trades
-# 2026-09-12: the margin floor's denominator is a HORIZON, and no sweep artifact recorded the
-# horizon a strategy was actually held for — so a floor spread over a 120-session risk-limits CAP could be
-# quoted as "3.9x headroom" while the median trade was held 33 sessions (1.07x). These pin the
-# measurement itself: bars between fill rows, NaN-safe stats, and the open/closed split of the same
-# trade records ``expectancy_pct`` is averaged over.
+# The measured hold: bars between fill rows, NaN-safe stats, and the open/closed split of the trade
+# records ``expectancy_pct`` is averaged over.
 
 
 def test_hold_bars_counts_rows_between_the_entry_and_exit_FILLS():
-    """The hold is exit ROW − entry ROW, so weekends/holidays the market never traded are not counted.
-
-    The next-open fill frame fills the entry on row ``_ENTRY_SIGNAL_ROW + 1`` and the exit on
-    ``_EXIT_SIGNAL_ROW + 1``; the hold is the distance between those two, not between the signals.
-    """
+    """The hold is exit row − entry row (weekends/holidays are not counted), between the fills, not the signals."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     runner = SweepRunner(None, CostModel.from_config(), clock)
     frames = _fill_frames()
@@ -284,19 +262,14 @@ def test_hold_bars_counts_rows_between_the_entry_and_exit_FILLS():
     assert bars[0] == float(_EXIT_SIGNAL_ROW - _ENTRY_SIGNAL_ROW) == 2.0
     assert _hold_stats(bars) == (2.0, 2.0, 2.0)
 
-    # ROWS, not calendar days. The fills above are Wed -> Fri, where the two agree; across a weekend
-    # they do not: a Friday entry and the next Monday's exit are one bar apart, three days.
+    # Rows, not calendar days: a Friday entry and Monday exit are one bar apart.
     week = pd.bdate_range("2024-01-01", periods=10)                     # Mon 01-01 .. Fri 01-12
     weekend = pd.DataFrame({"Entry Timestamp": [week[4]], "Exit Timestamp": [week[5]]})   # Fri -> Mon
     assert _trade_hold_bars(weekend, week).tolist() == [1.0]
 
 
 def test_an_open_trade_contributes_its_AGE_at_the_window_edge_not_a_realized_hold():
-    """A position still open at the last bar has NOT paid an exit leg — its duration is an age.
-
-    Reported all the same (the distribution the headline expectancy averages over includes it), but
-    reported BESIDE the closed-only figures so the two can never be confused.
-    """
+    """A position still open at the last bar has paid no exit leg: its duration is an age, reported beside the closed-only figures."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     runner = SweepRunner(None, CostModel.from_config(), clock)
     frames = _fill_frames()
@@ -311,12 +284,12 @@ def test_an_open_trade_contributes_its_AGE_at_the_window_edge_not_a_realized_hol
     assert len(trades) == 1
     assert trades["Status"].astype(str).str.lower().iloc[0] == "open"
     bars = _trade_hold_bars(trades, frames.close.index)
-    # entry filled on row _ENTRY_SIGNAL_ROW + 1; the open trade is marked at the LAST row
+    # Entry fills on row _ENTRY_SIGNAL_ROW + 1; the open trade is marked at the last row.
     assert bars[0] == float(len(_FILL_CLOSE) - 1 - (_ENTRY_SIGNAL_ROW + 1))
 
 
 def test_hold_stats_are_total_on_empty_and_nan_inputs():
-    """A reporting path must never be able to fail a validation run (pure/total)."""
+    """A reporting path never fails a validation run."""
     assert _hold_stats(np.zeros(0, dtype="float64")) == (None, None, None)
     assert _hold_stats(np.array([np.nan, np.nan])) == (None, None, None)
     assert _hold_stats(np.array([np.nan, 4.0, 10.0]))[:2] == (7.0, 7.0)
@@ -346,7 +319,7 @@ def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split
     if stat.n_closed:
         assert stat.expectancy_closed_pct is not None
         assert stat.hold_bars_median_closed is not None
-    # The headline IS the closed-trade mean; the all-trades mean rides beside it
+    # The headline is the closed-trade mean; the all-trades mean rides beside it.
     tr = runner._backtest("mom", runner._frames["mom"], dict(stat.params), runner._fee["mom"])
     records = tr.trades.records_readable
     all_returns = records["Return"].astype(float)
@@ -356,8 +329,7 @@ def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split
     assert stat.expectancy_pct == pytest.approx(
         float(all_returns.to_numpy()[closed].mean() * 100.0)
     )
-    # and the win rate is reported on BOTH populations, so the promotion table never pairs a
-    # mark-to-market hit rate with a realized per-trade mean
+    # Win rate is reported on both populations, so a mark-to-market hit rate is never paired with a realized mean.
     assert stat.win_rate == pytest.approx(float((all_returns > 0.0).mean()))
     if stat.n_closed:
         assert stat.win_rate_closed == pytest.approx(
@@ -368,7 +340,7 @@ def test_sweep_report_carries_the_holding_distribution_and_the_open_closed_split
 def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
     """A reporting-only read of vectorbt's column names must never fail a multi-minute sweep."""
     idx = pd.bdate_range("2024-01-01", periods=4)
-    # a records_readable shape this code does not anticipate (no Status column)
+    # An unanticipated records_readable shape (no Status column).
     trades = pd.DataFrame({"Return": [0.1], "Entry Timestamp": [idx[0]], "Exit Timestamp": [idx[2]]})
     n_closed, n_open, exp_closed, win_closed, hold_all, hold_closed = _trade_split_stats(
         trades, trades["Return"], idx
@@ -386,21 +358,17 @@ def test_hold_stats_degrade_instead_of_taking_the_sweep_down():
     assert _hold_stats(_trade_hold_bars(ok, dup)) == (None, None, None)
 
 
-# ------------------------------------------------- sweep mechanics (2026-09-13)
-# Three defects, all biasing the same way (the strategy's): daily stops decided on the CLOSE, stop
-# exits paying no spread, and open positions inside the ranked per-trade expectancy. These pin each
-# fix against the behaviour it replaced, and the stamp that tells a pre-fix artifact from a post-fix
-# one.
+# ------------------------------------------------- sweep mechanics
+# Intrabar daily stops, spread on stop exits, closed-trade ranking, and the mechanics stamp.
 
-#: A path whose LOW breaches the stop on row 3 while every CLOSE stays at 100 — the exact cell the
-#: close-evaluated mechanics could not see.
+#: A path whose low breaches the stop on row 3 while every close stays at 100.
 _STOP_LOW = [100.0, 100.0, 100.0, 90.0, 100.0, 100.0]
 _SL_FRAC = 0.05          # 5% below the entry FILL (stop_entry_price='fillprice')
 
 
 def _stop_frames(*, intrabar: bool) -> _Frames:
-    """The next-open fill frame with one intrabar dip. ``intrabar=False`` reproduces the input before the sweep-mechanics fix
-    vectorbt saw for a daily sweep: no open/high/low ⇒ the close substituted for all three."""
+    """The next-open fill frame with one intrabar dip. ``intrabar=False`` gives vectorbt no real
+    low (the close stands in), as a close-only daily sweep would."""
     idx = pd.bdate_range("2024-01-01", periods=len(_FILL_CLOSE))
     close = pd.DataFrame({_SYM: _FILL_CLOSE}, index=idx)
     low = pd.DataFrame({_SYM: _STOP_LOW}, index=idx) if intrabar else close.copy()
@@ -429,9 +397,8 @@ def _stop_signals(frames: _Frames) -> _Signals:
 
 
 def test_a_daily_stop_fires_on_an_INTRABAR_breach_not_only_on_a_close_through_it():
-    """High/low go to vectorbt for daily frames too, so a stop behaves like the live
-    resting broker stop. Pre-fix (high=low=close) the same bar's 90.0 low is invisible and the
-    position simply survives — strictly fewer stop-outs, in the strategy's favour."""
+    """High/low go to vectorbt for daily frames, so a stop behaves like the live resting broker stop;
+    with high=low=close the bar's 90.0 low is invisible and the position survives."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     runner = SweepRunner(None, CostModel.from_config(), clock)
 
@@ -462,12 +429,9 @@ def _ohlc_frames(o: list[float], h: list[float], low: list[float], c: list[float
 
 
 def test_a_daily_stop_fills_at_the_LEVEL_when_the_bar_closes_through_it_and_at_the_OPEN_on_a_gap():
-    """The intrabar-stop fix is the WHOLE bar, not just high/low: vectorbt substitutes the close for any OHLC leg
-    it is not handed, and ``get_stop_price_nb`` tests the OPEN before the low/high range. With the
-    close standing in for the open, every bar closing through the stop booked the exit at that close
-    — 88.0 here instead of the ~95.0 level a resting broker stop would have filled at. Supplying the
-    real open restores both halves of that stop's behaviour: trade through it ⇒ fill at the LEVEL,
-    gap through it ⇒ fill at the gapped OPEN."""
+    """vectorbt substitutes the close for any OHLC leg it is not handed and ``get_stop_price_nb`` tests the
+    open before the low/high range, so the real open must be supplied: trading through the stop fills
+    at the level (~95.0, not the 88.0 close), gapping through it fills at the gapped open."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     cost_model = CostModel.from_config()
     runner = SweepRunner(None, cost_model, clock)
@@ -478,16 +442,16 @@ def test_a_daily_stop_fills_at_the_LEVEL_when_the_bar_closes_through_it_and_at_t
         entry_px = float(trade["Avg Entry Price"])
         return entry_px * (1.0 - _SL_FRAC), float(trade["Avg Exit Price"])
 
-    # row 3 OPENS above the stop and CLOSES far through it — a resting stop fills at the level.
+    # Row 3 opens above the stop and closes far through it: fills at the level.
     through = _ohlc_frames(
         [100.0, 100.0, 100.0, 99.0, 100.0, 100.0], [100.0, 100.0, 100.0, 99.0, 100.0, 100.0],
         [100.0, 100.0, 100.0, 88.0, 100.0, 100.0], [100.0, 100.0, 100.0, 88.0, 100.0, 100.0],
     )
     level, exit_px = _exit_price(through)
     assert exit_px == pytest.approx(level * (1.0 - half_spread))
-    assert exit_px > 90.0                      # the pre-fix answer was the 88.0 close
+    assert exit_px > 90.0                      # not the 88.0 close
 
-    # row 3 GAPS open below the stop — a resting stop cannot fill at the level, only at the open.
+    # Row 3 gaps open below the stop: fills at the open only.
     gap = _ohlc_frames(
         [100.0, 100.0, 100.0, 90.0, 100.0, 100.0], [100.0, 100.0, 100.0, 92.0, 100.0, 100.0],
         [100.0, 100.0, 100.0, 88.0, 100.0, 100.0], [100.0, 100.0, 100.0, 91.0, 100.0, 100.0],
@@ -498,9 +462,8 @@ def test_a_daily_stop_fills_at_the_LEVEL_when_the_bar_closes_through_it_and_at_t
 
 
 def test_a_stop_exit_pays_the_same_half_spread_as_every_other_exit():
-    """stop_exit_price='stopmarket' fills AT the stop level and applies the per-leg
-    slippage; vectorbt's 'stoplimit' default returned the level with slippage zeroed, so a
-    stop-exited round trip paid the fee but not the spread (~1 bp cheap, the strategy's way)."""
+    """stop_exit_price='stopmarket' fills at the stop level with per-leg slippage; vectorbt's 'stoplimit'
+    default zeroes slippage, so a stop exit would pay the fee but not the spread."""
     clock = Clock(time_source=lambda: FIXED_NOW)
     cost_model = CostModel.from_config()
     runner = SweepRunner(None, cost_model, clock)
@@ -535,10 +498,9 @@ def _rank_stat(label: float, *, closed: float | None, all_trades: float, n_close
 
 
 def test_the_grid_winner_is_ranked_on_closed_round_trips_not_on_open_marks():
-    """The ranking statistic is the closed-trade mean, so a config whose lead comes from
-    unrealized marks on positions the window never closed cannot win — and a config that closed
-    NOTHING is not rankable at all (never ranked on its marks as a fallback)."""
-    marks_only = _rank_stat(1.0, closed=0.5, all_trades=9.0)     # before the sweep-mechanics fix this one wins
+    """Ranking is on the closed-trade mean: a lead from unrealized marks cannot win, and a config that
+    closed nothing is not rankable (no fallback to its marks)."""
+    marks_only = _rank_stat(1.0, closed=0.5, all_trades=9.0)     # leads only on open marks
     realized = _rank_stat(2.0, closed=2.0, all_trades=1.0)
     nothing_closed = _rank_stat(3.0, closed=None, all_trades=99.0, n_closed=0)
 
@@ -547,8 +509,7 @@ def test_the_grid_winner_is_ranked_on_closed_round_trips_not_on_open_marks():
 
 
 def test_every_sweep_report_stamps_the_three_mechanics_settings(store):
-    """The stamp is how a pre-fix number and a post-fix number are told apart — in the artifact, in
-    the JSON, and in the notes, never only in a chat reply."""
+    """The mechanics stamp appears in the report, JSON and notes."""
     start, end = _seed_daily(store)
     clock = Clock(time_source=lambda: FIXED_NOW)
     runner = SweepRunner(store, CostModel.from_config(), clock)
@@ -565,7 +526,7 @@ def test_every_sweep_report_stamps_the_three_mechanics_settings(store):
     md = reports.render_sweep_markdown(report)
     assert MECHANICS_STAMP in md
     assert "expectancy (CLOSED)" in md
-    # a report built without the stamp (any artifact written before 2026-09-13) says so in words
+    # A report built without the stamp says so in words.
     assert "PRE-2026-09-13" in reports.render_sweep_markdown(
         report.model_copy(update={"mechanics": ""})
     )

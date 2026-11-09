@@ -1,19 +1,15 @@
 """Sweep signal-builder correctness (pure pandas/numpy — no vectorbt).
 
-``engine.learning.sweep`` keeps its module top pure (indicator math + stdlib), so the per-strategy
-signal builders are testable without the heavy backtest stack. This file pins:
+The per-strategy signal builders are testable without the heavy backtest stack. Pins:
 
-* the ``orb`` intraday baseline's **forced session-end square-off** — a breakout still open at the
-  14:30 entry-window end must ride to the day's LAST bar (the MIS end-of-session square-off,
-  "squared off by window end"), NOT be truncated at 14:30 (truncation biased the CPCV reports);
-* the strategy-rules v2 (2026-07-12) **range-anchored stop/target** — risk = ``stop_range_frac × (entry −
-  range_low)`` stamped as per-signal ``sl_stop``/``tp_stop`` fractions — and the **cost floor**
-  that skips breakouts whose risk cannot pay a round trip twice (risk/price < 4 × per-side fee);
-* the ``rsi2`` **max_hold_days scheduled time-exit** (modelled 2026-07-12) OR-ed onto the RSI-exit;
-* the 2026-08-13 **next-bar-open shift** — the pure transform ``_shift_to_next_bar`` /
-  ``_shift_stop_frame`` that turns "signal on bar t" into "order on bar t+1, filled at its open",
-  including the session-aware drop that stops an intraday signal leaking into the next session;
-* the ``mom`` ranking window **excludes the traded session** once fills are next-open.
+* the ``orb`` forced session-end square-off: a breakout open at the 14:30 entry-window end rides to the
+  day's last bar, not truncated at 14:30;
+* the range-anchored stop/target (risk = ``stop_range_frac × (entry − range_low)``, stamped as per-signal
+  ``sl_stop``/``tp_stop`` fractions) and the cost floor skipping breakouts with risk/price < 4 × per-side fee;
+* the ``rsi2`` ``max_hold_days`` scheduled time-exit OR-ed onto the RSI-exit;
+* the next-bar-open shift (``_shift_to_next_bar`` / ``_shift_stop_frame``), including the session-aware
+  drop that stops an intraday signal leaking into the next session;
+* the ``mom`` ranking window excludes the traded session.
 """
 
 from __future__ import annotations
@@ -86,18 +82,16 @@ def test_orb_squares_off_at_session_end_not_entry_window_end():
     assert bool(exits.loc[ts_window_end]) is False
     assert ts_last > ts_window_end                             # the session really does extend past 14:30
 
-    # Strategy-rules v2: per-signal stop/target anchored at the OPPOSITE opening-range edge (range low 99.5),
-    # stamped at the entry bar. On the 102.0 breakout: risk = stop_range_frac(1.0) × (102.0 − 99.5)
-    # = 2.5, so sl_stop = risk/price = 2.5/102.0 and tp_stop = rr_target(1.5) × risk/price.
+    # Stop/target anchor at the opposite opening-range edge (low 99.5), stamped at the entry bar:
+    # risk = 1.0 × (102.0 − 99.5) = 2.5, so sl_stop = 2.5/102.0 and tp_stop = 1.5 × risk/price.
     assert sig.sl_stop is not None and sig.tp_stop is not None
     assert float(sig.sl_stop[_SYM].loc[ts_break]) == pytest.approx(2.5 / 102.0)
     assert float(sig.tp_stop[_SYM].loc[ts_break]) == pytest.approx(1.5 * 2.5 / 102.0)
 
 
 def test_orb_cost_floor_skips_sub_breakeven_breakout():
-    # Cost floor (strategy-rules v2): a breakout is skipped when risk/price < 4 × per-side fee (= 2×
-    # round-trip breakeven). Here risk/price = 2.5/102.0 ≈ 0.0245; with fee=0.01 the floor is
-    # 4 × 0.01 = 0.04 > 0.0245, so the single breakout is suppressed — no entry AND no square-off.
+    # A breakout is skipped when risk/price < 4 × per-side fee. Here risk/price = 2.5/102.0 ≈ 0.0245 and
+    # the floor is 4 × 0.01 = 0.04, so there is no entry and no square-off.
     frames = _breakout_session()
     params = {"orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5}
     sig = _signals_orb(frames, params, fee=0.01)
@@ -106,8 +100,7 @@ def test_orb_cost_floor_skips_sub_breakeven_breakout():
 
 
 def test_orb_cost_floor_boundary_passes():
-    # fee=0.005 ⇒ floor = 4 × 0.005 = 0.02 < 0.0245 = risk/price, so the SAME breakout clears the
-    # floor: exactly one entry survives, at the breakout bar.
+    # fee=0.005 ⇒ floor 0.02 < 0.0245 = risk/price, so the same breakout clears it.
     frames = _breakout_session()
     params = {"orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5}
     sig = _signals_orb(frames, params, fee=0.005)
@@ -117,10 +110,9 @@ def test_orb_cost_floor_boundary_passes():
 
 
 def _rsi2_shock_frames() -> _Frames:
-    """One symbol, ~260 DAILY bars: 255 gently rising days (RSI(2) ≈ 100, close climbs well above its
-    SMA200), then two consecutive −2% shocks that slam RSI(2) toward 0 (< the 10 entry threshold),
-    then a flat tail (Wilder RSI(2) halves both avg-gain and avg-loss on a zero-delta day, so the
-    ratio — and thus the sub-10 RSI — is held across the tail). No index_closes ⇒ regime disabled."""
+    """One symbol, ~260 daily bars: 255 gently rising days (RSI(2) ≈ 100, close well above SMA200), two
+    consecutive −2% shocks that drive RSI(2) below the 10 entry threshold, then a flat tail (a zero-delta
+    day halves avg-gain and avg-loss, so the sub-10 RSI holds). No index_closes ⇒ regime disabled."""
     n = 260
     idx = pd.bdate_range("2024-01-01", periods=n)          # naive daily DatetimeIndex — regime off
     close = np.empty(n, dtype="float64")
@@ -155,10 +147,8 @@ def test_rsi2_max_hold_days_schedules_time_exit():
         if p + 3 < n:                                      # max_hold_days sessions later (clipped)
             assert bool(exits[p + 3]) is True
 
-    # max_hold_days = 0 ⇒ NO scheduled time-exit; rsi_exit=100 never fires (RSI ≤ 100 always), so the
-    # exit frame is entirely empty. Reusing the SAME frames is safe: frames.cache["rsi2"] holds only
-    # the period-FIXED RSI(2)/SMA(200) series (identical across both variants — max_hold does not
-    # touch them); max_hold only gates the cheap scheduled-exit step downstream of that cache.
+    # max_hold_days = 0 ⇒ no scheduled time-exit; rsi_exit=100 never fires, so exits are empty. Reusing
+    # the frames is safe: frames.cache["rsi2"] holds only the RSI(2)/SMA(200) series max_hold does not touch.
     sig0 = _signals_rsi2(frames, {**base, "max_hold_days": 0.0})
     assert int(sig0.exits[_SYM].sum()) == 0
     assert int(sig0.entries[_SYM].sum()) == entry_positions.size   # entries unchanged (cache reused)
@@ -166,8 +156,7 @@ def test_rsi2_max_hold_days_schedules_time_exit():
 
 # --------------------------------------------------------------------------- next-bar-open shift
 def test_shift_to_next_bar_moves_signals_forward_and_drops_the_last_one():
-    """A signal computed on bar t must act on bar t+1; a signal on the LAST bar has no bar to fill
-    into and is dropped (never silently filled at its own bar, the defect before the next-open fill correction)."""
+    """A signal on bar t acts on bar t+1; a signal on the last bar has no bar to fill into and is dropped, not filled at its own bar."""
     idx = pd.bdate_range("2024-01-01", periods=5)
     sig = pd.DataFrame({_SYM: [False, True, False, False, True]}, index=idx)
 
@@ -179,8 +168,7 @@ def test_shift_to_next_bar_moves_signals_forward_and_drops_the_last_one():
 
 
 def test_shift_to_next_bar_never_crosses_an_intraday_session_boundary():
-    """Intraday (orb): a signal on a session's LAST bar must not fill on the next session's first
-    bar — the session gap is not a fillable next bar."""
+    """Intraday (orb): a signal on a session's last bar must not fill on the next session's first bar."""
     idx = pd.DatetimeIndex(
         [
             pd.Timestamp("2024-06-03 15:28", tz=IST), pd.Timestamp("2024-06-03 15:29", tz=IST),
@@ -197,7 +185,7 @@ def test_shift_to_next_bar_never_crosses_an_intraday_session_boundary():
 
 
 def test_shift_stop_frame_travels_with_its_entry_and_passes_scalars_through():
-    """Per-signal sl/tp FRACTIONS are stamped on the signal bar, so they must move with it."""
+    """Per-signal sl/tp fractions are stamped on the signal bar, so they move with it."""
     idx = pd.bdate_range("2024-01-01", periods=4)
     stops = pd.DataFrame({_SYM: [np.nan, 0.025, np.nan, np.nan]}, index=idx)
 
@@ -210,9 +198,8 @@ def test_shift_stop_frame_travels_with_its_entry_and_passes_scalars_through():
 
 
 def _mom_frames() -> _Frames:
-    """Two symbols over 24 daily bars. AAA leads on 4-week momentum through session t=22, then a
-    single −20% close on t=23 flips the ranking. With top_n=1 the winner therefore differs
-    depending on whether the ranking window includes session 23 or stops at 22."""
+    """Two symbols over 24 daily bars: AAA leads on momentum through t=22, then a −20% close on t=23
+    flips the ranking, so with top_n=1 the winner depends on whether the window includes session 23."""
     n = 24
     idx = pd.bdate_range("2024-01-01", periods=n)
     aaa = np.array([100.0 + 2.0 * i for i in range(n)])      # steady strong uptrend
@@ -231,24 +218,21 @@ def _mom_frames() -> _Frames:
 
 
 def test_mom_ranking_window_excludes_the_traded_session():
-    """The rank that FILLS on session t+1 is computed from closes through session t.
+    """The rank that fills on session t+1 is computed from closes through t, matching the live 'through d−1' window.
 
-    The builder stamps the rebalance on row t and ``SweepRunner._portfolio`` shifts it to t+1, so in
-    fill-row space the ranking input is ``momentum.shift(1)`` — the live 'through d−1' window
-    (ScanContext builds momentum from bars through d−1; the scanner trades on d). Here AAA's crash
-    lands on row 23: it must NOT influence the order that fills on row 23, and it MUST flip the
-    order that would fill on row 24 (which does not exist ⇒ dropped)."""
+    The builder stamps the rebalance on row t and ``SweepRunner._portfolio`` shifts it to t+1. AAA's crash
+    on row 23 must not influence the order filling on row 23, and flips only the order for the
+    nonexistent row 24 (dropped)."""
     frames = _mom_frames()
     close = frames.close
     sig = _signals_mom(frames, {"top_n": 1.0, "rebalance_days": 1.0})
 
     mom = close / close.shift(20) - 1.0
-    # signal rows are pre-shift; the row that FILLS at t+1 open is the signal row t.
+    # Signal rows are pre-shift: signal row t fills at t+1's open.
     signal_row_for_last_fill = len(close) - 2               # fills on the final row
     assert bool(sig.entries["AAA"].iloc[signal_row_for_last_fill]) is True   # ranked on closes <= t
     assert bool(sig.entries["BBB"].iloc[signal_row_for_last_fill]) is False
-    # the crash session itself (row 23) does rank BBB first — but that decision can only fill on a
-    # row 24 that does not exist, so it is dropped, exactly as a live pre-open rank for d+1 would be.
+    # The crash session (row 23) ranks BBB first, but that can only fill on a nonexistent row 24.
     assert float(mom["AAA"].iloc[-1]) < float(mom["BBB"].iloc[-1])
     assert bool(sig.entries["BBB"].iloc[-1]) is True
     shifted = _shift_to_next_bar(sig.entries, session_codes=None)

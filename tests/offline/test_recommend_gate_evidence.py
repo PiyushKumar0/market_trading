@@ -1,12 +1,9 @@
-"""``scripts/recommend_gate_evidence.py`` budget block — it must measure the SAME quota window the governor does.
+"""``scripts/recommend_gate_evidence.py`` budget block must measure the same quota window the governor does.
 
-The script is deliberately stdlib-only (its module docstring: no engine import, so the gate evidence
-generator can never perturb the live engine it reports on), which means it REIMPLEMENTS the governor's
-window arithmetic instead of importing it. An unpinned reimplementation is drift waiting to happen —
-and the failure mode is not cosmetic: the budget row is a gate verdict, and keying it a period off
-is exactly what printed the false "~85% of allocation" signal that the weekly re-scope exists to
-retire. So this pins the two implementations against each other across a whole year of instants, and
-pins the budget block itself to the window containing ``--to``.
+The script is stdlib-only (no engine import) so it reimplements the governor's window arithmetic; the
+budget row is a gate verdict, so a window keyed a period off is wrong, not cosmetic. This pins the two
+implementations against each other across a whole year of instants, and the budget block to the window
+containing ``--to``.
 """
 
 from __future__ import annotations
@@ -104,8 +101,7 @@ async def test_criterion_budget_covers_only_the_quota_week_containing_at(conn, g
     # An agent that billed with no allocation still gets a row, with no percentage to divide by.
     assert bud["per_agent"]["sdk_smoke"]["alloc_usd"] is None
     assert bud["per_agent"]["sdk_smoke"]["pct_of_alloc"] is None
-    # The denominator is the WEEKLY allocation from the same file the engine reads — one period on
-    # both sides of the ratio is the whole point of the budget-window fix.
+    # The denominator is the weekly allocation from the file the engine reads: one period on both sides of the ratio.
     alloc = cfg["budget_allocations_usd"]["news_analyst"]
     assert bud["per_agent"]["news_analyst"]["alloc_usd"] == pytest.approx(float(alloc))
     assert bud["per_agent"]["news_analyst"]["pct_of_alloc"] == pytest.approx(2.00 / float(alloc) * 100)

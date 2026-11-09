@@ -1,10 +1,8 @@
 """scripts/backtest.py argument defaults.
 
-The ``rsi2`` baseline is pinned to the "above a rising 50-DMA index" regime filter; the
-live ``Rsi2Scanner`` always applies it. The backtest CLI must therefore validate that SAME rule by
-DEFAULT — a ``--index-symbol`` that defaults to nothing silently disables the sweep's regime gate
-(``SweepRunner(index_symbol=None)``), promoting params measured on an all-regime strategy the live
-scanner never runs. These tests pin the canonical default and the explicit all-regime opt-out.
+The live ``Rsi2Scanner`` always applies the "above a rising 50-DMA index" regime filter, so the CLI
+must validate that rule by default: ``--index-symbol`` defaulting to nothing would silently disable the
+sweep's regime gate. Also pins the adjacency, margin-floor-days and realized-hold wiring.
 """
 
 from __future__ import annotations
@@ -33,8 +31,7 @@ _BASE_ARGV = ["rsi2", "--from", "2024-01-01", "--to", "2025-12-31"]
 
 
 def test_default_index_symbol_engages_the_rsi2_regime_filter():
-    """Default invocation resolves a real reference index, so the sweep applies the pinned
-    'rising 50-DMA index' gate (SweepRunner receives a non-None index_symbol)."""
+    """The default resolves a real reference index, so SweepRunner receives a non-None index_symbol."""
     args = bt._build_parser().parse_args(_BASE_ARGV)
     assert args.index_symbol == "NIFTY 50"
     assert args.index_symbol == bt._DEFAULT_INDEX_SYMBOL
@@ -42,8 +39,7 @@ def test_default_index_symbol_engages_the_rsi2_regime_filter():
 
 
 def test_empty_index_symbol_is_the_explicit_all_regime_optout():
-    """``--index-symbol ""`` is the deliberate opt-out: main() normalizes it to None so the sweep
-    runs all-regime (disclosed in the report notes), never silently by default."""
+    """``--index-symbol ""`` is the deliberate all-regime opt-out: main() normalizes it to None."""
     args = bt._build_parser().parse_args([*_BASE_ARGV, "--index-symbol", ""])
     assert args.index_symbol == ""
     assert (args.index_symbol or None) is None                # the all-regime opt-out
@@ -55,12 +51,9 @@ def test_explicit_index_symbol_override_is_honored():
 
 
 # ============================================================================ adjacency wiring
-#
-# "for the DAILY strategies only (rsi2/trend/mom — NOT orb), also run the adjacent grid density
-# (coarse<->medium) and pass adjacent_density + adjacent_winner (+ cost_floor_pct from the sweep)
-# into ParamSet so the validate report's WinnerStability populates. orb stays single-density (flag
-# reads not-assessed)." — the runner is mocked throughout (no real sweeps); these tests assert only
-# WHAT _run_one calls and WHAT it hands to ParamSet.
+# Daily strategies (rsi2/trend/mom, not orb) also run the adjacent grid density (coarse<->medium) and
+# pass adjacent_density + adjacent_winner (+ cost_floor_pct) into ParamSet so WinnerStability populates;
+# orb stays single-density. The runner is mocked: these assert what _run_one calls and hands to ParamSet.
 
 
 def _fake_sweep(
@@ -85,8 +78,7 @@ def _fake_sweep(
 
 
 class _FakeRunner:
-    """Records every ``.run()`` call — (strategy_id, grid_density) is the whole adjacency
-    assertion surface; the returned report content is otherwise irrelevant."""
+    """Records every ``.run()`` call as (strategy_id, grid_density)."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -110,7 +102,7 @@ class _FakeValidationReport:
 
 
 class _FakePipeline:
-    """Records every ``ParamSet`` handed to ``validate_sync`` — what ``_run_one`` actually wired."""
+    """Records every ``ParamSet`` handed to ``validate_sync``."""
 
     def __init__(self) -> None:
         self.received: list = []
@@ -121,8 +113,7 @@ class _FakePipeline:
 
 
 def _stub_report_writers(monkeypatch, tmp_path):
-    """``_run_one`` writes both a sweep and a validation report to disk; stub both so the test
-    exercises only the adjacency wiring, never the filesystem/schema of a real report."""
+    """Stub the sweep and validation report writers so tests never touch a real report's filesystem/schema."""
     stub = bt.reports.ReportArtifacts(markdown=tmp_path / "stub.md", json=tmp_path / "stub.json")
     monkeypatch.setattr(bt.reports, "write_sweep_report", lambda *a, **k: stub)
     monkeypatch.setattr(bt.reports, "write_report", lambda *a, **k: stub)
@@ -178,8 +169,7 @@ def test_no_adjacent_flag_skips_the_extra_sweep_for_a_daily_strategy(tmp_path, m
 
 
 def test_fine_density_has_no_adjacency_wiring_even_for_a_daily_strategy(tmp_path, monkeypatch):
-    # Only coarse<->medium is the wired pair (manager's scope); `fine` is a valid density with no
-    # adjacency partner, so the daily strategy still runs single-density.
+    # Only coarse<->medium is the wired pair; `fine` has no adjacency partner.
     runner, pipeline = _run_one("rsi2", "fine", run_adjacent=True, tmp_path=tmp_path,
                                  monkeypatch=monkeypatch)
 
@@ -193,12 +183,8 @@ def test_no_adjacent_cli_flag_defaults_false_and_parses():
 
 
 # ====================================================================== --margin-floor-days wiring
-#
-# The margin floor is cost_floor / <days>. The 20 is the risk-limits SWING holding cap; a positional
-# leg (trend, max_holding.position_trading_days = 120) is measured against a 6x-too-high bar at that
-# denominator. The CLI now carries the denominator, and these tests pin (a) the default is still 20,
-# so every pre-existing invocation is byte-identical, and (b) the value REACHES the
-# ValidationPipeline that runs the promotion rule — a flag parsed but not threaded is the whole risk.
+# The margin floor is cost_floor / <days>: 20 is the swing holding cap, 120 the positional one. Pins
+# that the default stays 20 and that the value reaches the ValidationPipeline running the promotion rule.
 
 
 def test_margin_floor_days_defaults_to_the_margin_floor_constant():
@@ -213,8 +199,7 @@ def test_margin_floor_days_parses_the_positional_holding_cap():
 
 @pytest.mark.parametrize("bad", ["0", "-5", "notanumber"])
 def test_margin_floor_days_rejects_a_non_positive_denominator(bad):
-    # Rejected at PARSE time: 0 would otherwise divide-by-zero inside margin_floor_pct_per_day
-    # after a multi-minute sweep had already run.
+    # Rejected at parse time: 0 would divide by zero in margin_floor_pct_per_day after a multi-minute sweep.
     with pytest.raises(SystemExit):
         bt._build_parser().parse_args([*_BASE_ARGV, "--margin-floor-days", bad])
 
@@ -232,11 +217,7 @@ _RUNNER_KWARGS: dict = {}       # what main() constructed SweepRunner with (fill
 def _main_pipeline_kwargs(
     monkeypatch, tmp_path, extra_argv: list[str], *, strategy: str = "trend"
 ) -> dict:
-    """Run ``main()`` with every I/O collaborator stubbed and return the ValidationPipeline kwargs.
-
-    Nothing here touches DuckDB/SQLite/vectorbt: the assertion surface is the plumbing between
-    ``--margin-floor-days`` and the pipeline that enforces the floor.
-    """
+    """Run ``main()`` with every I/O collaborator stubbed and return the ValidationPipeline kwargs."""
 
     class _Store:
         @staticmethod
@@ -299,8 +280,7 @@ def _main_pipeline_kwargs(
     [([], "NIFTY 50"), (["--index-symbol", "NIFTY BANK"], "NIFTY BANK"), (["--index-symbol", ""], None)],
 )
 def test_index_symbol_reaches_the_sweep_runner(tmp_path, monkeypatch, extra_argv, expected):
-    """The default, an override and the explicit all-regime opt-out ("" -> None) all arrive at
-    ``SweepRunner`` as given: a parsed-but-unthreaded flag would silently drop the regime gate."""
+    """The default, an override and the all-regime opt-out ("" -> None) all reach ``SweepRunner`` as given."""
     _main_pipeline_kwargs(monkeypatch, tmp_path, extra_argv, strategy="rsi2")
     assert _RUNNER_KWARGS == {"index_symbol": expected}
 
@@ -316,8 +296,7 @@ def test_margin_floor_days_default_leaves_existing_invocations_unchanged(tmp_pat
 
 
 def test_all_run_with_a_non_default_denominator_warns(tmp_path, monkeypatch, capsys):
-    """One denominator across `all` scales every leg to one leg's horizon — which can only LOOSEN
-    the floor for the shorter-held ones. Not blocked (research CLI), but never silent."""
+    """One denominator across `all` can only loosen the floor for shorter-held legs: allowed, but warned."""
     kwargs = _main_pipeline_kwargs(
         monkeypatch, tmp_path, ["--margin-floor-days", "120"], strategy="all"
     )
@@ -328,20 +307,14 @@ def test_all_run_with_a_non_default_denominator_warns(tmp_path, monkeypatch, cap
     assert capsys.readouterr().err == ""          # the default denominator warns about nothing
 
 
-# ============================================ 2026-09-12: realized-hold + survivorship wiring
-#
-# The 2026-09-12 trend run was promoted against a floor spread over the 120-session risk-limits CAP while
-# no artifact recorded that its median trade was held 33 sessions (where the same edge clears by
-# 1.07x, not 3.89x), and no artifact said the 200-name universe is a present-day snapshot applied
-# backwards. Both now travel from the sweep into the ParamSet the pipeline validates. Neither is an
-# input to the promotion rule — these tests pin the PLUMBING; test_validation.py pins that the
-# verdict does not move.
+# ============================================ realized-hold + survivorship wiring
+# The measured hold and the survivorship flag travel from the sweep into the validated ParamSet. Neither
+# is an input to the promotion rule; these pin the plumbing (test_validation.py pins the verdict).
 
 
 def _stat(strategy_params: dict[str, float], **kw) -> ParamSetStat:
     base = dict(
-        # expectancy_pct IS the closed-trade mean; the all-trades figure rides beside it, and
-        # the win rate is reported on both populations so the pair never mixes bases.
+        # expectancy_pct is the closed-trade mean; win rate is reported on both populations.
         params=strategy_params, n_trades=303, win_rate=0.3729, expectancy_pct=1.841,
         total_return_pct=5.026, sharpe=0.98, max_drawdown_pct=3.24,
         n_closed=273, n_open=30, expectancy_closed_pct=1.841, expectancy_all_pct=3.626,
@@ -379,10 +352,8 @@ def _sweep_with_stats(strategy_id: str = "trend", **report_kw) -> SweepReport:
 def test_sweep_stats_dict_carries_the_closed_only_expectancy_beside_the_headline():
     sweep = _sweep_with_stats()
     d = bt._sweep_stats_dict(sweep, sweep.best_params)
-    # Every per-trade key NAMES its population. This dict is persisted verbatim into
-    # param_sets.validation_report, so the two keys whose MEANING would otherwise have silently
-    # changed on 2026-09-13 (all-trades -> closed-only) under an unchanged name are RETIRED, not
-    # redefined: a query spanning both sides of the fix must never compare two statistics as one.
+    # Every per-trade key names its population. The dict is persisted verbatim into
+    # param_sets.validation_report, so the old ambiguous keys are retired, not redefined.
     assert "sweep_expectancy_pct" not in d
     assert "win_rate" not in d
     assert d["sweep_expectancy_closed_pct"] == 1.841   # CLOSED round trips only (the ranked one)
@@ -398,14 +369,13 @@ def test_realized_hold_maps_the_winning_configs_measured_sessions():
     assert (hold.n_trades, hold.n_closed, hold.n_open) == (303, 273, 30)
     assert hold.median_sessions == 33.0 and hold.mean_sessions == 48.64
     assert hold.median_sessions_closed == 31.0 and hold.p90_sessions_closed == 111.2
-    # RealizedHold's field meanings are unchanged by the sweep-mechanics fix: _pct is ALL trades, _closed_pct closed.
+    # RealizedHold: _pct is all trades, _closed_pct closed only.
     assert hold.expectancy_per_trade_pct == 3.626
     assert hold.expectancy_per_trade_closed_pct == 1.841
 
 
 def test_realized_hold_is_withheld_for_an_intraday_sweep_whose_bars_are_not_sessions():
-    """orb's hold_bars_* are 1-MINUTE bars. Labelling them sessions would make the re-based floor
-    ~375x too strict and the headroom multiple meaningless, so the cells are simply not emitted."""
+    """orb's hold_bars_* are 1-minute bars; labelling them sessions would make the re-based floor ~375x too strict, so no cells are emitted."""
     sweep = _sweep_with_stats("orb", bar_unit="1m bar")
     assert sweep.bar_unit == "1m bar"
     assert bt._realized_hold(sweep, sweep.best_params) is None
@@ -435,10 +405,9 @@ def test_run_one_threads_the_hold_and_the_survivorship_flag_into_the_validated_p
     ps = pipeline.received[0]
     assert ps.realized_hold is not None
     assert ps.realized_hold.median_sessions == 33.0
-    # the platform stores no point-in-time index membership, so this can only be True today
+    # No point-in-time index membership is stored, so this is always True.
     assert ps.population_is_survivorship_tainted_proxy is True
-    # The sweep's mechanics stamp reaches the validated ParamSet, so the verdict artifact
-    # names the mechanics its returns were produced under instead of leaving it to the reader.
+    # The mechanics stamp reaches the validated ParamSet.
     assert ps.sweep_mechanics == MECHANICS_STAMP
     assert ps.params_are_grid_winner is True
 
@@ -446,11 +415,9 @@ def test_run_one_threads_the_hold_and_the_survivorship_flag_into_the_validated_p
 def test_a_grid_that_ranked_nothing_validates_the_defaults_but_never_looks_like_a_winner(
     tmp_path, monkeypatch, capsys
 ):
-    """The sweep-mechanics fix made an unrankable config drop OUT of the ranking, so a window shorter than
-    the strategy's realized hold (or a vectorbt schema change that makes every open/closed split
-    unreadable) can leave ``best_params`` None. The CLI still validates the parameter-envelope defaults —
-    that is the long-standing fallback and nothing here gates on it — but a defaults verdict must be
-    impossible to mistake for a swept one, on the console line AND in the persisted ParamSet."""
+    """An unrankable config drops out of the ranking, so ``best_params`` can be None (short window, or an
+    unreadable open/closed split). The CLI then validates the envelope defaults, but the verdict must be
+    unmistakable as a defaults one on the console line and in the persisted ParamSet."""
     _stub_report_writers(monkeypatch, tmp_path)
 
     class _NoWinnerRunner:

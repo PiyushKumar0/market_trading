@@ -1,10 +1,10 @@
 """scripts/backtest_fade.py - smoke test of the refuted fade (SHORT) harness on synthetic bars.
 
-The synthetic tape is a temp :class:`MarketStore` holding 30 sessions of one-minute bars over an
-engineered cast. The last session (``SIGNAL_DAY``) is the one under test; the 29 before it give
-``rel_volume_tod`` its 20 prior sessions at a known constant volume. Every failed_breakout name shares one morning
-skeleton - the 09:15 open at 100.00, one 100.50 print at 09:20 so the OPENING RANGE HIGH IS 100.50,
-and a 101.00 stretch that is above it - so the cast differs only in the clause it exercises.
+The synthetic tape is a temp :class:`MarketStore` of 30 sessions of one-minute bars. The last session
+(``SIGNAL_DAY``) is under test; the 29 before it give ``rel_volume_tod`` its 20 prior sessions at a
+constant volume. Every failed_breakout name shares one morning skeleton (09:15 open at 100.00, one
+100.50 print at 09:20 so the opening-range high is 100.50, then a 101.00 stretch above it), so the cast
+differs only in the clause it exercises.
 
 The failed_breakout cast on ``SIGNAL_DAY`` (decision bar 11:00, entry 11:01):
 

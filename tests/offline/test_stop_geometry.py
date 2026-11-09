@@ -1,22 +1,9 @@
-"""Stop-geometry harness — mechanics pinned on SYNTHETIC 1m fixtures only.
+"""Stop-geometry harness mechanics on synthetic in-memory 1m fixtures (no store is opened).
 
-Nothing in this file opens ``data/market.duckdb`` (or any store): every test builds its own 1m bars in
-memory and injects them through ``StopGeometryExperiment(loader=...)`` or hand-builds an
-``EntryContext``. The pre-registration is what is under test — if one of these changes, the harness has
-drifted:
-
-* the **axis**: {1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 exit ladders = exactly 10 configs;
-* the **headline case**: a path that dips below the tight stop and then recovers to a positive sell —
-  the tight stop books the loss AND counts as a dodged winner, the wide stop books the win;
-* **fills at the NEXT bar's OPEN**, entry and exit alike, pinned so a same-bar fill (at the stop
-  price, or at the trigger bar's own close) produces a detectably different number;
-* the **no-target ladder's session-end exit** (last bar's OPEN, reason ``session_end``);
-* **adverse-first**: a bar touching stop AND target in the same 1m bar is booked as a STOP;
-* the **MAE / stop-out invariant** — "MAE >= w x ATR_10m" and "stopped at width w" are the same event
-  — and the hand-computable p25/p50/p75/p90 aggregation;
-* the **ATR switch point**: prior-session ATR seeding is what makes a 09:46 orb entry stoppable at
-  all; unseeded, the same entry falls inside the 140-minute warm-up and is dropped;
-* **promotion is NOT sought**: the module never names ``ValidationPipeline``.
+Pins the pre-registration: the axis ({1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 exit ladders = 10
+configs), the dip-and-recover headline case, next-bar-open fills for entry and exit, the no-target
+ladder's session-end exit, adverse-first ties, the MAE / stop-out invariant and quantile aggregation,
+the ATR seeding switch point, and that the module never reaches the validation pipeline.
 
 FIXTURE CONVENTION. Bars are ``high = max(open, close) + 0.25`` / ``low = min(open, close) - 0.25``
 (0.25 is binary-exact — no float drift in hand-computed levels). Baseline bars carry close 100.0 and
@@ -77,8 +64,7 @@ _HALF_RANGE = 0.25
 _COST = 0.1                         # a stand-in round-trip floor %; the real one is pinned separately
 _ORB_PARAMS = {"orb_minutes": 30.0, "vol_mult": 1.5, "stop_range_frac": 1.0, "rr_target": 1.5}
 
-#: 09:15 + 31 min = 09:46 — the breakout SIGNAL bar in the end-to-end fixture (the first bar past the
-#: 30-minute opening range that carries the volume surge). Its FILL is 09:47 = positional index 32.
+#: 09:46 — the breakout signal bar (first bar past the 30-minute opening range with the volume surge); its fill is 09:47 = index 32.
 _BREAKOUT_POS = 31
 _FILL_POS = 32
 
@@ -126,9 +112,9 @@ def _flat_session(day: date) -> pd.DataFrame:
 def _breakout_session(day: date) -> pd.DataFrame:
     """A session orb breaks out of at 09:46, dips at 09:56, then recovers and holds to the close.
 
-    Hand-computable: opening range [99.75, 100.25]; breakout close 101.0 on 5x volume at index 31;
-    the FILL is index 32's OPEN = 100.5 (the signal bar's close 101.0 is deliberately different, so a
-    same-bar fill is detectable); the dip low is 99.65 at index 41 and the square-off is 101.5.
+    Opening range [99.75, 100.25]; breakout close 101.0 on 5x volume at index 31; the fill is index 32's
+    open = 100.5 (differs from the signal close so a same-bar fill is detectable); dip low 99.65 at
+    index 41; square-off 101.5.
     """
     closes = [100.0] * _SESSION_BARS
     vols = [1000.0] * _SESSION_BARS
@@ -144,10 +130,9 @@ def _breakout_session(day: date) -> pd.DataFrame:
 
 
 def _late_dip_session(day: date) -> pd.DataFrame:
-    """:func:`_breakout_session` whose FINAL bar collapses AFTER its open (open 101.50, low 89.75).
+    """:func:`_breakout_session` whose final bar collapses after its open (open 101.50, low 89.75).
 
-    The position is squared off at that bar's OPEN, so the collapse is unreachable: it must not enter
-    the MAE and must not trigger any stop. Pins the exact bar range both diagnostics are measured over.
+    The square-off fills at that open, so the collapse must enter neither the MAE nor any stop.
     """
     frame = _breakout_session(day).copy()
     last = frame.index[-1]
@@ -190,12 +175,11 @@ def _ctx(
 
 
 def _dip_then_recover() -> EntryContext:
-    """THE headline fixture: entry 100.0, ATR 1.0, a dip to 99.65 low, recovery, square-off 101.0.
+    """Headline fixture: entry 100.0, ATR 1.0, a dip, recovery, square-off 101.0.
 
-    * 1.0 x ATR stop = 99.00 — HIT on bar 0 (low 98.80), filled at bar 1's open 98.90 ⇒ a booked loss;
-    * 1.5 / 2.5 / 4.0 x ATR stops = 98.50 / 97.50 / 96.00 — never hit ⇒ held to the square-off at
-      101.00 ⇒ a booked win;
-    * the target (orb's 1.5R, 5% here = 105.00) is out of reach, so both ladders agree.
+    * 1.0 x ATR stop = 99.00 — hit on bar 0 (low 98.80), filled at bar 1's open 98.90 ⇒ a loss;
+    * 1.5 / 2.5 / 4.0 x ATR stops = 98.50 / 97.50 / 96.00 — never hit ⇒ held to 101.00 ⇒ a win;
+    * the target (5% here = 105.00) is out of reach, so both ladders agree.
     """
     return _ctx(
         highs=[100.20, 100.50, 101.20],
@@ -218,7 +202,7 @@ def _experiment(loader, **kwargs) -> StopGeometryExperiment:
 
 # --------------------------------------------------------------------------- the fixed axis
 def test_the_axis_is_the_pre_registered_ten_configs_and_nothing_else():
-    """{1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 ladders. Drift here = pre-registration drift."""
+    """{1.0, 1.5, 2.5, 4.0} x ATR_10m + NO-STOP, x 2 ladders."""
     assert STOP_ATR_MULTIPLES == (1.0, 1.5, 2.5, 4.0)
     assert STOP_AXIS == (1.0, 1.5, 2.5, 4.0, None)
     assert LADDERS == (True, False)
@@ -241,13 +225,13 @@ def test_status_quo_row_is_not_one_of_the_pre_registered_ten():
 
 
 def test_reference_config_is_no_stop_no_target():
-    """Both diagnostics are measured against this exact configuration — it must stay the pure path."""
+    """Both diagnostics are measured against this configuration, which must stay the pure path."""
     assert REFERENCE_CONFIG.stop_source == STOP_SOURCE_NONE
     assert REFERENCE_CONFIG.use_target is False
 
 
 def test_orb_population_params_are_the_envelope_defaults():
-    """The stop-geometry pre-registration says 'the orb entry-signal stream' — the parameter-envelope default baseline, read from the envelope."""
+    """The orb entry-signal stream uses the parameter-envelope default baseline, read from the envelope."""
     assert orb_default_params() == {
         "orb_minutes": 30.0,
         "rr_target": 1.5,
@@ -256,9 +240,9 @@ def test_orb_population_params_are_the_envelope_defaults():
     }
 
 
-# --------------------------------------------------------------------------- THE headline case
+# --------------------------------------------------------------------------- the headline case
 def test_tight_stop_books_the_loss_wide_stop_books_the_win_on_the_same_dip_and_recover_path():
-    """The owner's hypothesis, made a unit test: one path, two geometries, opposite outcomes."""
+    """One path, two geometries, opposite outcomes."""
     ctx = _dip_then_recover()
 
     tight = simulate_entry(
@@ -291,7 +275,7 @@ def test_tight_stop_books_the_loss_wide_stop_books_the_win_on_the_same_dip_and_r
 
 
 def test_the_tight_stop_out_is_counted_as_a_dodged_winner_and_the_wide_one_is_not():
-    """DODGED WINNER = stopped out, AND the unstopped twin ended the session NET-positive."""
+    """Dodged winner = stopped out and the unstopped twin ended the session net-positive."""
     ctx = _dip_then_recover()
     tight_cfg = StopConfig(stop_source=STOP_SOURCE_ATR, stop_atr_mult=1.0, use_target=False)
     wide_cfg = StopConfig(stop_source=STOP_SOURCE_ATR, stop_atr_mult=2.5, use_target=False)
@@ -310,7 +294,7 @@ def test_the_tight_stop_out_is_counted_as_a_dodged_winner_and_the_wide_one_is_no
 
 
 def test_a_stop_out_whose_unstopped_twin_still_loses_is_not_a_dodged_winner():
-    """The denominator is stop-outs; the numerator is RECOVERIES. A stop that saved money is not one."""
+    """The denominator is stop-outs, the numerator recoveries; a stop that saved money is not a dodged winner."""
     ctx = _ctx(highs=[100.2, 99.0, 98.0], lows=[98.8, 98.0, 97.0], fill_opens=[98.9, 98.1, 97.5])
     cfg = StopConfig(stop_source=STOP_SOURCE_ATR, stop_atr_mult=1.0, use_target=False)
     trade = simulate_entry(ctx, cfg, cost_floor_pct=_COST)
@@ -323,7 +307,7 @@ def test_a_stop_out_whose_unstopped_twin_still_loses_is_not_a_dodged_winner():
 
 
 def test_dodged_winner_net_and_gross_readings_can_disagree_and_both_are_reported():
-    """A recovery that does not cover its own round trip is a GROSS dodge, not a NET one."""
+    """A recovery that does not cover its round trip is a gross dodge, not a net one."""
     # Square-off 100.05 ⇒ gross +0.05% (positive) but net −0.05% (below the 0.1% floor).
     ctx = _ctx(highs=[100.2, 100.1], lows=[98.8, 99.9], fill_opens=[98.9, 100.05])
     cfg = StopConfig(stop_source=STOP_SOURCE_ATR, stop_atr_mult=1.0, use_target=False)
@@ -339,7 +323,7 @@ def test_dodged_winner_net_and_gross_readings_can_disagree_and_both_are_reported
 
 # --------------------------------------------------------------------------- fills
 def test_exit_fills_at_the_next_bars_open_never_at_the_stop_price_or_the_trigger_bars_close():
-    """The next-open fill rule, pinned so every wrong-but-plausible fill price is detectably different."""
+    """Exits fill at the next bar's open, not the stop level nor the trigger bar's low."""
     ctx = _dip_then_recover()
     trade = simulate_entry(
         ctx,
@@ -366,7 +350,7 @@ def test_entry_fills_at_the_next_bars_open_never_the_signal_bars_close():
 
 
 def test_a_signal_on_the_sessions_last_usable_bar_is_dropped():
-    """There is no bar left to fill it in — never carried into the next session."""
+    """No bar is left to fill it in; the signal is never carried into the next session."""
     frame = _breakout_session(_DAY1)
     feats = compute_session_features(_SYM, frame, atr_seed=0.5)
     assert feats is not None
@@ -376,7 +360,7 @@ def test_a_signal_on_the_sessions_last_usable_bar_is_dropped():
 
 # --------------------------------------------------------------------------- the ladders
 def test_no_target_ladder_exits_at_the_session_end_square_off():
-    """Ladder (b) with NO-STOP has exactly one exit: the last bar's OPEN, labelled session_end."""
+    """The no-target ladder with NO-STOP has one exit: the last bar's open, labelled session_end."""
     ctx = _dip_then_recover()
     trade = simulate_entry(ctx, REFERENCE_CONFIG, cost_floor_pct=_COST)
     assert trade.exit_reason == "session_end"
@@ -387,7 +371,7 @@ def test_no_target_ladder_exits_at_the_session_end_square_off():
 
 
 def test_target_ladder_takes_orbs_own_1_5R_target_and_it_does_not_move_with_the_stop_width():
-    """The flagged interpretation: R is ORB'S risk unit, so one target level serves all five widths."""
+    """R is orb's own risk unit, so one target level serves all five widths."""
     assert TARGET_SOURCE == "orb_rr_target"
     ctx = _ctx(highs=[101.0, 103.0], lows=[99.9, 100.5], fill_opens=[100.4, 102.5], orb_target_frac=0.02)
     levels = {
@@ -459,12 +443,7 @@ def test_mae_never_goes_negative_when_the_path_never_dips_below_the_entry():
 
 @pytest.mark.parametrize("mult", STOP_ATR_MULTIPLES)
 def test_mae_and_stop_out_are_the_same_event(mult: float):
-    """THE consistency invariant the two diagnostics rest on: stopped at w  <=>  MAE >= w x ATR_10m.
-
-    If this ever fails, the MAE table and the stop-out counts are describing different things and the
-    report's central claim ("a stop tighter than the p90 figure cuts off a tenth of the winners")
-    becomes unsupportable.
-    """
+    """Stopped at w  <=>  MAE >= w x ATR_10m; the MAE table and the stop-out counts must describe the same thing."""
     for ctx in (
         _dip_then_recover(),
         _ctx(highs=[100.2, 101.2], lows=[95.0, 100.5], fill_opens=[95.5, 101.0]),
@@ -478,16 +457,15 @@ def test_mae_and_stop_out_are_the_same_event(mult: float):
 def test_the_unreachable_square_off_bar_enters_neither_the_mae_nor_any_stop():
     """The trigger/MAE range is bars ``e .. hard-1``: the exit-fill bar's own low is never held.
 
-    The fixture's last bar opens at 101.50 (the square-off price) and then collapses to an 89.75 low.
-    Widening the range by one bar would drag that collapse into the MAE (1.70 -> 21.40 ATR) and stop
-    out every width — with no bar left to fill the stop in.
+    The last bar opens at the 101.50 square-off price then collapses to 89.75; widening the range by
+    one bar would pull that into the MAE (1.70 -> 21.40 ATR) and stop out every width.
     """
     frame = pd.concat([_flat_session(_DAY1), _late_dip_session(_DAY2)])
     feats = compute_session_features(_SYM, _late_dip_session(_DAY2), atr_seed=0.5)
     assert feats is not None
     ctx = build_entry_context(feats, _BREAKOUT_POS, orb_stop_frac=0.0125, orb_target_frac=0.05)
     assert ctx is not None
-    # Index alignment: a trigger on bar k fills at fill_open[k]; the arrays must be the same length.
+    # A trigger on bar k fills at fill_open[k], so the arrays must be the same length.
     assert len(ctx.trigger_low) == len(ctx.trigger_high) == len(ctx.fill_open) == len(ctx.fill_ts)
     assert ctx.worst_low == pytest.approx(99.65)           # the 09:56 dip, NOT the 15:29 collapse
     assert ctx.mae_atr_mult == pytest.approx((100.50 - 99.65) / 0.5)
@@ -503,7 +481,7 @@ def test_the_unreachable_square_off_bar_enters_neither_the_mae_nor_any_stop():
 
 
 def test_mae_quantiles_are_the_hand_computed_p25_p50_p75_p90():
-    """Aggregation pinned on four values whose linear-interpolated quantiles are exact by hand."""
+    """Four values whose linear-interpolated quantiles are exact by hand."""
     winners = [(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]
     losers = [(9.0, 9.0)]
     dists = StopGeometryExperiment._mae_distributions(winners, losers)
@@ -528,11 +506,8 @@ def test_mae_distribution_of_an_empty_slice_is_none_not_nan():
 
 # --------------------------------------------------------------------------- the ATR switch point
 def test_seeded_atr_is_the_switch_point_and_is_what_makes_a_0946_orb_entry_stoppable():
-    """The harness depends on the shared prior-session ATR seeding: unseeded, orb's morning entry has no stop and is dropped.
-
-    Same frame, same signal bar, one flag: with the prior-session seed the 09:46 breakout carries an
-    ATR (0.5, the flat prior session's value) and is bookable; unseeded it sits inside the 140-minute
-    warm-up, has no stop, and is not booked at all — for EVERY config, so the population stays common.
+    """With the prior-session seed the 09:46 breakout carries ATR 0.5 and is bookable; unseeded it sits
+    inside the 140-minute warm-up, has no stop, and is dropped for every config (the population stays common).
     """
     assert SEED_ATR_PRIOR_SESSION is True
     frame = pd.concat([_flat_session(_DAY1), _breakout_session(_DAY2)])
@@ -553,7 +528,7 @@ def test_seeded_atr_is_the_switch_point_and_is_what_makes_a_0946_orb_entry_stopp
 
 
 def test_an_entry_without_a_defined_atr_is_dropped_for_every_config_including_no_stop():
-    """The common-population rule: NO-STOP must not see entries the stopped configs cannot."""
+    """NO-STOP must not see entries the stopped configs cannot."""
     frame = _breakout_session(_DAY1)
     feats = compute_session_features(_SYM, frame, atr_seed=None)   # unseeded ⇒ NaN before 11:35
     assert feats is not None
@@ -563,7 +538,7 @@ def test_an_entry_without_a_defined_atr_is_dropped_for_every_config_including_no
 
 # --------------------------------------------------------------------------- the orb population
 def test_the_population_comes_from_orbs_own_builder_one_entry_per_symbol_session():
-    """Reuse, not re-derivation: sweep._signals_orb produces the stream, and orb takes ONE per day."""
+    """sweep._signals_orb produces the stream, and orb takes one entry per day."""
     frame = pd.concat([_flat_session(_DAY1), _breakout_session(_DAY2)])
     signals = orb_signal_stream(_SYM, frame, params=_ORB_PARAMS, fee=0.0)
     assert len(signals) == 1                               # the flat session never breaks out
@@ -574,7 +549,7 @@ def test_the_population_comes_from_orbs_own_builder_one_entry_per_symbol_session
 
 
 def test_every_configuration_is_evaluated_on_exactly_the_same_entries():
-    """Requirement 1: the geometry changes the EXIT, never the entry. Different n_trades = broken."""
+    """Geometry changes the exit, never the entry: every config sees the same n_trades."""
     frame = pd.concat([_flat_session(_DAY1), _breakout_session(_DAY2)])
     report = _experiment(lambda sym: frame if sym == _SYM else None).run(
         [_SYM], start=_DAY1, end=_DAY2
@@ -586,9 +561,7 @@ def test_every_configuration_is_evaluated_on_exactly_the_same_entries():
 
 # --------------------------------------------------------------------------- end-to-end
 def test_end_to_end_geometry_table_on_the_dip_and_recover_session():
-    """The whole harness on one hand-computable symbol-session, checked row by row.
-
-    Entry 100.50 (09:47 open), ATR_10m 0.50 ⇒ stops at 100.00 / 99.75 / 99.25 / 98.50. The 09:56 dip
+    """Entry 100.50 (09:47 open), ATR_10m 0.50 ⇒ stops at 100.00 / 99.75 / 99.25 / 98.50. The 09:56 dip
     low is 99.65, so the two tight widths stop (filled at 09:57's open 100.40) and the two wide ones
     plus NO-STOP ride to the 101.50 square-off. MAE = (100.50 − 99.65)/100.50 = 0.8458% = 1.70 ATR.
     """
@@ -670,7 +643,7 @@ def test_report_carries_the_banner_the_verbatim_null_hypothesis_and_the_owner_an
 
 
 def test_owner_facing_strings_survive_a_cp1252_console():
-    """The CLI prints these verbatim to a Windows console that may be cp1252 — no em-dashes there."""
+    """The CLI prints these verbatim to a possibly cp1252 console, so they must be ASCII."""
     frame = pd.concat([_flat_session(_DAY1), _breakout_session(_DAY2)])
     report = _experiment(lambda _sym: frame).run([_SYM], start=_DAY1, end=_DAY2)
     printed = [
@@ -687,13 +660,8 @@ def test_owner_facing_strings_survive_a_cp1252_console():
 
 
 def test_promotion_is_never_sought_the_module_cannot_reach_the_validation_pipeline():
-    """Promotion is NOT sought — so the promotion path must be UNREACHABLE, not merely unused.
-
-    Checked structurally (the module's prose is allowed to DISCUSS the absence): no import of
-    ``engine.learning.validate`` in any spelling (``import engine.learning.validate``, ``from
-    engine.learning.validate import ...``, ``from engine.learning import validate``, or a relative form),
-    and no ``ValidationPipeline`` / ``ParamSet`` name bound anywhere in the module namespace. Nothing here
-    can construct a candidate row or a CPCV verdict.
+    """The promotion path is unreachable, checked structurally: no import of ``engine.learning.validate``
+    in any spelling (including relative) and no ``ValidationPipeline`` / ``ParamSet`` name in the module namespace.
     """
     import ast
 
@@ -721,7 +689,7 @@ def test_promotion_is_never_sought_the_module_cannot_reach_the_validation_pipeli
 
 
 def test_the_full_round_trip_is_charged_on_every_trade_including_stop_outs():
-    """Pre-registered: 'each stop-out realizes the full round-trip cost floor.'"""
+    """Each stop-out realizes the full round-trip cost floor."""
     ctx = _dip_then_recover()
     for cfg in all_configs():
         trade = simulate_entry(ctx, cfg, cost_floor_pct=_COST)

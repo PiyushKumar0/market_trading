@@ -1,16 +1,12 @@
-"""scripts/hi52_forward_verdict.py — the mechanical kill criterion for the 2026-09-12 promotion.
+"""scripts/hi52_forward_verdict.py — the mechanical kill criterion for the hi52 promotion.
 
-The script's whole job is to answer ONE pre-registered question on the promoted population, so these
-tests are about the answer being mechanical: a DEMOTE case, a HOLD case, an INSUFFICIENT case, the
-two boundaries the rule is written on (``n >= 20``, ``median <= 0``, ``hit < 50%``). The session
-arithmetic, the journal read and the sizing notional are production code
-(``engine.learning.hi52_forward``, ``engine.strategy.hi52_edge``), pinned in
-``tests/unit/test_hi52_forward.py``.
+Pins the pre-registered rule: DEMOTE, HOLD and INSUFFICIENT cases and the boundaries it is written on
+(``n >= 20``, ``median <= 0``, ``hit < 50%``). Session arithmetic, the journal read and the sizing
+notional are production code pinned in ``tests/unit/test_hi52_forward.py``.
 
-Costs come from the repo's own CostModel at the script's reference notional, never a frozen
-constant: a costs.yaml re-scrape must move the expected net with the model rather than break these
-tests for the wrong reason. The registered edge is pinned to the SAME derivation for the same
-reason — see ``tests/unit/test_hi52_edge.py::test_the_registered_edge_is_this_script_s_derivation``.
+Costs come from the repo's CostModel at the script's reference notional, not a frozen constant; the
+registered edge is pinned to the same derivation in
+``tests/unit/test_hi52_edge.py::test_the_registered_edge_is_this_script_s_derivation``.
 """
 
 from __future__ import annotations
@@ -60,10 +56,9 @@ def _series(
     n: int = 21,
     holidays: frozenset[date] = frozenset(),
 ) -> fv.Series:
-    """A 21-session series whose signal day is index 0: the entry is ``open[0]`` (the journal day's
-    OWN open) and T+k is ``close[k-1]`` — the k-th session of the hold, the entry session counting
-    as the first. So T+5 is ``close[4]``, T+10 ``close[9]``, T+20 ``close[19]``; index 20 is a spare
-    session that no horizon reads, and every other bar is inert (100.00)."""
+    """A 21-session series whose signal day is index 0: entry is ``open[0]`` (the journal day's own open)
+    and T+k is ``close[k-1]`` (the entry session counts as the first), so T+5 is ``close[4]``, T+10
+    ``close[9]``, T+20 ``close[19]``; index 20 is a spare and every other bar is inert (100.00)."""
     dates = _sessions(n, holidays=holidays)
     opens = [100.0] * n
     closes = [100.0] * n
@@ -87,8 +82,7 @@ def _report(signals, series, *, as_of: date = date(2026, 12, 31)) -> dict:
 
 # ============================================================ 1. DEMOTE
 def test_a_flat_population_of_twenty_signals_demotes():
-    """20 signals that go NOWHERE gross are a losing rule after one round trip: the median net is
-    the cost itself, negative, and nothing hits. Both clauses of the rule fire."""
+    """20 signals flat gross lose one round trip: the median net is -cost, nothing hits, both clauses fire."""
     doc = _report(*_population(20, t20_close=100.0))
     cell = doc["horizons"]["20"]
     assert cell["n"] == 20
@@ -96,7 +90,7 @@ def test_a_flat_population_of_twenty_signals_demotes():
     assert cell["hit_rate"] == 0.0
     assert doc["verdict"] == fv.VERDICT_DEMOTE
     assert "median net" in doc["reason"] and "hit rate" in doc["reason"]
-    # The report tells the operator what demotion IS — both edits, not one.
+    # The report names both edits demotion requires.
     text = fv.render(doc)
     assert "NO_EDGE_SHADOW_STRATEGIES" in text and "expected_edge_pct" in text
 
@@ -114,8 +108,7 @@ def test_twenty_signals_drifting_three_percent_hold():
 
 # ============================================================ 3. INSUFFICIENT
 def test_nineteen_signals_are_insufficient_however_bad_they_look():
-    """Below the pre-registered n the rule has NOTHING to say — and says that, rather than HOLD.
-    "Not yet refuted" and "no evidence" must never read the same."""
+    """Below the registered n the rule says INSUFFICIENT, never HOLD ("not yet refuted" is not "no evidence")."""
     doc = _report(*_population(19, t20_close=90.0))
     assert doc["horizons"]["20"]["n"] == 19
     assert doc["horizons"]["20"]["median_net"] < 0        # it looks terrible…
@@ -126,7 +119,7 @@ def test_nineteen_signals_are_insufficient_however_bad_they_look():
 
 # ============================================================ 4. the rule's own boundaries
 def test_the_verdict_rule_is_exactly_as_pre_registered():
-    """The three comparisons, at their boundaries, on the pure function — no bars, no stores."""
+    """The three comparisons at their boundaries, on the pure function."""
     at = lambda n, med, hit: fv.verdict({"20": {"n": n, "median_net": med, "hit_rate": hit}})[0]  # noqa: E731
     assert at(19, -9.0, 0.0) == fv.VERDICT_INSUFFICIENT   # n < 20 wins over everything
     assert at(20, 0.0, 0.9) == fv.VERDICT_DEMOTE          # median <= 0 (zero is a failure)
@@ -139,8 +132,7 @@ def test_the_verdict_rule_is_exactly_as_pre_registered():
 
 
 def test_a_half_hitting_population_with_a_positive_median_holds():
-    """Boundary population: 10 flat (net = -cost, a miss) and 10 at +3%. Hit rate is exactly 50%
-    and the median is positive, so BOTH clauses are satisfied and the rule HOLDs."""
+    """10 flat (a miss) and 10 at +3%: hit rate is exactly 50% and the median positive, so the rule HOLDs."""
     flat_s, flat_series = _population(10, t20_close=100.0)
     up_s, up_series = _population(10, t20_close=103.0)
     up_s = [fv.Signal(s.d, s.symbol + "X") for s in up_s]
@@ -154,8 +146,7 @@ def test_a_half_hitting_population_with_a_positive_median_holds():
 
 # ============================================================ 5. session arithmetic
 def test_horizons_are_measured_on_their_own_event_sets():
-    """A signal old enough for T+10 but not T+20 counts at T+10 ONLY — a forward test reads as its
-    data arrives, and pretending the cells share a population would misstate both."""
+    """A signal old enough for T+10 but not T+20 counts at T+10 only; the cells do not share a population."""
     young = fv.Series(symbol="YOUNG", dates=_sessions(12),
                       open=[100.0] * 12, close=[100.0] * 9 + [105.0, 100.0, 100.0])
     m = fv.measure_signal(young, young.dates[0], cost_pct=COST_PCT)
@@ -165,10 +156,8 @@ def test_horizons_are_measured_on_their_own_event_sets():
 
 
 def test_unmeasurable_signals_are_counted_by_REASON_never_silently_dropped():
-    """An ``n`` that shrank because the newest signal's bhavcopy has not landed yet (the ordinary
-    state of a forward test on the morning it runs) must not read like one that shrank because the
-    store has a hole in it — and with the entry at ``open(d)`` the two are told apart by WHERE ``d``
-    sits: past the last stored session, or missing from inside the stored range."""
+    """An ``n`` shrunk by a not-yet-landed bhavcopy must not read like a store hole: they are told apart by
+    whether ``d`` is past the last stored session or missing from inside the stored range."""
     good = _series("GOOD", t20_close=103.0)
     signals = [
         fv.Signal(START, "GOOD"),
@@ -185,9 +174,8 @@ def test_unmeasurable_signals_are_counted_by_REASON_never_silently_dropped():
 
 
 def test_a_signal_on_the_last_stored_session_is_entered_but_reaches_no_horizon():
-    """The anchor moved to ``open(d)``, so a signal journalled on the last stored session HAS an
-    entry — it is a measured trade with an empty cell set, not a skip. It must count in neither the
-    verdict cell nor the skip tally, or the two would disagree about the same row."""
+    """Entry is ``open(d)``, so a signal on the last stored session is a measured trade with an empty cell
+    set, not a skip; it counts in neither the verdict cell nor the skip tally."""
     good = _series("GOOD", t20_close=103.0)
     trades, _ = fv.measure_all([fv.Signal(good.dates[-1], "GOOD")], {"GOOD": good},
                                cost_pct=COST_PCT)
@@ -215,8 +203,7 @@ def _state_db(tmp_path: Path, rows: list[tuple[str, str, str]]) -> Path:
 
 
 def test_the_population_is_hi52_rows_from_the_promotion_day_onward(tmp_path):
-    """The journal is read through the script's own read-only connection. Which rows make the
-    population is pinned in ``tests/unit/test_hi52_forward.py``."""
+    """The journal is read through the script's read-only connection; row selection is pinned in ``tests/unit/test_hi52_forward.py``."""
     path = _state_db(tmp_path, [
         ("2026-09-11", "OLDSHADOW", "hi52"),              # pre-promotion: a different rule
         ("2026-09-14", "BHEL", "hi52"),
@@ -235,8 +222,7 @@ def test_the_population_is_hi52_rows_from_the_promotion_day_onward(tmp_path):
 
 
 def test_a_store_that_cannot_be_read_is_not_a_verdict(tmp_path, capsys):
-    """A missing store reports UNAVAILABLE and still exits 0 — an INSUFFICIENT there would put a
-    verdict on evidence nobody looked at."""
+    """A missing store reports UNAVAILABLE and exits 0; INSUFFICIENT would put a verdict on unread evidence."""
     rc = fv.main(["--state-db", str(tmp_path / "absent.db"), "--db", str(tmp_path / "absent.duckdb")])
     out = capsys.readouterr().out
     assert rc == 0
@@ -246,13 +232,11 @@ def test_a_store_that_cannot_be_read_is_not_a_verdict(tmp_path, capsys):
 
 # ============================================================ 7. the ONE cost derivation
 def test_the_registration_equity_is_the_go_flat_rung_and_falls_back_loudly(tmp_path):
-    """Derived at the WORST equity the risk table still lets a position be opened at (the
-    `equity_floor_rung`), because the cost floor RISES as the book shrinks: deriving at the largest
-    permitted book would register the flattering edge for exactly the drawdown it fails in."""
+    """Derived at the worst equity the risk table still opens positions at (the `equity_floor_rung`),
+    because the cost floor rises as the book shrinks; a larger book would register a flattering edge."""
     eq, src = fv.load_registration_equity(_LIMITS)
     assert eq == Decimal("36000.0") and "equity_floor_rung" in src
-    # An unreadable or implausible table falls back to the pinned rung and SAYS so — never to a
-    # bigger book, which would quietly lower the floor and raise the registered edge.
+    # An unreadable or implausible table falls back to the pinned rung and says so, never to a bigger book.
     missing = tmp_path / "nope.yaml"
     eq2, src2 = fv.load_registration_equity(missing)
     assert eq2 == Decimal("36000.0") and "pinned default" in src2
@@ -264,37 +248,34 @@ def test_the_registration_equity_is_the_go_flat_rung_and_falls_back_loudly(tmp_p
 
 
 def test_the_notional_override_is_shouted_not_whispered(tmp_path):
-    """`--notional` exists for what-ifs and is exactly the defect the derivation removed, so a report
-    that used it must say OVERRIDE in the numbers a reader quotes."""
+    """`--notional` is for what-ifs; a report that used it must say OVERRIDE."""
     cost, sizing = fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=None, min_equity=None,
         notional_override=Decimal("8000"))
-    assert cost == pytest.approx(float(fv.cost_floor_pct(Decimal("8000"))))  # the ₹8,000 floor the review refuted
+    assert cost == pytest.approx(float(fv.cost_floor_pct(Decimal("8000"))))
     assert sizing["override"] is True and sizing["derivation"].startswith("OVERRIDE")
     doc = _report(*_population(20, t20_close=103.0))
     doc["meta"]["sizing"] = sizing
     doc["meta"]["reference_notional_inr"] = sizing["notional_inr"]
     assert "[OVERRIDE]" in fv.render(doc)
-    # …and the derived path says nothing of the sort, and names the equity it used.
+    # The derived path carries no OVERRIDE tag.
     cost2, sizing2 = fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None)
-    # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000 (owner decision 2026-09-24; Rs 4,800 at the earlier 2.5x)
+    # Rs 36,000 x 2% / (2.0 x 6%) = Rs 6,000
     assert sizing2["override"] is False and Decimal(sizing2["notional_inr"]) == Decimal("6000")
     # Another rule's stop (cat's 5%, scripts/cat_shadow_verdict.py) moves the notional: Rs 7,200.
     assert Decimal(fv.resolve_cost_floor(
         limits_path=_LIMITS, equity_override=Decimal("36000"), min_equity=None,
         stop_pct=Decimal("5.0"))[1]["notional_inr"]) == Decimal("7200")
-    assert cost2 > cost                                   # the real floor is HIGHER than ₹8,000's
+    assert cost2 > cost                                   # a smaller notional costs more
     assert "[OVERRIDE]" not in fv.render(_report(*_population(20, t20_close=103.0)))
 
 
 def test_t5_and_t10_are_printed_as_diagnostics_and_never_vote():
-    """T+5 is printed because the manager asked to see it; the v2 study measured it DEAD, so the
-    promoted rule makes no claim there. A cell nobody pre-registered must be unquotable as an
-    outcome — it is labelled on its own row and the verdict reads T+20 alone."""
+    """T+5 and T+10 are labelled diagnostic-only; the verdict reads T+20 alone."""
     assert fv.HORIZONS == (5, 10, 20) and fv.VERDICT_HORIZON == 20
     assert fv.DIAGNOSTIC_HORIZONS == (5, 10)
-    # A population that is TERRIBLE at T+5/T+10 and fine at T+20 still HOLDs: only T+20 votes.
+    # Terrible at T+5/T+10 and fine at T+20 still HOLDs.
     signals = [fv.Signal(START, f"SYM{i:02d}") for i in range(20)]
     series = {s.symbol: _series(s.symbol, t20_close=103.0, t10_close=80.0, t5_close=80.0)
               for s in signals}
@@ -310,11 +291,9 @@ def test_t5_and_t10_are_printed_as_diagnostics_and_never_vote():
 
 
 def test_the_script_is_read_only_by_construction():
-    """No INSERT/UPDATE/DELETE/CREATE anywhere, and the DuckDB attach is read_only — the engine's
-    stores are never written by a report."""
+    """No write statements, and the DuckDB attach is read_only."""
     src = _SCRIPT.read_text(encoding="utf-8")
     assert "read_only=True" in src and "mode=ro" in src
-    # Case-SENSITIVE: SQL is written uppercase throughout this repo, and the prose above talks about
-    # deleting a settings key — a case-folded scan would flag that sentence instead of a statement.
+    # Case-sensitive: SQL is uppercase here, and prose mentions deleting a settings key.
     for stmt in ("INSERT INTO", "UPDATE ", "DELETE FROM", "CREATE TABLE", "DROP "):
         assert stmt not in src, stmt

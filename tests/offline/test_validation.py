@@ -5,16 +5,9 @@ the CPCV fold-pass fraction ≥ fold_pass_min(N), anchored walk-forward split de
 negative-result rendering. The one skfolio-backed test (real CPCV purge/embargo no-overlap) is marked
 ``needs_heavy_deps``.
 
-The 2026-08-13 margin-floor change adds two things pinned here:
-
-* the **margin floor** — median PASSING-split expectancy ≥ ``cost_floor / MARGIN_FLOOR_DAYS`` per
-  day, fail-closed when no cost floor is supplied — tested at the exact 12/15 = 80.0% boundary that
-  four rsi2 runs sat on, with the recorded sub-floor margins (⇒ not promotable) and with margins that
-  genuinely clear costs (⇒ promotable);
-* the **winner-stability flag** — recorded on the report, never part of the verdict.
-
-Every ``promotion_decision`` call therefore now passes a cost floor + a median: the rule fails closed
-without them, which is itself asserted below.
+Also pinned: the margin floor (median passing-split expectancy ≥ ``cost_floor / MARGIN_FLOOR_DAYS``
+per day, fail-closed without a cost floor), the winner-stability flag (recorded, never part of the
+verdict), and the reporting-only realized-hold cells and stamps.
 """
 
 from __future__ import annotations
@@ -29,8 +22,7 @@ import pytest
 from engine.core.clock import IST, Clock
 from engine.learning import reports
 
-# sweep.py's module top level is stdlib + pandas/numpy only (vectorbt is imported function-level),
-# so the stamp constant is reachable from this pure tier without pulling the heavy deps in.
+# sweep.py imports vectorbt function-level, so the stamp is reachable without the heavy deps.
 from engine.learning.sweep import MECHANICS_STAMP
 from engine.learning.validate import (
     MARGIN_FLOOR_DAYS,
@@ -54,13 +46,12 @@ FIXED_NOW = datetime(2026, 6, 17, 18, 0, tzinfo=IST)
 #: The CNC ₹20k round-trip friction after the spread correction = 0.2992% statutory fees + 0.0200% measured spread.
 #: The margin floor is this / MARGIN_FLOOR_DAYS = 0.01596 %/day.
 CNC_COST_FLOOR_PCT = 0.3192
-#: A margin that clears the floor comfortably (used wherever the test is about a DIFFERENT rule).
+#: A margin that clears the floor comfortably (for tests about a different rule).
 CLEARS = 0.05
 
 
 def _decide(n, fraction, **kw):
-    """promotion_decision with the margin inputs defaulted to a clearly-clearing edge, so a
-    test about (say) the drawdown gate is not silently answered by the margin floor."""
+    """promotion_decision with the margin inputs defaulted to a clearly-clearing edge."""
     kw.setdefault("median_passing_expectancy_pct", CLEARS)
     kw.setdefault("cost_floor_pct", CNC_COST_FLOOR_PCT)
     return promotion_decision(n, fraction, **kw)
@@ -135,8 +126,7 @@ def test_promotion_drawdown_gate():
 
 # --------------------------------------------------------------------------- margin floor
 def test_margin_floor_constant_and_derivation():
-    """floor = cost_floor / 20 sessions — the one round trip a position must earn over the risk-limits
-    swing holding cap. On the post-spread-correction CNC surface that is 0.3192% / 20 = 0.01596 %/day."""
+    """floor = cost_floor / 20 sessions (the swing holding cap): 0.3192% / 20 = 0.01596 %/day on the CNC surface."""
     assert MARGIN_FLOOR_DAYS == 20
     assert margin_floor_pct_per_day(CNC_COST_FLOOR_PCT) == pytest.approx(0.01596)
     assert margin_floor_pct_per_day(None) is None
@@ -146,8 +136,7 @@ def test_margin_floor_constant_and_derivation():
 
 
 def test_promotion_rejects_the_recorded_rsi2_boundary_pass():
-    """THE case the margin floor exists for: 12/15 = exactly 80.0% (a strict-< pass at N>30) with the recorded
-    rsi2 median passing split ~0.0006 %/day — positive, and ~27x below the cost floor."""
+    """12/15 = exactly 80.0% (a pass at N>30) with a median passing split of ~0.0006 %/day, ~27x below the cost floor."""
     n, fraction = 40, 12 / 15
     assert fraction == fold_pass_min(n)                       # sits EXACTLY on the bar
     ok, reasons = promotion_decision(
@@ -169,8 +158,7 @@ def test_promotion_accepts_the_same_boundary_with_a_cost_clearing_margin():
 
 
 def test_margin_floor_boundary_is_exact_and_inclusive():
-    """>= the floor passes; a hair below fails (the floor itself is a PASS, unlike fold_pass_min's
-    strict-< comparison, which the margin floor change deliberately left alone)."""
+    """>= the floor passes; a hair below fails."""
     floor = margin_floor_pct_per_day(CNC_COST_FLOOR_PCT)
     assert promotion_decision(
         40, 12 / 15, median_passing_expectancy_pct=floor, cost_floor_pct=CNC_COST_FLOOR_PCT
@@ -181,7 +169,7 @@ def test_margin_floor_boundary_is_exact_and_inclusive():
 
 
 def test_promotion_fails_closed_without_a_cost_floor():
-    """A margin floor that silently skips is no floor at all (same posture as a missing N)."""
+    """A margin floor that silently skips is no floor (same posture as a missing N)."""
     ok, reasons = promotion_decision(10, 1.0, median_passing_expectancy_pct=1.0)
     assert ok is False
     assert any("margin floor NOT EVALUATED" in r for r in reasons)
@@ -196,7 +184,7 @@ def test_promotion_fails_closed_without_any_passing_split():
 
 
 def test_fold_pass_fraction_comparison_stays_strict_less_than():
-    """The margin floor explicitly did NOT move this boundary: fraction == fold_pass_min(N) still PASSES."""
+    """fraction == fold_pass_min(N) passes."""
     for n in (10, 11, 31, 40):
         assert _decide(n, fold_pass_min(n))[0] is True
 
@@ -324,8 +312,7 @@ def test_pipeline_promotable_iff_fraction_meets_bar(clock):
 
 
 def _tiny_margin_series() -> pd.Series:
-    """Same 3/5 fold-pass shape, but the winning folds earn ~0.0006%/day — the recorded rsi2
-    magnitude: positive after costs, ~27x below the margin floor."""
+    """Same 3/5 fold-pass shape, but the winning folds earn ~0.0006%/day, ~27x below the margin floor."""
     idx = [date(2024, 1, 1) + timedelta(days=i) for i in range(40)]
     return pd.Series([0.000006] * 20 + [-0.01] * 20, index=idx, dtype="float64")
 
@@ -350,8 +337,7 @@ def test_pipeline_margin_floor_blocks_a_near_zero_margin_pass(clock):
 
 
 def test_pipeline_derives_the_cost_floor_when_the_caller_supplies_none(clock):
-    """No cost_floor_pct on the ParamSet and no provider ⇒ the pipeline derives one from the same
-    CostModel the sweeps/gate use, so the floor is enforced rather than skipped."""
+    """With no cost floor supplied the pipeline derives one from the CostModel, so the floor is enforced, not skipped."""
     pipe = _pipeline(clock)
     report = pipe.validate_sync("rsi2", ParamSet(strategy_id="rsi2", params={}, trial_count_n=10))
     assert report.cost_floor_pct is not None and report.cost_floor_pct > 0.3   # CNC fees + spread
@@ -380,8 +366,7 @@ def test_pipeline_persists_param_set_and_artifacts(clock, conn, tmp_path):
 
 
 def test_report_artifacts_carry_the_stability_flag_and_margin_floor(clock, tmp_path):
-    """Acceptance: the re-issued reports SHOW the winner-stability flag and the margin floor —
-    as prose in the md (via notes) and as structured fields in the json."""
+    """Reports show the winner-stability flag and margin floor as prose in the md and fields in the json."""
     pipe = _pipeline(clock, reports_dir=tmp_path)
     ps = ParamSet(
         strategy_id="rsi2", params={"rsi_entry": 3.0}, trial_count_n=10,
@@ -401,8 +386,7 @@ def test_report_artifacts_carry_the_stability_flag_and_margin_floor(clock, tmp_p
 
 
 def _positional_margin_series() -> pd.Series:
-    """The recorded 2026-08-14 ``trend`` shape: passing splits ≈ 0.01%/day — BELOW the 20-session
-    floor (0.01596), ABOVE the 120-session one (0.00266)."""
+    """Passing splits ≈ 0.01%/day: below the 20-session floor (0.01596), above the 120-session one (0.00266)."""
     idx = [date(2024, 1, 1) + timedelta(days=i) for i in range(40)]
     return pd.Series([0.0001] * 20 + [-0.01] * 20, index=idx, dtype="float64")
 
@@ -419,9 +403,8 @@ def _positional_pipeline(clock, *, margin_floor_days, reports_dir=None) -> Valid
 
 
 def test_report_records_the_margin_floor_denominator_it_used(clock, tmp_path):
-    """Realized-hold reporting (2026-09-12): the floor's DENOMINATOR is a protocol choice (20 sessions for a swing leg,
-    the risk-limits 120 for a positional one), so %/day alone does not make the artifact reproducible —
-    the report must carry and PRINT the days. Same returns, two denominators, opposite verdicts."""
+    """The floor's denominator (20 swing / 120 positional sessions) is a protocol choice, so the report
+    carries and prints the days. Same returns, two denominators, opposite verdicts."""
     ps = ParamSet(strategy_id="trend", params={}, trial_count_n=9)
 
     swing = _positional_pipeline(clock, margin_floor_days=MARGIN_FLOOR_DAYS)
@@ -528,13 +511,9 @@ def test_cpcv_purge_embargo_no_overlap():
         assert train_set.isdisjoint(set(int(x) for x in test_sorted))
 
 
-# ================================================== 2026-09-12 realized-hold reporting cells
-#
-# The margin floor is cost_floor / <sessions>, and the denominator is a HORIZON. Both registered
-# values are risk-limits CAPS (20 swing / 120 positional), and a CAP is an upper bound on the hold: the
-# 2026-09-12 trend run passed at 3.89x the 120-session floor while its median trade was held 33
-# sessions, where the same edge clears by 1.07x. These cells put the measured horizon in the
-# artifact. They are REPORTING ONLY and the assertions below pin that: the verdict must not move.
+# ================================================== realized-hold reporting cells
+# The registered margin-floor denominators are hold CAPS (20 / 120 sessions), an upper bound; these
+# cells put the measured hold in the artifact. Reporting only: the verdict must not move.
 
 
 def _hold(**kw) -> RealizedHold:
@@ -554,15 +533,13 @@ def test_realized_hold_cells_rebase_the_same_cost_floor_on_the_measured_horizon(
     assert len(cells) == 4
     median_all = by_label["realized MEDIAN hold (all trades)"]
     mean_all = by_label["realized MEAN hold (all trades)"]
-    # identical arithmetic to margin_floor_pct_per_day, only the denominator changes
     assert median_all.margin_floor_pct_per_day == pytest.approx(CNC_COST_FLOOR_PCT / 33.0)
     assert median_all.margin_floor_pct_per_day == pytest.approx(
         margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=33)
     )
-    # and the headroom the manager reads the verdict against: ~1.07x at the median, ~1.6x at the mean
+    # Headroom: ~1.07x at the median hold, ~1.6x at the mean, vs 3.89x at the 120-session cap.
     assert median_all.headroom_x == pytest.approx(1.07, abs=0.01)
     assert mean_all.headroom_x == pytest.approx(1.58, abs=0.01)
-    # vs 3.89x at the 120-session risk-limits CAP the run was registered at
     assert 0.010342 / margin_floor_pct_per_day(CNC_COST_FLOOR_PCT, margin_floor_days=120) == (
         pytest.approx(3.89, abs=0.01)
     )
@@ -594,11 +571,7 @@ def test_realized_hold_cells_are_total_on_missing_inputs():
 
 
 def test_realized_hold_never_changes_the_promotion_verdict(clock):
-    """The whole point: the bar stays at the REGISTERED denominator, however the hold came out.
-
-    A verdict that moved with a horizon measured on the same run it is judging would make the
-    promotion threshold a function of the result.
-    """
+    """The bar stays at the registered denominator however the hold came out; otherwise the threshold would depend on the result."""
     def _report(**extra):
         pipe = ValidationPipeline(
             returns_provider=lambda sid, params: _tiny_margin_series(),
@@ -611,7 +584,6 @@ def test_realized_hold_never_changes_the_promotion_verdict(clock):
         )
 
     bare = _report()
-    # a hold so short the floor at it is astronomically high, and one so long it is near zero
     short = _report(realized_hold=_hold(median_sessions=1.0, mean_sessions=1.0))
     forever = _report(realized_hold=_hold(median_sessions=5000.0, mean_sessions=5000.0))
 
@@ -646,11 +618,9 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
     assert "MEASURED holding period" in md
     assert "realized MEDIAN hold (all trades)" in md
     assert "still open at the window edge: 30" in md
-    # Closed-only is the headline/ranked figure; all-trades is what is reported beside it
     assert "CLOSED round trips only (the sweep headline and ranking statistic" in md
     assert "SURVIVORSHIP" in md
     assert "120 sessions" in md          # the registered denominator is still what the verdict used
-    # and it all travels in the machine-readable artifact, not only the prose
     art = reports.write_report(report, tmp_path)
     data = json.loads(art.json.read_text(encoding="utf-8"))
     assert data["population_is_survivorship_tainted_proxy"] is True
@@ -660,9 +630,7 @@ def test_report_renders_the_hold_cells_the_open_split_and_the_survivorship_cavea
 
 
 def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(clock, tmp_path):
-    """Sweep-mechanics fix (2026-09-13): a verdict is only comparable with one produced under the same sweep
-    mechanics, so the stamp is rendered and persisted with the report — and, like every other
-    reporting field, it is not an input to the promotion rule."""
+    """The sweep-mechanics stamp is rendered and persisted with the report but is not an input to the promotion rule."""
     def _report(**extra):
         pipe = ValidationPipeline(
             returns_provider=lambda sid, params: _tiny_margin_series(),
@@ -684,11 +652,8 @@ def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(c
     assert stamped.reasons == unstamped.reasons
 
     assert MECHANICS_STAMP in reports.render_markdown(stamped)
-    # An UNSTAMPED verdict must claim NOTHING about sweep mechanics. This pipeline also validates
-    # returns that never came out of SweepRunner (the event-study harnesses build their own series
-    # and charge their own fills/costs — scripts/validate_insider.py is one), and stamping those
-    # "PRE-2026-09-13" would assert three sweep biases they structurally cannot have. Absence is
-    # the tell; COMMANDS.md says what absence means on a verdict artifact.
+    # An unstamped verdict claims nothing about sweep mechanics: event-study harnesses (e.g.
+    # scripts/validate_insider.py) validate returns that never came out of SweepRunner.
     unstamped_md = reports.render_markdown(unstamped)
     assert "PRE-2026-09-13" not in unstamped_md
     assert "Sweep mechanics" not in unstamped_md
@@ -699,10 +664,8 @@ def test_the_sweep_mechanics_stamp_travels_with_the_verdict_and_never_moves_it(c
 def test_a_defaults_fallback_verdict_is_flagged_everywhere_and_still_moves_no_threshold(
     clock, tmp_path
 ):
-    """Sweep-mechanics follow-up: ``_rank_best`` can now return None for a whole grid (nothing closed a round
-    trip), and the CLI then validates the parameter-envelope DEFAULTS. That verdict must not RENDER like
-    a grid-winner verdict — banner, note, and JSON — while changing no threshold, because gating on
-    it would move the promotion rule and no pre-registration covers that."""
+    """When ``_rank_best`` returns None the CLI validates the envelope defaults; that verdict must not render
+    like a grid-winner verdict (banner, note, JSON) while changing no threshold."""
     def _report(**extra):
         pipe = ValidationPipeline(
             returns_provider=lambda sid, params: _tiny_margin_series(),
@@ -718,7 +681,6 @@ def test_a_defaults_fallback_verdict_is_flagged_everywhere_and_still_moves_no_th
     defaulted = _report(params_are_grid_winner=False)
     ranked = _report(params_are_grid_winner=True)
 
-    # reporting only: the verdict and every reason are identical either way
     assert defaulted.promotable is ranked.promotable
     assert defaulted.reasons == ranked.reasons
 

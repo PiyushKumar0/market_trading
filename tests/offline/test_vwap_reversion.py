@@ -1,33 +1,10 @@
-"""VWAP-reversion experiment harness — pinned on SYNTHETIC 1m fixtures only.
+"""VWAP-reversion experiment harness on synthetic in-memory 1m fixtures (no store is opened).
 
-Nothing in this file opens ``data/market.duckdb`` (or any store): every test builds its own 1m bars in
-memory and injects them through ``VwapReversionExperiment(loader=...)``. The pre-registration is what
-is under test — if one of these changes, the harness has drifted:
-
-* the **stretch trigger** fires only past the threshold;
-* **fills are at the NEXT bar's OPEN, never the signal bar** — pinned so a same-bar fill would produce
-  a different, detectably wrong number;
-* each rung of the exit ladder: **VWAP touch**, **60-min timeout (exactly 60 minutes)**, **1.5 x
-  Wilder ATR(14) on session-local 10-MINUTE bars** — every one filling at the bar AFTER its trigger
-  bar. The stop test uses a fixture where the (wrong) 1m-ATR scale and the (pre-registered) 10m-ATR
-  scale give DIFFERENT stop levels, and asserts the 10m one, so the wrong timescale is detectable;
-* the **10m-ATR warm-up**: bars before it produce NO trade rather than an unstopped one, and the
-  first possible entry FILL is 11:36 on a 09:15 session;
-* the **10:00-14:00 entry-window boundary** (on the FILL, inclusive both ends);
-* a signal on a **session's last usable bar is dropped**, never carried into the next session;
-* the **abort path**: a fixture whose unconditioned reversion is negative after costs must produce an
-  ABORTED report and never compute stage 2;
-* the cost charge is the **full round trip INCLUDING spread**, on every trade.
-
-And, for **prior-session ATR seeding** (owner-directed 2026-08-14 — a MODE, not a fork):
-
-* the **seeding chain**: session 2's first bucket continues session 1's FINAL 10m-ATR value;
-* the **overnight gap is excluded** — a fixture with a large gap where including the prev-close term
-  would detectably change the ATR proves the first bucket's TR is high−low only;
-* **fail-closed on day 1**: a symbol's first session has no prior ATR and keeps the unseeded warm-up;
-* **default-off is byte-identical**: the same fixture run both ways produces identical trades,
-  identical stage-1 base rate and identical grid stats with the flag off;
-* the **split-reporting math** (10:00–11:35 vs 11:36–14:00, by entry-fill time) — reporting only.
+Pins the pre-registration: stretch trigger, next-bar-open fills, the exit ladder (VWAP touch, 60-min
+timeout, 1.5 x Wilder ATR(14) on 10-minute bars), the 10m-ATR warm-up, the 10:00-14:00 entry window on
+the fill, the session-last-bar drop, the stage-1 abort path, full round-trip costs, and the
+prior-session ATR seeding mode (chain, no overnight gap, day-1 fail-closed, default-off identical,
+split reporting).
 
 FIXTURE CONVENTION. Bars are ``high = close + 0.25`` / ``low = close - 0.25``, so the typical price
 ``(H+L+C)/3`` is exactly the close (0.25 is binary-exact — no float drift in the hand-computed VWAP).
@@ -83,17 +60,13 @@ _BASE_VOL = 1000.0
 _SESSION_BARS = 375                 # 09:15 .. 15:29 inclusive
 _COST = 0.106                       # a stand-in round-trip floor %; the real one is pinned separately
 
-#: 09:15 + 45 min = 10:00 — the pre-registered window opening. NOT reachable in practice: it is
-#: dominated by the 10m-ATR warm-up below (that is a pre-registered consequence, pinned by
-#: ``test_10m_atr_warmup_blocks_entries_and_dominates_the_1000_window_opening``).
+#: 10:00 — the window opening; unreachable unseeded because the 10m-ATR warm-up dominates it.
 _WINDOW_OPEN_POS = 45
-#: 09:15 + 140 min = 11:35 — the first bar whose 10m ATR(14) exists ⇒ first SIGNAL bar; its fill is
-#: 11:36. Bars before it are ineligible (no stop ⇒ no trade).
+#: 11:35 — the first bar whose 10m ATR(14) exists ⇒ first SIGNAL bar; its fill is 11:36.
 _ATR_READY_POS = ATR_WARMUP_MINUTES
-#: 09:15 + 285 min = 14:00 — the last bar at which an entry may FILL.
+#: 14:00 — the last bar at which an entry may FILL.
 _LAST_FILL_POS = 285
-#: The standard signal bar for the mechanics fixtures: 12:34, comfortably past the 10m-ATR warm-up
-#: and inside the entry window, with room for a 60-min hold before 15:29.
+#: Standard signal bar for the mechanics fixtures: 12:34, past warm-up, in the window, room for a 60-min hold.
 _SIGNAL_POS = 199
 
 _CFG_UNCONDITIONED = ReversionConfig(stretch_min_pct=0.0, rel_vol_max=None)
@@ -138,8 +111,7 @@ def _dip_session(
 ) -> tuple[np.ndarray, np.ndarray]:
     """A session that steps DOWN to ``dip_close`` at ``signal_pos`` (volume 0 ⇒ VWAP stays 100.0).
 
-    ``hold_until``/``hold_close`` keep price parked below VWAP after the dip, which is what lets the
-    exit-ladder tests choose which rung fires.
+    ``hold_until``/``hold_close`` park price below VWAP after the dip so tests choose which exit rung fires.
     """
     closes, volumes = _flat_session(n)
     closes[signal_pos] = dip_close
@@ -153,14 +125,14 @@ def _dip_session(
 
 
 def _atr10_at(frame: pd.DataFrame, pos: int) -> float:
-    """The PRE-REGISTERED stop unit at ``pos``: Wilder ATR(14) on session-local 10-minute bars."""
+    """The pre-registered stop unit at ``pos``: Wilder ATR(14) on session-local 10-minute bars."""
     feats = compute_session_features(_SYM, frame)
     assert feats is not None
     return float(feats.atr_10m[pos])
 
 
 def _atr_1m_at(frame: pd.DataFrame, pos: int, period: int = 10) -> float:
-    """The REJECTED reading (ATR(10) on 1m bars) — computed only so tests can prove the two differ."""
+    """The rejected reading (ATR(10) on 1m bars), computed only to prove it differs from the 10m one."""
     return float(wilder_atr(frame["high"], frame["low"], frame["close"], period).to_numpy()[pos])
 
 
@@ -172,7 +144,7 @@ def _trades(frame: pd.DataFrame, config: ReversionConfig = _CFG_1PCT, cost: floa
 
 # --------------------------------------------------------------------------- session VWAP (req. 3)
 def test_vwap_is_session_cumulative_typical_price_volume() -> None:
-    """VWAP = cum(typical x volume)/cum(volume) from the session's FIRST bar (indicators.vwap reused)."""
+    """VWAP = cum(typical x volume)/cum(volume) from the session's first bar."""
     closes = np.array([100.0, 102.0, 98.0, 101.0])
     volumes = np.array([1000.0, 2000.0, 3000.0, 4000.0])
     feats = compute_session_features(_SYM, _session_frame(closes, volumes))
@@ -194,7 +166,7 @@ def test_session_slices_split_on_ist_calendar_date() -> None:
 
 
 def test_out_of_session_bars_are_clamped_before_any_feature_is_computed() -> None:
-    """A 09:07 pre-open row must not enter the session VWAP (design requirement 2: session-aware)."""
+    """A 09:07 pre-open row must not enter the session VWAP."""
     frame = _session_frame(*_flat_session(30))
     stray = frame.iloc[[0]].copy()
     stray.index = pd.DatetimeIndex([pd.Timestamp(f"{_DAY} 09:07", tz=IST)])
@@ -230,16 +202,13 @@ def test_stretch_trigger_fires_only_past_the_threshold(threshold: float, expect_
 
 
 def test_bars_at_or_above_vwap_are_never_signals() -> None:
-    """Long-only reversion needs price BELOW VWAP; a flat/above session produces nothing, even
-    unconditioned (stretch threshold 0.0)."""
+    """Long-only: a flat/above-VWAP session produces nothing, even unconditioned."""
     frame = _session_frame(*_flat_session())
     assert _trades(frame, _CFG_UNCONDITIONED) == []
 
 
 def test_relative_volume_filter_uses_the_house_20_bar_median_and_gates_entries() -> None:
-    """rel_vol = bar volume / median(previous 20 bars). A high-volume dip is filtered out at 1.5x;
-    the SAME dip is a signal once the filter is off (stage 1). Single-bar dip so the fixture has
-    exactly one candidate."""
+    """rel_vol = bar volume / median(previous 20 bars): a high-volume dip is filtered at 1.5x, a signal with the filter off."""
     closes, volumes = _dip_session(signal_pos=_SIGNAL_POS, dip_close=98.5)
     volumes[_SIGNAL_POS] = 5.0 * _BASE_VOL                      # rel_vol = 5.0x -> filtered
     frame = _session_frame(closes, volumes)
@@ -254,7 +223,7 @@ def test_relative_volume_filter_uses_the_house_20_bar_median_and_gates_entries()
 
 # --------------------------------------------------------------------------- next-bar-open fills
 def test_entry_fills_at_next_bar_open_never_the_signal_bar() -> None:
-    """THE fill pin: a same-bar fill would produce a different, detectably wrong number."""
+    """Entry fills at the next bar's open, never the signal bar."""
     signal_pos = _SIGNAL_POS
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=340)
     opens = closes.copy()
@@ -269,14 +238,13 @@ def test_entry_fills_at_next_bar_open_never_the_signal_bar() -> None:
     assert tr.entry_price == pytest.approx(98.0)                 # …at its OPEN
     assert tr.entry_price != pytest.approx(closes[signal_pos])   # not the signal bar's close
 
-    # A same-bar-close fill (the old defect) would book a materially different trade: pin the gap so
-    # this test cannot pass against a harness that quietly fills on the signal bar.
+    # A same-bar-close fill would book a materially different trade.
     wrong_gross = (tr.exit_price - closes[signal_pos]) / closes[signal_pos] * 100.0
     assert abs(wrong_gross - tr.gross_return_pct) > 0.4
 
 
 def test_exit_fills_at_the_bar_after_its_trigger_bar() -> None:
-    """Same rule on the way out: the trigger is observed on bar i, the fill is bar i+1's OPEN."""
+    """Exit trigger observed on bar i fills at bar i+1's open."""
     signal_pos, touch_pos = _SIGNAL_POS, _SIGNAL_POS + 5
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=touch_pos - 1)
     closes[touch_pos] = 100.5                       # high 100.75 >= VWAP 100 -> the trigger bar
@@ -334,20 +302,12 @@ def test_timeout_exit_is_exactly_60_minutes_after_the_entry_fill() -> None:
 def _wide_bar_session(
     *, signal_pos: int = _SIGNAL_POS, half_width: float = 2.0, last_wide_pos: int = 180
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """A session where the 10-MINUTE and the 1-MINUTE ATR readings diverge by ~6x.
+    """A session where the 10-minute and 1-minute ATR readings diverge by ~6x.
 
-    One bar per 10-minute bucket (indices 0, 10, … ``last_wide_pos``) carries a WIDE high/low —
-    ``close ± half_width`` — while its close stays at 100. Because the fixture's typical price is
-    ``(H+L+C)/3`` and the widening is symmetric, typical price is still exactly the close, so the
-    session VWAP is untouched at 100.0. Consequences:
-
-    * every 10-minute bucket 0..18 has range ``2 x half_width`` ⇒ Wilder ATR(14) on the 10m series is
-      exactly ``2 x half_width`` (4.0 by default) — the PRE-REGISTERED stop unit;
-    * the 1m bars are almost all ``±_HALF_RANGE`` wide, so ATR(10) on 1m sits under 1.0 — the REJECTED
-      reading. A stop placed on the wrong scale is therefore ~6x too tight and trivially detectable.
-
-    Wide bars stop at ``last_wide_pos`` so the holding window after ``signal_pos`` contains none of
-    them (a wide bar's high would otherwise trigger the VWAP-touch exit immediately).
+    One bar per 10-minute bucket (0, 10, … ``last_wide_pos``) has high/low ``close ± half_width``
+    (symmetric, so typical price and VWAP stay 100.0). Every 10m bucket then ranges ``2 x half_width``
+    ⇒ 10m ATR(14) = 4.0, while 1m ATR(10) stays under 1.0. Wide bars stop at ``last_wide_pos`` so the
+    holding window has none (their highs would trigger the VWAP-touch exit).
     """
     closes, volumes = _flat_session()
     highs = closes + _HALF_RANGE
@@ -375,9 +335,7 @@ def _explicit_frame(closes, volumes, highs, lows, *, day: str = _DAY) -> pd.Data
 
 
 def test_stop_uses_the_10_minute_atr_scale_not_the_1_minute_one() -> None:
-    """PUNCH-LIST (c): the two ATR timescales give DIFFERENT stop levels here, and the harness must
-    use the 10-minute one (manager ruling 2026-08-13). A bar that would stop out on the rejected
-    1m scale must NOT stop this trade."""
+    """The stop uses the 10-minute ATR: a bar that would stop out on the 1m scale must not stop this trade."""
     signal_pos = _SIGNAL_POS
     closes, volumes, highs, lows = _wide_bar_session()
     frame = _explicit_frame(closes, volumes, highs, lows)
@@ -427,13 +385,10 @@ def test_stop_exit_fills_at_the_bar_after_the_breakdown_bar() -> None:
     assert atr == pytest.approx(0.5)                    # flat 10m buckets range 99.75..100.25
     assert stop_price == pytest.approx(98.5 - 0.75)
 
-    # The breakdown bar takes the stop out; the NEXT bar (where the exit actually fills) opens there
-    # too, so the realised loss is the next-bar OPEN, not the trigger bar's low.
     closes[break_pos] = closes[break_pos + 1] = stop_price - 0.10
     frame = _session_frame(closes, volumes)
     trades = _trades(frame)
-    # Price stays parked below VWAP, so re-entries follow the stop-out; only the FIRST trade is under
-    # test here (the no-overlap rule has its own test).
+    # Only the first trade is under test; re-entries follow the stop-out.
     assert trades
     tr = trades[0]
     assert tr.exit_reason == "stop"
@@ -443,8 +398,7 @@ def test_stop_exit_fills_at_the_bar_after_the_breakdown_bar() -> None:
 
 
 def test_10m_atr_is_availability_lagged_by_one_bucket_no_lookahead() -> None:
-    """Bucket k's ATR may only be used from bucket k+1 — otherwise a bar would read its own bucket's
-    later high. Also pins the exact warm-up boundary the entry window inherits."""
+    """Bucket k's ATR is usable only from bucket k+1 (no lookahead); also pins the warm-up boundary."""
     closes, volumes = _flat_session()
     frame = _session_frame(closes, volumes)
     minute_of_day = np.asarray([t.hour * 60 + t.minute for t in frame.index], dtype=np.int64)
@@ -470,10 +424,7 @@ def test_10m_atr_is_availability_lagged_by_one_bucket_no_lookahead() -> None:
 
 
 def test_10m_atr_warmup_blocks_entries_and_dominates_the_1000_window_opening() -> None:
-    """Pre-registered consequence: no entry can fill between 10:00 and 11:35 — bars inside the 10m-ATR
-    warm-up produce NO TRADE (never an unstopped one), so the EFFECTIVE window is 11:36-14:00."""
-    # Price is stretched below VWAP continuously from 09:59 onward, so the STRETCH signal is present
-    # through the whole pre-registered 10:00-14:00 window…
+    """No entry fills between 10:00 and 11:35: bars inside the 10m-ATR warm-up produce no trade, never an unstopped one."""
     closes, volumes = _dip_session(signal_pos=_WINDOW_OPEN_POS - 1, dip_close=98.5, hold_until=340)
     frame = _session_frame(closes, volumes)
     feats = compute_session_features(_SYM, frame)
@@ -482,9 +433,8 @@ def test_10m_atr_warmup_blocks_entries_and_dominates_the_1000_window_opening() -
     assert feats.stretch_pct[_WINDOW_OPEN_POS - 1] == pytest.approx(1.5)   # the signal IS there…
     assert np.isnan(feats.atr_10m[: _ATR_READY_POS]).all()                 # …but no stop exists yet
 
-    # …yet nothing can fill before 11:36: the warm-up, not the 10:00 opening, is the binding bound.
-    # (Unconditioned config: a long parked stretch drives its own 20-bar volume median to zero, which
-    # would disable the rel-vol filter's bars for an unrelated reason — the ATR is what is under test.)
+    # Unconditioned: a long parked stretch drives the 20-bar volume median to zero, which would disable
+    # rel-vol for an unrelated reason.
     trades = _trades(frame, _CFG_UNCONDITIONED)
     assert trades
     assert min(tr.entry_ts for tr in trades).time() == datetime(2026, 1, 5, 11, 36).time()
@@ -503,7 +453,7 @@ def test_10m_atr_warmup_blocks_entries_and_dominates_the_1000_window_opening() -
 
 
 def test_stop_wins_a_same_bar_tie_with_the_vwap_touch() -> None:
-    """1m bars carry no intrabar path, so the ADVERSE event is assumed first (documented choice)."""
+    """1m bars carry no intrabar path, so a bar spanning both stop and VWAP is assumed to stop first."""
     signal_pos, both_pos = _SIGNAL_POS, _SIGNAL_POS + 6
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=340)
     frame_base = _session_frame(closes, volumes)
@@ -521,13 +471,7 @@ def test_stop_wins_a_same_bar_tie_with_the_vwap_touch() -> None:
 
 # --------------------------------------------------------------------------- the entry window
 def _features_with_atr_everywhere(closes: np.ndarray, volumes: np.ndarray) -> SessionFeatures:
-    """A ``SessionFeatures`` with the 10m ATR defined on EVERY bar.
-
-    The pre-registered 10:00 window opening is dominated by the real 10m-ATR warm-up (11:35), so on a
-    real fixture the 10:00 boundary can never be exercised — the ATR would decide the outcome, not the
-    window. Overriding ``atr_10m`` isolates the WINDOW predicate so its constants stay pinned in their
-    own right; the warm-up has its own end-to-end test above.
-    """
+    """A ``SessionFeatures`` with the 10m ATR defined on every bar, isolating the window predicate from the warm-up."""
     base = compute_session_features(_SYM, _session_frame(closes, volumes))
     assert base is not None
     return SessionFeatures(
@@ -549,8 +493,7 @@ def _features_with_atr_everywhere(closes: np.ndarray, volumes: np.ndarray) -> Se
     ],
 )
 def test_entry_window_boundary_is_on_the_fill_inclusive(fill_pos: int, expect_trade: bool, why: str) -> None:
-    # ONE dipping bar ⇒ exactly one candidate, so the only thing that can decide the outcome is
-    # whether ITS fill bar falls inside the window.
+    # One dipping bar ⇒ one candidate, so only its fill bar's position decides the outcome.
     signal_pos = fill_pos - 1
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5)
     feats = _features_with_atr_everywhere(closes, volumes)
@@ -565,13 +508,12 @@ def test_entry_window_boundary_is_on_the_fill_inclusive(fill_pos: int, expect_tr
 
 # --------------------------------------------------------------------------- session-last-bar drop
 def test_signal_on_the_sessions_last_bar_is_dropped() -> None:
-    """No bar left inside the session to fill into ⇒ the signal is dropped, not deferred."""
+    """No bar left in the session to fill into ⇒ the signal is dropped, not deferred."""
     signal_pos, n = 199, 270                    # 09:15 + 199 min = 12:34, inside the entry window
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, n=n)
     full = _session_frame(closes, volumes)
 
-    # Truncated so the dipping bar IS the session's last bar: bars 0..199 are byte-identical to the
-    # control's, so the ONLY difference is whether a next bar exists to fill into.
+    # Bars 0..199 match the control's; only the existence of a next bar differs.
     truncated = full.iloc[: signal_pos + 1]
     assert truncated.index[-1] == full.index[signal_pos]
     assert _trades(truncated) == []
@@ -583,7 +525,7 @@ def test_signal_on_the_sessions_last_bar_is_dropped() -> None:
 
 
 def test_a_signal_never_fills_into_the_next_session() -> None:
-    """Session-aware: session A's last bar must not fill at session B's first bar."""
+    """Session A's last bar must not fill at session B's first bar."""
     n = 200
     closes_a, volumes_a = _dip_session(signal_pos=n - 1, dip_close=98.5, n=n)
     day_a = _session_frame(closes_a, volumes_a, day="2026-01-05")
@@ -596,8 +538,7 @@ def test_a_signal_never_fills_into_the_next_session() -> None:
 
 
 def test_one_position_at_a_time_no_overlapping_entries() -> None:
-    """Every bar of a long parked-below-VWAP stretch is an unconditioned signal; only non-overlapping
-    trades may be booked (otherwise stage 1 would count ~240 'trades' per symbol-session)."""
+    """Every bar of a parked-below-VWAP stretch is an unconditioned signal; only non-overlapping trades are booked."""
     signal_pos = _SIGNAL_POS
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=_SESSION_BARS - 1)
     frame = _session_frame(closes, volumes)
@@ -625,7 +566,7 @@ def test_full_round_trip_is_charged_on_every_trade() -> None:
 
 
 def test_cost_floor_is_the_corrected_surface_including_spread_at_20k_mis() -> None:
-    """Requirement 4: ``breakeven_pct`` (fees + spread), NOT the spread-excluded fee anchor."""
+    """The floor is ``breakeven_pct`` (fees + spread), not the spread-excluded fee anchor."""
     from engine.strategy.cost_model import CostModel
 
     cm = CostModel.from_config()
@@ -671,7 +612,7 @@ def _multi_session_loader(closes: np.ndarray, volumes: np.ndarray, *, n_sessions
 
 
 def test_stage1_abort_writes_an_aborted_report_and_never_computes_stage2(tmp_path) -> None:
-    """A fixture whose unconditioned reversion is NEGATIVE after costs must stop the whole run."""
+    """A negative-after-costs unconditioned reversion aborts the run before stage 2."""
     # Price dips and parks: every trade times out flat, so gross == 0 and net == -cost < 0.
     closes, volumes = _dip_session(signal_pos=_SIGNAL_POS, dip_close=98.5, hold_until=340)
     loader, calls = _multi_session_loader(closes, volumes, n_sessions=20)
@@ -704,7 +645,7 @@ def test_stage1_abort_writes_an_aborted_report_and_never_computes_stage2(tmp_pat
 
 
 def test_zero_unconditioned_trades_also_aborts_fail_closed(tmp_path) -> None:
-    """No trades at all ⇒ no base rate to clear zero with ⇒ abort (fail closed), not a silent pass."""
+    """No trades ⇒ no base rate ⇒ abort (fail closed), not a silent pass."""
     closes, volumes = _flat_session()                        # never below VWAP ⇒ never a signal
     loader, calls = _multi_session_loader(closes, volumes, n_sessions=12)
 
@@ -733,8 +674,7 @@ def test_no_data_reports_no_data_and_measures_nothing() -> None:
 
 
 def test_stage2_runs_the_3x1_grid_and_applies_the_house_promotion_rule(tmp_path) -> None:
-    """Stage 1 clears zero ⇒ the pre-registered grid runs, each point validated by CPCV +
-    fold_pass_min(N=3) + the margin floor, with the MIS cost floor passed through."""
+    """Stage 1 clearing zero runs the grid, each point validated by CPCV + fold_pass_min(N=3) + the margin floor."""
     signal_pos, touch_pos = _SIGNAL_POS, _SIGNAL_POS + 5
     closes, volumes = _dip_session(signal_pos=signal_pos, dip_close=98.5, hold_until=touch_pos - 1)
     closes[touch_pos] = 101.0                       # reverts THROUGH VWAP -> a clearly profitable exit
@@ -789,8 +729,7 @@ def test_stage2_runs_the_3x1_grid_and_applies_the_house_promotion_rule(tmp_path)
 
 
 def test_report_carries_every_required_block(tmp_path) -> None:
-    """Design requirement 5: the report must carry the banner, stage-1 base rate, grid stats, CPCV +
-    margin floor + promotable, and a modelling_notes block naming every pre-registered choice."""
+    """The report carries the banner, stage-1 base rate, and a modelling_notes block naming every pre-registered choice."""
     closes, volumes = _dip_session(signal_pos=_SIGNAL_POS, dip_close=98.5, hold_until=340)
     loader, _ = _multi_session_loader(closes, volumes, n_sessions=12)
     exp = VwapReversionExperiment(
@@ -837,15 +776,10 @@ def test_report_carries_every_required_block(tmp_path) -> None:
 
 
 # ======================================================================= prior-session ATR
-# (owner-directed 2026-08-14 — a MODE of the shipped harness, not a fork)
 def _two_session_frame(
     *, gap: float = 0.0, n: int = _SESSION_BARS, day1: str = "2026-01-05", day2: str = "2026-01-06"
 ) -> pd.DataFrame:
-    """Two sessions for one symbol; session 2's prices are shifted by ``gap`` (the overnight gap).
-
-    Both sessions are flat internally (every 10m bucket ranges exactly 0.5), so the ATR arithmetic is
-    hand-computable and any contribution from the overnight gap stands out immediately.
-    """
+    """Two flat sessions (every 10m bucket ranges exactly 0.5); session 2's prices are shifted by ``gap``."""
     c1, v1 = _flat_session(n)
     c2, v2 = _flat_session(n)
     c2 = c2 + gap
@@ -888,8 +822,7 @@ def test_seeding_chain_continues_the_prior_sessions_final_atr() -> None:
 
 
 def test_overnight_gap_never_enters_the_stop_unit() -> None:
-    """The first bucket's TR is high−low ONLY. A 12-point gap-down would, if the prev-close term were
-    included, put ~12 into TR[0] and blow the seeded ATR up ~25x — this pins that it does not."""
+    """The first bucket's TR is high−low only: a 12-point gap-down must not leak a prev-close term into the seeded ATR."""
     gap = -12.0
     frame = _two_session_frame(gap=gap)
     day1, day2 = _session_features_chain(frame, seeded=True)
@@ -919,8 +852,7 @@ def test_overnight_gap_never_enters_the_stop_unit() -> None:
 
 
 def test_day_one_is_fail_closed_no_prior_atr_means_unseeded_warmup() -> None:
-    """A symbol's FIRST session has no prior ATR, so it keeps the unseeded 140-minute warm-up even in
-    seeded mode — 'no trades until its own warm-up completes' (pre-registered)."""
+    """A symbol's first session has no prior ATR, so it keeps the unseeded 140-minute warm-up even in seeded mode."""
     frame = _two_session_frame()
     day1, day2 = _session_features_chain(frame, seeded=True)
 
@@ -944,7 +876,7 @@ def test_day_one_is_fail_closed_no_prior_atr_means_unseeded_warmup() -> None:
 
 
 def test_seeded_mode_opens_the_registered_1000_window_from_day_two() -> None:
-    """The point of the seeding mode: with seeding, the effective entry window is the registered 10:00-14:00."""
+    """With seeding, the effective entry window is the registered 10:00-14:00 from day two."""
     closes, volumes = _dip_session(signal_pos=_WINDOW_OPEN_POS - 1, dip_close=98.5)
     days = pd.bdate_range("2026-01-05", periods=4).strftime("%Y-%m-%d").tolist()
     frame = pd.concat([_session_frame(closes, volumes, day=d) for d in days])
@@ -961,7 +893,7 @@ def test_seeded_mode_opens_the_registered_1000_window_from_day_two() -> None:
 
 
 def test_default_off_is_byte_identical_to_the_unseeded_run() -> None:
-    """PUNCH-LIST: run the existing fixture BOTH ways; with the flag off every number is unchanged."""
+    """With the seeding flag off (explicit or omitted) every number is unchanged."""
     closes, volumes = _dip_session(signal_pos=_SIGNAL_POS, dip_close=98.5, hold_until=340)
     days = pd.bdate_range("2026-01-05", periods=6).strftime("%Y-%m-%d").tolist()
     frame = pd.concat([_session_frame(closes, volumes, day=d) for d in days])
@@ -989,9 +921,8 @@ def test_default_off_is_byte_identical_to_the_unseeded_run() -> None:
     assert default.stage1.model_dump() == explicit_off.stage1.model_dump()
     assert default.status == explicit_off.status
 
-    # Seeding ON is a DIFFERENT measurement — otherwise the byte-identity above would be vacuous.
-    # (On a fixture that only dips at 12:34 the two modes coincide by construction, so the contrast
-    # uses an EARLY dip: the morning bars are exactly what seeding buys.)
+    # Seeding ON must differ, else the identity above is vacuous; a 12:34 dip coincides in both modes,
+    # so the contrast uses an early dip.
     early_c, early_v = _dip_session(signal_pos=_WINDOW_OPEN_POS - 1, dip_close=98.5, hold_until=340)
     early = pd.concat([_session_frame(early_c, early_v, day=d) for d in days])
     seeded_trades, _ = simulate_symbol(
@@ -1016,7 +947,7 @@ def test_split_of_boundary_is_1135_inclusive_on_the_entry_fill() -> None:
 
 
 def test_window_split_statistics_are_computed_per_split() -> None:
-    """The split math: counts, net expectancy and win rate are per-split; both splits always emitted."""
+    """Counts, net expectancy and win rate are per split; both splits are always emitted."""
     acc = ConfigAccumulator(config=_CFG_1PCT)
 
     def _trade(hour: int, minute: int, net: float) -> Trade:
@@ -1053,7 +984,7 @@ def test_window_split_statistics_are_computed_per_split() -> None:
 
 
 def test_seeded_report_carries_the_split_table_and_the_abort_stays_on_the_overall_number(tmp_path) -> None:
-    """Splits are REPORTING: the abort verdict must read the OVERALL base rate, not a split."""
+    """Splits are reporting only: the abort verdict reads the overall base rate."""
     closes, volumes = _dip_session(signal_pos=_WINDOW_OPEN_POS - 1, dip_close=98.5, hold_until=340)
     loader, _ = _multi_session_loader(closes, volumes, n_sessions=14)
     report = VwapReversionExperiment(

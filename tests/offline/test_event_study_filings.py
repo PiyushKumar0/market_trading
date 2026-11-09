@@ -1,11 +1,7 @@
-"""Filings legs of ``scripts/event_study.py`` — PURE event-derivation + measurement, plus a
-tmp-store glue smoke (the real ``data/market.duckdb`` is never touched; every fixture is synthetic).
-
-Covers the spec's required cases: zero-reaction drop; pledge cohort split; gross-vs-net arithmetic
-(net = gross - one CNC round trip). The store-reading glue is exercised on a temp MarketStore for the
-empty-table (honest n=0) and populated-insider paths. The crossing rule the script re-exports from
-``engine.datafeeds.insider_crossings`` (threshold crossing + re-arm, acq_mode exclusions, after-hours
-entry) is pinned in ``tests/unit/test_insider_crossings.py``.
+"""Filings legs of ``scripts/event_study.py``: pure event derivation and measurement (zero-reaction drop,
+pledge cohort split, net = gross - one CNC round trip) plus a temp-store glue smoke for the empty-table
+(honest n=0) and populated-insider paths. The crossing rule the script re-exports from
+``engine.datafeeds.insider_crossings`` is pinned in ``tests/unit/test_insider_crossings.py``.
 """
 
 from __future__ import annotations
@@ -109,11 +105,7 @@ def test_measure_directional_gross_minus_cost_is_net():
 
 # ====================================================== entry fill: next_open vs close_t
 def test_measure_directional_next_open_is_default_and_excludes_the_overnight_gap():
-    """A series whose whole move happens in the T->T+1 GAP: close_T fill books it, next_open cannot.
-
-    Flat intraday sessions (open == close) with a one-off +10% overnight gap after T=3 make the two
-    conventions differ materially, which is exactly the next-open fill-correction regression this pins.
-    """
+    """The whole move happens in the T->T+1 gap (flat sessions, one +10% overnight gap after T=3): a close_T fill books it, next_open cannot."""
     closes = [100.0] * 4 + [110.0] * 26        # gap up between session 3 and 4, flat thereafter
     opens = list(closes)                       # open == close every session ⇒ zero intraday move
     rows = _rows_seq(closes, opens)
@@ -128,7 +120,7 @@ def test_measure_directional_next_open_is_default_and_excludes_the_overnight_gap
                                      entry_fill=es.ENTRY_FILL_CLOSE_T)
     assert default is not None and next_open is not None and close_t is not None
     assert es.DEFAULT_ENTRY_FILL == es.ENTRY_FILL_NEXT_OPEN
-    assert default.gross == next_open.gross                    # the DEFAULT is the corrected one
+    assert default.gross == next_open.gross
     for k in es.INSIDER_HORIZONS:
         assert abs(next_open.gross[k] - 0.0) < 1e-9            # bought at 110 open, still 110
         assert abs(close_t.gross[k] - 10.0) < 1e-9             # bought at 100 close, booked the gap

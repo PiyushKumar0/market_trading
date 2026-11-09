@@ -1,31 +1,27 @@
 """scripts/backtest_brk20.py — the pre-registered brk20 entry-mechanism harness, on synthetic bars.
 
-Six engineered symbols in a temp :class:`MarketStore`, each 47 sessions long so the ONLY measurable
-signal in every one of them is at index 21 (``lookback_days`` 20 means index 21 is the first day
-``scan_daily`` can fire on — it needs ``y``, its 20-session window and one more session for the
-fresh-cross test — and the shared admission rule reserves ``MAX_FILL_WINDOW + 20`` = 25 forward
-sessions, so index 21 is also the LAST index that can book a trade). Every symbol trades flat at
-100.00 with every high pinned at 100.00 up to its trigger day, so ``H20`` is exactly 100.00 and the
-rested limit is exactly 100.00; every forward high is 130.00, which makes a second breakout
-arithmetically impossible and keeps the signal counts exact.
+Six engineered symbols in a temp :class:`MarketStore`, each 47 sessions long so the only measurable
+signal is at index 21 (the first day ``scan_daily`` can fire on with ``lookback_days`` 20, and the last
+that can book a trade given the ``MAX_FILL_WINDOW + 20`` = 25 forward sessions the admission rule
+reserves). Every symbol trades flat at 100.00 with highs pinned at 100.00 up to its trigger day, so
+``H20`` and the rested limit are exactly 100.00; every forward high is 130.00, which rules out a
+second breakout.
 
 * ``WINNER``     — trigger close 104.00, then opens 103.00 and dips to 99.00: next-open fills at 103.00,
-  a limit at the 100.00 level, and the two hand-computed return sets differ by the mechanism alone.
-* ``GAPPER``     — trigger close 102.00, then GAPS THROUGH the level (open 95.00): the limit must fill at
-  the OPEN, not at the level, and the two mechanisms then get the same price.
-* ``LATEFILL``   — trigger close 106.00, then holds above the level for three sessions and only
-  touches it on y+4: unfilled under 3-session-limit, filled under 5-session-limit, and its next-open and 5-session-limit exits land on
-  DIFFERENT sessions — the fill-anchored horizon's whole point.
-* ``NOFILL``     — trigger close 108.00, then never trades at or below the level: next-open fills, both limit
+  a limit at the 100.00 level; the return sets differ by the mechanism alone.
+* ``GAPPER``     — trigger close 102.00, then gaps through the level (open 95.00): the limit fills at the
+  open, so both mechanisms get the same price.
+* ``LATEFILL``   — trigger close 106.00, holds above the level for three sessions, touches it on y+4:
+  unfilled under 3-session-limit, filled under 5-session-limit, and the next-open and 5-session-limit
+  exits land on different sessions (the fill-anchored horizon).
+* ``NOFILL``     — trigger close 108.00, never trades at or below the level: next-open fills, both limit
   variants book nothing, and the fill rate's denominator stays the shared admitted population.
 * ``OUTSIDER``   — WINNER's bars, excluded ``not_in_index``: must never appear.
-* ``CAPPEDPLUS`` — WINNER's bars, excluded ``['watchlist_cap', 'surveillance_asm']``: the STRICT
+* ``CAPPEDPLUS`` — WINNER's bars, excluded ``['watchlist_cap', 'surveillance_asm']``: the strict
   single-reason eligibility equality must reject it.
 
-Every price is exact in 2 dp (the ``bars_1d`` DECIMAL(12,2) column) so the arithmetic is
-hand-checkable; the cost deduction is asserted as "gross minus exactly one CNC round trip" against
-the repo's own CostModel rather than a frozen constant, so a costs.yaml re-scrape moves the expected
-value with the model instead of breaking the test for the wrong reason.
+Every price is exact in 2 dp (the ``bars_1d`` DECIMAL(12,2) column). Costs are asserted as gross minus
+one CNC round trip from the repo's CostModel, not a frozen constant.
 """
 
 from __future__ import annotations
@@ -84,15 +80,13 @@ def _flat(sym: str, idx: int, price: str, *, high: str, v: int = 1000) -> DailyB
 
 
 def _prefix(sym: str) -> list[DailyBar]:
-    """Sessions 0..20: dead flat at 100.00 with every high at 100.00, so H20 == 100.00 exactly and
-    every overnight gap is 0.00 — which makes the brk20 stop-geometry floor 2.0 x median(0) = 0 and
-    therefore never the reason a fixture signal does or does not fire."""
+    """Sessions 0..20: flat at 100.00 with highs at 100.00, so H20 == 100.00 and every overnight gap is 0.00
+    (the stop-geometry floor is then 0 and never decides whether a fixture signal fires)."""
     return [_flat(sym, i, "100.00", high="100.00") for i in range(SIGNAL_IDX)]
 
 
 def _trigger(sym: str, close: str) -> DailyBar:
-    """The breakout session: close above the 100.00 band on 2x the window's mean volume (the rule
-    needs 1.2x). The high equals the close so the next session's own window sees no phantom high."""
+    """The breakout session: close above the band on 2x the window's mean volume (the rule needs 1.2x); high == close."""
     return _bar(sym, SIGNAL_IDX, o="100.00", h=close, lo="100.00", c=close, v=2000)
 
 
@@ -125,10 +119,8 @@ def gapper_bars() -> list[DailyBar]:
 def latefill_bars() -> list[DailyBar]:
     """Trigger 106.00; lows hold at 101.00 for y+1..y+3 and only reach 99.00 on y+4 (index 25).
 
-    So 3-session-limit's window (y+1..y+3) closes unfilled and 5-session-limit fills at index 25 — and the T+20 exits then
-    land on DIFFERENT sessions: index 42 for next-open's index-22 fill (close 102.00) and index 45 for
-    5-session-limit's (close 115.00). A signal-anchored horizon would give both the same exit and hide the
-    difference the fill anchor exists to measure.
+    3-session-limit closes unfilled; 5-session-limit fills at index 25, so the T+20 exits differ:
+    index 42 for next-open's index-22 fill (close 102.00), index 45 for 5-session-limit's (close 115.00).
     """
     sym = "LATEFILL"
     bars = _prefix(sym) + [_trigger(sym, "106.00")]
@@ -140,22 +132,18 @@ def latefill_bars() -> list[DailyBar]:
 
 
 def nofill_bars() -> list[DailyBar]:
-    """Trigger 108.00, then the tape never returns to the level — the rested limit expires unfilled
-    under both limit windows while next-open is filled at the next open (107.00)."""
+    """Trigger 108.00, then the tape never returns to the level: both limits expire unfilled, next-open fills at 107.00."""
     sym = "NOFILL"
     bars = _prefix(sym) + [_trigger(sym, "108.00")]
     bars += [_flat(sym, i, "107.00", high="130.00") for i in range(ENTRY_IDX, N_SESSIONS)]
     return bars
 
 
-#: The fixture's structural ex-date: 20 calendar days before the DECISION day, i.e. inside the
-#: 35-day unadjusted-history window but far outside the 10-day UPCOMING-ex skip, so the two vetoes
-#: cannot be confused for one another.
+#: Structural ex-date 20 days before the decision day: inside the 35-day unadjusted-history window, outside the 10-day upcoming-ex skip.
 ACTION_EX = SESSIONS[ENTRY_IDX] - timedelta(days=20)
 
-#: ``universe_daily`` exclusion vectors. NOFILL proves a cap-only row is ELIGIBLE; CAPPEDPLUS proves
-#: the eligibility equality is STRICT (cap plus anything else is out); OUTSIDER is the ordinary
-#: out-of-index name.
+#: ``universe_daily`` exclusion vectors. NOFILL: a cap-only row is eligible; CAPPEDPLUS: eligibility is
+#: strict (cap plus anything else is out); OUTSIDER: the ordinary out-of-index name.
 UNIVERSE_ROWS: dict[str, list[str]] = {
     "WINNER": [], "GAPPER": [], "LATEFILL": [],
     "NOFILL": ["watchlist_cap"],
@@ -252,7 +240,7 @@ def _cost_pct() -> float:
 
 # ============================================================ 0. pre-registration discipline
 def test_three_pre_registered_variants_no_sweep():
-    """N=3 and the rule params ARE the live scanner's frozen defaults — no sweep, no drift."""
+    """N=3 and the rule params are the live scanner's frozen defaults — no sweep, no drift."""
     assert bt.TRIAL_COUNT_N == 3
     assert bt.PRE_REGISTERED_PARAMS == dict(brk20.DEFAULT_PARAMS)
     assert bt.PRE_REGISTERED_FLOOR_PARAMS == dict(brk20.FLOOR_PARAMS)
@@ -268,8 +256,7 @@ def test_three_pre_registered_variants_no_sweep():
 
 
 def test_unadjusted_window_is_the_live_brk20_sweep_window():
-    """35 calendar days, not hi52's 400: brk20's lookback is 20 sessions, and reading hi52's window
-    here would veto symbols the live brk20 sweep happily scans."""
+    """35 calendar days, not hi52's 400: hi52's window would veto symbols the live brk20 sweep scans."""
     assert bt.UNADJUSTED_LOOKBACK_DAYS == 35
     today = date(2025, 6, 30)
     span = bt.UNADJUSTED_LOOKBACK_DAYS
@@ -292,9 +279,9 @@ def test_cost_path_is_cnc_delivery_and_spread_inclusive():
     assert 0.15 < full < 0.60              # sanity band around the documented ~0.32% CNC round trip
 
 
-# ============================================================ 1. the signal set IS scan_daily's
+# ============================================================ 1. the signal set is scan_daily's
 def test_windowed_scan_matches_the_full_prefix(db_file):
-    """The bounded scan window must offer scan_daily a BIT-IDENTICAL read to the full row prefix."""
+    """The bounded scan window offers scan_daily a bit-identical read to the full row prefix."""
     conn = bt.open_readonly(db_file)
     try:
         series = bt.load_series(conn, SESSIONS[0], SESSIONS[-1], symbols=sorted(ELIGIBLE))
@@ -315,15 +302,13 @@ def test_windowed_scan_matches_the_full_prefix(db_file):
 
 
 def test_signal_level_is_the_rules_own_tick_rounded_entry(study):
-    """The rested level is the candidate's ``raw_levels.entry``, and the margin denominator read
-    back for the tercile split is the same physical number (``signals_for`` tripwires otherwise)."""
+    """The rested level is the candidate's ``raw_levels.entry``, the same number the tercile split's margin reads."""
     doc, trades = study
     assert doc["meta"]["n_signals_after_vetoes"] == len(ELIGIBLE)
     assert doc["meta"]["n_signals_admitted"] == len(ELIGIBLE)
     t = _by_symbol(trades, bt.VARIANT_LIMIT_5)["WINNER"]
     assert t.margin == pytest.approx(0.04, abs=1e-9)        # close(y) 104.00 / H20 100.00 - 1
     assert t.fill_px == pytest.approx(LEVEL)                # the level is what the rule shipped
-    # the margins the tercile split reads are the rule's own strength signal, one per fixture
     margins = {s: _by_symbol(trades, bt.VARIANT_NEXT_OPEN)[s].margin for s in ELIGIBLE}
     assert margins == pytest.approx(
         {"GAPPER": 0.02, "WINNER": 0.04, "LATEFILL": 0.06, "NOFILL": 0.08}, abs=1e-9
@@ -332,8 +317,7 @@ def test_signal_level_is_the_rules_own_tick_rounded_entry(study):
 
 # ============================================================ 2. hand-computed fills, net of costs
 def test_next_open_and_limit_book_the_same_signal_at_different_prices(study):
-    """WINNER: next-open pays the next OPEN (103.00), the limit rests and gets the level (100.00). Same signal,
-    same exit sessions, and the only difference in the return is the mechanism."""
+    """WINNER: next-open pays the next open (103.00), the limit gets the level (100.00); same signal and exits."""
     _doc, trades = study
     cost = _cost_pct()
     next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["WINNER"]
@@ -356,9 +340,7 @@ def test_next_open_and_limit_book_the_same_signal_at_different_prices(study):
 
 
 def test_a_gap_through_fills_at_the_open_not_at_the_level(study):
-    """GAPPER opens at 95.00, below the 100.00 limit: ``min(open, level)`` must book 95.00 — a
-    marketable-on-open limit gets the opening print, and booking 100.00 would invent a fill the
-    tape never offered."""
+    """GAPPER opens at 95.00, below the 100.00 limit: ``min(open, level)`` books 95.00; 100.00 would invent a fill the tape never offered."""
     _doc, trades = study
     limit = _by_symbol(trades, bt.VARIANT_LIMIT_3)["GAPPER"]
     next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["GAPPER"]
@@ -379,9 +361,7 @@ def test_the_limit_window_boundary_is_n_sessions_exactly(study):
 
 
 def test_horizons_are_anchored_on_the_fill_not_the_signal(study):
-    """LATEFILL's next-open and 5-session-limit legs fill 3 sessions apart, so their T+20 exits are 3 sessions apart
-    too: index 42 (close 102.00) and index 45 (close 115.00). A signal anchor would give both the
-    same exit and silently charge the limit variants for the days it spent waiting."""
+    """LATEFILL's legs fill 3 sessions apart, so their T+20 exits are too: index 42 (close 102.00) and 45 (close 115.00)."""
     _doc, trades = study
     next_open = _by_symbol(trades, bt.VARIANT_NEXT_OPEN)["LATEFILL"]
     limit5 = _by_symbol(trades, bt.VARIANT_LIMIT_5)["LATEFILL"]
@@ -391,8 +371,7 @@ def test_horizons_are_anchored_on_the_fill_not_the_signal(study):
 
 
 def test_an_untouched_level_books_no_trade_and_the_fill_rate_says_so(study):
-    """NOFILL's limit is never reached: both limit variants book nothing, next-open books the open, and the
-    fill rate's denominator stays the SHARED admitted population — not each variant's own."""
+    """NOFILL's limit is never reached: both limit variants book nothing; the fill-rate denominator is the shared admitted population."""
     doc, trades = study
     assert "NOFILL" in _by_symbol(trades, bt.VARIANT_NEXT_OPEN)
     for variant in (bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5):
@@ -404,7 +383,7 @@ def test_an_untouched_level_books_no_trade_and_the_fill_rate_says_so(study):
     assert blocks[bt.VARIANT_LIMIT_5]["n_filled"] == 3 and blocks[bt.VARIANT_LIMIT_5]["n_unfilled"] == 1
     for variant in bt.VARIANTS:
         b = blocks[variant]
-        # ONE shared SIGNAL population; the TRADE sets above are deliberately NOT shared
+        # The signal population is shared; the trade sets are not.
         assert b["n_signals_admitted"] == 4
         assert b["n_filled"] + b["n_unfilled"] == 4
         assert b["fill_rate"] == pytest.approx(b["n_filled"] / 4)
@@ -412,7 +391,7 @@ def test_an_untouched_level_books_no_trade_and_the_fill_rate_says_so(study):
 
 # ============================================================ 3. the population predicate
 def test_population_is_the_eligible_universe_applied_backwards(study, db_file):
-    """``included`` OR cap-only; an out-of-index name and a cap-PLUS-something name are both out."""
+    """Eligible = ``included`` or cap-only; an out-of-index name and a cap-plus-something name are out."""
     conn = bt.open_readonly(db_file)
     try:
         eligible, source, as_of = bt.load_eligible_universe(conn)
@@ -433,8 +412,7 @@ def test_population_is_the_eligible_universe_applied_backwards(study, db_file):
 
 # ============================================================ 4. the margin-tercile split
 def test_margin_tercile_split_partitions_the_population(study):
-    """The cut is taken ONCE over the admitted signals, so a signal sits in the same cell under
-    every variant and the cells compare mechanisms rather than populations."""
+    """The cut is taken once over the admitted signals, so a signal sits in the same cell under every variant."""
     doc, trades = study
     cuts = doc["margin_tercile_cuts"]
     assert cuts is not None and cuts["cut_1"] < cuts["cut_2"]
@@ -443,7 +421,6 @@ def test_margin_tercile_split_partitions_the_population(study):
     assert by_symbol["GAPPER"].tercile == bt.CELL_MARGIN_LOW       # margin 0.02, the narrowest
     assert by_symbol["NOFILL"].tercile == bt.CELL_MARGIN_HIGH      # margin 0.08, the widest
     assert {by_symbol[s].tercile for s in ("WINNER", "LATEFILL")} == {bt.CELL_MARGIN_MID}
-    # every variant sees the SAME tercile for the same symbol
     for variant in (bt.VARIANT_LIMIT_3, bt.VARIANT_LIMIT_5):
         for sym, t in _by_symbol(trades, variant).items():
             assert t.tercile == by_symbol[sym].tercile
@@ -452,8 +429,7 @@ def test_margin_tercile_split_partitions_the_population(study):
         cells = doc["variants"][variant]["cells"]
         total = sum(cells[name]["n_trades"] for name in bt.MARGIN_CELLS)
         assert total == cells[bt.CELL_ALL]["n_trades"]             # a partition, never a double count
-    # the widest-margin signal is exactly the one the rested limit never catches, which is the
-    # mechanism cost the split exists to surface
+    # The widest-margin signal is the one the rested limit never catches.
     assert doc["variants"][bt.VARIANT_LIMIT_5]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 0
     assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cells"][bt.CELL_MARGIN_HIGH]["n_trades"] == 1
     assert any("DESCRIPTIVE, NOT TRADEABLE" in n for n in doc["notes"])
@@ -472,8 +448,7 @@ def test_tercile_of_is_a_total_partition_on_the_cuts():
 
 # ============================================================ 4B. the matched-cohort decomposition
 def test_the_signal_population_is_shared_but_the_trade_sets_are_not(study):
-    """The claim the 2026-09-12 audit struck must not come back: all three variants are offered the
-    SAME admitted signals, and exactly two of them book a different set of TRADES."""
+    """All three variants are offered the same admitted signals, but the limit variants book a different (nested) set of trades."""
     doc, trades = study
     admitted = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_NEXT_OPEN]}
     n3 = {(t.symbol, t.signal_date) for t in trades[bt.VARIANT_LIMIT_3]}
@@ -492,11 +467,11 @@ def test_the_signal_population_is_shared_but_the_trade_sets_are_not(study):
 
 
 def test_matched_cohorts_split_next_open_by_whether_the_limit_filled(study):
-    """Next-open re-quoted on the cohort 5-session-limit FILLED and on the cohort it never filled, hand-checked.
+    """Next-open re-quoted on the cohort 5-session-limit filled and on the cohort it never filled.
 
-    5-session-limit fills WINNER (level 100.00), GAPPER (gap-through 95.00) and LATEFILL (level 100.00 on y+4);
-    NOFILL's level is never touched. next-open books all four at the next open. At T+20 the next-open legs are
-    WINNER 120/103 = +16.5049%, GAPPER 96/95 = +1.0526%, LATEFILL 102/105 = -2.8571%, NOFILL 0.0%.
+    5-session-limit fills WINNER (100.00), GAPPER (gap-through 95.00) and LATEFILL (100.00 on y+4); NOFILL
+    is never touched. At T+20 the next-open legs are WINNER 120/103 = +16.5049%, GAPPER 96/95 = +1.0526%,
+    LATEFILL 102/105 = -2.8571%, NOFILL 0.0%.
     """
     doc, _trades = study
     blk = doc["matched_cohorts"]["variants"][bt.VARIANT_LIMIT_5]
@@ -507,7 +482,7 @@ def test_matched_cohorts_split_next_open_by_whether_the_limit_filled(study):
     filled = blk["cells"][bt.cohort_label(bt.VARIANT_LIMIT_5, bt.COHORT_FILLED)]
     unfilled = blk["cells"][bt.cohort_label(bt.VARIANT_LIMIT_5, bt.COHORT_UNFILLED)]
     limit = blk["cells"][f"{bt.VARIANT_LIMIT_5}_{bt.COHORT_FILLED}"]
-    # the two cohorts PARTITION next-open's trades: nothing double-counted, nothing dropped
+    # The two cohorts partition next-open's trades.
     assert filled["n_trades"] == 3 and unfilled["n_trades"] == 1 and limit["n_trades"] == 3
     assert filled["n_trades"] + unfilled["n_trades"] == doc["variants"][bt.VARIANT_NEXT_OPEN]["n_filled"]
 
@@ -519,7 +494,7 @@ def test_matched_cohorts_split_next_open_by_whether_the_limit_filled(study):
     assert filled["horizons"]["20"]["median_net"] == pytest.approx(gapper20 - cost, abs=1e-4)
 
     e = blk["effects"]["20"]
-    # PRICE: limit minus next-open on the SAME events. SELECTION: next-open filled minus next-open unfilled.
+    # PRICE: limit minus next-open on the same events. SELECTION: next-open filled minus unfilled.
     assert e["price_effect_median_net_pp"] == pytest.approx(15.0 - gapper20, abs=1e-3)
     assert e["selection_effect_median_net_pp"] == pytest.approx(gapper20, abs=1e-3)
     assert e["pooled_gap_median_net_pp"] is not None
@@ -536,7 +511,7 @@ def test_matched_cohorts_split_next_open_by_whether_the_limit_filled(study):
 
 
 def test_carried_by_names_the_effect_and_never_guesses():
-    """The four sign combinations, stated plainly — and an n=0 cell is 'unknown', never a verdict."""
+    """The four sign combinations; an n=0 cell is 'unknown', never a verdict."""
     assert "PRICE" in bt._carried_by(2.0, -1.0)
     assert "runs AGAINST" in bt._carried_by(2.0, -1.0)
     assert "SELECTION" in bt._carried_by(-1.0, 2.0)
@@ -547,10 +522,9 @@ def test_carried_by_names_the_effect_and_never_guesses():
 
 
 def test_every_cell_carries_its_own_fill_rate_and_the_tercile_claim_is_matched(study):
-    """The 'in every margin tercile' claim is only readable off MATCHED cells with n per cell.
+    """The 'in every margin tercile' claim reads off matched cells with n per cell.
 
-    On the fixture the widest tercile is NOFILL alone — the one signal the rested limit never
-    catches — so the limit variant has no trade there at all and the claim is NOT TESTABLE, never 'true'.
+    The widest tercile is NOFILL alone, which the limit never catches, so the claim is NOT TESTABLE, never 'true'.
     """
     doc, _trades = study
     cells = doc["variants"][bt.VARIANT_LIMIT_5]["cells"]
@@ -582,8 +556,7 @@ def test_every_cell_carries_its_own_fill_rate_and_the_tercile_claim_is_matched(s
 
 # ============================================================ 5. geometry, CPCV, the decision rule
 def test_geometry_is_the_median_gross_of_the_variants_own_fills(study):
-    """The geometry line is per VARIANT, over that variant's own fills — the unfilled signals are
-    absent from it, not zero-filled, or a mechanism that never fills would look costless."""
+    """Geometry is per variant over its own fills; unfilled signals are absent, not zero-filled."""
     doc, _trades = study
     cost = _cost_pct()
     limit = doc["geometry"][bt.VARIANT_LIMIT_5]["horizons"]["20"]
@@ -600,8 +573,7 @@ def test_geometry_is_the_median_gross_of_the_variants_own_fills(study):
 
 
 def test_geometry_verdict_is_strict_against_the_cost_floor():
-    """`viable` iff the MEDIAN gross clears one full round trip — equality is DEAD, because a trade
-    that exactly pays its costs earns nothing. Probed directly so the boundary is exercised."""
+    """`viable` iff the median gross clears one full round trip; equality is dead (it earns nothing)."""
     def _t(gross: float) -> bt.Trade:
         return bt.Trade(
             symbol="X", variant=bt.VARIANT_NEXT_OPEN, signal_date=SESSIONS[0], fill_date=SESSIONS[1],
@@ -619,7 +591,7 @@ def test_geometry_verdict_is_strict_against_the_cost_floor():
 
 
 def test_cpcv_degrades_honestly_on_a_tiny_population(study):
-    """Four signals on one day cannot be cross-validated: no folds, not promotable, and it SAYS so."""
+    """Four signals on one day cannot be cross-validated: no folds, not promotable, and the report says so."""
     doc, _trades = study
     for variant in bt.VARIANTS:
         cpcv = doc["variants"][variant]["cpcv"]["20"]
@@ -629,7 +601,7 @@ def test_cpcv_degrades_honestly_on_a_tiny_population(study):
         assert cpcv["promotable"] is False
         assert any("CPCV produced no folds" in r for r in cpcv["reasons"])
         assert cpcv["margin_floor_pct_per_day"] == pytest.approx(_cost_pct() / 20.0, abs=1e-9)
-    # the CPCV series is keyed on the FILL day: next-open fills everything on one day, 5-session-limit spans two
+    # The CPCV series is keyed on the fill day: next-open fills on one day, 5-session-limit on two.
     assert doc["variants"][bt.VARIANT_NEXT_OPEN]["cpcv"]["20"]["n_obs_days"] == 1
     assert doc["variants"][bt.VARIANT_LIMIT_5]["cpcv"]["20"]["n_obs_days"] == 2
 
@@ -645,11 +617,9 @@ def test_decision_rule_is_neither_when_nothing_is_promotable(study):
 
 
 def _decision_doc(entries: dict[str, tuple]) -> dict:
-    """A minimal document shaped exactly as :func:`decision_outcome` reads it.
+    """A minimal document shaped as :func:`decision_outcome` reads it.
 
-    Each entry is ``(cpcv_promotable, median_net)`` or ``(cpcv_promotable, median_net,
-    reported_promotable)``; the third element defaults to the first, which is what a run with no
-    geometry disagreement produces.
+    Entries are ``(cpcv_promotable, median_net[, reported_promotable])``; the third defaults to the first.
     """
     def _row(entry: tuple) -> dict:
         promotable, med, *rest = entry
@@ -664,7 +634,7 @@ def _decision_doc(entries: dict[str, tuple]) -> dict:
 
 
 def test_decision_rule_picks_the_higher_median_among_promotable_variants_only():
-    """A higher median that is NOT CPCV-promotable never wins — the proviso is the whole rule."""
+    """A higher median that is not CPCV-promotable never wins."""
     doc = _decision_doc({
         bt.VARIANT_NEXT_OPEN: (False, 9.0),       # best median, not promotable -> ineligible
         bt.VARIANT_LIMIT_3: (True, 1.0),
@@ -694,11 +664,8 @@ def test_decision_rule_picks_the_higher_median_among_promotable_variants_only():
 
 
 def test_reported_promotable_requires_cpcv_AND_viable_geometry():
-    """The 2026-09-12 reporting amendment: CPCV alone never earns a PROMOTABLE label.
-
-    The gates are built on different statistics — the CPCV series is a per-fill-day MEAN, the
-    geometry verdict a MEDIAN — so a tail-driven cell can pass CPCV while its typical trade pays the
-    round trip for nothing (next-open at T+10 on the real run). Reported promotability is the AND.
+    """Reported promotability is CPCV AND viable geometry: the CPCV series is a per-fill-day mean and the
+    geometry verdict a median, so a tail-driven cell can pass CPCV while its typical trade pays the round trip for nothing.
     """
     dead = bt.apply_reporting_rule(
         {"promotable": True, "reasons": []}, {"verdict": "dead"}, -0.3192
@@ -712,22 +679,21 @@ def test_reported_promotable_requires_cpcv_AND_viable_geometry():
     ok = bt.apply_reporting_rule({"promotable": True, "reasons": []}, {"verdict": "viable"}, 0.0513)
     assert ok["reported_promotable"] is True and ok["gates_disagree"] is False
 
-    # a median net of EXACTLY zero is not viable: that trade pays the full round trip for nothing
+    # A median net of exactly zero is not viable.
     zero = bt.apply_reporting_rule({"promotable": True, "reasons": []}, {"verdict": "dead"}, 0.0)
     assert zero["reported_promotable"] is False
-    # an honest n=0 cell has no median and is never reported promotable
+    # An n=0 cell has no median and is never reported promotable.
     none_med = bt.apply_reporting_rule(
         {"promotable": True, "reasons": []}, {"verdict": "unknown"}, None
     )
     assert none_med["reported_promotable"] is False
-    # and the amendment can only WITHHOLD: a CPCV refusal is never rescued by good geometry
+    # The rule can only withhold: a CPCV refusal is never rescued by good geometry.
     refused = bt.apply_reporting_rule({"promotable": False, "reasons": []}, {"verdict": "viable"}, 9.0)
     assert refused["reported_promotable"] is False and refused["gates_disagree"] is True
 
 
 def test_the_tightened_gate_can_only_withhold_never_promote():
-    """Same decision rule, tighter proviso: it can change the winner by REMOVING a candidate, and
-    can never add one the registered CPCV gate refused."""
+    """The tightened gate can change the winner only by removing a candidate, never by adding one CPCV refused."""
     doc = _decision_doc({
         bt.VARIANT_NEXT_OPEN: (True, 3.0, False),       # CPCV passes, geometry dead -> withheld
         bt.VARIANT_LIMIT_3: (True, 1.0, True),
@@ -745,8 +711,7 @@ def test_the_tightened_gate_can_only_withhold_never_promote():
 
 
 def test_both_decision_outcomes_are_reported_side_by_side(study):
-    """Every run states the registered outcome AND the tightened one, and says whether they differ —
-    a tightening that silently replaced the registered outcome would be a post-hoc rule change."""
+    """Every run states the registered outcome and the tightened one, and whether they differ."""
     doc, _trades = study
     t = doc["decision_under_tightened_reporting_rule"]
     assert doc["decision"]["rule"] == t["rule"] == bt.DECISION_RULE
@@ -768,8 +733,7 @@ def test_both_decision_outcomes_are_reported_side_by_side(study):
     [("bonus", False, 1), ("dividend", True, 0)],
 )
 def test_a_structural_ex_date_vetoes_the_signal(db_with_action, kind, books_trade, vetoes):
-    """A bonus 20 days before WINNER's cross holds its 20-session window in two units; a dividend
-    rescales nothing and must not suppress anything."""
+    """A bonus 20 days before WINNER's cross splits its 20-session window into two units; a dividend rescales nothing."""
     doc, trades = _run(db_with_action(kind))
     booked = {t.symbol for t in trades[bt.VARIANT_NEXT_OPEN]}
     assert ("WINNER" in booked) is books_trade
@@ -844,7 +808,7 @@ def test_main_writes_json_and_md_and_orders_the_report(db_file, tmp_path, capsys
 
 
 def test_refuses_an_empty_universe_rather_than_measuring_it(db_no_universe, tmp_path, capsys):
-    """The eligible set IS the population here — an empty one is a refusal, not a negative result."""
+    """The eligible set is the population, so an empty one is a refusal, not a negative result."""
     rc = bt.main(["--db", str(db_no_universe), "--out", str(tmp_path / "z.json")])
     assert rc == 2
     assert "no eligible universe" in capsys.readouterr().err

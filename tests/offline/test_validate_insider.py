@@ -1,10 +1,8 @@
-"""``scripts/validate_insider.py`` PURE daily-return-series builder (filings-layer stage 3). Synthetic
-events + bars -> a hand-computed cost-adjusted daily portfolio series: PIT entry after the
-event-session close, T+1..T+H returns, per-side CNC legs on the entry + exit sessions,
-cross-sectional MEAN across open positions, 0 on flat days. It adds the fill convention —
-``next_open`` (default, buy at open_(T+1)) vs the superseded ``close_t`` — pinned here against a
-series where the two differ. The loose script is loaded by path (the repo pattern used by
-``test_event_study_filings.py``); no store, no network.
+"""``scripts/validate_insider.py`` pure daily-return-series builder on synthetic events and bars.
+
+Pins a hand-computed cost-adjusted daily portfolio series: point-in-time entry after the event-session
+close, T+1..T+H returns, per-side CNC legs on the entry and exit sessions, cross-sectional mean across
+open positions, 0 on flat days, and the fill convention (``next_open`` default vs superseded ``close_t``).
 """
 
 from __future__ import annotations
@@ -68,8 +66,8 @@ def test_single_held_session_charges_both_legs():
     expected = (105.0 / 104.0 - 1.0) - 2 * 0.005                # entry+exit legs on the same session
     assert series[DAYS[5]] == pytest.approx(expected)
     assert series[DAYS[4]] == 0.0
-    # Same event under the next_open default: the single held session is bought at ITS OWN open (104),
-    # so the d4->d5 overnight gap is not booked; both legs still land on that one session.
+    # Under the next_open default the single held session is bought at its own open (104), so the
+    # d4->d5 overnight gap is not booked; both legs still land on that session.
     series_next = vi.build_daily_return_series(
         events, bars, DAYS[0], DAYS[5], per_side_fee_pct=0.5, hold_sessions=2
     )
@@ -107,7 +105,7 @@ def test_next_open_is_the_default_and_excludes_the_entry_overnight_gap():
         entry_fill=vi.ENTRY_FILL_CLOSE_T,
     )
     assert vi.DEFAULT_ENTRY_FILL == vi.ENTRY_FILL_NEXT_OPEN
-    assert default == next_open                                 # the DEFAULT is the corrected one
+    assert default == next_open
     assert next_open[DAYS[2]] == pytest.approx(0.0)             # bought at the 110 open, closed 110
     assert close_t[DAYS[2]] == pytest.approx(0.10)              # bought at the 100 close: +10%
 

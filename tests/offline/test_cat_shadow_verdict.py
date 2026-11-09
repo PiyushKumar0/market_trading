@@ -103,8 +103,7 @@ def test_the_cohort_is_the_first_twenty_by_day_then_symbol():
 
 
 def test_a_late_maturing_early_signal_holds_the_verdict_and_is_never_replaced(cal):
-    """Signal #1 has a bar missing mid-hold, so its T+20 lands a session after everyone else's.
-    The 21st..25th signals are fully measured and STILL never enter: the verdict waits for #1."""
+    """Signal #1 has a bar missing mid-hold, so its T+20 lands a session late; the 21st..25th signals never replace it."""
     d0 = FIRST
     signals = [Signal(d0, f"S{i:02d}") for i in range(20)]
     later = [Signal(_sessions(cal, 2)[1], f"T{i:02d}") for i in range(5)]
@@ -125,8 +124,7 @@ def test_a_late_maturing_early_signal_holds_the_verdict_and_is_never_replaced(ca
     assert doc["verdict"] == cv.VERDICT_INSUFFICIENT
     assert "cohort members" in doc["reason"]
     assert doc["population"]["signals_admitted"] == 25
-    # One session later S00's own T+20 bar has landed: the SAME 20 form the verdict, and the five
-    # later signals (measured all along) still never entered.
+    # One session later S00's T+20 bar has landed: the same 20 form the verdict.
     doc = cv.build_report(signals + later, series, cost_pct=COST, as_of=full.dates[20], start=d0,
                           calendar=cal)
     assert [m["symbol"] for m in doc["cohort"]["members"]] == [f"S{i:02d}" for i in range(20)]
@@ -190,8 +188,7 @@ def test_insufficient_names_each_binding_condition():
 
 
 def test_a_store_hole_in_the_cohort_holds_the_verdict_and_is_listed(cal):
-    """"Fix the data, never skip the row": a symbol with no bars is a hole, and the 21st signal does
-    not take its place."""
+    """A symbol with no bars is a hole (fix the data, never skip the row); the 21st signal does not replace it."""
     sessions = _sessions(cal, 40)
     signals = [Signal(sessions[0], f"S{i:02d}") for i in range(21)]
     series = {s.symbol: _series(cal, s.symbol, start=s.d, n=40, t10=90.0, t20=90.0)
@@ -306,8 +303,8 @@ def _void_population(cal, *, n_signals: int = 21):
 
 
 def test_an_unadjusted_ex_date_inside_the_hold_voids_and_the_21st_signal_enters_the_cohort(cal):
-    """exit_sim's rule: an UNADJUSTED_KINDS ex-date x with d < x <= the last measured session voids
-    the observation (stored bars are never re-adjusted, so the window holds two units)."""
+    """An UNADJUSTED_KINDS ex-date x with d < x <= the last measured session voids the observation
+    (stored bars are never re-adjusted, so the window holds two units)."""
     sessions, signals, series = _void_population(cal)
     doc = cv.build_report(signals, series, cost_pct=COST, as_of=sessions[-1], start=FIRST,
                           calendar=cal, ex_dates={"S03": [(sessions[5], "bonus")]})
@@ -549,8 +546,8 @@ def test_as_of_bounds_both_stores_end_to_end(tmp_path, cal, clock, capsys):
 
 # ============================================================ 10. the void window is the hold
 def test_a_hole_is_not_voided_by_an_ex_date_after_its_would_be_t20(cal):
-    """Reviewer repro: S03 has no bar on d (and S04 a bad T+20 close); a bonus AFTER the would-be
-    T+20 must not void them — the hole stays, and the verdict stays INSUFFICIENT."""
+    """S03 has no bar on d (and S04 a bad T+20 close); a bonus after the would-be T+20 must not void
+    them: the hole stays and the verdict stays INSUFFICIENT."""
     sessions, signals, series = _void_population(cal)
     s03 = series["S03"]
     series["S03"] = Series("S03", s03.dates[1:], s03.open[1:], s03.close[1:])    # no bar on d
@@ -608,8 +605,7 @@ def _orig(age: int, *refs: str) -> list:
 
 
 def test_a_story_first_seen_after_the_open_enters_at_the_next_session(cal):
-    """A post-open digest can grade an age-0 cluster first seen 09:40 on d; open(d) would book the
-    announcement move. The entry moves to the next session's open, and the hold counts from there."""
+    """An age-0 cluster first seen after the open on d enters at the next session's open (open(d) would book the announcement move)."""
     sessions = _sessions(cal, 45)
     d = sessions[0]
     s = _series(cal, "A", start=d, n=45)
@@ -660,8 +656,7 @@ def test_no_originating_row_or_an_unreadable_first_seen_is_a_hole(cal):
 
 # ============================================================ 13. same-story duplicates
 def test_an_age0_then_age1_origination_of_one_story_is_a_duplicate(cal):
-    """First seen on d before d's digest: age 0 on d, age 1 on d+1, both originate. The second
-    shares a cluster with the first: DUPLICATE, out of the cohort, listed with the signal it repeats."""
+    """Age 0 on d then age 1 on d+1 sharing a cluster: the second is a DUPLICATE, out of the cohort, listed with the signal it repeats."""
     sessions = _sessions(cal, 45)
     signals = [Signal(sessions[0], f"S{i:02d}") for i in range(20)] + [Signal(sessions[1], "S03")]
     series = {s.symbol: _series(cal, s.symbol, start=sessions[0], n=45, t10=103.0, t20=103.0)
@@ -681,8 +676,7 @@ def test_an_age0_then_age1_origination_of_one_story_is_a_duplicate(cal):
 
 
 def test_consecutive_rows_from_disjoint_clusters_stay_separate_signals(cal):
-    """Same symbol, same event_type, consecutive days, no shared cluster: two stories by the
-    registered letter, both counted."""
+    """Same symbol and event_type on consecutive days with no shared cluster are two stories, both counted."""
     sessions = _sessions(cal, 45)
     signals = [Signal(sessions[0], "A"), Signal(sessions[1], "A")]
     series = {"A": _series(cal, "A", start=sessions[0], n=45)}
