@@ -257,17 +257,61 @@ def test_brent_change_nan_without_n_earlier_sessions_and_no_flag_mid_month():
     assert bool(out.loc[date(2026, 10, 16), "roll_flag"]) is False
 
 
-def test_brent_roll_flag_last_weekday_when_month_ends_on_a_weekend():
-    # 2026-05-29 is a Friday and the last weekday of May (05-30/31 are a weekend)
-    days = [date(2026, 5, 22), date(2026, 5, 25), date(2026, 5, 26), date(2026, 5, 27), date(2026, 5, 28),
-            date(2026, 5, 29), date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
-    brent = pd.Series([100.0 - i for i in range(len(days))], index=days)
-    out = brent_change([date(2026, 5, 29), date(2026, 6, 1), date(2026, 6, 3), date(2026, 6, 4)], brent, n=3)
-    assert bool(out.loc[date(2026, 5, 29), "roll_flag"]) is False         # 05-25..05-28
-    assert bool(out.loc[date(2026, 6, 1), "roll_flag"]) is True           # 05-26..05-29
-    assert bool(out.loc[date(2026, 6, 3), "roll_flag"]) is True           # 05-28..06-02
-    assert bool(out.loc[date(2026, 6, 4), "roll_flag"]) is True           # 05-29..06-03: 05-29 compared
-    assert out.loc[date(2026, 6, 4), "pct"] == pytest.approx((92.0 / 95.0 - 1) * 100)
+def _weekdays(lo: date, hi: date, skip: tuple[date, ...] = ()) -> list[date]:
+    return [d for d in (lo + timedelta(days=i) for i in range((hi - lo).days + 1)) if d.weekday() < 5 and d not in skip]
+
+
+def _flags(brent_days: list[date], ds: list[date]) -> dict[date, bool]:
+    out = brent_change(ds, pd.Series([100.0 - 0.1 * i for i in range(len(brent_days))], index=brent_days), n=3)
+    return {d: bool(out.loc[d, "roll_flag"]) for d in ds}
+
+
+def test_brent_contract_expiry_rules_and_the_2016_transition():
+    exp = mm.brent_contract_expiry
+    # old rule: the business day before the 15th calendar day before the 1st of the delivery month
+    assert exp(2015, 12) == date(2015, 11, 13)          # 15th day back = Mon 11-16
+    assert exp(2016, 1) == date(2015, 12, 16)           # Thu 12-17
+    assert exp(2015, 3) == date(2015, 2, 12)            # Sat 02-14: preceding business day Fri 02-13, then Thu
+    assert exp(2016, 2) == date(2016, 1, 14)            # Sun 01-17: Fri 01-15, then Thu 01-14 (last old-rule contract)
+    # new rule from the March 2016 contract: the last weekday of the second month before delivery
+    assert exp(2016, 3) == date(2016, 1, 29)
+    assert exp(2026, 12) == date(2026, 10, 30)
+    assert exp(2018, 5) == date(2018, 3, 30)
+
+
+def test_brent_roll_flag_pre_2016_mid_month_expiry_and_not_month_end():
+    days = _weekdays(date(2015, 11, 2), date(2015, 12, 4))
+    f = _flags(days, [date(2015, 11, 16), date(2015, 11, 23), date(2015, 12, 2), date(2015, 12, 3)])
+    assert f[date(2015, 11, 16)] is True                 # compares 11-10..11-13: the Dec-15 expiry 11-13
+    assert f[date(2015, 11, 23)] is False                # 11-17..11-20: past e+1 = 11-16
+    assert f[date(2015, 12, 2)] is False                 # 11-26..12-01 spans the 11-30 month-end, no expiry near
+    assert f[date(2015, 12, 3)] is False                 # 11-27..12-02
+
+
+def test_brent_good_friday_expiry_maps_to_the_previous_session():
+    good_friday = date(2018, 3, 30)
+    days = _weekdays(date(2018, 3, 1), date(2018, 4, 13), skip=(good_friday,))
+    rolls = mm.brent_roll_sessions(days)
+    assert date(2018, 3, 29) in rolls and good_friday not in rolls
+    f = _flags(days, [date(2018, 3, 21), date(2018, 4, 2), date(2018, 4, 11)])
+    assert f[date(2018, 4, 2)] is True                   # compares 03-26..03-29 (the last-weekday rule missed it)
+    assert f[date(2018, 3, 21)] is False                 # 03-15..03-20
+    assert f[date(2018, 4, 11)] is False                 # 04-05..04-10
+
+
+def test_brent_roll_flag_margin_is_two_sessions_before_and_one_after():
+    days = _weekdays(date(2026, 10, 1), date(2026, 11, 20))     # Dec-26 expiry Fri 10-30
+    f = _flags(days, [date(2026, 10, 28), date(2026, 10, 29), date(2026, 11, 6), date(2026, 11, 9)])
+    assert f[date(2026, 10, 28)] is False                # compares 10-22..10-27
+    assert f[date(2026, 10, 29)] is True                 # 10-23..10-28: e-2 = 10-28
+    assert f[date(2026, 11, 6)] is True                  # 11-02..11-05: e+1 = 11-02
+    assert f[date(2026, 11, 9)] is False                 # 11-03..11-06
+
+
+def test_brent_roll_flag_expiry_just_past_the_data_end_still_flags():
+    days = _weekdays(date(2026, 10, 1), date(2026, 10, 29))     # data ends the day before the 10-30 expiry
+    assert _flags(days, [date(2026, 10, 30)])[date(2026, 10, 30)] is True   # compares 10-26..10-29: e-1
+
 
 
 # ----------------------------------------------------------------------------- trailing statistics
@@ -405,6 +449,12 @@ def test_verdict_refuses_non_finite_returns():
     bad[5] = TradeRow(bad[5].signal_date, bad[5].entry_date, bad[5].exit_date, 3.0, float("nan"))
     with pytest.raises(ValueError, match="non-finite"):
         verdict(bad, [0.0] * 1000, 5, 0.3)
+
+
+def test_verdict_refuses_a_population_shorter_than_the_sample():
+    # the population holds every trade's entry session, so a shorter one is a caller error, not a null
+    with pytest.raises(ValueError, match="40.*10|10.*40"):
+        verdict(trades(40, gross=3.0, net=2.7), [0.0] * 10, 5, 0.3)
 
 
 def test_non_overlapping_rejects_unsorted_sessions():

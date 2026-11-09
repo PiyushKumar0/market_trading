@@ -21,7 +21,7 @@ import json
 import math
 import statistics
 import sys
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -177,30 +177,85 @@ def us_overnight(nifty_days: Sequence[date], close: pd.Series) -> pd.Series:
     return pd.Series(out, index=pd.Index(days, name="date"), name="us_overnight")
 
 
-def _is_last_weekday(d: date) -> bool:
-    last = date(d.year + d.month // 12, d.month % 12 + 1, 1) - timedelta(days=1)
-    while last.weekday() >= 5:
-        last -= timedelta(days=1)
-    return d == last
+#: Sessions of margin around a mapped Brent expiry: Yahoo's BZ=F continuation roll timing is unknown.
+ROLL_MARGIN_BEFORE = 2
+ROLL_MARGIN_AFTER = 1
+#: The first delivery month under ICE's last-business-day-of-the-second-month-before rule.
+_BRENT_NEW_RULE_FROM = (2016, 3)
+
+
+def _prev_weekday(d: date) -> date:
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def brent_contract_expiry(year: int, month: int) -> date:
+    """The ICE Brent futures expiry for delivery month ``year-month``, business days = weekdays.
+
+    Through February 2016: the business day before the 15th calendar day before the 1st of the delivery month,
+    or, when that day is not a business day, the business day before the business day preceding it. From March
+    2016: the last business day of the second month before delivery."""
+    if (year, month) >= _BRENT_NEW_RULE_FROM:
+        y, m = (year, month - 1) if month > 1 else (year - 1, 12)
+        return _prev_weekday(date(y, m, 1))          # last weekday of month - 2
+    day15 = date(year, month, 1) - timedelta(days=15)
+    return _prev_weekday(day15) if day15.weekday() < 5 else _prev_weekday(_prev_weekday(day15))
+
+
+def _weekdays_between(lo: date, hi: date) -> int:
+    """Weekdays in the half-open range [lo, hi)."""
+    return sum((lo + timedelta(days=i)).weekday() < 5 for i in range((hi - lo).days))
+
+
+def _roll_indices(br: Sequence[date]) -> list[int]:
+    """Each contract expiry near ``br`` as the position of the last Brent session on or before it.
+
+    An expiry before the first or after the last session gets a virtual position counted in weekdays, so a window
+    at either end of the data still sees it."""
+    if not br:
+        return []
+    out: set[int] = set()
+    y, m = br[0].year, br[0].month
+    end = (br[-1].year + (br[-1].month + 3 - 1) // 12, (br[-1].month + 3 - 1) % 12 + 1)
+    while (y, m) <= end:
+        e = brent_contract_expiry(y, m)
+        if e < br[0]:
+            out.add(-_weekdays_between(e, br[0]))
+        elif e > br[-1]:
+            out.add(len(br) - 1 + _weekdays_between(br[-1] + timedelta(days=1), e + timedelta(days=1)))
+        else:
+            out.add(bisect_right(br, e) - 1)
+        y, m = (y, m + 1) if m < 12 else (y + 1, 1)
+    return sorted(out)
+
+
+def brent_roll_sessions(brent_days: Sequence[date]) -> list[date]:
+    """The Brent sessions each in-range contract expiry maps to (the last session on or before it)."""
+    br = sorted(_as_date(d) for d in brent_days)
+    return [br[i] for i in _roll_indices(br) if 0 <= i < len(br)]
 
 
 def brent_change(nifty_days: Sequence[date], close: pd.Series, n: int = OIL_SESSIONS) -> pd.DataFrame:
     """Per D: ``pct``, the latest ``close`` session dated before D against the one ``n`` sessions earlier, in %;
-    ``roll_flag``, True when any of the n + 1 compared sessions is the last weekday of its month (an ICE Brent
-    expiry). NaN / False without n + 1 sessions before D."""
+    ``roll_flag``, True when the compared sessions [j - n, j] meet [e - 2, e + 1] for a contract expiry mapped to
+    session e (``brent_contract_expiry``, ``brent_roll_sessions``). NaN / False without n + 1 sessions before D."""
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
     days = [_as_date(d) for d in nifty_days]
     _require_increasing(days, "nifty_days")
     br, px = _date_series(close, "close")
-    roll = [_is_last_weekday(d) for d in br]
+    rolls = _roll_indices(br)
     pct = np.full(len(days), np.nan)
     flag = np.zeros(len(days), dtype=bool)
     for k, d in enumerate(days):
         j = bisect_left(br, d) - 1
         if j - n >= 0:
             pct[k] = (px[j] / px[j - n] - 1.0) * 100.0
-            flag[k] = any(roll[j - n:j + 1])
+            # [j - n, j] meets [e - before, e + after]  <=>  j - n - after <= e <= j + before
+            i = bisect_left(rolls, j - n - ROLL_MARGIN_AFTER)
+            flag[k] = i < len(rolls) and rolls[i] <= j + ROLL_MARGIN_BEFORE
     return pd.DataFrame({"pct": pct, "roll_flag": flag}, index=pd.Index(days, name="date"))
 
 
@@ -331,6 +386,9 @@ def verdict(trades: list[TradeRow], population_gross: Sequence[float], hold: int
     for what, vals in (("population_gross", pop), ("trade gross", [t.gross for t in rows]), ("trade net", nets)):
         if not all(math.isfinite(v) for v in vals):
             raise ValueError(f"{what} has non-finite values")
+    # The population holds every trade's entry session, so a shorter one is a caller error.
+    if n > len(pop):
+        raise ValueError(f"population_gross has {len(pop)} values, fewer than the {n} trades")
     out: dict[str, Any] = {"label": "insufficient", "n": n, "mean_net": None, "median_net": None,
                            "perm_p": None, "fold_pass": None, "half1_mean": None, "half2_mean": None,
                            "drop_top3_mean": None, "margin_floor_promotable": None, "criteria": None,
@@ -343,8 +401,7 @@ def verdict(trades: list[TradeRow], population_gross: Sequence[float], hold: int
     out["half1_mean"] = statistics.fmean(nets[:half]) if half else None
     out["half2_mean"] = statistics.fmean(nets[half:])
     out["drop_top3_mean"] = statistics.fmean(sorted(nets)[:-3]) if n > 3 else None
-    if n <= len(pop):
-        out["perm_p"] = permutation_pvalue([t.gross for t in rows], pop, seed=PERM_SEED)
+    out["perm_p"] = permutation_pvalue([t.gross for t in rows], pop, seed=PERM_SEED)
     cv_rows = [SimpleNamespace(fill_date=t.entry_date, net={hold: t.net}) for t in rows]
     rep = bb.cpcv_report(cv_rows, hold, cost, trial_count=N_TRIALS)
     folds = rep["folds"]
