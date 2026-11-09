@@ -90,8 +90,8 @@ limits:
     on_breach: reject_entry
 
   max_leverage:
-    platform_cap_x: 3.0         # envelope [1×, cap]; live AUTO starts at 1.0× via limits_overlay.phase4.yaml; cap never learnable
-    phase4_start_x: 1.0
+    platform_cap_x: 3.0         # envelope [1×, cap]; cap never learnable
+    live_auto_start_x: 1.0      # live AUTO's starting leverage; no code reads it until live routing is built
     on_breach: shrink_to_cap_else_reject
 
   no_trade_windows:

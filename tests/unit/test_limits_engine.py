@@ -72,7 +72,7 @@ def test_full_parse_of_real_limits_yaml(registered_store):
     assert table.limits.per_sector_exposure.unclassified_cap == 1
     assert table.limits.co_movement_cap.corr_max == 0.7
     assert table.limits.max_leverage.platform_cap_x == 3.0
-    assert table.limits.max_leverage.phase4_start_x == 1.0
+    assert table.limits.max_leverage.live_auto_start_x == 1.0
 
     ntw = table.limits.no_trade_windows
     assert ntw.mis_entry_start == time(9, 30)

@@ -111,7 +111,7 @@ class CoMovementCap(_Block):
 
 class MaxLeverage(_Block):
     platform_cap_x: float
-    phase4_start_x: float
+    live_auto_start_x: float
     on_breach: str
 
 
