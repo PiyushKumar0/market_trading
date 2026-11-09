@@ -1,27 +1,20 @@
 """Conservative paper-broker fill model + same-code-path replay harness.
 
-The 2026-09-10 change lands the broker half: :class:`~engine.paper.surface.BrokerSurface`
-(the routable surface ``KiteClient`` and ``PaperBroker`` both satisfy),
-:mod:`engine.paper.fill_model` (latency, time-of-day k buckets, never-zero half-spread) and
-:class:`~engine.paper.broker.PaperBroker`. ``ReplayHarness`` is the replay half.
+Pieces: :class:`~engine.paper.surface.BrokerSurface` (the routable surface ``KiteClient`` and
+``PaperBroker`` both satisfy), :mod:`engine.paper.fill_model` (latency, time-of-day k buckets,
+never-zero half-spread), :class:`~engine.paper.broker.PaperBroker` and ``ReplayHarness``.
 
-**Dependency budget, per module** (``tests/unit/test_import_graph.py`` enforces it
-structurally, module by module, since round 3 on 2026-09-10):
+**Dependency budget, per module** (``tests/unit/test_import_graph.py`` enforces it):
 
 * this ``__init__``, :mod:`engine.paper.broker`, :mod:`engine.paper.fill_model` and
-  :mod:`engine.paper.surface` depend on ``engine.core`` ALONE — which is what the order-postback
-  wire contract both brokers emit (``ORDER_UPDATE_TOPIC`` / ``OrderUpdateFrame``) living in
-  :mod:`engine.core.contracts` buys, and what keeps a PaperBroker constructible without the
-  market-data or pykiteconnect import chains;
-* :mod:`engine.paper.replay` additionally depends on ``engine.marketdata``, because the
-  replay harness drives the REAL ``BarBuilder`` into a scratch ``MarketStore`` — "one code path"
-  is the point of it. The allowance is one module wide and deliberately not re-exported here, so
+  :mod:`engine.paper.surface` depend on ``engine.core`` ALONE (the order-postback wire contract
+  both brokers emit lives in :mod:`engine.core.contracts`), so a PaperBroker is constructible
+  without the market-data or pykiteconnect import chains;
+* :mod:`engine.paper.replay` additionally depends on ``engine.marketdata``: it drives the REAL
+  ``BarBuilder`` into a scratch ``MarketStore`` ("one code path"). Not re-exported here, so
   importing this package never pulls the market-data tier in.
 
 No module in the package may import ``engine.broker`` or ``engine.intelligence``.
-
-Exports are re-exported here so callers write ``from engine.paper import PaperBroker`` rather than
-reaching into module paths that may be reorganised as the replay half lands.
 """
 
 from engine.paper.broker import PaperBroker, PaperOrderError, SigmaEstimator

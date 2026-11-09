@@ -1,99 +1,78 @@
 """Recorded ticks → the real BarBuilder → a scratch store, deterministically.
 
-``ReplayHarness`` (added 2026-09-10) is the foundation
-leg of "backtest = paper = live, one code path". It replays a recorded trading day out of the
-tick Parquet dataset through the SAME :class:`~engine.marketdata.bar_builder.BarBuilder` the live
-engine runs, into a SCRATCH :class:`~engine.marketdata.store.MarketStore`, with an optional broker
-attached, and emits a :class:`ReplayReport` whose ``digest`` is the golden-day artefact: *same
-inputs ⇒ byte-identical output*.
+``ReplayHarness`` is the foundation leg of "backtest = paper = live, one code path". It replays a
+recorded trading day out of the tick Parquet dataset through the SAME
+:class:`~engine.marketdata.bar_builder.BarBuilder` the live engine runs, into a SCRATCH
+:class:`~engine.marketdata.store.MarketStore`, with an optional broker attached, and emits a
+:class:`ReplayReport` whose ``digest`` is the golden-day artefact: *same inputs ⇒ byte-identical
+output*.
 
-Seven properties are load-bearing, and each is a deliberate design constraint rather than an
-implementation detail:
+Seven load-bearing properties:
 
 1. **It never opens ``market.duckdb``.** The archive is read through the harness's OWN
    ``duckdb.connect(":memory:")`` against ``read_parquet`` globs. DuckDB is single-writer and the live
-   engine holds that file; a replay that took the store's lock could not run beside a trading
-   session, which is exactly when you want to run one. ``MarketStore.get_ticks`` is therefore NOT used
-   here despite doing the same job — it reads through the live connection and its lock.
-2. **The day is STREAMED in bounded chunks, never materialised whole** (hot-path invariants,
-   performance bar). The read is still ONE ordered query, but it is consumed with
-   ``fetchmany(20_000)`` on a private single-worker executor thread that hands chunks to the event
-   loop through a bounded queue; peak resident memory is O(chunk), not O(day). A recorded tick costs
-   ~2.2 KB as a live ``Tick`` — a 300-symbol session-day materialised twice (rows, then models) is
-   ~17 GB, which is not a slow replay, it is a dead box.
+   engine holds that file; a replay must be able to run beside a trading session.
+   ``MarketStore.get_ticks`` is NOT used (it reads through the live connection and its lock).
+2. **The day is STREAMED in bounded chunks, never materialised whole.** One ordered query consumed
+   with ``fetchmany(20_000)`` on a private single-worker executor thread that hands chunks to the
+   event loop through a bounded queue; peak memory is O(chunk), not O(day) (a recorded tick costs
+   ~2.2 KB as a live ``Tick``; a 300-symbol day materialised is ~17 GB).
 3. **The tick loop runs ON the event-loop thread, yielding cooperatively.** Every
-   :data:`_YIELD_EVERY_TICKS` ticks the loop awaits ``asyncio.sleep(0)``, so timers and bus handlers
-   scheduled by anything downstream get to run and the loop is never blocked for longer than
-   :data:`_YIELD_EVERY_TICKS` ticks. The rows of a fetch chunk are turned into ``Tick`` models one
-   yield-slice at a time (fix round, 2026-09-10) rather than a whole chunk up front: converting
-   20,000 rows is ~0.4 s of uninterruptible loop-thread work, so a chunk-at-a-time conversion made
-   the yield granularity a lie — the block was bounded by ``_FETCH_ROWS``, not by
-   ``_YIELD_EVERY_TICKS``. The loop is deliberately NOT offloaded to a worker thread:
-   ``EventBus.publish`` schedules handler tasks on the RUNNING loop (``call_soon``/``create_task``),
-   so a tick loop on another thread would either raise or silently queue a day's worth of work onto
-   a loop that is idle-waiting for it — which is the same batching hazard as the bus-collector seam
-   rejected below.
-4. **The clock IS the tick stream.** :class:`ReplayClock` is a ``Clock`` whose ``time_source`` closes
-   over the current tick's ``exchange_ts``, advanced BEFORE the tick is delivered. Nothing in a replay
-   may read wall time — that is what makes the golden decision log reproducible, and the
-   ``Clock`` seam is precisely why the platform has never scattered ``datetime.now()`` calls.
+   :data:`_YIELD_EVERY_TICKS` ticks the loop awaits ``asyncio.sleep(0)`` so timers and bus handlers
+   run and the loop is never blocked longer than that. The rows of a fetch chunk are turned into
+   ``Tick`` models one yield-slice at a time: converting a whole 20,000-row chunk is ~0.4 s of
+   uninterruptible work, which would make the yield bound ``_FETCH_ROWS`` instead. The loop is NOT
+   offloaded to a worker thread: ``EventBus.publish`` schedules handler tasks on the RUNNING loop
+   (``call_soon``/``create_task``), so a tick loop on another thread would raise or queue a day's
+   work onto an idle loop (the same batching hazard as a bus-collector for bars, below).
+4. **The clock IS the tick stream.** :class:`ReplayClock`'s ``time_source`` closes over the current
+   tick's ``exchange_ts``, advanced BEFORE the tick is delivered. Nothing in a replay may read wall
+   time.
 5. **The harness OWNS the publish collector.** :meth:`ReplayHarness.publish` is the
    ``publish(topic, event)`` callable a broker is constructed with (``PaperBroker(publish=...)``);
    every ``order.update`` frame it sees is recorded, counted on the report and hashed into the
-   digest. The harness never reaches into the broker for a postback log: a getattr-shaped seam that
-   matches nothing degrades to an empty list and reports a bars-only digest as though it covered
-   orders. If a broker ends the run with a non-empty orderbook and the harness collected zero frames,
-   that is a wiring bug and :class:`ReplayContractError` is raised — a silent bars-only digest is
-   refused.
-6. **ULIDs are the one accepted non-determinism**. Platform-minted ids differ between
-   two runs of identical inputs by construction, so every ULID-shaped token is masked before hashing
-   (:func:`mask_ulids`).
-7. **Replay behaviour is a function of the STREAM, never of task scheduling** (fix round,
-   2026-09-10). Anything that must HAPPEN during a replay — placing an order, injecting a gap,
-   flipping a config — is registered with :meth:`ReplayHarness.schedule` (at an instant) or
-   :meth:`ReplayHarness.at_tick` (at a stream ordinal) and is invoked SYNCHRONOUSLY inside the tick
-   loop, immediately before its tick is delivered, with the clock already standing at that tick.
-   The rejected alternative was a fire-and-forget ``create_task`` that placed its order at whichever
-   cooperative yield the OS happened to schedule it on: measured over the golden day, that produced
-   0 or 1 fills between runs of identical input — a replay whose digest depends on thread timing is
-   not a replay. Fire-and-forget bus tasks created by code under replay may still run at the yields
-   (nothing forbids them), but nothing the digest covers is allowed to depend on WHEN they do.
+   digest. The harness never reaches into the broker for a postback log: a seam that matches nothing
+   would degrade to an empty list and report a bars-only digest as though it covered orders. A broker
+   that ends the run with a non-empty orderbook while the harness collected zero frames is a wiring
+   bug: :class:`ReplayContractError` is raised.
+6. **ULIDs are the one accepted non-determinism.** Platform-minted ids differ between runs by
+   construction, so every ULID-shaped token is masked before hashing (:func:`mask_ulids`).
+7. **Replay behaviour is a function of the STREAM, never of task scheduling.** Anything that must
+   HAPPEN during a replay (placing an order, injecting a gap, flipping a config) is registered with
+   :meth:`ReplayHarness.schedule` (at an instant) or :meth:`ReplayHarness.at_tick` (at a stream
+   ordinal) and invoked SYNCHRONOUSLY inside the tick loop, immediately before its tick is delivered,
+   with the clock already standing at that tick. A fire-and-forget ``create_task`` would place its
+   order at whichever yield the OS scheduled it on (0 or 1 fills between identical runs). Bus tasks
+   created by code under replay may still run at the yields, but nothing the digest covers may depend
+   on WHEN they do.
 
-**Scope of v1.** The strategy → gate → OMS leg is driven from outside, through ``schedule()`` /
-``at_tick()`` (tests/replay/test_paper_e2e.py); there is no order origination here
-and nothing in this module is reachable from the RECOMMEND pipeline. ``config_overlay`` is kept only
-to match the pinned signature and is recorded on the report for provenance; nothing
-consumes it.
-Raw ticks are never re-persisted: they were just read FROM the Parquet dataset, so staging them back
-into a scratch copy of it is a pure round trip, and ``BarBuilder.on_tick`` only *stages* — the flush
-lives on the async ``on_tick_event`` seam the harness does not use, so a staged buffer would simply
-grow for the whole day. There is no flag for it (the v1 flag deferred every byte of that work to
-teardown, which is a memory leak wearing a feature's clothes).
+**Scope.** The strategy → gate → OMS leg is driven from outside, through ``schedule()`` /
+``at_tick()`` (tests/replay/test_paper_e2e.py); there is no order origination here and nothing in
+this module is reachable from the RECOMMEND pipeline. ``config_overlay`` only matches the pinned
+signature and is recorded on the report for provenance; nothing consumes it.
+Raw ticks are never re-persisted: they were just read FROM the Parquet dataset, and
+``BarBuilder.on_tick`` only *stages* (the flush lives on the async ``on_tick_event`` seam the harness
+does not use), so a staged buffer would grow for the whole day.
 
-**Bar capture — which seam, and why.** The design allowed either a bus subscriber or the
-builder's finalize path. A bus subscriber is out: ``BarBuilder`` publishes bars with
-``EventBus.publish``, which is *fire-and-forget* — inside a running loop it schedules handler tasks
-that do not run until the next ``await``, so a collector on the bus would batch a chunk's bars at the
-harness's cooperative yield and destroy the tick↔bar interleaving the broker's fill model depends on.
-The builder is therefore constructed with ``bus=None``.
+**Bar capture — which seam.** A bus subscriber is out: ``BarBuilder`` publishes bars with
+``EventBus.publish``, which is *fire-and-forget* — inside a running loop handler tasks do not run
+until the next ``await``, so a bus collector would batch a chunk's bars at the cooperative yield and
+destroy the tick↔bar interleaving the broker's fill model depends on. The builder is constructed
+with ``bus=None``.
 
-Which leaves the finalize path — and specifically the **store write**, ``insert_bars_1m``, not
-``advance()``'s return value. That distinction is load-bearing: ``BarBuilder.on_tick`` calls
-``_advance()`` internally on EVERY path, so most bars are finalized inside ``on_tick`` and never come
-back through the harness's own ``advance()`` call at all. Capturing ``advance()``'s return value
-alone loses them (measured: 6 of 1,122 bars survived). ``_write_and_publish`` persists the batch
-BEFORE notifying anyone, so the store seam sees every finalized bar exactly once, in
-finalization order, at the instant of finalization — which is precisely the capture point the
-interleaving needs. :class:`_BufferedBarStore` is therefore both the write buffer and the capture
-hook, and the broker gets each bar from there, still ahead of the tick that triggered it.
+The capture point is the **store write**, ``insert_bars_1m``, not ``advance()``'s return value:
+``BarBuilder.on_tick`` calls ``_advance()`` internally on EVERY path, so most bars are finalized
+inside ``on_tick`` and never come back through the harness's own ``advance()`` call (measured: 6 of
+1,122 bars survived). ``_write_and_publish`` persists the batch BEFORE notifying anyone, so the store
+seam sees every finalized bar exactly once, in finalization order, at the instant of finalization.
+:class:`_BufferedBarStore` is both the write buffer and the capture hook; the broker gets each bar
+from there, still ahead of the tick that triggered it.
 
-``advance()`` itself is called once per MINUTE (when the tick being fed belongs to a different minute
-than the last one), not once per tick — the per-tick call was ~26 k redundant scans of the open-bar
-dict on a single-symbol day, on top of the one ``on_tick`` already does. It is ADDITIVE either way (a
-tick can never finalize its OWN minute: that minute closes 65 s after it), so it changes no bar's
-content; what it buys is finalization for a symbol that has stopped printing while others keep
-ticking, and what the conditional changes is only how often that sweep runs. ``flush_all()`` at day
-end catches whatever the last boundary left open.
+``advance()`` is called once per MINUTE (when the tick being fed belongs to a different minute than
+the last), not per tick. It is ADDITIVE (a tick can never finalize its OWN minute: that minute closes
+65 s after it), so cadence changes no bar's content; it buys finalization for a symbol that has
+stopped printing while others keep ticking. ``flush_all()`` at day end catches whatever the last
+boundary left open.
 """
 
 from __future__ import annotations
@@ -115,10 +94,6 @@ from typing import Any, Protocol
 import duckdb
 from pydantic import BaseModel, ConfigDict
 
-# The order-postback wire contract now lives in ``engine.core.contracts`` (fix round,
-# 2026-09-10): the move this import block anticipated has landed, so ``engine.paper`` imports it from
-# ``core`` like everything else and the package no longer reaches into ``engine.broker`` at all
-# (enforced by tests/unit/test_import_graph.py).
 from engine.core.clock import IST, Clock
 from engine.core.contracts import ORDER_UPDATE_TOPIC, OrderUpdateFrame
 from engine.core.log import get_logger
@@ -142,22 +117,19 @@ TICK_COLUMNS: tuple[str, ...] = (
 )
 
 #: The day stream's sort key: a TOTAL order over the tick row. ``exchange_ts, tradingsymbol`` alone
-#: is not one — the archive routinely holds several prints for one symbol in the same second, and two
-#: rows tying on those two keys are free to swap between runs (DuckDB's sort is not stable across a
-#: differently-parallelised scan). Two such rows differing only in ``bid``/``ask`` would flip the
-#: broker's half-spread, and therefore its fill price, between runs of identical input. Every
-#: remaining column is therefore part of the key, so the only rows left interchangeable are ones
-#: identical in all twelve columns — interchangeable by definition. ``test_golden_day`` asserts this
-#: is a permutation of :data:`TICK_COLUMNS`, so a new column cannot quietly de-totalise the order.
+#: is not one — the archive holds several prints per symbol per second, and tied rows may swap
+#: between runs (DuckDB's sort is not stable across a differently-parallelised scan); two differing
+#: only in ``bid``/``ask`` would flip the broker's half-spread and fill price. Every remaining column
+#: is part of the key, so only rows identical in all twelve columns stay interchangeable.
+#: ``test_golden_day`` asserts this is a permutation of :data:`TICK_COLUMNS`.
 ORDER_BY_COLUMNS: tuple[str, ...] = (
     "exchange_ts", "tradingsymbol", "volume_traded", "ltp", "bid", "ask", "avg_price",
     "instrument_token", "ohlc_open", "ohlc_high", "ohlc_low", "ohlc_close",
 )
 
-#: Memory ceiling for the harness's private DuckDB instance ("every DuckDB instance in this
-#: platform carries a stated ceiling", generalizing the 53 GB incident of 2026-08-17). Half the live
-#: store's 8 GB on purpose: a replay is a maintenance-class job and must never be able to compete for
-#: RAM with the session that may be trading beside it. Past the limit DuckDB spills to its temp dir.
+#: Memory ceiling for the harness's private DuckDB instance (every DuckDB instance carries a stated
+#: ceiling). Half the live store's 8 GB on purpose: a replay is a maintenance-class job and must not
+#: compete for RAM with a session trading beside it. Past the limit DuckDB spills to its temp dir.
 _MEMORY_LIMIT = "4GB"
 
 #: Rows per ``fetchmany`` from the reader thread. ~20 k rows of the 12-column tuple shape is a few MB
@@ -187,12 +159,11 @@ _BAR_WRITE_BATCH = 500
 #: wall-clock read there would be the first crack in "nothing in a replay reads wall time".
 _EPOCH = datetime(1970, 1, 1, tzinfo=IST)
 
-#: ULID as text: 26 Crockford base32 characters (alphabet 0-9 A-Z minus I, L, O, U), the first of
-#: which encodes the high bits of a 48-bit millisecond timestamp and is therefore 0-7 for every date
-#: this platform will ever see. The leading-char restriction is what keeps the mask from eating an
-#: unrelated 26-character uppercase token. Bounded by non-alphanumerics so it cannot match INSIDE a
-#: longer identifier. Accepted residual: masking is lossy by construction — two logs differing only
-#: in a masked token hash the same, which is the entire point ("accepted non-determinism").
+#: ULID as text: 26 Crockford base32 characters (no I, L, O, U), the first being 0-7 for every date
+#: this platform will see (high bits of a 48-bit ms timestamp) — that restriction keeps the mask from
+#: eating an unrelated 26-character uppercase token. Bounded by non-alphanumerics so it cannot match
+#: INSIDE a longer identifier. Masking is lossy by construction: logs differing only in a masked
+#: token hash the same.
 _ULID_RE = re.compile(r"(?<![0-9A-Za-z])[0-7][0-9A-HJKMNP-TV-Z]{25}(?![0-9A-Za-z])")
 
 #: Version tag hashed into every digest. Bump it when the canonical serialisation changes, so a
@@ -218,8 +189,7 @@ def mask_ulids(text: str) -> str:
 class ReplayBroker(Protocol):
     """The duck-typed broker seam the harness drives.
 
-    Deliberately a Protocol and NOT an import of ``engine.paper.broker``: the harness must be usable — and testable — with a stub. Two methods,
-    and the contract around them:
+    A Protocol, NOT an import of ``engine.paper.broker``, so the harness works with a stub.
 
     * ``on_tick`` receives **in-session prints only**. Pre-open and post-close ticks
       reach the ``BarBuilder`` — the pre-open ones carry the auction open — but never the broker: a
@@ -283,9 +253,8 @@ class ReplayReport(BaseModel):
 
     ``actions_fired`` counts the scripted actions (:meth:`ReplayHarness.schedule` /
     :meth:`ReplayHarness.at_tick`) the stream reached. It is reported rather than merely assumed
-    because a scripted action that silently never ran is exactly the failure mode the seam replaces
-    (fix round, 2026-09-10); an action the stream never reaches is a hard error at the end of
-    :meth:`ReplayHarness.run`, so this is a positive count, never a shortfall.
+    because a scripted action that silently never ran is the failure mode the seam replaces; an
+    action the stream never reaches is a hard error at the end of :meth:`ReplayHarness.run`.
 
     ``elapsed_s`` is wall time and is deliberately NOT part of ``digest``.
     """
@@ -373,24 +342,20 @@ class _BufferedBarStore:
     """The harness's seam onto ``BarBuilder``'s bar output: capture hook + write buffer.
 
     **Capture.** ``_write_and_publish`` calls ``insert_bars_1m`` with every finalized batch, before
-    notifying anything — so this is where the harness sees each bar, exactly once, in
-    finalization order. ``on_bars`` is invoked synchronously with the batch, ahead of the buffering,
-    which is what keeps the tick↔bar interleaving the broker's fill model reads. See the module
-    docstring for why ``advance()``'s return value is NOT that seam.
+    notifying anything, so this is where the harness sees each bar exactly once, in finalization
+    order. ``on_bars`` is invoked synchronously ahead of the buffering, which keeps the tick↔bar
+    interleaving the broker's fill model reads. See the module docstring for why ``advance()``'s
+    return value is NOT that seam.
 
-    **Buffering.** The builder persists on every finalization batch — correct for a live session,
-    where a batch arrives once a minute and durability matters. Under replay it is one DuckDB upsert
-    round trip per replayed minute: measured on this box at ~14 ms each, so a 375-minute day spends
-    ~5 s on nothing but transaction overhead, and it scales with MINUTES not symbols — a 300-symbol
-    day pays the same 375 round trips for 100× the rows. So rows are batched to
-    :data:`_BAR_WRITE_BATCH` and flushed at each day's end. The ``BarBuilder`` is UNCHANGED and
-    unaware; this is a harness-local adapter, not a store or builder feature. Durability mid-replay
-    buys nothing (the scratch store is thrown away), while in a live session it is the whole point.
+    **Buffering.** The builder persists on every finalization batch (right for a live session). Under
+    replay that is one DuckDB upsert round trip per replayed minute (~14 ms each, scaling with MINUTES
+    not symbols), so rows are batched to :data:`_BAR_WRITE_BATCH` and flushed at each day's end.
+    Durability mid-replay buys nothing (the scratch store is thrown away). The ``BarBuilder`` is
+    unaware of this harness-local adapter.
 
-    Every other store call passes through untouched, including ``amend_bar_1m_extremes``. That is
-    safe rather than lucky: the late-tick path that would read a not-yet-written bar is unreachable
-    under a sorted replay (see :class:`ReplayBroker`). Were it reachable, this adapter would have to
-    flush before delegating.
+    Every other store call passes through untouched, including ``amend_bar_1m_extremes``: the
+    late-tick path that would read a not-yet-written bar is unreachable under a sorted replay (see
+    :class:`ReplayBroker`); were it reachable, this adapter would have to flush before delegating.
     """
 
     def __init__(
@@ -513,12 +478,10 @@ class ReplayHarness:
         """The event-bus ``publish`` seam a replayed broker is constructed with.
 
         ``PaperBroker(publish=harness.publish)``. Every frame on the attached broker's topic
-        (default :data:`ORDER_UPDATE_TOPIC`) is recorded here — this collector is what the digest hashes and what ``ReplayReport.postbacks`` counts.
-        Frames on other topics are accepted and ignored: the harness asserts the ORDER path, and a
-        broker publishing something else must not crash a replay over it.
+        (default :data:`ORDER_UPDATE_TOPIC`) is recorded here: this collector is what the digest hashes
+        and ``ReplayReport.postbacks`` counts. Frames on other topics are ignored, not an error.
 
-        Synchronous and allocation-cheap by design: it is called from inside the broker's ``on_tick``,
-        i.e. on the hot path, once per order state change.
+        Synchronous and allocation-cheap: called from the broker's ``on_tick`` (hot path).
         """
         if topic == self._topic:
             self._frames.append(event)  # type: ignore[arg-type]
@@ -527,13 +490,12 @@ class ReplayHarness:
     def schedule(self, at: datetime, fn: Callable[[], Any]) -> None:
         """Run ``fn`` immediately before the first tick whose ``exchange_ts >= at`` is fed.
 
-        This is the ONLY sanctioned way to make something happen during a replay (fix round,
-        2026-09-10, module docstring property 7). ``fn`` is called synchronously on the event-loop
-        thread from inside the tick loop, with :attr:`clock` ALREADY advanced to that tick's
-        ``exchange_ts`` — so an order placed here is stamped with the instant the print arrived, not
-        with whatever the loop got round to. If ``fn`` returns an awaitable (``PaperBroker`` methods
-        are ``async``, and their bodies never suspend) it is awaited inline, before the tick is fed:
-        the action is complete before anything downstream sees the tick, whatever the awaitable does.
+        This is the ONLY sanctioned way to make something happen during a replay (module docstring
+        property 7). ``fn`` is called synchronously on the event-loop thread from inside the tick
+        loop, with :attr:`clock` ALREADY advanced to that tick's ``exchange_ts``, so an order placed
+        here is stamped with the instant the print arrived. If ``fn`` returns an awaitable
+        (``PaperBroker`` methods are ``async`` but never suspend) it is awaited inline, before the
+        tick is fed.
 
         The predicate is over the STREAM, which includes the pre-open and post-close prints the
         broker never sees — ``at`` earlier than 09:15 therefore fires against an auction print.
@@ -562,9 +524,8 @@ class ReplayHarness:
     async def _fire_due_actions(self, ts: datetime, index: int) -> None:
         """Fire every scripted action due at stream ordinal ``index`` / instant ``ts``.
 
-        Ordinal actions go first: an ``at_tick`` names one exact tick, while a ``schedule`` names
-        "at or after", so running the exact match first is the only ordering that does not depend on
-        which of the two forms happened to be registered first.
+        Ordinal actions go first (an exact tick vs "at or after"), the only ordering independent of
+        which form was registered first.
         """
         while self._indexed and self._indexed[0][0] <= index:
             _, _, fn = self._indexed.pop(0)
@@ -639,10 +600,8 @@ class ReplayHarness:
         self._frames = []
         self._stream_index = 0
         self._actions_fired = 0
-        # Snapshot the broker's book BEFORE the first tick (fix round, 2026-09-10). The
-        # postbacks-collected check is about orders THIS run produced; a second run() against the
-        # same broker inherits the first run's orderbook, and comparing the cumulative book against
-        # this run's (empty) frame list would fail a correctly-wired harness.
+        # Snapshot the broker's book BEFORE the first tick: the postbacks check is about orders THIS
+        # run produced, and a second run() against the same broker inherits the first run's book.
         book_at_start = await self._broker_book_size()
 
         ticks_read = pre_open = post_close = delivered = 0
@@ -712,16 +671,10 @@ class ReplayHarness:
     async def _assert_postbacks_collected(self, book_at_start: int | None) -> None:
         """Refuse a bars-only digest from a run that had a broker doing order work.
 
-        The check is "the broker's orderbook GREW during this run but nothing was published", which
-        is exactly the wiring bug: a broker constructed with someone else's ``publish``. A broker
-        that simply never received an order (the common case — v1 has no order origination) is
-        silent here, as it should be.
-
-        Growth, not emptiness (fix round, 2026-09-10). The predecessor compared the broker's
-        CUMULATIVE book against THIS run's frames, so a second ``run()`` on a broker that had
-        ordered in the first one raised even though the harness was wired correctly and this run
-        simply had no order work — a false positive that would have made the multi-run golden
-        assertion below impossible to write.
+        The check is "the broker's orderbook GREW during this run but nothing was published": a
+        broker constructed with someone else's ``publish``. A broker that never received an order is
+        silent here. Growth, not emptiness, so a second ``run()`` on a broker that ordered in the
+        first does not false-positive.
         """
         if self._broker is None or self._frames:
             return
@@ -741,11 +694,9 @@ class ReplayHarness:
     def _day_globs(self, day: date, symbols: tuple[str, ...] | None) -> list[str]:
         """Parquet globs for ``day``, narrowed to ``symbols`` when given.
 
-        Narrowing at the PATH level rather than with a SQL ``WHERE`` matters at archive scale: the
-        live dataset holds hundreds of thousands of per-flush fragments per day, and a symbol filter
-        that still opened all of them would pay the whole day's file-listing cost to throw most of it
-        away. Non-existent / empty partitions are dropped here because ``read_parquet`` raises on a
-        glob that matches nothing.
+        Narrowing at the PATH level, not a SQL ``WHERE``, matters at archive scale (hundreds of
+        thousands of per-flush fragments per day). Empty partitions are dropped because
+        ``read_parquet`` raises on a glob that matches nothing.
         """
         day_dir = self._parquet_root / "ticks" / f"date={day.isoformat()}"
         if not day_dir.is_dir():
@@ -762,9 +713,8 @@ class ReplayHarness:
     def _pool(self) -> ThreadPoolExecutor:
         """The harness's PRIVATE single-worker reader pool.
 
-        Single worker on purpose: a DuckDB connection is not safe to drive from several threads at
-        once, and with one worker every statement of a day's read happens on the same thread, so the
-        connection is never shared. Created lazily and released by :meth:`close`.
+        Single worker on purpose: a DuckDB connection is not safe to drive from several threads, and
+        one worker keeps every statement of a day's read on the same thread. Released by :meth:`close`.
         """
         if self._reader is None:
             self._reader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt-replay-read")
@@ -790,11 +740,9 @@ class ReplayHarness:
     ) -> Any:
         """Build the reader-thread body: ONE ordered query, consumed ``_FETCH_ROWS`` at a time.
 
-        The query is still a single ``read_parquet`` scan — DuckDB does the sort and the file
-        handling — but the ROWS cross into Python in bounded chunks, so nothing here is ever
-        proportional to the size of the day. An empty list is the end-of-stream sentinel; an
-        exception is forwarded as a value and re-raised on the loop thread, where it has a traceback
-        someone can read.
+        A single ``read_parquet`` scan (DuckDB sorts), with rows crossing into Python in bounded
+        chunks. An empty list is the end-of-stream sentinel; an exception is forwarded as a value and
+        re-raised on the loop thread.
         """
 
         def _read() -> None:
@@ -827,18 +775,13 @@ class ReplayHarness:
     def _to_ticks(rows: Sequence[tuple]) -> list[Tick]:
         """One fetched chunk → ``Tick`` models.
 
-        Built with ``Tick.model_construct`` (validation skipped). Measured on this box over a real
-        26,164-row symbol-day: ``model_construct`` 0.46 s vs full validation 0.43 s — i.e. the two
-        are within noise and speed is NOT the reason. The reason is that a replay must be able to
-        replay whatever the archive actually holds: a validation error on one recorded row would
-        abort the replay of exactly the day someone is investigating. The two invariants validation
-        would have enforced are re-established here directly — ``exchange_ts`` is normalised to
-        zoneinfo IST (DuckDB hands back a pytz ``Asia/Kolkata``; 0.035 s / 26 k rows), and every price
-        column is a native ``Decimal`` because the columns are ``DECIMAL`` in Parquet and the fetch
-        binds them as such. That last point is why this does NOT go through a pandas frame as first
-        sketched: ``duckdb`` `.df()` converts ``DECIMAL`` to ``float64`` (verified 2026-09-10 —
-        ``CAST(101.05 AS DECIMAL(12,2))`` came back ``np.float64``), which would put a float on every
-        price and break the money convention on the way in.
+        Built with ``Tick.model_construct`` (validation skipped; speed is NOT the reason): a replay
+        must replay whatever the archive holds, and a validation error on one recorded row would abort
+        the replay of exactly the day under investigation. The invariants validation would enforce
+        are re-established here: ``exchange_ts`` is normalised to zoneinfo IST (DuckDB hands back a
+        pytz ``Asia/Kolkata``), and every price is a native ``Decimal`` because the Parquet columns
+        are ``DECIMAL``. Never go through a pandas frame: ``duckdb`` ``.df()`` converts ``DECIMAL`` to
+        ``float64``, breaking the money convention.
         """
         build = Tick.model_construct
         return [
@@ -896,20 +839,14 @@ class ReplayHarness:
                 if not item:
                     break
                 read += len(item)
-                # ONE yield-slice converted at a time, not the whole fetch chunk: _to_ticks over
-                # _FETCH_ROWS rows is ~0.4 s of uninterruptible loop-thread work, so converting up
-                # front made _YIELD_EVERY_TICKS a fiction — the real bound on how long the loop was
-                # held was _FETCH_ROWS (fix round, 2026-09-10, module docstring property 3).
+                # ONE yield-slice converted at a time, not the whole fetch chunk (module docstring
+                # property 3): otherwise _FETCH_ROWS, not _YIELD_EVERY_TICKS, bounds the loop block.
                 for offset in range(0, len(item), _YIELD_EVERY_TICKS):
                     for tick in self._to_ticks(item[offset:offset + _YIELD_EVERY_TICKS]):
-                        # The clock advances BEFORE anything sees the tick — bar finalization, and
-                        # every consumer downstream of it, must observe the instant this print
-                        # arrived, never wall time.
+                        # The clock advances BEFORE anything sees the tick, and scripted actions run
+                        # here, before any consumer has seen it (property 7).
                         ts = tick.exchange_ts
                         self.clock.advance_to(ts)
-                        # …and scripted actions run here, with the clock already on this tick and
-                        # before any consumer has seen it: replay behaviour is a function of the
-                        # stream, never of when the OS scheduled a task (property 7).
                         if self._timed or self._indexed:
                             await self._fire_due_actions(ts, self._stream_index)
                         self._stream_index += 1
@@ -932,14 +869,12 @@ class ReplayHarness:
                             delivered += 1
                             if self._broker is not None:
                                 self._broker.on_tick(tick)
-                    # Cooperative yield: bus handlers, timers and anything else scheduled on this
-                    # loop run here. One chunk is the longest the harness ever blocks the loop.
+                    # Cooperative yield: bus handlers and timers run here.
                     await asyncio.sleep(0)
         finally:
             # An exception in the tick loop leaves the reader parked on a full queue; ``stop`` plus
-            # the bounded ``put`` timeout is what lets it notice and exit rather than stranding the
-            # executor's only worker for the life of the process. Joined here so the run never
-            # outlives its own reader thread.
+            # the bounded ``put`` timeout lets it exit instead of stranding the executor's only
+            # worker. Joined so the run never outlives its reader thread.
             stop.set()
             await reader
 

@@ -7,32 +7,26 @@ part that touches I/O:
   risk rule needs, already resolved. Because it holds no handles, :meth:`RiskGate.evaluate` is a pure
   function of ``(action, ctx)`` and the whole limit table is table-testable.
 - :class:`GateContextBuilder` — assembles that bag from DETERMINISTIC broker/exchange sources ONLY:
-  ``InstrumentStore`` (tick/lot, F&O flag), the ``universe_daily`` snapshot (eligibility and
-  its surveillance codes), ``sector_map``, ``earnings_calendar``, ``ExposureTracker``,
-  ``ModeManager`` (incl. the owner-set trade window), ``KillSwitch``, ``NSECalendar``, live LTP/feed-age callbacks and the
-  margins API. It is pinned that the media/origination tables (headline store, cluster store, aggregated
-  sentiment, the origination watchlist) are NOT readable from here — the ``catalyst_guard`` block
-  is stored in the protected table for governance but ENFORCED UPSTREAM in the deterministic
-  digest/pre-screen code, never inside this gate. A unit test greps this module's
-  source for those four table names precisely so the invariant cannot rot.
+  ``InstrumentStore``, the ``universe_daily`` snapshot, ``sector_map``, ``earnings_calendar``,
+  ``ExposureTracker``, ``ModeManager`` (incl. the owner-set trade window), ``KillSwitch``,
+  ``NSECalendar``, live LTP/feed-age callbacks and the margins API. The media/origination tables
+  (headline store, cluster store, aggregated sentiment, origination watchlist) are NOT readable from
+  here: ``catalyst_guard`` is stored in the protected table but ENFORCED UPSTREAM in the
+  digest/pre-screen code, never in this gate. A unit test greps this module's source for those four
+  table names.
 
 ``engine.risk`` imports NOTHING from ``engine.intelligence`` (AST-enforced by
 ``tests/unit/test_import_graph.py``): the action union and :class:`GateVerdict` come from
-``engine.core.contracts``. Everything the builder only type-hints is imported under
-``TYPE_CHECKING`` so importing the gate costs nothing beyond ``engine.core``, the OMS state
-vocabulary and the limit table.
+``engine.core.contracts``. Builder-only type hints sit under ``TYPE_CHECKING``.
 
 Verdict precedence (monotone table): ``reject`` > ``owner_approval_required`` > ``shrink`` >
 ``approve``. The gate may only ever SHRINK an entry — :meth:`RiskGate.evaluate` asserts
-``approved_qty <= original_qty`` as a code invariant, and a property test asserts it.
+``approved_qty <= original_qty``, and a property test asserts it.
 
-SIZING REFERENCE (2026-08-13): a LIMIT proposal's ``entry_price`` is a STATED price, and by
-the time the gate runs the market may have moved past it — sizing off it computes risk and notional
-from a price better than obtainable. :meth:`RiskGate._sizing_reference` is the ONE point where the
-price the sizing rules consume is chosen; see its docstring for the rule and for why the
-selection can only ever TIGHTEN a cap. The ``entry_sanity_band`` hard-reject is deliberately NOT
-routed through it — it band-checks the STATED entry against the live LTP, which is the whole point
-of that rule.
+SIZING REFERENCE: a LIMIT proposal's ``entry_price`` is a STATED price and the market may have moved
+past it. :meth:`RiskGate._sizing_reference` is the ONE point where the price the sizing rules consume
+is chosen (see its docstring: it can only ever TIGHTEN a cap). ``entry_sanity_band`` is deliberately
+NOT routed through it — it band-checks the STATED entry against the live LTP.
 """
 
 from __future__ import annotations
@@ -82,10 +76,10 @@ _log = get_logger("engine.risk.gate")
 
 Verdict = Literal["approve", "shrink", "reject", "owner_approval_required"]
 
-#: The two warm-up COVERAGE CLASSES an ENTER proposal can be judged on (2026-09-13). Spelled here rather than imported: Tier 2 never imports ``engine.ops`` — the warm-up
-#: status arrives duck-typed through ``warmup_status_fn``, exactly like the ``"regime:"`` blocker
-#: prefix :meth:`GateContextBuilder._regime_ready` has always matched on. Keep identical to
-#: ``engine.ops.warmup.CLASS_INTRADAY`` / ``CLASS_DAILY``.
+#: The two warm-up COVERAGE CLASSES an ENTER proposal can be judged on. Spelled here, not imported:
+#: Tier 2 never imports ``engine.ops``; the warm-up status arrives duck-typed through
+#: ``warmup_status_fn`` (like the ``"regime:"`` blocker prefix :meth:`GateContextBuilder._regime_ready`
+#: matches on). Keep identical to ``engine.ops.warmup.CLASS_INTRADAY`` / ``CLASS_DAILY``.
 WARMUP_CLASS_INTRADAY = "intraday"
 WARMUP_CLASS_DAILY = "daily"
 
@@ -163,43 +157,37 @@ SHRINKABLE_RULES: frozenset[str] = frozenset(
 #: ``strategy_expected_edge_pct``).
 _NO_TARGET = "no target_price — expected edge unverifiable"
 
-#: The narrow, deliberate exception to :data:`_NO_TARGET`, added 2026-08-17 for the ``ins`` leg.
+#: The narrow, deliberate exception to :data:`_NO_TARGET`, for the ``ins`` leg.
 #:
-#: The cost-gate check needs ONE number: the expected favourable move, as a percentage. For every strategy
-#: shipped before ``ins`` that number is derived from the proposal's own target — a target is the
-#: strategy's own statement of where it expects price to go, so deriving the edge from it is honest.
-#: ``ins`` has no target BY DESIGN: its exit is TIME (the 20-td swing cap = the validated T+20
-#: horizon), and the drift it captures was measured, not predicted. Inventing a target purely to feed
-#: this check would push a fabricated price into the gate's arithmetic and into the owner's payload —
-#: strictly worse than using the measured number directly.
+#: The cost-gate check needs ONE number: the expected favourable move, as a percentage. Normally it
+#: is derived from the proposal's own target. ``ins`` has no target BY DESIGN: its exit is TIME (the
+#: 20-td swing cap = the validated T+20 horizon) and its drift was measured, not predicted. Inventing
+#: a target to feed this check would push a fabricated price into the gate's arithmetic and the
+#: owner's payload.
 #:
-#: So a strategy MAY register a pre-measured expected edge, and it is used ONLY when the proposal has
-#: no target. Guard-rails that keep this from becoming a bypass:
+#: So a strategy MAY register a pre-measured expected edge, used ONLY when the proposal has no
+#: target. Guard-rails against it becoming a bypass:
 #:   * It is a per-strategy OWNER setting (``settings.yaml`` ``ins.expected_edge_pct``), never
 #:     learner-movable and never model-supplied — Tier 1 cannot hand itself an edge.
-#:   * It does not weaken the check: ``edge_multiple = edge / breakeven >= edge_multiple_min`` is
-#:     evaluated exactly as before, at the post-shrink size, against the same shipped cost surface.
-#:   * A strategy with NO registered edge and no target still hard-fails, unchanged.
+#:   * ``edge_multiple = edge / breakeven >= edge_multiple_min`` is evaluated exactly as before, at
+#:     the post-shrink size, against the same cost surface.
+#:   * A strategy with NO registered edge and no target still hard-fails.
 _NO_TARGET_MEASURED_EDGE = "no target_price — using the strategy's pre-registered measured edge"
 
 #: Sentinel for the SHADOW reject (cost gate): the strategy is registered in ``no_edge_shadow_strategies``,
 #: so the cost gate refuses it unconditionally — whatever ``target_price`` the proposal carries.
 #:
-#: WHY THIS EXISTS (2026-08-27, shipped with ``cat_reversal``). A shadow strategy accumulates a
-#: validation population and must reach RECOMMEND exactly never until its owner promotion gate. The
-#: mechanism relied on until now was INDIRECT: ship no ``expected_edge_pct``, and let the
-#: :data:`_NO_TARGET` branch below reject every candidate. That reasoning has a hole — the branch
-#: fires only when ``target_price is None``, but the ANALYST emits the ``EnterAction`` and the wire
-#: schema (``intelligence.schemas``) lets it supply a target; nothing between the candidate and this
-#: gate reconciles that field against the candidate's ``raw_levels.target``. An analyst that
-#: volunteers a target hands the cost gate a real edge basis and the shadow's defining property evaporates on a
-#: model whim.
+#: WHY: a shadow strategy accumulates a validation population and must never reach RECOMMEND before
+#: its owner promotion gate. Inferring that from "ship no ``expected_edge_pct``, let the
+#: :data:`_NO_TARGET` branch reject" has a hole: the branch fires only when ``target_price is None``,
+#: but the ANALYST emits the ``EnterAction`` and the wire schema (``intelligence.schemas``) lets it
+#: supply a target; nothing reconciles that against the candidate's ``raw_levels.target``. An analyst
+#: that volunteers a target would hand the cost gate a real edge basis and the shadow property would
+#: evaporate on a model whim.
 #:
-#: So the property is declared here instead of inferred: a registered id is rejected BEFORE the target
-#: is even read. It is Tier-2 owned, fails closed by construction, can only ever REJECT (it adds no
-#: path to approval), and no prompt, model output or upstream layer can bypass it. Promoting a
-#: strategy out of the shadow means removing it from this set at the owner promotion gate — a deliberate,
-#: reviewable edit, which is exactly the ceremony the promotion deserves.
+#: So the property is declared, not inferred: a registered id is rejected BEFORE the target is read.
+#: It is Tier-2 owned, fails closed, can only ever REJECT, and no prompt, model output or upstream
+#: layer can bypass it. Promotion means removing the id from this set at the owner promotion gate.
 _SHADOW_NO_EDGE = "shadow strategy — no validated edge exists; the cost gate cannot be satisfied at any target"
 
 _HUNDRED = Decimal(100)
@@ -304,7 +292,7 @@ class GateContext(BaseModel):
     #: Symbols of OPEN positions the platform has already told the owner to SELL (an exit
     #: recommendation delivered within :data:`_EXITING_LOOKBACK_DAYS`) — EXCLUDED from
     #: ``open_total``/``open_mis``/``open_cnc`` and ``open_sector_counts`` by the builder
-    #: (owner-directed 2026-09-07). Still members of ``open_symbols`` (one position per symbol).
+    #: (owner decision). Still members of ``open_symbols`` (one position per symbol).
     exiting_symbols: frozenset[str] = frozenset()
     open_symbols: frozenset[str] = frozenset()
     pending_rec_symbols: frozenset[str] = frozenset()   # unexpired, unconfirmed entry recs
@@ -333,12 +321,11 @@ class GateContext(BaseModel):
     is_nifty50: bool = False
 
     # -- readiness gates (fail-closed defaults) --------------------------------------------
-    #: ``warmup_ready`` is answered for the candidate's own COVERAGE CLASS since 2026-09-13
-    #: (``intraday`` style ⇒ today's 1-minute bars; every other style ⇒ completed daily sessions),
-    #: exactly as ``regime_ready`` has always been its own class. ``warmup_class`` records WHICH
-    #: class the builder judged, so the ledger can name it and an enter proposal evaluated against a
-    #: context built for the other class fails closed instead of reading the wrong answer. ``None`` =
-    #: unclassified (a hand-built or pre-2026-09-13 context) ⇒ the flat answer, no class check.
+    #: ``warmup_ready`` is answered for the candidate's own COVERAGE CLASS (``intraday`` style ⇒
+    #: today's 1-minute bars; every other style ⇒ completed daily sessions). ``warmup_class`` records
+    #: WHICH class the builder judged, so an enter proposal evaluated against a context built for the
+    #: other class fails closed. ``None`` = unclassified (hand-built context) ⇒ the flat answer, no
+    #: class check.
     warmup_ready: bool = False
     warmup_class: str | None = None
     regime_ready: bool = False
@@ -404,13 +391,11 @@ class RiskGate:
     ) -> None:
         """``strategy_expected_edge_pct`` maps ``strategy_id`` -> a pre-registered, owner-set expected
         edge in percent, consumed by ``min_viable_size`` ONLY for a proposal with no ``target_price``
-        (see :data:`_NO_TARGET_MEASURED_EDGE`). Unset ⇒ the pre-2026-08-17 behaviour exactly: a
-        targetless entry is a hard cost-gate reject.
+        (see :data:`_NO_TARGET_MEASURED_EDGE`). Unset ⇒ a targetless entry is a hard cost-gate reject.
 
         ``no_edge_shadow_strategies`` lists ``strategy_id``s in SHADOW mode: the cost gate rejects them
-        unconditionally, whatever target the proposal carries (see :data:`_SHADOW_NO_EDGE`). Unset ⇒
-        behaviour is byte-identical to before this parameter existed. An id in BOTH mappings is a
-        deployment defect and the shadow wins — refusing is the safe reading of a contradiction."""
+        unconditionally, whatever target the proposal carries (see :data:`_SHADOW_NO_EDGE`). An id in
+        BOTH mappings is a deployment defect and the shadow wins — refusing is the safe reading."""
         self._limits = limits_engine
         self._costs = cost_model
         self._clock = clock
@@ -512,7 +497,7 @@ class RiskGate:
         else:
             verdict = "approve"
 
-        # The gate NEVER enlarges. Code invariant; A property test also asserts it.
+        # The gate NEVER enlarges (a property test also asserts it).
         assert approved <= qty, "RiskGate must never enlarge a proposal"    # noqa: S101
 
         return self._verdict(
@@ -594,10 +579,10 @@ class RiskGate:
     def _rule_levels_coherent(
         self, led: _Ledger, action: EnterAction, entry_ref: Decimal | None
     ) -> None:
-        """Stop/target must agree with ``action.side`` (2026-07-28 review: the edge/risk math infers
-        direction from ``stop < entry``, so a BUY with the stop ABOVE entry was silently scored as a
-        healthy short — and its 'protective' SL-M would sit above the market). BUY: stop < entry <
-        target; SELL mirrored. With no usable entry reference, orientation of stop vs target alone."""
+        """Stop/target must agree with ``action.side``: the edge/risk math infers direction from
+        ``stop < entry``, so a BUY with the stop ABOVE entry would score as a healthy short and its
+        'protective' SL-M would sit above the market. BUY: stop < entry < target; SELL mirrored. With
+        no usable entry reference, orientation of stop vs target alone."""
         long_side = action.side == "BUY"
         stop, target = action.stop_price, action.target_price
         problems: list[str] = []
@@ -726,10 +711,9 @@ class RiskGate:
             led.add("capital_cap", False, "unpriceable (no entry reference)",
                     f"deployed <= {_q(cap)}", "fail closed", shrinkable=True)
             return
-        # RECOMMEND mode charges MIS at FULL notional on BOTH sides of the inequality — matching
-        # ExposureTracker.deployed_capital(), which has no per-stock leverage until the order machinery exists
-        # (2026-07-28 review: charging the NEW leg at notional/3 against open legs at 1x notional
-        # made one MIS fill consume the whole cap). Conservative: never under-charges deployment.
+        # MIS is charged at FULL notional on BOTH sides of the inequality, matching
+        # ExposureTracker.deployed_capital() (a mixed basis would make one MIS fill consume the
+        # whole cap). Conservative: never under-charges deployment.
         per_unit = notional_ref                      # notional basis (see _sizing_reference)
         qty_max = _floor_div(headroom, per_unit)
         led.cap("capital_cap", qty_max)
@@ -939,10 +923,9 @@ class RiskGate:
         )
 
     def _rule_readiness(self, led: _Ledger, ctx: GateContext, intraday: bool) -> None:
-        # Per-CLASS since 2026-09-13: an intraday proposal is judged on the
-        # intraday minute-bar coverage, a swing/position one on the completed daily sessions. A
-        # context built for the OTHER class cannot answer this proposal's question, so it fails
-        # closed rather than borrowing the answer (the class the builder judged is pinned in ctx).
+        # Per-CLASS: an intraday proposal is judged on intraday minute-bar coverage, a swing/position
+        # one on completed daily sessions. A context built for the OTHER class fails closed rather
+        # than lending its answer.
         want = WARMUP_CLASS_INTRADAY if intraday else WARMUP_CLASS_DAILY
         matched = ctx.warmup_class is None or ctx.warmup_class == want
         warm = ctx.warmup_ready and matched
@@ -1045,15 +1028,14 @@ class RiskGate:
         be filled at, not the one the stated entry advertises."""
         need = self._costs.edge_multiple_min
         limit = f"expected edge >= {need} x breakeven"
-        # SHADOW strategies are refused FIRST and unconditionally — before target_price is read at
-        # all, so an analyst-supplied target cannot buy one an edge basis (:data:`_SHADOW_NO_EDGE`).
-        # This is the property that keeps a shadow's signals a measurement and never a recommendation.
+        # SHADOW strategies are refused FIRST and unconditionally — before target_price is read, so
+        # an analyst-supplied target cannot buy one an edge basis (:data:`_SHADOW_NO_EDGE`).
         if action.strategy_id in self._shadow_no_edge:
             led.add("min_viable_size", False, _SHADOW_NO_EDGE, limit,
                     "shadow mode: origination is journalled for validation, never recommended")
             return None
         # A targetless proposal is a hard reject UNLESS its strategy registered a measured edge
-        # (`ins`, 2026-08-17 — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
+        # (`ins` — see _NO_TARGET_MEASURED_EDGE for why and for the guard-rails).
         measured_edge = self._strategy_edge.get(action.strategy_id)
         if action.target_price is None and (measured_edge is None or measured_edge <= 0):
             led.add("min_viable_size", False, _NO_TARGET, limit,
@@ -1218,12 +1200,11 @@ class RiskGate:
 
 
 # --------------------------------------------------------------------------- context assembly
-#: Owner decision 2026-09-07: an OPEN position with an exit recommendation delivered within
-#: this many calendar days is EXITING. Calendar days rather than sessions so a Friday exit still
-#: counts on Monday; the position review re-issues an exit once per session while a stop stays
-#: breached (one per session since 2026-09-12), so a genuinely exiting position never ages
-#: out of the window while it is still open. A position the broker no longer holds produces no exit
-#: at all and is excluded on the holdings journal instead — see :func:`_gone_symbols`.
+#: Owner decision: an OPEN position with an exit recommendation delivered within this many calendar
+#: days is EXITING. Calendar days, not sessions, so a Friday exit still counts on Monday; the
+#: position review re-issues an exit once per session while a stop stays breached, so a genuinely
+#: exiting position never ages out while open. A position the broker no longer holds produces no
+#: exit and is excluded on the holdings journal instead — see :func:`_gone_symbols`.
 _EXITING_LOOKBACK_DAYS = 3
 
 
@@ -1231,13 +1212,11 @@ def _gone_symbols(positions: Sequence[Mapping[str, Any]], missing_ids: Collectio
     """Open symbols whose position the BROKER has shown empty on two consecutive sessions.
 
     The holdings journal (``positions_missing_from_holdings(..., require_zero=True)``) says the
-    owner sold these outside the ledger; the position-event path therefore stops recommending an
-    exit from them, and without an exit recommendation :func:`_exiting_symbols` would drop them
-    after three calendar days — putting a position that does not exist back on the position
-    and sector counts, the exit-pending shape with the sign reversed (caps tighter, not looser). Excluding
-    them on the journal itself keeps the counts honest until the owner's ``/closed`` ends the row.
-    Same scope as EXITING: counts only — the symbol still blocks a fresh BUY on itself (the ledger
-    row is OPEN until the owner says otherwise) and deployed cash is untouched.
+    owner sold these outside the ledger, so no exit is recommended and :func:`_exiting_symbols`
+    would age them out, putting a position that does not exist back on the position and sector
+    counts (caps tighter, not looser). Excluding them keeps the counts honest until the owner's
+    ``/closed`` ends the row. Same scope as EXITING: counts only — the symbol still blocks a fresh
+    BUY on itself and deployed cash is untouched.
     """
     ids = set(missing_ids)
     if not ids:
@@ -1252,13 +1231,10 @@ def _exiting_symbols(
 ) -> frozenset[str]:
     """Open symbols the platform has already told the owner to SELL.
 
-    "Keep sell recommendations separate from the buy limits": until 2026-09-07 a position the
-    platform had recommended exiting kept occupying a position-count and a sector slot until the
-    owner actually sold — two through-the-stop CNC positions with 39 expired exit recommendations
-    held the book at 2/2 for eleven sessions and every swing entry was refused for capacity. A
-    delivered exit recommendation is the platform's own record that the position is no longer
-    wanted; from then on it holds no slot against a new BUY. It still blocks a new entry on its own
-    symbol and still counts as deployed cash — only the counts are relaxed.
+    Sell recommendations are kept separate from the buy limits: a delivered exit recommendation is
+    the platform's own record that the position is no longer wanted, so it holds no position-count
+    or sector slot against a new BUY. It still blocks a new entry on its own symbol and still counts
+    as deployed cash — only the counts are relaxed.
     """
     out: set[str] = set()
     for row in rec_rows:
@@ -1310,12 +1286,10 @@ def _active_counts(
 
 def _co_movement_peers(symbol: str, held: frozenset[str], sector_of: Mapping[str, str]) -> frozenset[str]:
     """The held and pending symbols the co-movement cap correlates ``symbol`` against: those of its own
-    sector, and every one when either sector is unknown (owner 2026-11-05).
+    sector, and every one when either sector is unknown (owner decision).
 
-    Across 2023-2026 a 20d correlation above 0.7 between two sectors mostly did not last (next 20
-    sessions: median 0.38, 10% still above 0.7; within a sector 0.53 and 24%), and the market did not
-    explain the pairs it blocked (TIPSMUSIC-SYNGENE kept 0.65-0.71 with the index taken out). An
-    unclassified symbol is not evidence of an unrelated one, so it keeps the pair.
+    Cross-sector 20d correlation above 0.7 mostly does not persist, so only same-sector pairs bind;
+    an unclassified symbol is not evidence of an unrelated one, so it keeps the pair.
     """
     own = sector_of.get(symbol, _UNCLASSIFIED)
     return frozenset(
@@ -1333,12 +1307,10 @@ _EXCL_CAP_ONLY = ["watchlist_cap"]
 
 def _eligible_universe_row(rows: Sequence[Mapping[str, Any]], symbol: str) -> dict[str, Any] | None:
     """``symbol``'s ``universe_daily`` row iff it is in the ELIGIBLE set: ``included`` (the tick
-    watchlist) OR excluded for ``watchlist_cap`` alone (owner decision 2026-09-04).
+    watchlist) OR excluded for ``watchlist_cap`` alone (owner decision).
 
-    Until the owner's NIFTY 500 widening the gate read ``included_only`` rows, which equalled the eligible set only because the
-    200 cap did not bind on a 200-name index. With NIFTY 500 eligible at ~350–450 names, that shortcut
-    would have rejected every swing candidate from the capped tail as out-of-universe and made the
-    widening a no-op. The cap governs ticks; the RECOMMEND boundary is the eligible set by definition.
+    The cap governs ticks; the RECOMMEND boundary is the eligible set by definition, so ``included``
+    alone would reject every swing candidate from the capped tail as out-of-universe.
     Extended-leg rows (``not_in_index`` / legacy ``not_nifty200``) and rows carrying any
     real exclusion stay out — the gate approves nothing the rule did not pass.
     """
@@ -1386,8 +1358,8 @@ class GateContextBuilder:
     warmup_status_fn:
         Returns a :class:`~engine.ops.warmup.WarmupStatus`; duck-typed to avoid importing the
         composition root from Tier 2. Read per COVERAGE CLASS **and per SYMBOL** through its
-        ``ready_for(cls, symbol)`` (2026-09-13 / 2026-09-17), with the flat ``ready`` as the fallback
-        for a status that has none. Unwired ⇒ not ready (fail closed).
+        ``ready_for(cls, symbol)``, with the flat ``ready`` as the fallback for a status that has
+        none. Unwired ⇒ not ready (fail closed).
     clock_skew_ok_fn:
         Unwired ⇒ ``False`` — an unverifiable clock is never treated as "skew is fine".
     conn:
@@ -1449,9 +1421,8 @@ class GateContextBuilder:
         self._conn = conn if conn is not None else getattr(exposure, "_conn", None)
         self._nifty50_fn = nifty50_fn
         self._expiry_day_fn = expiry_day_fn
-        # 2026-09-12: position ids the holdings journal shows EMPTY on two consecutive
-        # sessions. Injected rather than imported — the risk layer does not import engine.ops — and
-        # unwired ⇒ nothing is ever "gone", which is the behaviour from before this seam existed.
+        # Position ids the holdings journal shows EMPTY on two consecutive sessions. Injected, not
+        # imported (the risk layer does not import engine.ops); unwired ⇒ nothing is ever "gone".
         self._missing_holdings_fn = missing_holdings_fn
         self._index_symbol = index_symbol
         self._corr_n = int(corr_lookback_sessions)
@@ -1464,11 +1435,10 @@ class GateContextBuilder:
         facts and the per-side/per-style branches (MIS vs CNC caps, windows, leverage) live in the
         RULES, so one context can be evaluated against any proposal for that symbol.
 
-        ``style`` is the ONE exception since 2026-09-13: warm-up coverage is answered per class, so an intraday candidate is judged on today's 1-minute coverage and a
-        swing/position one on the completed daily sessions — and since 2026-09-17 the answer is
-        narrowed further to this ``symbol``, so one symbol's hole never refuses the rest of its
-        class. The class judged is pinned into the context (``warmup_class``) — a context is still a
-        bag of facts, but this fact now says which question it answered.
+        ``style`` is the ONE exception: warm-up coverage is answered per class (intraday ⇒ today's
+        1-minute coverage; swing/position ⇒ completed daily sessions) and narrowed to this ``symbol``,
+        so one symbol's hole never refuses the rest of its class. The class judged is pinned into the
+        context (``warmup_class``).
         """
         del side                 # documented above: assembly is side-agnostic
         real = self._scope == "real"
@@ -1490,10 +1460,8 @@ class GateContextBuilder:
         pending = self._pending_entry_rec_symbols(now) if real else self._paper_pending_entry_symbols()
         orders = self._orders()
 
-        # Un-actioned recommendations occupy concentration room too (2026-07-28 review: in RECOMMEND
-        # no position exists until /taken, so sector/correlation caps never bound while the sibling
-        # position-count rules already charged pending recs). Sector: each pending symbol counts in
-        # its sector. Correlation: the candidate is compared against pending symbols as well.
+        # Un-actioned recommendations occupy concentration room too (no position exists until
+        # /taken): each pending symbol counts in its sector, and correlation is checked against them.
         sector_counts: dict[str, int] = dict(self._exposure.per_sector_open(sector_of))
         for pending_symbol in pending:
             if pending_symbol == symbol:
@@ -1502,13 +1470,10 @@ class GateContextBuilder:
             sector_counts[sector] = sector_counts.get(sector, 0) + 1
 
         if real:
-            # Owner decision 2026-09-07: positions already recommended for EXIT hold no position-count or
-            # sector slot against a new BUY — see _exiting_symbols. open_symbols keeps them (one
-            # position per symbol) and deployed_capital keeps them (real cash).
+            # Positions already recommended for EXIT hold no position-count or sector slot against a
+            # new BUY (_exiting_symbols); open_symbols and deployed_capital keep them.
             exiting = _exiting_symbols(self._recommendations(), open_symbols, now)
-            # 2026-09-12: a position the broker has shown EMPTY on two consecutive sessions gets
-            # no exit recommendation any more, so it would age out of the window above and re-take a
-            # slot — it is excluded on the holdings journal instead (see _gone_symbols). A failing
+            # Broker-empty positions are excluded on the holdings journal (_gone_symbols). A failing
             # journal read excludes nothing: the conservative direction for a count is to keep it.
             exiting = exiting | _gone_symbols(positions, self._missing_holdings())
         else:
@@ -1695,11 +1660,10 @@ class GateContextBuilder:
 
     # ------------------------------------------------------------------ readiness seams
     def _warmup_ready(self, style: str, symbol: str) -> bool:
-        """Warm-up readiness for the candidate's COVERAGE CLASS (2026-09-13) **and SYMBOL**
-        (2026-09-17): one symbol's coverage hole refuses that symbol's candidates, never the whole
-        class's — PTCIL's tradeless 13:36 on 2026-09-16 refused every intraday candidate in the book
-        until the close. A status without ``ready_for`` (a fake, an older snapshot) falls back to the
-        flat ``ready`` — the pre-2026-09-13 answer, never looser than the per-class one."""
+        """Warm-up readiness for the candidate's COVERAGE CLASS **and SYMBOL**: one symbol's coverage
+        hole refuses that symbol's candidates, never the whole class's. A status without ``ready_for``
+        (a fake, an older snapshot) falls back to the flat ``ready``, never looser than the per-class
+        answer."""
         if self._warmup_status_fn is None:
             return False
         status = self._warmup_status_fn()

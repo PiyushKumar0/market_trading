@@ -77,7 +77,7 @@ def _fixed(value: Decimal) -> Callable[[], Decimal]:
 
 def snapshot_pnl(row: sqlite3.Row | Mapping[str, Any]) -> Decimal | None:
     """An equity-snapshot row's P&L, ``realized_pnl + open_mtm``; None when either column is NULL or
-    empty (a row from before the dashboard capital change). Every reader then falls back to ``equity − base`` its own way."""
+    empty (a legacy row). Every reader then falls back to ``equity − base`` its own way."""
     realized, open_mtm = row["realized_pnl"], row["open_mtm"]
     if realized is None or realized == "" or open_mtm is None or open_mtm == "":
         return None
@@ -157,7 +157,7 @@ class FloorBreach(BaseModel):
 class ExposureTracker:
     """Platform equity + day-scoped risk counters, rebuilt from SQLite on every call.
 
-    ``scope="paper"`` reads the paper book instead : paper rows of the current epoch, a
+    ``scope="paper"`` reads the paper book instead: paper rows of the current epoch, a
     ``PENDING_EXIT`` position still held, ``paper_equity_snapshots``, and ``void`` closes skipped by
     the loss streak. It never applies a halt — ``apply_*`` raise, because paper must never write
     the real mode, kill or cause state.
@@ -282,7 +282,7 @@ class ExposureTracker:
 
     def _row_pnl(self, row: sqlite3.Row) -> Decimal:
         """A snapshot row's P&L (:func:`snapshot_pnl`). A NULL or empty column falls back to
-        ``equity − current base``, which reproduces the equity read from before the dashboard capital change for that row."""
+        ``equity − current base``."""
         pnl = snapshot_pnl(row)
         return _dec(row["equity"]) - self.capital_base if pnl is None else pnl
 
@@ -412,9 +412,8 @@ class ExposureTracker:
     def deployed_capital(self) -> Decimal:
         """Deployed capital against `capital_cap.max_deployed_capital_inr`.
 
-        CNC is cash/notional. MIS is *margin* — but leverage lands with paper AUTO, so RECOMMEND mode charges MIS
-        at full notional: conservative (never under-reports deployment), and the cap only tightens
-        when the real margin divisor arrives.
+        CNC is cash/notional. MIS is *margin*, but is charged at full notional here: conservative
+        (never under-reports deployment).
         """
         total = Decimal(0)
         for row in self._open_rows():
@@ -532,8 +531,7 @@ class ExposureTracker:
 
     def evaluate_day_loss(self, soft_pct: Decimal, hard_pct: Decimal, d: date | None = None) -> list[str]:
         """Daily-loss rungs on the CAPITAL BASE (thresholds are negative percents, e.g. −5.0):
-        returns the tripped rung names, hard first. 2026-07-28 review: `daily_loss_hard` had no
-        enforcement locus at all — the equity floor ladder only covers the equity/weekly rungs."""
+        returns the tripped rung names, hard first. The equity floor ladder does not cover these."""
         d = d or self._clock.today()
         pct = self.day_mtm(d) / self.capital_base * Decimal(100)
         rungs: list[str] = []
@@ -605,7 +603,7 @@ class ExposureTracker:
                 else:
                     await self._escalate(mode_manager, RiskState.CLOSE_ONLY, reason)
                 await mode_manager.force_downgrade(Mode.RECOMMEND, breach.rung)
-                # The paper-AUTO order machinery wires the real exit-all here; RECOMMEND mode runs alert-only when unwired.
+                # Alert-only when no flatten callback is wired.
                 if breach.action == "forced_exit_close_only" and flatten is not None:
                     await flatten()
             _log.critical("floor_breach_applied", rung=breach.rung, equity=str(breach.equity),

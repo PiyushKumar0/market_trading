@@ -160,10 +160,9 @@ class RiskStateLatch:
             resolved=resolved.value,
             actor=who.value,
         )
-        # Defense-in-depth (2026-07-28 review): clearing a cause that was NOT active must never RELAX
-        # a state some out-of-ledger writer set (e.g. a freeze from a latch-less code path) — the
-        # historical failure was /resume_entries re-arming NORMAL over a token-rejected freeze. When
-        # the cause WAS active, the ledger owned the state and the resolve-write is authoritative.
+        # Clearing a cause that was NOT active must never RELAX a state an out-of-ledger writer set
+        # (e.g. /resume_entries over a token-rejected freeze). When the cause WAS active, the
+        # ledger owned the state and the resolve-write is authoritative.
         current = self._mode.risk_state()
         if not was_active and _RISK_RANK[current] > _RISK_RANK[resolved]:
             _log.warning("risk_cause_clear_preserved_state", cause=cause, state=current.value,

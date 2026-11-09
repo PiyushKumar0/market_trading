@@ -1,89 +1,69 @@
 """PaperBroker v1 — a conservative, deterministic simulation of the Kite order surface.
 
-Added 2026-09-10.
-
 ``PaperBroker`` implements :class:`~engine.paper.surface.BrokerSurface`, so the OMS routes to it or
-to :class:`~engine.broker.kite_client.KiteClient` without knowing which (``routing`` flag).
-Since the paper autopilot (2026-10-08) the RECOMMEND pipeline's paper branch routes to it through
-the OrderManager; no method can place a real broker order and the module imports nothing from
-``engine.broker``, so the zero-API-orders constraint is untouched.
+to :class:`~engine.broker.kite_client.KiteClient` without knowing which (``routing`` flag). No method
+can place a real broker order and the module imports nothing from ``engine.broker``.
 
-Design rules, all of them load-bearing:
+Design rules, all load-bearing:
 
 * **Postbacks are the ONLY output.** Every state change publishes exactly one
   :class:`~engine.core.contracts.OrderUpdateFrame` on the broker's ``topic`` (production:
   ``PAPER_ORDER_UPDATE_TOPIC``, never the real ``order.update``) with a Kite-shaped ``data`` dict —
   the same field names the mt-ticker child forwards for live orders, so live and paper share ONE
-  OMS parser. The frame and topic live in
-  ``engine.core.contracts`` precisely because two brokers emit them; this module imports nothing
-  from ``engine.broker`` (the paper tier depends on ``core`` alone, enforced by
-  ``tests/unit/test_import_graph.py``). Price fields are :class:`~decimal.Decimal` rather than the
-  float a real Kite postback carries; the OMS parser coerces with ``Decimal(str(v))`` either way,
-  so Decimal is lossless where a float would not be.
-* **Conservative fills, never optimistic ones**. A market order waits out the simulated
-  latency and pays half-spread + k·σ₁ₘ; a limit order needs a strict TRADE-THROUGH, and is classed
-  once, on its first eligible tick: through on that tick it is MARKETABLE and fills like a market
-  order capped at its limit, otherwise it RESTS and fills at its limit, never at the better traded
-  price; an SL-M fills at the print it triggered on, which
-  is what makes a gap through a stop cost more than the stop distance; every order gets a
-  ``participation_cap`` share of each MINUTE's volume — a budget per (order, minute), not per tick
-  (fix round 2026-09-10: applied per tick it was unbounded per minute, and a probe measured single
-  orders taking 101–130 % of a minute's tape); and prices are rounded to the tick AGAINST the taker.
-* **Session-bounded like the real thing.** Resting DAY orders LAPSE at the session roll — Kite
-  cancels every unfilled DAY order at the close, so a paper limit must never fill on the next
-  session's open print (fix round 2026-09-10). GTTs do NOT lapse: a Kite GTT is good-till-triggered
-  (a year), which is exactly why protection is parked in one overnight.
-* **Deterministic under replay**. The only randomness is injected rejections, drawn from a
-  seeded :class:`random.Random`; one draw happens on EVERY ``place_order`` regardless of the branch
-  taken, so the rejection sequence depends on the order count alone, never on timing or config.
-  Order ids and GTT ids are monotonic counters, not uuids.
-* **No async work inside ``on_tick``, and nothing escapes it.** Market data arrives on the hot path;
-  ``on_tick``/``on_bar`` are cheap, synchronous, and publish through the
-  injected ``publish`` callable (``EventBus.publish`` is fire-and-forget). An exception raised there
-  would take down the feed for every symbol, so ALL THREE loops inside it carry a
-  log-once-and-continue guard (rounds 3–4, 2026-09-10): the **session-lapse sweep**, whose failure
-  is the worst of the three because it runs broker-wide on a session's first tick and would strand
-  every symbol after the raiser; the **match loop**, where an order whose match raises is terminated
-  with one postback (:meth:`PaperBroker._reject_internal`); and the **GTT loop**, where a leg that
-  cannot be booked latches the GTT to ``"failed"``. Everything the per-order body touches —
-  ``tick_size``, ``publish``, the fill model — is injected, so "it cannot raise" was never a property
-  this module could assert on its own. ``publish`` is the injected callable EVERY one of those paths
-  ends in, so all of them emit through the single :meth:`PaperBroker._publish_guarded` helper, and
-  always AFTER the book change is applied: a lost postback is a gap the reconciler's orderbook
-  re-read closes, whereas a state change unwound by a failed notification is a lie the OMS
-  cannot detect (round-4 fix). The caller-facing paths (``place_order``/``modify_order``/
-  ``cancel_order``) publish UNguarded — there the caller is awaiting an answer and can be told.
-* **``engine.core`` and nothing else.** This module's entire engine dependency is
-  ``engine.core.contracts`` / ``engine.core.log`` (plus ``engine.paper`` siblings); the market-data
-  and live-broker packages are both out. ``tests/unit/test_import_graph.py`` asserts it
-  per module — ``engine.paper.replay`` is the one module allowed ``engine.marketdata`` on top, and
-  that allowance stops there.
+  OMS parser. Price fields are :class:`~decimal.Decimal` (the OMS coerces with ``Decimal(str(v))``
+  either way).
+* **Conservative fills, never optimistic ones.** A market order waits out the simulated latency and
+  pays half-spread + k·σ₁ₘ; a limit order needs a strict TRADE-THROUGH and is classed once, on its
+  first eligible tick: through on that tick it is MARKETABLE and fills like a market order capped at
+  its limit, otherwise it RESTS and fills at its limit, never at the better traded price; an SL-M
+  fills at the print it triggered on (a gap through a stop costs more than the stop distance); every
+  order gets a ``participation_cap`` share of each MINUTE's volume — a budget per (order, minute),
+  not per tick (per tick it is unbounded per minute); prices are rounded to the tick AGAINST the
+  taker.
+* **Session-bounded like the real thing.** Resting DAY orders LAPSE at the session roll (Kite
+  cancels unfilled DAY orders at the close), so a paper limit never fills on the next session's open
+  print. GTTs do NOT lapse (good-till-triggered), which is why protection is parked in one overnight.
+* **Deterministic under replay.** The only randomness is injected rejections from a seeded
+  :class:`random.Random`; one draw happens on EVERY ``place_order`` regardless of branch, so the
+  rejection sequence depends on the order count alone. Order and GTT ids are monotonic counters.
+* **No async work inside ``on_tick``, and nothing escapes it.** ``on_tick``/``on_bar`` are cheap,
+  synchronous, and publish through the injected ``publish`` (``EventBus.publish`` is
+  fire-and-forget). An exception there would take down the feed for every symbol, so ALL THREE
+  loops carry a log-once-and-continue guard: the **session-lapse sweep** (broker-wide on a
+  session's first tick; a raise would strand every symbol after it), the **match loop** (an order
+  whose match raises is terminated with one postback, :meth:`PaperBroker._reject_internal`), and the
+  **GTT loop** (a leg that cannot be booked latches the GTT to ``"failed"``). Everything the
+  per-order body touches (``tick_size``, ``publish``, the fill model) is injected, so "cannot raise"
+  is not assertable here. Every path emits through :meth:`PaperBroker._publish_guarded`, always
+  AFTER the book change is applied: a lost postback is a gap the reconciler's orderbook re-read
+  closes, a state change unwound by a failed notification is a lie the OMS cannot detect. The
+  caller-facing paths (``place_order``/``modify_order``/``cancel_order``) publish UNguarded — the
+  caller is awaiting an answer.
+* **``engine.core`` and nothing else** (``engine.core.contracts`` / ``engine.core.log`` plus
+  ``engine.paper`` siblings), asserted per module by ``tests/unit/test_import_graph.py``;
+  ``engine.paper.replay`` alone may also import ``engine.marketdata``.
 
-**Known v1 simplifications** (documented rather than hidden, and all in the conservative direction):
-only ``variety="regular"`` and order types MARKET / LIMIT / SL-M are accepted — SL (limit-after-
-trigger), CO, AMO and iceberg are REJECTED rather than approximated; a GTT fire is not subject to
-injected rejection (the fired-but-rejected handling lands with the paper ProtectionManager,
-engine.oms.protection); margins are
-a static stub, not a real span/exposure calculation (margin pre-checks live in the OMS).
+**Known v1 simplifications** (all in the conservative direction): only ``variety="regular"`` and
+order types MARKET / LIMIT / SL-M are accepted — SL, CO, AMO and iceberg are REJECTED rather than
+approximated; a GTT fire is not subject to injected rejection; margins are a static stub (margin
+pre-checks live in the OMS).
 
 Two more, each with a consumer that has to know:
 
 * **GTT status ``"failed"`` is PAPER-ONLY.** Kite's vocabulary is ``active`` / ``triggered`` /
   ``disabled`` / ``expired`` / ``deleted``; ``"failed"`` is this broker's terminal status for a
-  trigger that fired and could not book its leg (see :class:`_Gtt` and :meth:`PaperBroker.gtts`).
-  the paper ProtectionManager (engine.oms.protection) maps it to a PROTECTION_FAILED reason; live Kite simply never produces it,
-  which is why it can be added without colliding.
+  trigger that fired and could not book its leg (see :class:`_Gtt`, :meth:`PaperBroker.gtts`). The
+  paper ProtectionManager (engine.oms.protection) maps it to a PROTECTION_FAILED reason.
 * **A cumulative-volume re-baseline blacks the symbol out for the rest of the session.** The
-  participation base is measured from a HIGH-WATER cumulative, so a counter that restates
-  downward and never climbs back over the mark offers zero available volume on every remaining tick
-  — the symbol simply stops filling until the session roll clears the baseline. Deliberate and
-  conservative, and the same outcome ``engine.marketdata.bar_builder`` produces from the same rule;
-  see :meth:`PaperBroker._effective_volume` branch 0.
+  participation base is measured from a HIGH-WATER cumulative, so a counter that restates downward
+  and never climbs back over the mark offers zero available volume on every remaining tick until
+  the session roll clears the baseline. Deliberate and conservative, and the same outcome as
+  ``engine.marketdata.bar_builder``; see :meth:`PaperBroker._effective_volume` branch 0.
 
 **Kite semantics deliberately NOT simplified**, because a downstream decision reads them: a cancel
-of an SL-M whose trigger has already crossed RAISES rather than succeeding — the order has left the
-trigger book — and the square-off coordination reads that refusal as "the stop is going to
-fill, do not send a second exit". Only the error text differs from live Kite's.
+of an SL-M whose trigger has already crossed RAISES — the order has left the trigger book — and the
+square-off coordination reads that refusal as "the stop is going to fill, do not send a second
+exit". Only the error text differs from live Kite's.
 """
 
 from __future__ import annotations
@@ -213,13 +193,10 @@ class _Order:
     triggered: bool = False           # SL-M only: the trigger has been crossed
     marketable: bool | None = None    # LIMIT only: set once, on the first eligible tick
     # Timestamp of this row's LAST state change (set by _postback). Reported by orders() so a read
-    # never restamps the book with the read time — the reconciler compares broker timestamps
-    # against platform rows, and "everything updated just now" is the one answer that tells it
-    # nothing (fix round, 2026-09-10).
+    # never restamps the book: the reconciler compares broker timestamps against platform rows.
     last_update_at: datetime | None = None
     # Participation budget for ONE minute: how much of `minute_key`'s volume this order has already
-    # taken. Reset when the symbol's minute rolls. Per (order, minute) — a per-tick cap places no
-    # bound at all on a minute with many ticks (fix round, 2026-09-10).
+    # taken. Reset when the symbol's minute rolls. Per (order, minute), not per tick.
     minute_key: datetime | None = None
     minute_filled: int = 0
 
@@ -246,12 +223,10 @@ class _Gtt:
     last_price: Decimal
     orders: list[dict[str, Any]]
     created_at: datetime
-    #: ``"active"`` -> ``"triggered"`` on a fire, exactly as Kite reports them — PLUS one paper-only
-    #: terminal status, ``"failed"``: the trigger crossed and the leg could NOT be booked (an invalid
-    #: or corrupted leg; see :meth:`PaperBroker._match_gtts`). Live Kite never emits it, so nothing
-    #: downstream can be reading it from a real GTT — it is latched here rather than left ``active``
-    #: so the trigger is not retried on every later tick, and the paper ProtectionManager maps it to a
-    #: PROTECTION_FAILED reason (round 4, 2026-09-10: named here, at the field the consumer reads).
+    #: ``"active"`` -> ``"triggered"`` on a fire, as Kite reports them — PLUS one paper-only terminal
+    #: status, ``"failed"``: the trigger crossed and the leg could NOT be booked (see
+    #: :meth:`PaperBroker._match_gtts`). Latched rather than left ``active`` so the trigger is not
+    #: retried every tick; the paper ProtectionManager maps it to a PROTECTION_FAILED reason.
     status: str = "active"
 
 
@@ -262,8 +237,8 @@ class _Fill:
     side: str
     quantity: int
     price: Decimal
-    #: The TRADE's own time (the tick's ``exchange_ts``), not the engine's wall clock — it is what
-    #: scopes a fill to a session in :meth:`PaperBroker.positions` (fix round, 2026-09-10).
+    #: The TRADE's own time (the tick's ``exchange_ts``), not the engine's wall clock: it scopes a
+    #: fill to a session in :meth:`PaperBroker.positions`.
     ts: datetime
 
 
@@ -274,22 +249,21 @@ class _SymbolState:
     last_ltp: Decimal | None = None
     session_date: date | None = None          # date of the last tick seen (drives the session roll)
     minute: datetime | None = None            # start of the minute the running volume belongs to
-    #: HIGH-WATER cumulative volume for this symbol, carried ACROSS minutes and cleared at the
-    #: session roll (cumulative volume is a per-DAY counter). This is the same baseline
-    #: ``engine.marketdata.bar_builder.BarBuilder._volume_delta`` keeps, and for the same reason:
-    #: it is the only value a restatement can be recognised against once the restated tick has
-    #: itself become "the last tick" (round-3 fix 2026-09-10).
+    #: HIGH-WATER cumulative volume, carried ACROSS minutes and cleared at the session roll
+    #: (cumulative volume is a per-DAY counter). Same baseline as
+    #: ``engine.marketdata.bar_builder.BarBuilder._volume_delta``: the only value a restatement can
+    #: be recognised against once the restated tick has itself become "the last tick".
     last_cum: int | None = None
     #: The high-water mark as of the START of ``minute`` — the intra-minute delta is measured from
     #: HERE, never from the raw cumulative of whatever tick opened the minute.
     minute_start_cum: int = 0
     running_volume: int = 0
     last_bar_volume: int | None = None
-    #: True once ANY tick for this symbol has reported a non-zero cumulative volume. Sticky: it is
-    #: how "this feed carries volume, this minute simply has none" is told apart from "this feed
-    #: carries no volume at all" once a cumulative counter resets to 0 (fix round 2026-09-10).
+    #: True once ANY tick for this symbol has reported a non-zero cumulative volume. Sticky: tells
+    #: "this feed carries volume, this minute has none" from "no volume at all" once a counter
+    #: resets to 0.
     saw_volume: bool = False
-    #: Set on a tick whose cumulative volume printed BELOW the high-water mark (a cumulative-volume restatement /
+    #: Set on a tick whose cumulative volume printed BELOW the high-water mark (a restatement /
     #: resubscribe re-baseline). That tick offers zero available volume — never an uncapped fill.
     volume_reset: bool = False
     resting: list[str] = field(default_factory=list)
@@ -315,10 +289,8 @@ def _gtt_leg_request(
     """Build the order request a GTT leg fires as — the ONE place the leg defaults are applied.
 
     Shared by :meth:`PaperBroker._validate_gtt` (placement) and :meth:`PaperBroker._fire_gtt_leg`
-    (fire) so that "it validated at placement" really does mean "it will book at fire time"; two
-    copies of these defaults would let the two disagree, which is the failure this refactor exists
-    to prevent (fix round, 2026-09-10). Kite semantics: a fired GTT places a LIMIT order, at the
-    leg's own price when it has one and otherwise at the trigger.
+    (fire) so "validated at placement" means "will book at fire time". Kite semantics: a fired GTT
+    places a LIMIT order, at the leg's own price when it has one and otherwise at the trigger.
     """
     out = dict(leg)
     out.setdefault("tradingsymbol", symbol)
@@ -493,21 +465,14 @@ class PaperBroker:
         self._publish(self._topic, OrderUpdateFrame(data=self._data(order, at)))
 
     def _publish_guarded(self, order: _Order, at: datetime) -> None:
-        """The ONE postback path for everything emitted from inside ``on_tick`` (round-4 fix,
-        2026-09-10).
+        """The ONE postback path for everything emitted from inside ``on_tick``.
 
-        ``on_tick`` is the market-data hot path and ``publish`` is injected, so a bus that
-        throws must not escape: it would take the feed down for every symbol, and — in the lapse
-        sweep, which runs on the first tick of a session — it would do so before the day started,
-        leaving every symbol after the raiser resting forever.
-
-        Two properties this helper exists to guarantee, in all three loops (match, GTT, lapse) and
-        in :meth:`_reject_internal`:
+        ``publish`` is injected, so a bus that throws must not escape the hot path: it would take the
+        feed down for every symbol (in the lapse sweep, leaving every symbol after the raiser
+        resting forever). Guarantees, in all three loops and :meth:`_reject_internal`:
 
         * the book change is applied BEFORE the publish is attempted, so a failed publish loses the
-          NOTIFICATION and never unwinds the state change it was reporting — a half-applied
-          transition is a lie the OMS cannot detect, while a missed postback is a gap the
-          reconciler's orderbook re-read closes;
+          NOTIFICATION and never unwinds the state change it reported;
         * one log line per affected order, then carry on with the rest of the book.
         """
         try:
@@ -573,11 +538,10 @@ class PaperBroker:
     def _register(self, fields: dict[str, Any]) -> _Order:
         """Mint an id, book the order and rest it — the whole state change, and NO postback.
 
-        Split out of the old ``_book`` (round-4 fix, 2026-09-10) precisely so the two callers can
-        order the publish differently: :meth:`place_order` publishes unguarded (its caller is
-        awaiting the answer), while :meth:`_fire_gtt_leg` marks the GTT ``triggered`` first and then
-        publishes through :meth:`_publish_guarded`. Fused, the publish sat between "the leg is
-        resting" and "the GTT fired", and a raising bus split the pair.
+        Separate from the publish so the callers can order it differently: :meth:`place_order`
+        publishes unguarded (its caller awaits the answer), while :meth:`_fire_gtt_leg` marks the GTT
+        ``triggered`` first and then publishes through :meth:`_publish_guarded`, so a raising bus
+        cannot split "leg resting" from "GTT fired".
         """
         now = self._clock.now()
         order = _Order(
@@ -634,12 +598,11 @@ class PaperBroker:
 
         Quantity can never go below ``filled_qty`` (the filled portion is preserved — shrinking
         past it would leak an already-open, protected position out of the book), and shrinking to
-        EXACTLY ``filled_qty`` COMPLETES the order (fix round, 2026-09-10): that is the ordinary
-        "take what I got, drop the rest" amendment, and it leaves nothing to fill. Left OPEN it
-        would rest forever with ``pending_quantity`` 0 — a row no state transition can ever retire,
-        and one the square-off coordination would keep treating as live protection.
+        EXACTLY ``filled_qty`` COMPLETES the order (the "take what I got, drop the rest" amendment):
+        left OPEN it would rest forever with ``pending_quantity`` 0, a row no transition can retire
+        and one the square-off coordination would treat as live protection.
         Modifying a terminal order raises, as Kite does. The 20-modification self-cap is the
-        OMS's counter, not the broker's: the broker must not silently absorb the 21st modify.
+        OMS's counter, not the broker's.
         """
         self._guard(intent)
         order = self._live_order(order_id)
@@ -674,20 +637,18 @@ class PaperBroker:
     ) -> str:
         """Cancel a resting order: ``cancelled_quantity`` = the residual, ``filled_quantity`` kept.
 
-        This is the PARTIALLY_FILLED -> CANCEL_PENDING -> CANCELLED path of the order state machine (the common thin
-        MIS case): the filled portion stays an open, protectable position and the residual is
-        recorded as a cancel, never as an orphan or a quantity leak.
+        The PARTIALLY_FILLED -> CANCEL_PENDING -> CANCELLED path: the filled portion stays an open,
+        protectable position and the residual is recorded as a cancel, never an orphan or a
+        quantity leak.
 
-        TWO refusals, both of them signals the square-off coordination reads rather than
-        errors it merely tolerates — live Kite raises in exactly these cases and paper must too:
+        TWO refusals, signals the square-off coordination reads (live Kite raises in exactly these
+        cases and paper must too):
 
         * an already-terminal order — "the protective order already filled, do NOT send the market
           exit";
-        * an SL-M whose trigger has CROSSED (round-3 fix, 2026-09-10). Once triggered, the order has
-          left the trigger book and is on its way to becoming a market order; Kite will not take it
-          back. The refusal is how the square-off learns "the stop is going to fill, do not also
-          send a market exit" — a paper broker that accepted the cancel would keep that double-exit
-          hazard invisible until the first live session met it.
+        * an SL-M whose trigger has CROSSED: it has left the trigger book and Kite will not take it
+          back. The refusal is how the square-off learns "the stop is going to fill, do not also send
+          a market exit"; accepting the cancel would hide that double-exit hazard.
 
         ``variety`` is accepted for call-shape parity with ``KiteClient`` and ignored: paper v1
         books only ``regular`` orders (see :meth:`_validate`).
@@ -720,11 +681,8 @@ class PaperBroker:
 
     def _terminate(self, order: _Order, status: str, message: str) -> None:
         """Move ``order`` to a terminal state with its residual cancelled: ``cancelled_qty`` absorbs
-        ``order.remaining`` while ``filled_qty`` is PRESERVED — the shape every terminal
-        transition that can leave quantity outstanding needs (client cancel, an internal-error
-        reject that already has fills, end-of-day lapse). Callers still run their own
-        postback/publish (and logging) after this returns; :meth:`_unrest` is the one common step
-        folded in here."""
+        ``order.remaining`` while ``filled_qty`` is PRESERVED (client cancel, internal-error reject
+        with fills, end-of-day lapse). Callers run their own postback and logging afterwards."""
         order.cancelled_qty = order.remaining
         order.status = status
         order.status_message = message
@@ -746,10 +704,9 @@ class PaperBroker:
         of the fills on the side the position sits on — a simplification of Kite's net-average that
         is exact for the open-then-close flow the OMS produces.
 
-        ``day`` is scoped to the CURRENT session date (fix round, 2026-09-10). Reporting the net
-        book as the day book makes a position carried in from an earlier session look like it was
-        opened today, and the square-off scheduler reads exactly that to decide what must be
-        flattened before the window closes — a MIS/CNC confusion with real money attached.
+        ``day`` is scoped to the CURRENT session date: reporting the net book as the day book would
+        make a carried position look opened today, and the square-off scheduler reads that to decide
+        what to flatten.
         """
         day_fills = (
             [f for f in self._fills if f.ts.date() == self._session_date]
@@ -934,9 +891,9 @@ class PaperBroker:
 
         ``status`` is ``"active"`` or ``"triggered"`` as Kite reports them, and — paper only — the
         terminal ``"failed"``: the trigger crossed but its leg could not be booked, so the
-        protection this GTT represented does NOT exist and was not retried. The paper ProtectionManager
-        (engine.oms.protection) turns that into a PROTECTION_FAILED reason; a reader that only knows Kite's vocabulary must
-        not silently bucket it with ``active`` (round 4, 2026-09-10).
+        protection this GTT represented does NOT exist and was not retried. The paper
+        ProtectionManager (engine.oms.protection) turns that into a PROTECTION_FAILED reason; a
+        reader that only knows Kite's vocabulary must not bucket it with ``active``.
         """
         return [
             {
@@ -975,11 +932,9 @@ class PaperBroker:
         trigger_values = [Decimal(str(t)) for t in triggers]
         leg_params = [_as_params(leg) for leg in legs]
 
-        # Validate every leg HERE, at placement, exactly as the fire path will build it (fix round,
-        # 2026-09-10). Until this existed a leg was first seen by the validator inside ``on_tick``,
-        # days later: a malformed leg raised out of the market-data hot path — killing the feed for
-        # every symbol — with the GTT already flipped to `triggered` and therefore lost. Validation
-        # belongs where the caller can still be told.
+        # Validate every leg HERE, at placement, exactly as the fire path will build it: a malformed
+        # leg first seen inside ``on_tick`` would raise out of the hot path with the GTT already
+        # flipped to `triggered` and lost. Validation belongs where the caller can still be told.
         for index, leg in enumerate(leg_params):
             try:
                 self._validate(_gtt_leg_request(symbol, exchange, trigger_values[index], leg))
@@ -1043,10 +998,8 @@ class PaperBroker:
             rolled = self._session_date is not None
             self._session_date = tick_date
             if rolled:
-                # BROKER-WIDE, not per-symbol (round-3 fix, 2026-09-10): Kite cancels every unfilled
-                # DAY order at the close, on every symbol at once. Swept per ticking symbol, an
-                # order on a name that never prints again — delisted, halted, dropped from the
-                # subscription — rests forever and still reads as live protection to the square-off coordination.
+                # BROKER-WIDE, not per-symbol: Kite cancels every unfilled DAY order at the close on
+                # every symbol at once; an order on a name that never prints again would rest forever.
                 self._lapse_all(tick_date, tick.exchange_ts)
 
         gap = symbol in self._gap_pending
@@ -1054,9 +1007,8 @@ class PaperBroker:
         if st.session_date != tick_date:
             st.session_date = tick_date
             gap = True                      # first tick of a session: the open print may have gapped
-            # Cumulative volume restarts each day, so the high-water baseline CANNOT survive the
-            # roll: carried over, tomorrow's small opening cumulative reads as a restatement and
-            # zeroes this symbol's participation base for the whole session.
+            # Cumulative volume restarts each day: carried over, tomorrow's small opening cumulative
+            # would read as a restatement and zero this symbol's participation base all session.
             st.last_cum = None
             st.minute = None
             st.minute_start_cum = 0
@@ -1067,13 +1019,10 @@ class PaperBroker:
             st.saw_volume = True
         minute = tick.exchange_ts.replace(second=0, microsecond=0)
         # The BarBuilder rule (``bar_builder.py`` ``_volume_delta``): ``volume_traded`` is the
-        # CUMULATIVE day count, so a print BELOW the high-water mark is a restatement — and the test
-        # is made BEFORE the minute-roll branch, because a restatement that lands on a minute
-        # boundary is otherwise invisible: it would silently re-baseline the new minute at the
-        # restated (tiny) cumulative, and the correction back up would then read as a delta of the
-        # whole day's volume. The round-2 fix only caught mid-minute restatements; the probe stream
-        # (100000, 100500, 500, 100600) inflated the participation base ~100x through the boundary
-        # (round-3 fix, 2026-09-10).
+        # CUMULATIVE day count, so a print BELOW the high-water mark is a restatement. Tested BEFORE
+        # the minute-roll branch: a restatement landing on a minute boundary would otherwise
+        # re-baseline the new minute at the restated (tiny) cumulative, and the correction back up
+        # would read as a delta of the whole day's volume.
         st.volume_reset = st.last_cum is not None and cum < st.last_cum
         if st.minute != minute:
             st.minute = minute
@@ -1087,11 +1036,9 @@ class PaperBroker:
             order = self._orders.get(order_id)
             if order is None or order.status in TERMINAL_STATUSES:
                 continue
-            # NOTHING escapes on_tick — the GTT fire path is not the only thing in here that can
-            # raise (round-3 fix, 2026-09-10). The per-order body reaches injected callables
-            # (``tick_size``, ``publish``) and Decimal math; an exception from any of them on the
-            # market-data hot path would kill the feed for EVERY symbol. Log once, terminate
-            # THIS order with a postback the OMS can act on, carry on with the rest of the book.
+            # NOTHING escapes on_tick: the per-order body reaches injected callables (``tick_size``,
+            # ``publish``) and Decimal math. Log once, terminate THIS order with a postback the OMS
+            # can act on, carry on with the rest of the book.
             try:
                 self._match(order, tick, st, gap)
             except Exception:
@@ -1106,25 +1053,20 @@ class PaperBroker:
         self._match_gtts(tick, st)
 
     def _reject_internal(self, order: _Order, at: datetime) -> None:
-        """Terminate an order whose match raised, and TELL the OMS (round-3 fix, 2026-09-10).
+        """Terminate an order whose match raised, and TELL the OMS.
 
-        Silently dropping the order would leave the OMS holding a row it believes is resting — an
-        exit that will never fill, which the square-off coordination reads as live protection. The terminal status is
-        terminal, so this fires exactly once however many ticks follow, and the postback goes
-        through :meth:`_publish_guarded` — ``publish`` is injected, so it is one of the things that
-        can raise here.
+        Silently dropping it would leave the OMS holding a row it believes is resting (an exit that
+        will never fill, read by the square-off coordination as live protection). The status is
+        terminal, so this fires once however many ticks follow; the postback goes through
+        :meth:`_publish_guarded`.
 
-        WHICH terminal status depends on whether anything traded (round-4 fix, 2026-09-10). The
-        residual always lands in ``cancelled_quantity`` first, so ``filled + cancelled == quantity``
-        holds on the frame either way — a terminal transition that leaks quantity leaves the OMS's
-        position arithmetic short by the difference, with nothing in the payload to reconcile
-        against:
+        The residual always lands in ``cancelled_quantity`` first, so ``filled + cancelled ==
+        quantity`` holds on the frame (a leak would leave the OMS's position arithmetic short):
 
         * ``filled_qty > 0`` → **CANCELLED** with the residual cancelled. REJECTED means "no part of
-          this order ever traded" to the OMS parser; on a row with shares already filled — and by
-          then protected — it would strand a live position the platform believes it does not hold.
-          The partial-cancel is the shape the OMS parser already has for exactly this.
-        * nothing filled → **REJECTED**, the ordinary "this order never became anything" ending.
+          this order ever traded" to the OMS parser; on a partly filled row it would strand a live
+          position the platform believes it does not hold.
+        * nothing filled → **REJECTED**.
         """
         status = "CANCELLED" if order.filled_qty > 0 else "REJECTED"
         self._terminate(order, status, "paper: internal error")
@@ -1132,29 +1074,23 @@ class PaperBroker:
 
     def _lapse_all(self, session_date: date, at: datetime) -> None:
         """Terminate EVERY symbol's orders left resting from a PREVIOUS session, on the first tick
-        of a new session (fix round, 2026-09-10; broker-wide in round 3).
+        of a new session.
 
-        Kite cancels unfilled DAY orders at the close, so a paper order that survived the roll would
-        fill on the next session's open print — a fill that could never have happened, and the most
-        flattering possible lie to the paper-expectancy gate. Emitted as CANCELLED with the
-        residual in ``cancelled_quantity``, which the shared OMS parser already maps; the
-        filled portion is preserved exactly as a client cancel preserves it.
+        Kite cancels unfilled DAY orders at the close, so a paper order surviving the roll would fill
+        on the next open print, a fill that could never have happened. Emitted as CANCELLED with the
+        residual in ``cancelled_quantity`` (the filled portion is preserved as in a client cancel).
 
-        The sweep is over the whole book, keyed on the BROKER's session date, because the real event
-        is account-wide: scoped to the symbol whose tick revealed the roll, an order on a name that
-        never prints again would rest forever (round-3 fix). Every resting order's symbol has a
-        state — ``_register`` creates it — so iterating the symbol states covers the book while touching
-        only resting rows.
+        The sweep covers the whole book, keyed on the BROKER's session date (the real event is
+        account-wide; a name that never prints again must not rest forever). Every resting order's
+        symbol has a state (``_register`` creates it), so iterating the states covers the book.
 
         Scoped by ``placed_at``, not by "resting when the roll was noticed": the roll is detected on
-        the new session's FIRST TICK, which is well after the OMS may have placed today's orders
-        (pre-open staging, or simply a symbol whose first print is late). Those are today's orders
-        and must survive — the ones that lapse are strictly the ones placed on an earlier date.
+        the new session's FIRST TICK, after the OMS may already have placed today's orders
+        (pre-open staging, a late first print); only orders placed on an earlier date lapse.
 
-        Stamped with the ROLL tick's time, not the previous close: the broker only observes the
-        lapse when the next session opens, and stamping backwards would put a postback before frames
-        the OMS has already recorded. GTTs are deliberately untouched — a Kite GTT is
-        good-till-triggered, not good-for-the-day (the square-off coordination relies on that to hold protection).
+        Stamped with the ROLL tick's time, not the previous close: stamping backwards would put a
+        postback before frames the OMS has already recorded. GTTs are untouched (good-till-triggered;
+        the square-off coordination relies on that to hold protection).
         """
         for st in list(self._symbols.values()):
             for order_id in list(st.resting):
@@ -1176,32 +1112,28 @@ class PaperBroker:
     def _effective_volume(self, st: _SymbolState) -> int | None:
         """Volume backing the participation cap, in precedence order:
 
-        0. ``0`` on a tick whose cumulative volume prints BELOW the high-water mark. Nothing
-           is known to have traded on it, and the pre-fix code fell through to the "no volume at
-           all" branch below and removed the cap entirely — the reset was indistinguishable from a
-           synthetic feed (fix round, 2026-09-10).
+        0. ``0`` on a tick whose cumulative volume prints BELOW the high-water mark. Nothing is
+           known to have traded on it, and falling through to the "no volume at all" branch would
+           remove the cap entirely.
 
-           **This branch can black a symbol out for the rest of the session, and that is intended**
-           (documented round 4, 2026-09-10). ``volume_reset`` is recomputed per tick against the
-           high-water cumulative, so a feed that re-baselines low and never climbs back over the
-           mark — a resubscribe on a thin name late in the day — takes this branch on EVERY
-           remaining tick: no order on that symbol fills again until the session roll clears
-           ``last_cum``. Note it also short-circuits branch 2, so a closed bar cannot re-open the
-           cap either. The alternative is sizing fills off a delta measured from a baseline the
-           exchange has disowned, which is how the round-3 probe inflated a minute's tape ~100x.
-           Under-filling costs the paper-expectancy gate nothing (it measures what DID fill);
-           over-filling lies to it. ``engine.marketdata.bar_builder`` resolves the identical
-           ambiguity the identical way, so the two tiers cannot disagree about a restated day.
+           **This branch can black a symbol out for the rest of the session, and that is intended.**
+           ``volume_reset`` is recomputed per tick against the high-water cumulative, so a feed that
+           re-baselines low and never climbs back over the mark (a resubscribe on a thin name late
+           in the day) takes this branch on EVERY remaining tick: no order on that symbol fills
+           again until the session roll clears ``last_cum``; it also short-circuits branch 2. The
+           alternative is sizing fills off a baseline the exchange has disowned (a minute's tape
+           inflated ~100x). Under-filling costs the paper-expectancy gate nothing (it measures what
+           DID fill); over-filling lies to it. ``engine.marketdata.bar_builder`` resolves the same
+           ambiguity the same way.
         1. the running intra-minute delta of cumulative volume when anything has printed;
         2. the last CLOSED bar's volume — the minute is young and nothing has printed yet;
         3. ``0`` when this feed is KNOWN to carry volume (``saw_volume``) but this minute has none
            and no bar has closed — nothing has traded, so nothing can be taken from it;
         4. ``None`` (= unknown, no cap) only when the feed has never once reported volume for this
-           symbol. That is reachable on a perfectly ordinary LIVE name — every tick before its
-           first print of the day carries ``volume_traded == 0`` — as well as on backfilled or
-           synthetic ticks (the round-2 text claimed the latter only; corrected round 3,
-           2026-09-10). A broker that silently never fills is less useful, and no more conservative
-           in any way the gate measures, than one that fills the whole order.
+           symbol: reachable on an ordinary LIVE name (every tick before its first print of the day
+           carries ``volume_traded == 0``) and on backfilled or synthetic ticks. A broker that
+           silently never fills is less useful, and no more conservative in any way the gate
+           measures, than one that fills the whole order.
         """
         if st.volume_reset:
             return 0
@@ -1216,10 +1148,9 @@ class PaperBroker:
     def _fillable_qty(self, order: _Order, st: _SymbolState) -> int:
         """How much of ``order`` may fill on this tick, spending its budget for the CURRENT minute.
 
-        The cap is a share of the MINUTE's tape, so it must be a budget per (order, minute): capping
-        each TICK at 10 % of the minute's volume bounds nothing, because a busy minute carries
-        dozens of ticks (the fix-round probe measured single orders taking 101–130 % of a minute's
-        volume that way). The budget is re-armed when the symbol's minute rolls.
+        The cap is a share of the MINUTE's tape, so it is a budget per (order, minute): capping each
+        TICK at 10 % bounds nothing on a minute with dozens of ticks. Re-armed when the symbol's
+        minute rolls.
         """
         volume = self._effective_volume(st)
         if volume is None:
@@ -1300,10 +1231,9 @@ class PaperBroker:
             order.status = "OPEN"
             if not order.status_message:
                 order.status_message = "paper: partial fill"
-        # The exchange stamps a trade with the trade's own time, not the engine's wall clock — and
-        # using the tick timestamp keeps replay postbacks independent of Clock granularity. Guarded
-        # (round-4 fix, 2026-09-10): the fill is already recorded, so a raising bus must not reach
-        # the caller's ``except`` in ``on_tick`` and terminate an order that just traded.
+        # Stamped with the trade's own time (tick timestamp), which keeps replay postbacks
+        # independent of Clock granularity. Guarded: the fill is already recorded, so a raising bus
+        # must not reach ``on_tick``'s ``except`` and terminate an order that just traded.
         self._publish_guarded(order, tick.exchange_ts)
 
     def _market_price(self, order: _Order, tick: Tick) -> Decimal:
@@ -1335,23 +1265,18 @@ class PaperBroker:
                 fired = tick.ltp <= trigger if downside else tick.ltp >= trigger
                 if not fired:
                     continue
-                # NOTHING may escape on_tick: it is the market-data hot path, so an exception
-                # here kills the feed for every symbol. Legs are validated at placement, so this is
-                # a backstop — and the fire marks the GTT the moment the leg is REGISTERED, with the
-                # postback guarded after it (see :meth:`_fire_gtt_leg`), so a leg that IS resting can
-                # never be left with its trigger still armed OR reported as failed protection.
+                # NOTHING may escape on_tick. Legs are validated at placement, so this is a backstop;
+                # the fire marks the GTT the moment the leg is REGISTERED, with the postback guarded
+                # after it (:meth:`_fire_gtt_leg`), so a resting leg is never left with its trigger
+                # still armed OR reported as failed protection.
                 try:
                     self._fire_gtt_leg(gtt, index)
                 except Exception:
-                    # LATCH, do not retry (round-3 fix, 2026-09-10). Left "active" the same trigger
-                    # is re-evaluated on every later tick through it: an exception-and-log storm on
-                    # the hot path for the rest of the session, and — worse — a status that reads
-                    # to the paper ProtectionManager as protection that is still armed. "failed" is a
-                    # DISTINCT terminal status: the ProtectionManager turns it into a PROTECTION_FAILED
-                    # reason, and only the GTT's owner may re-arm the trigger. CONDITIONAL (round-4
-                    # review): a leg that already REGISTERED marked the GTT "triggered" before the
-                    # guarded postback, and a later raise inside the same try (a logging sink, say)
-                    # must never un-fire a trigger whose leg is on the book.
+                    # LATCH, do not retry: left "active" the trigger is re-evaluated on every later
+                    # tick (a log storm) and reads to the paper ProtectionManager as protection still
+                    # armed. "failed" is a DISTINCT terminal status (PROTECTION_FAILED); only the
+                    # GTT's owner may re-arm. CONDITIONAL: a leg that already REGISTERED marked the
+                    # GTT "triggered", and a later raise in the same try must never un-fire it.
                     if gtt.status == "active":
                         gtt.status = "failed"
                     _log.exception(
@@ -1367,14 +1292,11 @@ class PaperBroker:
         """Place the fired leg. Kite semantics: a GTT fires a LIMIT order at the leg's price — a
         trigger is NOT a fill, so the order joins the resting book like any other.
 
-        BOOKED == FIRED, in that order and with nothing between them (round-4 fix, 2026-09-10):
-        ``_register`` books and rests the leg, the GTT is marked ``triggered``, and only THEN is the
-        postback attempted, guarded. The old ``_book`` published in the middle of that pair, so an
-        injected ``publish`` that threw unwound with the leg already resting and the GTT latched
-        ``"failed"`` by the caller — a resting leg the paper ProtectionManager would read as failed
-        protection, and, had the caller left it ``"active"`` instead, the SAME leg re-fired on the
-        next tick through the trigger: a second exit on a position that already has one (the square-off
-        double-exit hazard).
+        BOOKED == FIRED, in that order with nothing between them: ``_register`` books and rests the
+        leg, the GTT is marked ``triggered``, and only THEN is the postback attempted, guarded.
+        Publishing in the middle would let a throwing ``publish`` leave a resting leg with the GTT
+        latched ``"failed"`` (read as failed protection) or still ``"active"`` (the same leg
+        re-fires next tick: a second exit, the square-off double-exit hazard).
 
         The converse stays honest: a leg that cannot be VALIDATED or REGISTERED raises before the
         mark, nothing is resting, and the caller latches the GTT ``"failed"``.

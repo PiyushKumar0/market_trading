@@ -1,32 +1,22 @@
 """The broker order / GTT / account surface shared by live and paper routing.
 
-2026-09-10.
+Routing is a sticky flag: the OMS talks to :class:`~engine.broker.kite_client.KiteClient` or
+:class:`~engine.paper.broker.PaperBroker` per ``routing: paper | live`` and must not know which.
+:class:`BrokerSurface` makes that structural; ``tests/unit/test_broker_surface.py`` asserts BOTH
+implementations against it with :func:`inspect.signature` (names, kinds, defaults).
 
-**Why this exists.** Routing is a sticky flag: in AUTO the OMS talks to
-:class:`~engine.broker.kite_client.KiteClient` or to :class:`~engine.paper.broker.PaperBroker`
-depending on ``routing: paper | live``, and it must not know which. Duck typing alone makes that a
-convention; :class:`BrokerSurface` makes it structural, and ``tests/unit/test_broker_surface.py``
-asserts BOTH implementations against it with :func:`inspect.signature` (identical parameter names,
-kinds and defaults) so a signature drift is a CI failure rather than a runtime surprise on the
-first paper-AUTO session.
+Pinned here:
 
-**What is pinned here, and why:**
+* Exactly the twelve order/GTT/account methods the OMS calls. ``KiteClient.historical`` and
+  ``KiteClient.instruments`` are OUT: market-data endpoints owned by ``engine.marketdata`` /
+  ``InstrumentStore``, never routed per mode.
+* ``intent`` defaults (``"entry"`` on place, ``"risk_reducing"`` on modify/cancel) are contract:
+  they select the ``order_rate`` pool on the live side and are what the injected ``order_guard``
+  sees.
+* Every method is ``async`` (paper fills are computed synchronously in ``on_tick``) so the OMS has
+  one call shape.
 
-* Exactly the twelve order/GTT/account methods the OMS calls — the count the design
-  pins. ``KiteClient.historical`` and ``KiteClient.instruments`` are deliberately OUT of the
-  surface: they are reference/market-data endpoints owned by ``engine.marketdata`` /
-  ``InstrumentStore``, never routed per mode, and a PaperBroker implementation of them would be
-  meaningless.
-* ``intent`` defaults (``"entry"`` on place, ``"risk_reducing"`` on modify/cancel) are part of the
-  contract, not an implementation detail: they select the ``order_rate`` pool on the live side
-  and are what the injected ``order_guard`` (the order-surface predicate) sees.
-* Every method is ``async``. Paper fills are computed synchronously inside ``on_tick``, but the
-  surface stays awaitable so the OMS has one call shape.
-
-This module imports nothing from ``engine.broker`` — a Protocol needs no implementation — which
-keeps ``engine.paper`` free of the pykiteconnect import chain. Its engine dependency is
-``engine.core`` alone (in fact it needs nothing but stdlib), asserted per module by
-``tests/unit/test_import_graph.py``.
+Imports nothing from ``engine.broker`` (keeps ``engine.paper`` free of the pykiteconnect chain).
 """
 
 from __future__ import annotations

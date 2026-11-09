@@ -4,9 +4,9 @@ The defining property: ``kill_state=KILLED`` is persisted to SQLite (fsync via W
 action, and :meth:`is_killed` is checked before ANY order on EVERY startup — so no startup path
 (manual, scheduled-task, or NSSM crash-restart) can resurrect trading after a kill.
 
-The flatten sequence (cancel opens → flatten MIS → verify CNC GTTs) is OMS-dependent and arrives with the
-order machinery; here it is invoked via an injected ``flatten_callback`` (None until then). What ships here is the load-bearing part: sticky persistence, the before-act ordering, single-step trigger /
-two-step owner reset, and the startup order-path block .
+The flatten sequence (cancel opens → flatten MIS → verify CNC GTTs) is OMS-owned and invoked via the
+injected ``flatten_callback``. Here: sticky persistence, the before-act ordering, single-step trigger /
+two-step owner reset, and the startup order-path block.
 """
 
 from __future__ import annotations
