@@ -1,5 +1,5 @@
 /** Results of owner writes ("Saved: 09:30–15:00", "Couldn't change the mode: …"). Successes fade after
- *  6 s; failures stay until dismissed, so a refusal is never missed. Replaces `window.alert`. */
+ *  6 s; failures stay until dismissed, so a refusal is never missed. */
 import { useCallback, useRef, useState } from 'react'
 import type { JSX } from 'react'
 import { Icon } from './Icon'

@@ -1,6 +1,5 @@
 /**
- * Confirmation dialog on the native <dialog> (focus trap, Esc = cancel, inert page behind). Replaces
- * `window.confirm`: the buttons name the action ("Turn off" / "Keep recommending"), never OK/Cancel.
+ * Confirmation dialog on the native <dialog> (focus trap, Esc = cancel, inert page behind): the buttons name the action ("Turn off" / "Keep recommending"), never OK/Cancel.
  * The cancel button comes first in the DOM, so it is what `showModal()` focuses — the safe default.
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react'

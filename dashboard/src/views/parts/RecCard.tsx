@@ -1,7 +1,7 @@
 /**
  * A recommendation as a trade ticket: the plain instruction is the headline ("Buy 3 shares at
- * ₹2,445.00"), the levels sit right under it, then the reasoning and your steps. Everything the old
- * card showed is still here; the secondary facts sit under "Details".
+ * ₹2,445.00"), the levels sit right under it, then the reasoning and your steps; the secondary facts
+ * sit under "Details".
  *
  * Gate reasons come from the recommendation's own embedded verdict (`gate`) — never from
  * `/decisions`: another proposal's verdict is never this card's provenance.

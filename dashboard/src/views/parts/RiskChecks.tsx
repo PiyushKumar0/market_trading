@@ -1,5 +1,5 @@
 /**
- * Risk checks: every Tier-1 proposal LEFT JOINed to its gate verdict (provenance chain). `reasons` are
+ * Risk checks: every Tier-1 proposal LEFT JOINed to its gate verdict. `reasons` are
  * the rules the gate cited, so for a block or a shrink they ARE the failing rules.
  *
  * Rows are split by the IST day the proposal was created on: today's fold starts open, earlier days

@@ -3,7 +3,7 @@
  * term (kept so Telegram messages and logs can still be matched). One place, so the same thing is
  * called the same everywhere. Pure and DOM-free (`node --test` runs it).
  *
- * Sources, read 2026-10-08: risk/mode.py (modes, risk states, trade window), core/types.py
+ * Sources: risk/mode.py (modes, risk states, trade window), core/types.py
  * (TradeWindow), intelligence/governor.py (degrade ladder), risk/gate.py (verdicts, rule
  * IDs), ops/paper_risk.py + RUNBOOK paper halt table (halts), ops/scorecard.py (scorecard),
  * notify/telegram.py (`/resume_entries`), notify/catalog.py (message kinds), strategy/scanners/*.py
@@ -33,7 +33,7 @@ function lookup(table: Table, v: string | null | undefined, fallback: (v: string
 
 // ------------------------------------------------------------------------------------ engine state
 
-// Verified against the engine on 2026-10-08 (copy-accuracy review): in Recommend and Off the engine
+// In Recommend and Off the engine
 // places NO orders in Kite (telegram.py, pipeline.py "the platform places none in RECOMMEND"); exit and
 // stop-warning alerts fire in every mode; Auto is refused while settings say paper-only (mode.py).
 const MODE: Table = {

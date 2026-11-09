@@ -81,8 +81,7 @@ function rec(id, day, hms, inst, side, kind, action, extra = {}) {
 }
 
 let recommendations = [
-  // Synthetic edge case: valid_until on the next day (the engine stamps today's close since the
-  // 2026-09-23 withdrawal of the next-session entry TTL), so this exit stays live at any hour of the day.
+  // Synthetic edge case: valid_until on the next day, so this exit stays live at any hour of the day.
   rec('r-t1', today, '10:15:03', 'HDFCAMC', 'SELL', 'exit', null, { valid_until: `${shift(today, 1)}T15:30:00+05:30` }),
   // An adjust places NO order and keeps the held side (pipeline.py _manage_recommendation): the card
   // must read as a stop-loss move, never as "Buy 10 shares".
@@ -115,9 +114,9 @@ let recommendations = [
   rec('r-y1', d1, '13:00:19', 'HDFCAMC', 'SELL', 'exit', 'expired'),
   rec('r-y2', d1, '13:00:12', 'HINDZINC', 'SELL', 'exit', 'expired'),
   rec('r-y3', d1, '10:02:00', 'CEIGALL', 'BUY', 'enter', 'dismissed'),
-  // Synthetic edge case (the next-session entry TTL was withdrawn 2026-09-23, so the engine no
-  // longer stamps this): an ENTRY delivered YESTERDAY, still pending, valid to TOMORROW's close —
-  // yesterday's fold must start open and the `valid till` chip must carry the date.
+  // Synthetic edge case (the engine no longer stamps this): an ENTRY delivered YESTERDAY, still
+  // pending, valid to TOMORROW's close — yesterday's fold must start open and the `valid till` chip
+  // must carry the date.
   rec('r-live', d1, '14:47:00', 'JINDALSTEL', 'BUY', 'entry', null, {
     valid_until: `${shift(today, 1)}T15:30:00+05:30`,
     // A shrunk entry: the card's quantity-cut note and its reasons with the engine's own figures.
@@ -210,8 +209,8 @@ if (NO_TODAY) {
 
 // The governor's quota week:Thursday 14:00 IST → Thursday 14:00 IST, keyed by its START
 // Thursday. Mirrors engine.intelligence.governor._window_key — wall-clock and calendar-blind, and the
-// reset-day MORNING still belongs to the window that ends. Computed live so the BudgetPanel chips show
-// a plausible current week on any dev box rather than a frozen date.
+// reset-day MORNING still belongs to the window that ends. Computed live so the chips show a
+// plausible current week.
 const THURSDAY = 4 // Date#getUTCDay
 function quotaWindow(at = new Date()) {
   const day = istDay(at)
@@ -232,8 +231,7 @@ function quotaWindow(at = new Date()) {
 }
 
 // Mid-week spend against the shipped weekly allocations, with `sdk_smoke` billing WITHOUT an
-// allocation on purpose: the union row is the thing GET /budget added, so the fixture has to exercise
-// it (the rows must add up to window_spend_usd, 81.6487).
+// allocation on purpose, to exercise the union row (the rows must add up to window_spend_usd, 81.6487).
 const win = quotaWindow()
 const budgetFixture = {
   budget: {
@@ -380,7 +378,7 @@ const scorecardFixture = {
   },
 }
 
-// GET /paper (plan "Response contract"). Six sessions on consecutive weekdays ending today; the epoch
+// GET /paper. Six sessions on consecutive weekdays ending today; the epoch
 // opened on the first. The figures tie out: pnl = realized + open_mtm and capital_base = equity - pnl
 // on the latest snapshot; realized includes the void, the totals do not. The latest snapshot is 10:31:
 // HINDZINC lost its mark after that, so snapshots (and paper halts) are paused and its LLM exit waits
