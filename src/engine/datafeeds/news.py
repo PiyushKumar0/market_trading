@@ -6,28 +6,20 @@ only: every ``news`` row is written ``untrusted=true`` (forced by ``MarketStore.
 
 Feed set (CONFIG — ``settings.yaml news.feeds``; changing it is an owner config change, config_audit):
 
-- **RSS**, a config-driven name → ``{url, poll_s}`` map (``news.feeds.rss``; seeds: ET Markets at
-  5 min + Livemint markets/companies at 15 min). Parsed with stdlib ``xml.etree.ElementTree`` over an
-  injected ``httpx.AsyncClient`` (convention 11 — best-effort). Moneycontrol RSS was removed
-  2026-08-04: the feed has been frozen since ~2024-04 (391 polls, zero inserts) and its silence left
-  the corpus single-source, which no corroboration gate can pass.
-  Malformed items are tolerated: an item without a title or an absolute link is skipped; an item with
-  a missing/unparsable ``pubDate`` keeps the headline with ``published_at`` = ingest time (Clock) —
-  conservative-recent, never a naive datetime.
+- **RSS**, a config-driven name → ``{url, poll_s}`` map (``news.feeds.rss``), parsed with stdlib
+  ``xml.etree.ElementTree`` over an injected ``httpx.AsyncClient`` (best-effort). Malformed items are
+  tolerated: an item without a title or an absolute link is skipped; a missing/unparsable ``pubDate``
+  keeps the headline with ``published_at`` = ingest time (Clock) — conservative-recent, never naive.
 - **GDELT DOC 2.0** ``artlist`` JSON (15-min update granularity): the pinned query from settings plus
   a client-side domain filter to major Indian financial press (:data:`GDELT_DOMAIN_ALLOWLIST`).
-  The ``timespan`` request parameter is the lookback window — the SAME poll with a widened
-  ``timespan`` is the off-period startup backfill (RSS feeds have a fixed publisher-side
-  lookback; GDELT is the only feed with a controllable window, capped at
+  The ``timespan`` parameter is the lookback window — the SAME poll with a widened ``timespan`` is the
+  off-period startup backfill (the only feed with a controllable window, capped at
   ``news.gdelt_backfill_max_days`` ≈ the ~3-month DOC window).
-- **NSE corporate announcements** (``nse_ann``, 2026-09-04): the exchange as a source.
-  The 30-session coverage audit found only 47% of each day's top-10 movers had ANY cluster naming
-  them, while the filings that moved them (UNITDSPR's Reg-30 disclosure, HINDZINC's LoI ~2 h ahead of
-  the press) sat unread on ``corporate-announcements``. Items become ordinary ``news`` rows with
-  ``source_domain="nseindia.com"`` (so the exchange counts as ONE corroborating domain under
-  ``catalyst_guard.min_source_domains``, never two) and a title prefixed by the explicit
+- **NSE corporate announcements** (``nse_ann``): the exchange as a source. Items become ordinary
+  ``news`` rows with ``source_domain="nseindia.com"`` (the exchange counts as ONE corroborating
+  domain under ``catalyst_guard.min_source_domains``, never two) and a title prefixed by the explicit
   ``[NSE:<SYMBOL>]`` token :class:`~engine.datafeeds.news_pipeline.EntityResolver` honours — the
-  payload carries ``symbol`` natively, so no alias guess is involved anywhere.
+  payload carries ``symbol`` natively, so no alias guess is involved.
 
 Dedupe is by URL: within the polled batch here, and against the ``news`` table by
 ``MarketStore.insert_news`` (idempotent re-polls / overlapping windows / startup backfill).
@@ -65,9 +57,8 @@ _log = get_logger("engine.datafeeds.news")
 #: GDELT DOC 2.0 API endpoint (the query itself is config — ``news.feeds.gdelt_doc_query``).
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
-#: GDELT results are domain-filtered to major Indian financial press.
-#: Module-pinned (not settings) — widening it is a code change the owner reviews, same
-#: posture as the feed set being config_audit'd. Compared against the normalized registrable host
+#: GDELT results are domain-filtered to major Indian financial press. Module-pinned (not settings) —
+#: widening it is a code change the owner reviews. Compared against the normalized host
 #: (lowercase, ``www.`` stripped).
 GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
     "economictimes.indiatimes.com",
@@ -83,30 +74,16 @@ GDELT_DOMAIN_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 #: The NON-RSS feed keys accepted by :meth:`NewsIngest.poll`. The RSS keys are config-driven
-#: (``news.feeds.rss``), so the accepted set is built per-instance in ``poll``; each source has its
-#: own cadence (per-feed ``poll_s`` / ``news.gdelt_poll_s`` / ``news.feeds.nse_announcements.poll_s``)
-#: and the scheduler may poll each alone.
+#: (``news.feeds.rss``), so the accepted set is built per-instance in ``poll``; the scheduler may
+#: poll each source alone at its own cadence.
 GDELT_KEY = "gdelt"
 NSE_ANN_KEY = "nse_ann"
 
-#: The ONLY ``corporate-announcements`` fields this feed reads, pinned against the LIVE payload
-#: (probed once through :func:`engine.core.nse_http.nse_get`, 2026-09-04 15:14 IST). The response is
-#: a bare JSON list of rows; one row verbatim::
-#:
-#:     {"an_dt": "04-Sep-2026 15:14:44", "attFileSize": "2.60 MB",
-#:      "attchmntFile": "https://nsearchives.nseindia.com/corporate/MOHITIND_04092026151409_NOTICEMIL04092026.pdf",
-#:      "attchmntText": "Mohit Industries Limited has informed the Exchange regarding Notice of
-#:                       Annual General Meeting to be held on September 30, 2026",
-#:      "bflag": null, "csvName": null, "desc": "Shareholders meeting", "difference": "00:00:01",
-#:      "dt": "04092026151444", "exchdisstime": "04-Sep-2026 15:14:45", "fileSize": "2.60 MB",
-#:      "hasXbrl": true, "old_new": null, "orgid": null, "seq_id": "106769737",
-#:      "smIndustry": "Textile Products", "sm_isin": "INE954E01012",
-#:      "sm_name": "Mohit Industries Limited", "sort_date": "2026-09-04 15:14:44",
-#:      "symbol": "MOHITIND"}
-#:
-#: ``desc`` is the SUBJECT (the announcement category ``news.feeds.nse_announcements.drop_subjects``
-#: filters on); ``attchmntText`` is the one-line disclosure body. There is no ``subject`` key in this
-#: payload — "subject-or-attachment-text" is exactly this pair.
+#: The ONLY ``corporate-announcements`` fields this feed reads. The response is a bare JSON list of
+#: rows (``symbol``, ``desc``, ``attchmntText``, ``attchmntFile``, ``sort_date``, ``exchdisstime``,
+#: ``an_dt``, ``seq_id``, ``sm_name``, ...). ``desc`` is the SUBJECT (the category
+#: ``news.feeds.nse_announcements.drop_subjects`` filters on); ``attchmntText`` is the one-line
+#: disclosure body. There is no ``subject`` key.
 NSE_ANN_FIELDS: tuple[str, ...] = (
     "symbol", "desc", "attchmntText", "attchmntFile", "sort_date", "exchdisstime", "an_dt", "seq_id",
 )
@@ -121,15 +98,14 @@ NSE_ANN_DOMAIN = "nseindia.com"
 
 
 def nse_ann_url(d: date) -> str:
-    """The announcements endpoint for ONE day (probe 2026-09-09): the bare url answers its 20 newest
-    rows whatever the volume, while ``from_date/to_date`` (DD-MM-YYYY) returns the whole day — 745
-    rows for 08-09-2026 — so a poll asks for the clock's day and the store dedupes the overlap."""
+    """The announcements endpoint for ONE day: the bare url answers only its 20 newest rows, while
+    ``from_date/to_date`` (DD-MM-YYYY) returns the whole day — so a poll asks for the clock's day and
+    the store dedupes the overlap."""
     stamp = d.strftime("%d-%m-%Y")
     return f"{NSE_ANNOUNCEMENTS_URL}&from_date={stamp}&to_date={stamp}"
 
 #: Exchange timestamps, tried in this order. ``sort_date`` first because it is the only
-#: locale-INDEPENDENT form (``%b`` parsing follows LC_TIME); live they differ by ~1 s
-#: (an_dt 15:14:44 → exchdisstime 15:14:45), which is immaterial at a 300 s cadence.
+#: locale-INDEPENDENT form (``%b`` parsing follows LC_TIME); the three differ by ~1 s.
 _ANN_DT_FIELDS: tuple[tuple[str, str], ...] = (
     ("sort_date", "%Y-%m-%d %H:%M:%S"),
     ("exchdisstime", "%d-%b-%Y %H:%M:%S"),
@@ -150,8 +126,8 @@ def _clean_title(title: str) -> str:
 class Headline(BaseModel):
     """One ingested headline (``NewsIngest.poll`` output; ``news`` row shape).
 
-    HEADLINE-LEVEL ONLY: no body, no summary. ``published_at`` is tz-aware IST always. ``headline_id`` is the platform-assigned ULID minted at ingest — the key
-    ``HeadlineClusterer`` uses to link ``news.cluster_id``.
+    HEADLINE-LEVEL ONLY: no body, no summary. ``published_at`` is tz-aware IST always. ``headline_id``
+    is the ULID minted at ingest — the key ``HeadlineClusterer`` uses to link ``news.cluster_id``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -245,10 +221,9 @@ class NewsIngest:
         if NSE_ANN_KEY in selected and self._cfg.feeds.nse_announcements.enabled:
             batch += await self._fetch_guarded(NSE_ANN_KEY, self._fetch_nse_ann())
 
-        # Drop list (2026-08-03): auto-generated live-blog/ticker PAGE titles are
-        # not news headlines — they carry zero event content, burn scorer budget, and their template
-        # tokens glued different companies into one cluster (the contamination finding). Owner-
-        # editable in settings (news.drop_title_patterns), case-insensitive substring match.
+        # Drop list: auto-generated live-blog/ticker PAGE titles carry no event content, burn scorer
+        # budget, and their template tokens glue different companies into one cluster. Owner-editable
+        # (news.drop_title_patterns), case-insensitive substring match.
         patterns = [p.lower() for p in (self._cfg.drop_title_patterns or [])]
         if patterns:
             kept: list[Headline] = []
@@ -398,11 +373,11 @@ class NewsIngest:
         return f"{math.ceil(hours / 24)}d"
 
     async def _fetch_nse_ann(self) -> list[Headline]:
-        """NSE ``corporate-announcements`` → token-prefixed headlines (2026-09-04).
+        """NSE ``corporate-announcements`` → token-prefixed headlines.
 
         Fetched through :func:`engine.core.nse_http.nse_get`, never a bare GET: the ``/api`` edge is
         cookie-gated and answers an un-primed request with a MISLEADING 404. The endpoint URL
-        is the one the ISIN job already uses — one constant, one probe-verified contract.
+        is the one the ISIN job already uses.
 
         A row is unusable without ``symbol`` (the token IS the resolution) and is skipped; every
         other field degrades: no attachment ⇒ the deterministic :data:`NSE_ANN_ITEM_URL`, no

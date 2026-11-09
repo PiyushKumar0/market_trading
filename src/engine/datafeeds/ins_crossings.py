@@ -1,61 +1,47 @@
 """``ins_crossings`` — the EOD job that finds the day's NEW insider net-BUY crossings (the `ins` strategy).
 
-Owner-directed 2026-08-17, the first evidence-first origination leg. Runs date-keyed at 19:15 IST,
-AFTER ``filings_pit_fresh`` (19:00) so the day's BSE fresh disclosures are already in
-``insider_trades``, and persists each crossing as an ``ins_pending`` row (migration 0008) for the NEXT
-session's window-open sweep to admit through ``SignalPreScreen.admit``.
-
-Why the work is split EOD-compute / morning-admit rather than done in one place: filings arrive after
-the close, so the event is knowable tonight; but a candidate may only enter the pipeline during a
-session, through the prescreen's dedupe/caps spine. Journalling the crossing in between is what makes the
-handoff survive an engine restart, a sleeping machine or a catch-up replay — the same reason
-``mom_rebalance_state`` (0006) and the prescreen day-slot journal (0004/0005) exist.
+Runs date-keyed at 19:15 IST, AFTER ``filings_pit_fresh`` (19:00) so the day's BSE fresh
+disclosures are already in ``insider_trades``, and persists each crossing as an ``ins_pending`` row
+for the NEXT session's window-open sweep to admit through ``SignalPreScreen.admit``. The split
+(EOD compute, morning admit) exists because filings arrive after the close but a candidate may only
+enter the pipeline during a session; the journal row makes the handoff survive a restart, a sleeping
+machine or a catch-up replay.
 
 **The crossing rule is NOT implemented here.** It comes from
 :func:`engine.datafeeds.filings_events.insider_net_buy`, which wraps
 :func:`engine.datafeeds.insider_crossings.insider_cluster_events` verbatim — the SAME function the
-insider-crossing study runs (T+10 +0.7297% / T+20 +1.5797% net). One definition; a copy would drift, and a
-drifted live rule would be trading a population the evidence never measured. This module's whole job
-is to feed that function the right inputs and journal what comes back.
+study runs. One definition; a copy would drift. This module feeds that function the right inputs and
+journals what comes back.
 
 STARVATION VISIBILITY (binding)
 ------------------------------------------
-Live crossings come from two same-day feeds carrying the same filings: the **BSE fresh feed** (live
-since 2026-07-19, ~13-18 in-universe rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old
-NSE route's ~70-day embargo had made NSE historical-only). :meth:`MarketStore.get_insider_trades`
-counts a trade both feeds carry once. The live-reachable event population is still NOT proven
-identical to the backtested one. Every run therefore
-logs ``ins_crossings_run`` with the day's fresh-feed row counts alongside the crossings found:
+Live crossings come from two same-day feeds carrying the same filings: the **BSE fresh feed**
+(~13-18 in-universe rows/day) and NSE's PIT V2.0 route (the old NSE route's ~70-day embargo made NSE
+historical-only). :meth:`MarketStore.get_insider_trades` counts a trade both feeds carry once. Every
+run logs ``ins_crossings_run`` with the day's fresh-feed row counts alongside the crossings found:
 **sustained zero-rows is starvation of the feed, not absence of signal**, and the two are
-indistinguishable from a "0 crossings" line alone. That was the 2026-08-04 news-corpus lesson; it is
-not being re-learned here.
+indistinguishable from a "0 crossings" line alone.
 
-Rows are not the only starvation shape (2026-09-12). The feed can deliver rows every day and still
-cover a handful of ISSUERS: the 09-10 run saw 22 symbols with filings across a 480-name eligible
-universe (4.6%) where the NSE corpus the edge was measured on carried 1,565. ``ins_crossings_run``
-therefore also carries ``coverage_pct`` (:func:`coverage_percent`), and a run under
-:data:`COVERAGE_WARN_PCT` raises ``ins_feed_coverage_low`` — the row-count warning above fires only
-on ZERO rows and was silent through the whole episode. ``coverage_pct`` measures the 120-day CORPUS,
-not today's feed (a backfill can widen it with the live feeds unchanged), so both lines also carry
-``fresh_symbols_in_universe``: the issuers the live feeds reached on ``d``.
+Rows are not the only starvation shape: the feed can deliver rows every day yet cover a handful of
+ISSUERS. ``ins_crossings_run`` therefore also carries ``coverage_pct`` (:func:`coverage_percent`), and
+a run under :data:`COVERAGE_WARN_PCT` raises ``ins_feed_coverage_low`` (the zero-rows warning does not
+fire in that case). ``coverage_pct`` measures the 120-day CORPUS, not today's feed (a backfill can
+widen it with the live feeds unchanged), so both lines also carry ``fresh_symbols_in_universe``: the
+issuers the live feeds reached on ``d``.
 
-This alarm does NOT own the feed's own resolution stage. Widening the corpus lifts ``coverage_pct``
-above the floor and silences this line permanently, so a later collapse of
-``filings_pit_fresh``'s scrip→symbol map would be invisible here: that job raises its own
-``filings_pit_fresh_scrip_map_degraded`` warning and a latched owner alert. Keep the
-two alarms distinct — this one answers "how much of the universe has filings at all", that one
-answers "can we still resolve the rows we fetched".
+This alarm does NOT own the feed's own resolution stage: widening the corpus silences it, so a
+collapse of ``filings_pit_fresh``'s scrip→symbol map would be invisible here. That job raises its own
+``filings_pit_fresh_scrip_map_degraded`` warning and a latched owner alert. Keep the two alarms
+distinct — this one answers "how much of the universe has filings at all", that one "can we still
+resolve the rows we fetched".
 
-DELIBERATE APPROXIMATION, STATED
---------------------------------
-:func:`~engine.datafeeds.insider_crossings.insider_cluster_events` starts ``armed=True`` at
-``sessions[0]``, so its re-arm hysteresis is path-dependent from the first session it is given. The
-study runs the full 3-year history; a live EOD job cannot re-derive three years nightly for every
-symbol. This job runs a :data:`LOOKBACK_DAYS`-calendar-day window instead. A divergence from the
-full-history study needs the trailing sum to sit at/above the threshold across the ENTIRE window
-prefix (any single session below it re-arms both computations identically) — i.e. ~4 months of
-uninterrupted ≥₹1cr trailing insider buying in one symbol. Accepted, documented, and the window is
-the knob if it ever bites.
+DELIBERATE APPROXIMATION
+------------------------
+``insider_cluster_events`` starts ``armed=True`` at ``sessions[0]``, so its re-arm hysteresis is
+path-dependent from the first session it is given. The study runs the full 3-year history; this job
+runs a :data:`LOOKBACK_DAYS`-calendar-day window. A divergence needs the trailing sum to sit at/above
+the threshold across the ENTIRE window prefix — ~4 months of uninterrupted ≥₹1cr trailing insider
+buying in one symbol. Accepted; the window is the knob if it ever bites.
 """
 
 from __future__ import annotations
@@ -79,25 +65,21 @@ from engine.marketdata.store import MarketStore
 _log = get_logger("engine.datafeeds.ins_crossings")
 
 #: Calendar-day history the crossing function is given per symbol. Must comfortably exceed the
-#: 10-SESSION trailing window (that part needs ~3 weeks); the rest buys margin on the re-arm
-#: path-dependence documented in the module docstring.
+#: 10-SESSION trailing window (~3 weeks); the rest buys margin on the re-arm path-dependence.
 LOOKBACK_DAYS = 120
 
 #: ISSUER-coverage floor, in percent of the eligible universe, under which the run warns
-#: ``ins_feed_coverage_low``. 10% is not a measured optimum — it is the round number that sits an
-#: order of magnitude above the 09-10 reading (22/480 = 4.6%) and well below the ~1,565-issuer NSE
-#: corpus the edge was measured on, so it fires on today's starvation and would stop firing only on
-#: a materially wider feed. Raise it when the feed is fixed, never to quieten the line.
+#: ``ins_feed_coverage_low``. A round number, not a measured optimum: well below the ~1,565-issuer
+#: NSE corpus the edge was measured on. Raise it when the feed is fixed, never to quieten the line.
 COVERAGE_WARN_PCT = 10.0
 
 
 class InsCrossingsResult(BaseModel):
     """One run's outcome (never an exception — this job is not entry-blocking).
 
-    ``ok`` is the watermark verdict (``engine.ops.jobs._job_result_ok`` reads it): False only when the
-    day could not be EVALUATED at all — no universe row for ``d``, or no daily bar for ``d`` on any
-    candidate symbol — so a catch-up pass retries it. Zero crossings on a day that WAS evaluated
-    is a real answer, not a failure: ``ok=True``, ``crossings_found=0``.
+    ``ok`` is the watermark verdict (``engine.ops.jobs._job_result_ok``): False only when the day
+    could not be EVALUATED — no universe row for ``d``, or no daily bar for ``d`` on any candidate —
+    so a catch-up pass retries it. Zero crossings on an evaluated day is ``ok=True``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -118,10 +100,8 @@ class InsCrossingsResult(BaseModel):
 class InsCrossingsJob:
     """``ins_crossings`` — date-keyed EOD crossing detection + ``ins_pending`` journalling.
 
-    Idempotent per day: ``ins_pending``'s ``(for_session, symbol)`` primary key means a re-run
-    (catch-up replay, the periodic missed-job sweep, a manual ``--once``) upserts the same row rather
-    than queueing a duplicate candidate. A re-run deliberately does NOT resurrect a row the morning
-    sweep already consumed — see :meth:`_persist`.
+    Idempotent per day: ``ins_pending``'s ``(for_session, symbol)`` key makes a re-run upsert the
+    same row. A re-run does NOT resurrect a consumed row — see :meth:`_persist`.
     """
 
     def __init__(
@@ -151,24 +131,19 @@ class InsCrossingsJob:
     def _run_sync(self, d: date) -> InsCrossingsResult:
         window_start = d - timedelta(days=LOOKBACK_DAYS)
 
-        # --- CORE-eligible universe (owner decision): the eligible set brk20 scans, restricted to core (NIFTY 500)
-        #     members via get_core_eligible_symbols (`ins` is a batch rule). A watchlist-cap exclusion is the ONE
-        #     exclusion that still leaves a symbol tradeable — it means "not in today's top-N focus
-        #     list", not "ineligible" — and cap symbols have no 1m bars, which is precisely why a
-        #     batch rule exists at all. (2026-09-01: predicate centralized in the store method —
-        #     this was an inline duplicate; `ins` deliberately stays on the ELIGIBLE set, NOT the
-        #     batch-universe extended set, because its registered edge was measured on index members
-        #     and its candidates must be gate-approvable.)
-        #     Owner decision 2026-10-08: the CORE (NIFTY 500) subset of the eligible set — the index widened
-        #     to NIFTY Total Market, and the registered edge was never measured on microcaps.
+        # --- CORE-eligible universe (owner decision): the eligible set brk20 scans, restricted to core
+        #     (NIFTY 500) members via get_core_eligible_symbols (`ins` is a batch rule). A watchlist-cap
+        #     exclusion still leaves a symbol tradeable (cap symbols have no 1m bars, which is why a
+        #     batch rule exists). `ins` stays on the ELIGIBLE set, NOT the batch-universe extended set:
+        #     its edge was measured on index members, never microcaps, and candidates must be
+        #     gate-approvable.
         eligible = set(self._store.get_core_eligible_symbols(d))
         if not eligible:
             _log.warning("ins_crossings_no_universe", d=d.isoformat())
             return InsCrossingsResult(d=d, ok=False, reason="no core-eligible universe rows for the run day (no build, or core list unavailable)")
 
-        # --- one bulk read of the filings window, grouped by symbol. A symbol with no filing inside
-        #     the window cannot produce a crossing inside it (the trailing sum is 10 sessions), so
-        #     this is a lossless narrowing of the core-eligible universe down to the handful that filed.
+        # --- one bulk read of the filings window, grouped by symbol; a symbol with no filing in the
+        #     window cannot cross, so narrowing to those that filed is lossless.
         filings = self._store.get_insider_trades(
             broadcast_from=datetime.combine(window_start, time(0, 0), tzinfo=IST),
             broadcast_to=datetime.combine(d, time(23, 59, 59), tzinfo=IST),
@@ -179,17 +154,13 @@ class InsCrossingsJob:
             if symbol in eligible:
                 by_symbol[symbol].append(row)
 
-        # --- feed-health telemetry: what the live feeds delivered for d (both are same-day, so a row
-        #     broadcast on d can only have come from one of them).
+        # --- feed-health telemetry: what the live (same-day) feeds delivered for d.
         fresh_today = [row for row in filings if _broadcast_date(row) == d]
         fresh_in_universe = [
             row for row in fresh_today if str(row.get("symbol") or "").upper() in eligible
         ]
-        # ISSUERS the live feeds reached today, apart from the ROWS they delivered. `by_symbol` below
-        # counts the 120-day CORPUS: a backfill can widen `coverage_pct` past the alarm threshold
-        # while today's live feeds still reach the same handful of issuers. Logging both keeps "the
-        # corpus is wide" readable apart from "today's feeds reached N issuers" even when the alarm
-        # has gone quiet.
+        # ISSUERS reached today, apart from ROWS: `by_symbol` counts the 120-day CORPUS, which a
+        # backfill can widen while today's feeds still reach the same few issuers.
         fresh_symbols_in_universe = len({
             str(row.get("symbol") or "").upper() for row in fresh_in_universe
         })
@@ -200,17 +171,14 @@ class InsCrossingsJob:
             bars = self._store.get_bars_1d(symbol, window_start, d)
             sessions = [b.d for b in bars]
             if not sessions or sessions[-1] != d:
-                # No completed bar for the run day (bhavcopy/daily_bars gap, or a symbol that did not
-                # trade): a crossing AT d is not computable and must not be invented from an older
-                # session's close. Counted and logged, never silently dropped.
+                # No completed bar for d: a crossing AT d must not be invented from an older
+                # session's close. Counted, never silently dropped.
                 missing_bar += 1
                 continue
             events = insider_net_buy(by_symbol[symbol], sessions, min_value_inr=self._threshold)
             reference_close = bars[-1].close
             for event in events:
-                # Only crossings that happened TODAY are new. Earlier ones in the window were
-                # journalled on their own run day (or predate the leg) — re-emitting them would
-                # re-originate stale events every night.
+                # Only TODAY's crossings are new; earlier ones were journalled on their own run day.
                 if event["event_session"] != d:
                     continue
                 pending.append(
@@ -238,9 +206,8 @@ class InsCrossingsJob:
             rows_written=written,
             symbols_missing_bar=missing_bar,
         )
-        # THE starvation-visibility line: fresh-feed row counts next to crossings found.
-        # Zero crossings with zero fresh rows = the feed is starved. Zero crossings with healthy fresh
-        # rows = a genuinely quiet day. One log line has to be able to tell those apart.
+        # Starvation-visibility line: zero crossings with zero fresh rows = starved feed; with healthy
+        # rows = a quiet day.
         coverage_pct = coverage_percent(len(by_symbol), len(eligible))
         _log.info(
             "ins_crossings_run",
@@ -259,16 +226,10 @@ class InsCrossingsJob:
         )
         if not fresh_today:
             _log.warning("ins_crossings_fresh_feed_empty", d=d.isoformat())
-        # The SECOND starvation shape, invisible until 2026-09-12: the feed delivers rows every day
-        # (so `fresh_feed_empty` never fires) but from a handful of ISSUERS — the 09-10 run saw 22
-        # symbols across a 480-name eligible universe, 4.6%, where the NSE corpus the edge was
-        # measured on carried 1,565. A rule that can only see 4.6% of the universe is not quiet, it is
-        # blind, and the two are indistinguishable from a crossings=0 line.
-        # KNOWN LIMIT of the threshold metric: its numerator is the 120-day corpus, so a single NSE
-        # PIT backfill (rows broadcast ~70 days ago, inside the window) can lift `coverage_pct` past
-        # the threshold and silence this line while the LIVE feed still reaches ~22 issuers a day.
-        # `fresh_symbols_in_universe` rides along so the warning — and the run line above, which is
-        # what is left once the warning goes quiet — still names today's live issuer count.
+        # Second starvation shape: rows every day (so `fresh_feed_empty` never fires) from a handful
+        # of ISSUERS — blind, not quiet. KNOWN LIMIT: the numerator is the 120-day corpus, so an NSE
+        # PIT backfill can lift `coverage_pct` past the threshold and silence this while the live
+        # feed stays narrow; `fresh_symbols_in_universe` rides along to name today's issuer count.
         if coverage_pct < COVERAGE_WARN_PCT:
             _log.warning(
                 "ins_feed_coverage_low", d=d.isoformat(),
@@ -281,11 +242,9 @@ class InsCrossingsJob:
     def _persist(self, for_session: date, pending: list[dict[str, Any]]) -> int:
         """Upsert the day's crossings as ``ins_pending`` rows. Returns rows written.
 
-        The ``ON CONFLICT`` clause is what makes a same-day re-run idempotent, and it deliberately
-        leaves ``consumed`` ALONE: if the morning sweep already admitted a row, a later catch-up pass
-        for the same trading day must not un-consume it and let the candidate be admitted twice. The
-        crossing metadata is refreshed (a late-arriving filing can legitimately raise the trailing
-        value) — that is data correction, not re-origination.
+        ``ON CONFLICT`` makes a same-day re-run idempotent and deliberately leaves ``consumed`` ALONE:
+        a catch-up pass must not un-consume a row the morning sweep admitted. Crossing metadata is
+        refreshed (a late filing can raise the trailing value) — data correction, not re-origination.
         """
         if not pending:
             return 0
@@ -302,11 +261,9 @@ class InsCrossingsJob:
             )
             for row in pending
         ]
-        # Bare execute on the autocommit connection (``isolation_level=None``), matching the engine's
-        # other journal writers. Deliberately NOT ``core.db.transaction()``: this runs on a worker
-        # thread against the connection the loop thread also uses, and an explicit BEGIN could land
-        # inside one another writer already opened. Per-row commits are fine here — the (for_session,
-        # symbol) key makes a partially-written batch converge on the next run rather than duplicate.
+        # Bare execute on the autocommit connection, NOT ``core.db.transaction()``: this runs on a
+        # worker thread against a connection the loop thread also uses, and an explicit BEGIN could
+        # land inside another writer's. Per-row commits are fine: the key makes a partial batch converge.
         self._conn.executemany(
             """
             INSERT INTO ins_pending (
@@ -327,8 +284,8 @@ class InsCrossingsJob:
 def coverage_percent(symbols_with_filings: int, universe: int) -> float:
     """Share of the eligible universe the filings feed reached, to one decimal (0.0 on no universe).
 
-    ONE definition, used by the run log, the warning test and the ``--once`` print: two call sites
-    rounding independently would let the logged number and the alarm threshold disagree at the edge.
+    ONE definition for the run log, the warning and the ``--once`` print, so the logged number and the
+    alarm threshold cannot disagree at the edge.
     """
     if universe <= 0:
         return 0.0
@@ -354,8 +311,7 @@ async def _run_once(d: date | None = None) -> InsCrossingsResult:
     clock = Clock()
     store = MarketStore.from_settings(settings, clock).open()
     conn = connect(settings.sqlite_path())
-    # Same calendar as the engine (ops.main, include_special=False), so for_session never names a
-    # special session the live sweep will not run on.
+    # Same calendar as the engine (include_special=False): for_session never names a special session.
     calendar = NSECalendar(config_dir() / "calendar", clock, sqlite_conn=conn, include_special=False)
     run_day = d or clock.today()
     try:

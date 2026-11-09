@@ -5,18 +5,15 @@ cross-section for submissions with ``broadcastDate`` newer than the stored water
 (symbol, quarter) fetch the BSE SHP detail stack — the SEBI-format quarterly tables that carry the
 per-category **pledged/encumbered** + locked shares NSE's master does not — and upsert one row per
 category into ``shp_quarterly``. The BSE detail is two calls (``SHPQNewFormat/w`` quarter
-index → ``CorporatesSHPSecuritybeta/w`` detail per ``qtrid``), paced ≥1.5 s apart (observed safe).
+index → ``CorporatesSHPSecuritybeta/w`` detail per ``qtrid``), paced ≥1.5 s apart.
 
-The BSE scrip code comes from ``symbol_isin`` (seeded by ``isin_map`` / the backfill). A symbol with
-no scrip-code mapping is **skipped-and-counted**, never a failure — the feed degrades to less data,
-never raises. A per-symbol BSE fetch failure (incl. the documented
-``error_Bse.html``-as-200 quirk via :func:`engine.core.bse_http.bse_get`) degrades that symbol only.
+The BSE scrip code comes from ``symbol_isin``. A symbol with no scrip-code mapping is
+**skipped-and-counted**, never a failure — the feed degrades to less data, never raises. A per-symbol
+BSE fetch failure (incl. the ``error_Bse.html``-as-200 quirk via :func:`engine.core.bse_http.bse_get`)
+degrades that symbol only. Data only; no decision path touched.
 
-DATA ONLY in stage 1 (no decision path touched).
-
-**BSE SHP detail shape — LIVE-VERIFIED 2026-07-16** (the original probe had guessed the WRONG
-endpoints — ``ShareholdingPattern/w`` / ``ShareholdingPatternGetData/w`` — which returned
-``error_Bse.html``; the endpoints below were re-probed live during this build):
+**BSE SHP detail shape (live-verified).** The endpoints guessed first (``ShareholdingPattern/w`` /
+``ShareholdingPatternGetData/w``) return ``error_Bse.html``; use these:
   * ``SHPQNewFormat/w?scripcode=`` → ``{"Table": [{yr, qtrid (float), qtr ("June 2026"),
     filing_date_time, XbrlFile, ...}]}`` — the filed-quarter index. ``qtrid`` is a float (``130.0``);
     the quarter is a "<Month> <Year>" LABEL, not a date, so we derive the quarter-END date from it.
@@ -47,16 +44,16 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_shp")
 
-#: NSE SHP daily-incremental master cross-section (equities). [VERIFY]; probe-verified list shape.
+#: NSE SHP daily-incremental master cross-section (equities); returns a list.
 NSE_SHP_MASTER_URL = "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities"
 
-#: BSE SHP detail stack — endpoints and shape live-verified 2026-07-16 (module docstring).
+#: BSE SHP detail stack (shape in the module docstring).
 BSE_SHP_QUARTER_INDEX_URL = "https://api.bseindia.com/BseIndiaAPI/api/SHPQNewFormat/w?scripcode={code}"
 BSE_SHP_DETAIL_URL = (
     "https://api.bseindia.com/BseIndiaAPI/api/CorporatesSHPSecuritybeta/w?scripcode={code}&qtrid={qtrid}"
 )
 
-#: BSE per-request spacing (≥1.5 s observed safe). Module indirection so tests skip the wait.
+#: BSE per-request spacing. Module indirection so tests skip the wait.
 _BSE_SPACING_S = 1.5
 _sleep = asyncio.sleep
 
@@ -147,7 +144,7 @@ def _bse_table(payload: Any, key: str = "Table") -> list[dict[str, Any]]:
     return []
 
 
-# --------------------------------------------------------------------------- NSE master (VERIFIED shape)
+# --------------------------------------------------------------------------- NSE master
 class ShpSubmission(BaseModel):
     """One NSE SHP-master submission (the daily new-filing detection unit)."""
 
@@ -191,8 +188,8 @@ def parse_shp_master(payload: Any) -> list[ShpSubmission]:
     return subs
 
 
-# --------------------------------------------------------------------------- BSE detail (LIVE-VERIFIED)
-# Real field names (live 2026-07-16); defensive fallbacks kept for resilience to BSE tweaks.
+# --------------------------------------------------------------------------- BSE detail
+# Real field names first; the fallbacks absorb BSE tweaks.
 _QTRID_ALIASES = ("qtrid", "qtr_id", "fld_quarterid", "quarterid", "qid")
 _QTR_LABEL_ALIASES = ("qtr", "fld_qtrname", "fld_quartername", "fld_enddate", "quarter", "quarterdate", "date")
 _CATEGORY_ALIASES = ("fld_shortname", "fld_shortcatg", "fld_category", "category", "categoryname")
@@ -207,9 +204,8 @@ _LOCKED_ALIASES = ("fld_nooflockedinshares", "lockedshares", "noofshareslocked")
 #: scan covers a BSE result-set reshuffle without a code change.
 _DETAIL_ROW_KEYS = ("Table1", "Table5", "Table")
 
-#: The DECLARATION row (result set ``Table``) carries the quarter's disclosure timestamp
-#: ``Fld_AuthoriseDate`` — the point-in-time key for backfill-path rows, where no
-#: NSE-master broadcast is available. Alias fallbacks defensive like every other field.
+#: The DECLARATION row (``Table``) carries the quarter's disclosure timestamp ``Fld_AuthoriseDate`` —
+#: the point-in-time key for backfill rows, which have no NSE-master broadcast.
 _AUTHORISE_ALIASES = ("fld_authorisedate", "authorisedate", "fld_authorizedate")
 _DECLARATION_ROW_KEYS = ("Table", "Table4", "Table2")
 
@@ -343,11 +339,8 @@ class FilingsShpJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Alert dedup (2026-08-13, DEVIATES from bhavcopy's per-date ``set[date]``): ``run()`` is
-        #: RUN_LATEST and takes no ``d`` — neither it nor ``_alert`` carries a run-date to key on (see
-        #: the composition-root sweep report), so there is no per-day identity to dedup against. A
-        #: single process-lifetime flag stands in for "currently in a failing/degraded streak" instead;
-        #: reset (re-arming the alert) on the next fully-clean run.
+        #: Alert dedup: ``run()`` is RUN_LATEST with no run-date to key on, so one process-lifetime
+        #: flag means "in a failing/degraded streak"; reset on the next fully-clean run.
         self._alerted: bool = False
 
     async def run(self) -> FilingsShpResult:
@@ -374,16 +367,13 @@ class FilingsShpJob:
         for sub in new:
             mapping = isin_map.get(sub.symbol)
             if mapping is None:
-                # The NSE SHP master is MARKET-WIDE; a submission for a symbol we never mapped is
-                # simply out-of-universe — routine on every run, NEVER a degradation (2026-07-23:
-                # counting these as degraded produced false owner alerts — alert fatigue is the
-                # real failure mode). Counted separately for the log line only.
+                # The NSE SHP master is MARKET-WIDE: an unmapped symbol is out-of-universe, routine,
+                # NEVER a degradation (counting it produced false owner alerts). Logged only.
                 skipped_out_of_universe += 1
                 continue
             code = _clean(mapping.get("bse_scrip_code"))
             if not code:
-                # IN-universe symbol whose scrip mapping is missing: its SHP data is silently
-                # unobtainable — this IS a real degradation (isin_map should have resolved it).
+                # IN-universe symbol with no scrip mapping: its SHP data is unobtainable — a real degradation.
                 skipped_no_scrip += 1
                 continue
             try:
@@ -424,8 +414,7 @@ class FilingsShpJob:
                 symbols_upserted += 1
 
         # Degraded ⇔ something we WANTED was not obtained: a failed BSE fetch, or an IN-universe
-        # symbol without a scrip mapping. Out-of-universe skips are routine and never alert
-        # (2026-07-23 owner report: a "7 skipped (no scrip code)" alert fired on a healthy run).
+        # symbol without a scrip mapping. Out-of-universe skips never alert.
         degraded = bool(failed or skipped_no_scrip)
         if degraded:
             if not self._alerted:  # dedup: don't storm on every retry of a still-degraded streak

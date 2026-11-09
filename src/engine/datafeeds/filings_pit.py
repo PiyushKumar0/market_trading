@@ -1,30 +1,27 @@
 """NSE insider trades → ``insider_trades`` (job ``filings_pit``, ~18:35).
 
-**Two NSE routes.** Insider (PIT) disclosures moved to SEBI's PIT V2.0 XBRL filings on 2026-05-03 (found
-2026-09-24 by capturing NSE's own insider-trading page). The old ``corporates-pit`` route
-(:func:`pit_url`, :func:`parse_pit`) holds the history up to 2026-05-02 and only
-``scripts/backfill_filings.py`` still walks it. The daily job reads ``corporates-pit-gg``
+**Two NSE routes.** Insider (PIT) disclosures moved to SEBI's PIT V2.0 XBRL filings on 2026-05-03. The
+old ``corporates-pit`` route (:func:`pit_url`, :func:`parse_pit`) holds history up to 2026-05-02 and
+only ``scripts/backfill_filings.py`` still walks it. The daily job reads ``corporates-pit-gg``
 (:func:`pit_gg_url`): one listing row per FILING, with its trades in the filing's XBRL (one context per
 disclosure, :func:`parse_pit_xbrl`). Only index constituents' XBRL is fetched, the same universe the
 BSE fresh feed resolves to.
 
-**Point-in-time discipline:** ``broadcast_dt`` is the exchange dissemination time (the
-listing's received time when that is missing; the two differ by at most 5 s), and every downstream
-as-of join keys on it, never the ``txn_from``/``txn_to`` period. The PK is a sha256 content hash of
+**Point-in-time discipline:** ``broadcast_dt`` is the exchange dissemination time (the listing's
+received time when that is missing; they differ by at most 5 s), and every downstream as-of join keys
+on it, never the ``txn_from``/``txn_to`` period. The PK is a sha256 content hash of
 (symbol, person_name, broadcast_dt, txn_type, qty, value), so a re-ingested filing never duplicates.
 
-**Both exchanges carry the same filing** (2026-09-24: all 19 NSE disclosures of 09-22/23 matched a BSE
-fresh-feed row field for field, BSE 20 s to 3 min earlier). Each source's rows are stored as they
-come; :meth:`MarketStore.get_insider_trades` pairs the two copies of a trade and keeps the earlier.
+**Both exchanges carry the same filing** (BSE 20 s to 3 min earlier). Each source's rows are stored as
+they come; :meth:`MarketStore.get_insider_trades` pairs the two copies of a trade and keeps the earlier.
 
 **Window.** Both routes return nothing without an explicit ``from_date``/``to_date`` (DD-MM-YYYY)
 window. The daily job's window is ``[watermark - PIT_RETRY_DAYS → run-day]`` where the watermark is
-the latest stored ``broadcast_dt`` **of this source's rows only** (2026-09-13 — the BSE fresh
-feed writes into the same table every day and a whole-table watermark collapsed this window to
-``[d-1, d]``), floored at :data:`MAX_WINDOW_DAYS` behind the run day and walked in
-:data:`PIT_WINDOW_DAYS` chunks. A filing whose XBRL link already has stored rows is not fetched again.
-History older than the floor is the backfill's job
-(``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
+the latest stored ``broadcast_dt`` **of this source's rows only** (the BSE fresh feed writes into the
+same table daily; a whole-table watermark would collapse the window to ``[d-1, d]``), floored at
+:data:`MAX_WINDOW_DAYS` behind the run day and walked in :data:`PIT_WINDOW_DAYS` chunks. A filing whose
+XBRL link already has stored rows is not fetched again. History older than the floor is the backfill's
+job (``scripts/backfill_filings.py seed --from <day> --skip-results --skip-integrated --skip-shp``).
 
 **Failure model.** A listing row without a symbol, broadcast time or XBRL link is skipped and
 counted. A filing whose XBRL fails (fetch, parse or store) is skipped and counted, and fetched again on
@@ -66,39 +63,30 @@ NSE_PIT_GG_URL = "https://www.nseindia.com/api/corporates-pit-gg"
 PIT_GG_FIRST_DAY = date(2026, 5, 3)
 
 #: Days before the watermark each run lists again. A filing whose XBRL failed (not yet on the archive
-#: host, a transient error, a malformed file) is fetched again on every run inside this margin; one
-#: failure never stalls the filings behind it.
+#: host, a transient error, a malformed file) is fetched again on every run inside this margin.
 PIT_RETRY_DAYS = 7
 
 #: This job's source tag in ``insider_trades`` — the bare-id rows (``filings_pit_fresh`` writes the
-#: ``bse:``-tagged ones). Canonical: ``filings_events.SOURCE_NSE`` imports this directly — filings_events
-#: already depends on this module transitively (filings_events -> filings_pit_fresh -> filings_pit), so
-#: a direct import adds no new edge and cannot cycle.
+#: ``bse:``-tagged ones). ``filings_events.SOURCE_NSE`` imports this directly (no import cycle).
 NSE_SOURCE = "nse"
 
-#: Widest span (days) ONE request asks for — the unit ``scripts/backfill_filings.py`` already walks
-#: this SAME endpoint in (imported there as ``_NSE_WINDOW_DAYS``, observed safe; scripts/ can
-#: import src/, so the value is shared, not duplicated). NSE has never been observed to REFUSE a wider
-#: window — the 2026-09-12 probe answered 01-05 → 12-09 (134 days) and its 3 rows came from the START
-#: of that span, which argues against truncation without proving it — but a silent truncation to the
-#: newest slice would lift the watermark past rows never served, and that hole has no alarm: the
-#: floor below only fires on what it refuses to ASK for. So the daily job never asks for more than
-#: the backfill does.
+#: Widest span (days) ONE request asks for — the unit ``scripts/backfill_filings.py`` walks this SAME
+#: endpoint in (shared, not duplicated). A wider window is not known to be refused, but a silent
+#: truncation to the newest slice would lift the watermark past rows never served, with no alarm
+#: (the floor below only fires on what it refuses to ASK for).
 PIT_WINDOW_DAYS = 31
 
-#: Listing requests ONE run may issue, hence the window-START floor (2026-09-13). The window
-#: opens at the per-SOURCE NSE watermark, which widens by a day for every day the feed stores nothing —
-#: unbounded without a floor. Window bounds are INCLUSIVE, so N chunks reach
-#: ``N * PIT_WINDOW_DAYS - 1`` days behind the run day. A residue older than the floor is an owner-run
-#: ``scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-integrated
-#: --skip-shp``, announced by ``filings_pit_window_clamped``.
+#: Listing requests ONE run may issue, hence the window-START floor. The window opens at the
+#: per-SOURCE NSE watermark, which widens by a day for every day the feed stores nothing. Bounds are
+#: INCLUSIVE, so N chunks reach ``N * PIT_WINDOW_DAYS - 1`` days behind the run day. A residue older
+#: than the floor is an owner-run ``scripts/backfill_filings.py seed --from <watermark day>
+#: --skip-results --skip-integrated --skip-shp``, announced by ``filings_pit_window_clamped``.
 MAX_WINDOWS_PER_RUN = 6
 MAX_WINDOW_DAYS = PIT_WINDOW_DAYS * MAX_WINDOWS_PER_RUN - 1
 
-#: ≥1.5 s between consecutive requests to the cookie-gated www host (observed safe). Public:
-#: ``scripts/backfill_filings.py`` imports it (with :func:`pit_windows` and :data:`PIT_WINDOW_DAYS`)
-#: to walk the same endpoint. ``_sleep`` is a module-level indirection so tests observe the pacing
-#: without waiting (the ``engine.core.nse_http`` idiom).
+#: ≥1.5 s between consecutive requests to the cookie-gated www host. Public: ``scripts/backfill_filings.py``
+#: imports it (with :func:`pit_windows` and :data:`PIT_WINDOW_DAYS`). ``_sleep`` is a module-level
+#: indirection so tests observe the pacing without waiting.
 PIT_PACE_S = 1.5
 _sleep = asyncio.sleep
 
@@ -121,9 +109,8 @@ def pit_gg_url(frm: date, to: date) -> str:
 def pit_windows(frm: date, to: date, span_days: int = PIT_WINDOW_DAYS) -> list[tuple[date, date]]:
     """Ascending ≤``span_days`` windows covering ``[frm, to]`` inclusive (empty if ``frm > to``).
 
-    Canonical implementation — ``scripts/backfill_filings.py`` imports this rather than keeping its
-    own copy (scripts/ can import src/; the reverse cannot, which is why this lives here and not
-    there). The two walk the SAME endpoint in the same unit, so a change here is a change for both.
+    ``scripts/backfill_filings.py`` imports this; they walk the SAME endpoint, so a change here is a
+    change for both.
     """
     out: list[tuple[date, date]] = []
     cur = frm
@@ -160,10 +147,9 @@ def _rows_of(payload: Any) -> list[dict[str, Any]]:
 
 
 def _clean(raw: Any) -> str:
-    """Stringify + strip. Deliberately treats every falsy raw value (``None``, ``0``, ``""``, ``False``)
-    as missing — NOT the same as ``filings_pit_fresh``'s own ``_clean``, which preserves a numeric ``0``
-    (BSE's ``secVal='0'`` is a real zero-consideration value there); the two must not be merged without
-    an explicit data decision on whether the NSE feed's numeric fields can legitimately carry a bare 0."""
+    """Stringify + strip; every falsy raw value (``None``, ``0``, ``""``) is missing. NOT the same as
+    ``filings_pit_fresh``'s ``_clean``, which preserves a numeric ``0`` (BSE's ``secVal='0'`` is a real
+    zero consideration); do not merge without deciding whether NSE numeric fields can carry a bare 0."""
     return str(raw or "").strip()
 
 
@@ -196,10 +182,8 @@ def _dec(raw: Any) -> Decimal | None:
         v = Decimal(s)
     except InvalidOperation:
         return None
-    # A bare ``NaN`` (or ``Infinity``) token survives ``json.loads`` and constructs a Decimal fine,
-    # but every ORDERING comparison on it raises InvalidOperation (int(Decimal('Infinity')) raises
-    # OverflowError) — a raise that :func:`_int` and any downstream `v <= 0` would take out of the never-raise
-    # guard. Non-finite is "no consideration" (folded in from filings_pit_fresh, 2026-09-23).
+    # A bare ``NaN``/``Infinity`` token survives ``json.loads`` but raises on ordering comparisons
+    # and int(); that would escape the never-raise guard. Non-finite is "no consideration".
     return v if v.is_finite() else None
 
 
@@ -219,8 +203,7 @@ def _flt(raw: Any) -> float | None:
 
 
 def _first_present(*values: Any) -> Any:
-    """First non-None value — NOT ``or`` chaining (a legit ``Decimal(0)``/``0`` is falsy but present,
-    e.g. a gift's ``secVal='0'`` is a real zero-consideration value, not 'missing')."""
+    """First non-None value — NOT ``or`` chaining (a gift's ``secVal='0'`` is falsy but present)."""
     for value in values:
         if value is not None:
             return value
@@ -448,15 +431,11 @@ class FilingsPitJob:
         self._settings = settings
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): with the watermark fix forwarding this
-        #: job's ``ok`` through the composition root, the 30-min sweeps genuinely re-run a still-failing
-        #: day — alert once per failing streak, not on every attempt.
+        #: Per-date alert dedup: the 30-min sweeps re-run a still-failing day — alert once per streak.
         self._alerted: set[date] = set()
-        #: Window-floor latch: WARNING on the TRANSITION into clamping, not once per run and not once
-        #: per replayed date (a boot catch-up replays one run per missed day through THIS instance,
-        #: and while the feed stores nothing the condition holds on every run). Cleared the moment the
-        #: watermark is back inside the cap — a latching cause needs a symmetric clear (2026-09-01
-        #: catchup_safety_jobs lesson) or the alarm never re-arms.
+        #: Window-floor latch: WARNING on the TRANSITION into clamping, not once per run or per
+        #: replayed date (a boot catch-up replays one run per missed day through THIS instance).
+        #: Cleared when the watermark is back inside the cap, or the alarm never re-arms.
         self._clamped = False
 
     def _window_start(self, watermark: datetime | None, d: date) -> date:
@@ -472,10 +451,9 @@ class FilingsPitJob:
         if frm >= floor:
             self._clamped = False
             return max(frm - timedelta(days=PIT_RETRY_DAYS), floor)
-        # Rows older than `floor` and newer than the watermark are NOT requested by this run, and no
-        # later run reaches them either: a successful run lifts the watermark past the gap. Recovery
-        # is `scripts/backfill_filings.py seed --from <watermark day> --skip-results --skip-integrated
-        # --skip-shp`.
+        # Rows between the watermark and `floor` are not requested, and no later run reaches them (a
+        # successful run lifts the watermark past the gap). Recovery: `scripts/backfill_filings.py
+        # seed --from <watermark day> --skip-results --skip-integrated --skip-shp`.
         log = _log.info if self._clamped else _log.warning
         log(
             "filings_pit_window_clamped", watermark=frm.isoformat(), frm=floor.isoformat(),
@@ -488,11 +466,9 @@ class FilingsPitJob:
         """Ingest the PIT V2.0 filings broadcast over ``[frm → d]`` in ≤:data:`PIT_WINDOW_DAYS`
         chunks (:meth:`_window_start`), skipping filings already stored. Idempotent on the
         content-hash id; ``d`` is the run day (date-keyed). Never raises into the scheduler
-        — the constituents and watermark reads are inside the guard too, so they degrade like a
-        fetch failure."""
-        # `frm` stands at the run day until the watermark is read, so a store fault reports the
-        # degenerate window it never got to widen; `windows_done=0` on the warning is what separates
-        # "the watermark read failed" from "the first fetch failed".
+        — the constituents and watermark reads are inside the guard too."""
+        # `frm` stays at the run day until the watermark is read; `windows_done=0` on the warning
+        # separates "the watermark read failed" from "the first fetch failed".
         frm = d
         win: tuple[date, date] | None = None
         windows = 0
@@ -546,8 +522,7 @@ class FilingsPitJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Filings are NEVER load-bearing: a features/risk-context
-            # feed, not a safety-critical one — closest closed-catalog kind, warning severity.
+            # Filings are NEVER load-bearing: closest closed-catalog kind, warning severity.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Insider-trades (PIT) feed degraded",
             body=(

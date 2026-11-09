@@ -1,18 +1,15 @@
-"""NSE corporate-actions feed → ``corp_actions`` (settings.jobs.corp_actions_ist — 20:15 since 2026-07-24, best-effort).
+"""NSE corporate-actions feed → ``corp_actions`` (settings.jobs.corp_actions_ist, best-effort).
 
 Pulls upcoming/recent corporate actions (ex-dates for dividends, splits, bonuses, rights, …) from
-the NSE corporates API and persists them to the DuckDB ``corp_actions`` table. Consumers:
-brk20/hi52 ex-date and unadjusted-history vetoes (ops.main), ``ScanContext`` upcoming ex-dates, the
-features engine, the pre-open planner, rec_outcomes / learning benchmark, the paper ExitManager.
-Still to land (live AUTO): ``GTTManager.adjust_for_ex_date`` and the startup scan via
-``NSECalendar.ex_dates``.
+the NSE corporates API into the DuckDB ``corp_actions`` table. Consumers: brk20/hi52 ex-date and
+unadjusted-history vetoes, ``ScanContext``, the features engine, the pre-open planner, rec_outcomes,
+the paper ExitManager. Still to land (live AUTO): ``GTTManager.adjust_for_ex_date``.
 
-Parsing is defensive: the row list is located under common wrapper keys, per-row field names
-are matched case-insensitively, the free-text ``purpose`` ("Dividend - Rs 5 Per Share",
-"Bonus 1:1", "Face Value Split…") is classified by keyword with ratio/amount extracted by regex —
-an unclassifiable purpose is kept as ``kind='other'`` (recorded, never guessed into a GTT
-adjustment). On fetch failure: alert + reuse yesterday's rows (the table simply keeps what it has;
-the catch-up retries). Never raises into the scheduler.
+Parsing is defensive: the row list is located under common wrapper keys, field names match
+case-insensitively, and the free-text ``purpose`` is classified by keyword with ratio/amount by
+regex — an unclassifiable purpose is kept as ``kind='other'`` (recorded, never guessed into a GTT
+adjustment). On fetch failure: alert and keep the rows the table has; the catch-up retries. Never
+raises into the scheduler.
 """
 
 from __future__ import annotations
@@ -35,33 +32,24 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.corp_actions")
 
-#: NSE corporates corporate-actions API (equities segment), BASE url — ``corp_actions_url()`` appends
-#: the per-run from_date/to_date window (see below). VERIFIED 2026-08-14: NSE removed the dashed route
-#: ``corporates-corporate-actions`` (hard 404, confirmed genuine — reproduced after nse_http's antibot
-#: re-prime retry, so it is not a cookie/priming issue) in favour of ``corporates-corporateActions``
-#: (camelCase, no dash before "Actions"); cross-checked against BennyThadikaran/NseIndiaApi
-#: (github.com/BennyThadikaran/NseIndiaApi, `src/nse/NSE.py::actions()`, commit 2026-07-23) and
-#: confirmed live (HTTP 200, JSON). The live payload is now a BARE list (not ``{"data": [...]}"``) —
-#: ``_rows_of`` already accepts both shapes, no change needed there — and per-row keys are ``symbol``/
-#: ``exDate``/``subject`` (not ``purpose``), both already matched case-insensitively below. anti-bot [likely].
+#: NSE corporate-actions API (equities), base URL; ``corp_actions_url()`` appends the date window.
+#: NSE dropped the dashed route ``corporates-corporate-actions`` (hard 404) for this camelCase one.
+#: The payload is a bare list with per-row keys ``symbol``/``exDate``/``subject``; ``_rows_of`` and
+#: the case-insensitive key match accept both this and the older wrapped shape.
 NSE_CORP_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporateActions?index=equities"
 
-#: Forward window past the run day: comfortably exceeds the largest current consumer horizon
-#: (``ops.scan_context.DEFAULT_EX_HORIZON_DAYS`` = 28; ``features.engine``/``ops.preopen_planner`` use
-#: 10) so a later horizon increase doesn't silently starve. VERIFIED 2026-08-14: the bare
-#: ``?index=equities`` call with no date params returns ONLY actions whose ex-date IS the call date —
-#: useless for these forward-looking consumers, which all query ``MarketStore.get_corp_actions`` with
-#: an ``ex_to`` horizon — so every fetch is explicitly date-ranged via :func:`corp_actions_url`.
+#: Forward window past the run day: exceeds the largest consumer horizon
+#: (``ops.scan_context.DEFAULT_EX_HORIZON_DAYS`` = 28) so a horizon increase doesn't starve. Every
+#: fetch must be date-ranged: the bare ``?index=equities`` call returns only actions whose ex-date is
+#: the call date.
 _FORWARD_WINDOW_DAYS = 35
-#: Trailing window — "recent" per this module's docstring: ledger attribution needs ex-dates that have
-#: JUST passed (a trade near a recent ex-date); cheap insurance against a same-day gap.
+#: Trailing window: ledger attribution needs ex-dates that have just passed.
 _BACKWARD_WINDOW_DAYS = 7
 
 
 def corp_actions_url(d: date) -> str:
-    """NSE corporate-actions URL for the ``[d - _BACKWARD_WINDOW_DAYS, d + _FORWARD_WINDOW_DAYS]``
-    window (``from_date``/``to_date``, ``%d-%m-%Y`` — verified param shape, mirrors
-    ``earnings_calendar.event_calendar_range_url``)."""
+    """NSE corporate-actions URL for ``[d - _BACKWARD_WINDOW_DAYS, d + _FORWARD_WINDOW_DAYS]``
+    (``from_date``/``to_date``, ``%d-%m-%Y``)."""
     frm = d - timedelta(days=_BACKWARD_WINDOW_DAYS)
     to = d + timedelta(days=_FORWARD_WINDOW_DAYS)
     return f"{NSE_CORP_ACTIONS_URL}&from_date={frm:%d-%m-%Y}&to_date={to:%d-%m-%Y}"
@@ -75,9 +63,9 @@ _KIND_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("sub-division", "split"),
     ("subdivision", "split"),
     ("sub division", "split"),
-    ("consolidation", "split"),          # a reverse split rescales the series the same way (2026-09-03)
+    ("consolidation", "split"),          # a reverse split rescales the series the same way
     ("rights", "rights"),
-    ("demerger", "demerger"),            # the parent's series rescales on the ex-date (2026-09-03)
+    ("demerger", "demerger"),            # the parent's series rescales on the ex-date
     ("capital reduction", "demerger"),
     ("reduction of capital", "demerger"),
     ("buyback", "buyback"),
@@ -196,9 +184,7 @@ class CorpActionsJob:
         self._http = http
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): with the watermark fix forwarding this
-        #: job's ``ok`` through the composition root, the 30-min sweeps genuinely re-run a still-failing
-        #: day — alert once per failing streak, not on every attempt.
+        #: Per-date alert dedup: the 30-min sweeps re-run a still-failing day — alert once per streak.
         self._alerted: set[date] = set()
 
     async def run(self, d: date) -> CorpActionsResult:

@@ -7,18 +7,16 @@ deals-job pattern):
 1. **Results filings** — ``corporates-financial-results?period=Quarterly`` filing METADATA (period,
    audited/consolidated flags, ``broadCastDate``/``exchdisstime``, XBRL link) → ``results_filings``.
    This endpoint's newest period is the Dec-2024 quarter; it now only carries late filings of old
-   periods. The date filter keys off the BROADCAST date (correct for point-in-time — a
-   2023-broadcast filing for FY2021 was observed live; period labels lie).
+   periods. The date filter keys off the BROADCAST date (point-in-time; period labels lie).
 2. **Integrated filings** — SEBI's Integrated Filing (Financials) listing, where every result from
-   the Mar-2025 quarter on is filed (probe-verified 2026-09-24): same metadata, same table.
-3. **Board-meeting dates (past + future)** — merged into the existing ``earnings_calendar`` table via
-   the provider's historical leg (:meth:`EarningsCalendarJob.run_range`), the historical results-date
-   source the event study lacked. The provider's forward-looking daily job contract is untouched.
+   the Mar-2025 quarter on is filed: same metadata, same table.
+3. **Board-meeting dates (past + future)** — merged into ``earnings_calendar`` via the provider's
+   historical leg (:meth:`EarningsCalendarJob.run_range`); the provider's daily job contract is untouched.
 
 The listing legs' incremental window keys off the latest stored ``results_filings.broadcast_dt``
 watermark (deep history is the backfill's job). A run whose newest stored period is older than
 :data:`RESULTS_STALE_AFTER_DAYS` is degraded + alerted: a listing that returns nothing new still
-"succeeds", which is how the switch to Integrated Filing went unnoticed for 18 months.
+"succeeds", so staleness is the only signal that the source moved.
 
 ``results_line_items`` (stage 2) fetches each pending filing's XBRL and stores its quarterly
 ``revenue``/``pat``, a bounded batch per run. Defensive parse (skip-and-count), idempotent upsert,
@@ -49,7 +47,7 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_results")
 
-#: NSE quarterly financial-results API (equities). [VERIFY]; anti-bot [likely].
+#: NSE quarterly financial-results API (equities).
 NSE_RESULTS_URL = "https://www.nseindia.com/api/corporates-financial-results"
 
 #: SEBI Integrated Filing (Financials) listing — the home of every result since the Mar-2025 quarter.
@@ -66,18 +64,16 @@ RESULTS_STALE_AFTER_DAYS = 150
 LINE_ITEMS_PER_RUN = 300
 LINE_ITEMS_LOOKBACK_DAYS = 450
 
-#: Quarterly line items, first tag present wins (probe-verified 2026-09-24 on INDAS, NBFC_INDAS,
-#: NONINDAS, BANKING, LI and GI filings). "Revenue" is the issuer's operating scale: revenue from
-#: operations; an insurer's gross premium; a bank's total income.
+#: Quarterly line items, first tag present wins (covers INDAS, NBFC_INDAS, NONINDAS, BANKING, LI, GI
+#: filings). "Revenue" is the issuer's operating scale: revenue from operations; an insurer's gross
+#: premium; a bank's total income.
 _REVENUE_TAGS = ("RevenueFromOperations", "GrossPremiumIncome", "GrossPremiumsWritten", "Income")
 _PROFIT_TAGS = (
     "ProfitLossForPeriod", "ProfitLossForThePeriod", "ProfitLossAfterTaxAndExtraordinaryItems",
     "ProfitLossAfterTax",
 )
 
-#: The event-calendar historical leg's daily window around the run day — a modest past leg captures
-#: just-announced board meetings; the forward leg captures the near-term results calendar. The deep
-#: multi-year event-calendar history is the backfill's job, not the nightly incremental.
+#: The event-calendar leg's daily window around the run day (deep history is the backfill's job).
 EVENT_CALENDAR_PAST_DAYS = 7
 EVENT_CALENDAR_FUTURE_DAYS = 45
 
@@ -166,7 +162,7 @@ def _is_audited(raw: Any) -> bool | None:
 def parse_results(payload: Any) -> list[dict[str, Any]]:
     """NSE financial-results JSON → ``results_filings`` row dicts (defensive, skip-and-count).
 
-    Field map (probe-verified): symbol; toDate→period_end (the quarter end — the PK component);
+    Field map: symbol; toDate→period_end (the quarter end — the PK component);
     consolidated flag; audited flag; broadCastDate→broadcast_dt (the point-in-time key); exchdisstime→
     exchdiss_dt; xbrl. Line items (revenue/pat/eps) are NULL in stage 1. A row without a symbol or an
     unparseable period_end is skipped (never key a filing on a missing period).
@@ -312,10 +308,8 @@ def parse_xbrl_line_items(content: bytes | str, period_end: date) -> tuple[Decim
 class FilingsResultsJob:
     """Job ``filings_results`` — results filings + historical board-meeting dates (date-keyed).
 
-    ``earnings`` is the existing :class:`EarningsCalendarJob` provider; this job calls its historical
-    leg (``run_range``) so the board-meeting dates land in the SAME ``earnings_calendar`` table without
-    changing that provider's daily forward-looking job contract. ``earnings=None`` runs the
-    results leg only.
+    ``earnings`` is the :class:`EarningsCalendarJob` provider, called via ``run_range`` so board-meeting
+    dates land in the SAME ``earnings_calendar`` table. ``earnings=None`` skips that leg.
     """
 
     def __init__(
@@ -334,10 +328,8 @@ class FilingsResultsJob:
         self._earnings = earnings
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): keyed on ``d``; ``_alert`` can fire on a
-        #: run where only the event_calendar leg failed (``ok`` stays True — ``ok="results" not in
-        #: failed``), so the dedup guards the call site, not the ``ok`` field. Discarded whenever a run
-        #: for ``d`` has zero failed legs (re-arms for a later streak).
+        #: Per-date alert dedup, guarding the call site (``_alert`` can fire while ``ok`` is True, e.g.
+        #: only the event_calendar leg failed); discarded when a run for ``d`` has no failed legs.
         self._alerted: set[date] = set()
 
     async def run(self, d: date) -> FilingsResultsResult:
@@ -416,8 +408,7 @@ class FilingsResultsJob:
         if self._notify is None:
             return
         msg = CatalogMessage(
-            # Filings are NEVER load-bearing: features/risk-context, not safety —
-            # warning severity, not entry-blocking (contrast the earnings-calendar SAFETY job).
+            # Filings are NEVER load-bearing: warning severity, not entry-blocking.
             kind=MessageKind.DATA_FRESHNESS_FROZEN,
             title="Results-filings feed degraded",
             body=(

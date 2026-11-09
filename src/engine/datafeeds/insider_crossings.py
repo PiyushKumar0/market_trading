@@ -1,28 +1,19 @@
 """Insider-crossing primitives — THE one definition, shared by the study and live.
 
-These are the pure functions the stage-2 study validated and that a 2026-08-14 re-run repeated
-under corrected mechanics (disclosure-date anchoring, next-open fills, spread-inclusive costs):
-T+10 **+0.7297%** / T+20 **+1.5797%** net — the only recorded edge that survived, and therefore the
-evidence the ``ins`` strategy leg is promoted from.
+These are the pure functions the stage-2 study validated (disclosure-date anchoring, next-open
+fills, spread-inclusive costs): T+10 **+0.7297%** / T+20 **+1.5797%** net — the only recorded edge
+that survived, and the evidence the ``ins`` strategy leg is promoted from.
 
-**Why this module exists (the one-definition rule).** Until 2026-08-17 these
-functions lived in ``scripts/event_study.py`` and :mod:`engine.datafeeds.filings_events` reached them
-by path-loading that loose script at import time — a shim whose own docstring flagged that engine code
-must not import a script at runtime once the library went live. ``ins`` makes it live: an EOD job now
-computes crossings on the live decision path. So the primitives are PROMOTED here (dependency
-inverted) and ``scripts/event_study.py`` imports them back. Both the validated study and the live
-``ins_crossings`` job therefore execute the SAME bytes — a copy would drift, and a drifted live rule
-would be trading a population the evidence never measured.
-
-Nothing in this module was changed in the move: the code below is the validated stage-2 text verbatim.
-Anyone editing it is editing the validated rule and must re-run the study, not just the unit tests.
+**One-definition rule.** ``scripts/event_study.py`` imports these back, so the validated study and
+the live ``ins_crossings`` job execute the SAME bytes — a copy would drift, and a drifted live rule
+would trade a population the evidence never measured. The code is the validated stage-2 text:
+anyone editing it is editing the validated rule and must re-run the study, not just the unit tests.
 
 **Standing caveats (carried, never hidden):**
 
-* Live crossings come from the **BSE fresh feed** (live since 2026-07-19, ~13-18 in-universe
-  rows/day) and, since 2026-09-24, NSE's PIT V2.0 route (the old NSE route's ~70-day content
-  embargo had made NSE historical-only). The live-reachable event population is NOT proven
-  identical to the backtested one.
+* Live crossings come from the **BSE fresh feed** (~13-18 in-universe rows/day) and NSE's PIT V2.0
+  route (the old NSE route's ~70-day content embargo made NSE historical-only). The live-reachable
+  event population is NOT proven identical to the backtested one.
 * The CPCV pass is boundary-exact (60.0% of folds against a 60% bar — one fold from failure).
 * The survivorship / index-membership bound is uncorrectable with stored data.
 
@@ -39,10 +30,8 @@ from engine.core.clock import IST
 INSIDER_TRAILING_SESSIONS = 10          # trailing-session window for the insider BUY value sum
 MARKET_CLOSE_IST = time(15, 30)         # a filing broadcast after this is NOT knowable at that close
 
-# Taxonomy — acq_mode values that are NOT open-market purchases and are excluded from the
-# insider_net_buy aggregation. Case-insensitive SUBSTRING match (defensive: NSE varies the exact
-# label — 'ESOP' / 'ESOPs' / 'ESOP Allotment' all contain 'esop'; 'Inter-se Transfer' vs 'Inter se
-# Transfer'; 'Preferential Offer' vs 'Preferential Allotment' — the substrings below cover the family).
+# acq_mode values that are NOT open-market purchases, excluded from insider_net_buy. Case-insensitive
+# SUBSTRING match because NSE varies the exact label ('ESOP' / 'ESOP Allotment', 'Inter-se' / 'Inter se').
 INSIDER_ACQ_MODE_EXCLUSIONS = (
     "esop", "gift", "inter-se", "inter se", "pledge invocation",
     "preferential", "rights", "bonus",
@@ -52,8 +41,7 @@ INSIDER_ACQ_MODE_EXCLUSIONS = (
 def to_ist(dt: datetime) -> datetime:
     """Coerce to tz-aware IST. Store rows are TIMESTAMPTZ (already IST); a naive dt is assumed IST.
 
-    (Was ``event_study._to_ist``; made public in the 2026-08-17 promotion — ``scripts/filings_experiments.py``
-    consumes it, so it is part of this module's contract, not an internal helper.)"""
+    Public: ``scripts/filings_experiments.py`` consumes it."""
     return dt.astimezone(IST) if dt.tzinfo is not None else dt.replace(tzinfo=IST)
 
 
@@ -61,14 +49,11 @@ def to_ist(dt: datetime) -> datetime:
 def after_hours(broadcast_dt: datetime) -> bool:
     """A broadcast strictly after 15:30 IST was NOT knowable at that session's close (PIT).
 
-    **Midnight guard.** Exchanges do not broadcast at 00:00:00, so an exact-midnight stamp
-    means the TIME IS UNKNOWN, not that the filing was public before dawn: it is what the feeds'
-    date-only parse fallbacks produce (``filings_pit._parse_dt``'s ``'%d-%b-%Y'`` branch,
-    ``filings_pit_fresh._parse_dt``'s ``'%Y-%m-%d'`` branch) and what ``scripts/event_study.py``
-    synthesises for date-only ``earnings_calendar`` fallback rows. Treating it as intraday would let
-    a filing that was actually disseminated at 20:39 (the shape of every real PIT row — see
-    ``tests/unit/fixtures/filings_pit.json``) enter at that same session's close: a one-session
-    lookahead. So an unknown time is treated as AFTER hours — the conservative direction.
+    **Midnight guard.** Exchanges do not broadcast at 00:00:00, so an exact-midnight stamp means the
+    TIME IS UNKNOWN (the feeds' date-only parse fallbacks and ``scripts/event_study.py``'s date-only
+    ``earnings_calendar`` rows produce it). Treating it as intraday would let a filing disseminated
+    at 20:39 enter at that same session's close: a one-session lookahead. An unknown time is
+    treated as AFTER hours — the conservative direction.
     """
     t = to_ist(broadcast_dt).time()
     if t == time(0, 0):
@@ -102,13 +87,10 @@ def is_open_market_buy(txn_type: object, acq_mode: object) -> bool:
 
 
 def is_open_market_sell(txn_type: object, acq_mode: object) -> bool:
-    """Mirror of :func:`is_open_market_buy` for the SELL side (the filings experiments'
-    RSI2 catalyst-veto adverse context leg). True iff ``txn_type`` == 'Sell' AND ``acq_mode`` is not one of the non-market modes
-    (:data:`INSIDER_ACQ_MODE_EXCLUSIONS`). The SAME exclusion taxonomy applies, so an
-    ESOP-exercise SELL (acq_mode contains 'esop') is deliberately NOT counted as an open-market sell —
-    an insider disposing of just-exercised ESOP stock is not the bearish open-market signal the adverse
-    cohort is after. A blank/None acq_mode on a Sell defaults to open-market (symmetry with the buy
-    side)."""
+    """Mirror of :func:`is_open_market_buy` for the SELL side (RSI2 catalyst-veto adverse context).
+
+    The SAME exclusions apply: an ESOP-exercise SELL is deliberately NOT an open-market sell, and a
+    blank/None acq_mode defaults to open-market."""
     if str(txn_type or "").strip().lower() != "sell":
         return False
     mode = str(acq_mode or "").strip().lower()
@@ -127,13 +109,12 @@ def insider_cluster_events(
     Pure. ``sessions`` = ascending session dates; ``filings`` = plain row dicts (``txn_type``,
     ``acq_mode``, ``value``, ``broadcast_dt``). Each eligible filing's value lands on its point-in-time
     knowable session (:func:`entry_session_index`); the crossing session is the entry T (close_T).
-    Only the absolute ₹ floor is applied here — the value/20d-ADV floor is deliberately NOT part
-    of this proxy (see the module report's ambiguity note).
+    Only the absolute ₹ floor is applied; the value/20d-ADV floor is deliberately NOT part of this proxy.
 
-    **Re-arm state is PATH-DEPENDENT from ``sessions[0]``** (``armed`` starts True): a caller that
-    passes a TRUNCATED session window can therefore re-detect a crossing the full-history study
-    considered already-armed-down. The live ``ins_crossings`` job runs a deliberately long window for
-    exactly this reason — see :data:`engine.datafeeds.ins_crossings.LOOKBACK_DAYS`.
+    **Re-arm state is PATH-DEPENDENT from ``sessions[0]``** (``armed`` starts True): a TRUNCATED
+    session window can re-detect a crossing the full-history study considered already-armed-down. The
+    live job runs a long window for this reason — see
+    :data:`engine.datafeeds.ins_crossings.LOOKBACK_DAYS`.
     """
     thr = Decimal(str(threshold))
     per_session = [Decimal("0")] * len(sessions)

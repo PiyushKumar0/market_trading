@@ -1,77 +1,59 @@
 """BSE FRESH insider disclosures -> ``insider_trades`` (job ``filings_pit_fresh``, 19:00 - stage 3).
 
-The old NSE PIT route was embargoed ~70 days (re-verified 2026-07-19: boundary 2026-05-10), so when
-this feed was built it was the only SAME-DAY source; since 2026-09-24 :mod:`engine.datafeeds.filings_pit`
-reads NSE's same-day PIT V2.0 route too, and ``MarketStore.get_insider_trades`` counts a trade both
-feeds carry once. BSE ``getCorp_Regulation_ng/w`` (found 2026-07-19 via browser network capture) serves the SAME structured PIT rows fresh on the disclosure day, with a full
-``Fld_CreateDate`` broadcast timestamp. This feed pulls those rows into the SAME ``insider_trades``
-table the NSE feed writes. Never entry-blocking, but on the origination path: the
-rows written here are a live input (with NSE's PIT V2.0 route since 2026-09-24) to the ``ins``
-leg (``engine.datafeeds.ins_crossings``, 19:15). The catalyst wiring does not read them.
+BSE ``getCorp_Regulation_ng/w`` serves the structured PIT rows fresh on the disclosure day, with a
+full ``Fld_CreateDate`` broadcast timestamp, into the SAME ``insider_trades`` table the NSE feed writes
+(the old NSE route is embargoed ~70 days; :mod:`engine.datafeeds.filings_pit` reads NSE's same-day
+PIT V2.0 route, and ``MarketStore.get_insider_trades`` counts a trade both feeds carry once). Never
+entry-blocking, but on the origination path: the rows are a live input to the ``ins`` leg
+(``engine.datafeeds.ins_crossings``, 19:15). The catalyst wiring does not read them.
 
-**Two-surface fetch (re-measured 2026-09-12):**
-  * ``Isdefault=1`` -> the LATEST view (one call, no date filter) — the daily-pull surface, and the
-    one that CARRIES THE DAY. It is a SAME-DAY view, NOT the "rolling ~100-row / ~4-week" window
-    first recorded on 2026-07-19: the 09-12 capture was 124 rows / 72 distinct scrips with every
-    ``Fld_CreateDate`` stamped the run day (one 06-23 straggler aside). A day this surface misses is
-    therefore NOT recoverable from it later.
-  * ``Isdefault=2&fromDT=YYYYMMDD&ToDate=YYYYMMDD`` -> a date-filtered narrow sweep over ``[d-3, d]``.
-    Because Isdefault=1 is same-day only, this is the ONLY missed-day recovery path (the date-keyed
-    catch-up's whole purpose), not belt-and-braces. It is HARD-CAPPED at ~25 rows/call and a wide
-    range silently returns ``{}`` (no pagination). So: if the window call returns >= 25 rows (cap
-    likely hit), the window is SUBDIVIDED per-day and each day refetched. A per-day call that STILL
-    returns 25 is logged — and that is NOT rare: ``filings_pit_fresh_day_still_capped`` has fired on
-    3-4 per-day calls EVERY trading day since the warning shipped 2026-08-13. The cap therefore
-    BOUNDS what a catch-up can recover, and the bound is real, not theoretical.
+**Two-surface fetch:**
+  * ``Isdefault=1`` -> the LATEST view (one call, no date filter) — the daily-pull surface. It is a
+    SAME-DAY view, not a rolling window: a day this surface misses is NOT recoverable from it later.
+  * ``Isdefault=2&fromDT=YYYYMMDD&ToDate=YYYYMMDD`` -> a date-filtered narrow sweep over ``[d-3, d]``,
+    the ONLY missed-day recovery path (the date-keyed catch-up's purpose). It is HARD-CAPPED at ~25
+    rows/call and a wide range silently returns ``{}`` (no pagination). So if the window call returns
+    >= 25 rows the window is SUBDIVIDED per-day and each day refetched. A per-day call that STILL
+    returns 25 is logged (``filings_pit_fresh_day_still_capped``) and is NOT rare: the cap BOUNDS
+    what a catch-up can recover.
 
 The two surfaces overlap heavily; rows are deduped on the content-hash ``id`` before the upsert.
 
-**Source tagging — id PREFIX, not a column (decided by store shape):** ``insider_trades`` has
-NO ``source`` column and :meth:`MarketStore.init_schema` is ``CREATE TABLE IF NOT EXISTS`` only — there
-is NO ALTER migration path, so adding a column to the DDL would NOT migrate the already-created live
-table and would break the NSE feed's insert. BSE rows are therefore tagged by an ``id`` PREFIX
-(``bse:``): NSE ids stay bare (byte-identical to the existing convention — back-compatible), BSE ids
-never collide with NSE ids, and the downstream :mod:`engine.datafeeds.filings_events` recovers the
-source from the prefix. See that module's ``row_source``.
+**Source tagging — id PREFIX, not a column:** ``insider_trades`` has NO ``source`` column and
+:meth:`MarketStore.init_schema` is ``CREATE TABLE IF NOT EXISTS`` only (no ALTER migration), so a new
+column would not migrate the live table and would break the NSE insert. BSE rows are tagged by an
+``id`` PREFIX (``bse:``): NSE ids stay bare, BSE ids never collide with them, and
+:mod:`engine.datafeeds.filings_events` recovers the source from the prefix (its ``row_source``).
 
-**Equity filter (probe deviation, documented):** the brief said keep ``Fld_SecurityTypeName == 'Equity'``
-rows, but the probe shows the equity value is overwhelmingly ``'Equity Shares'`` ('Equity' is 2/102 in
-the Isdefault=1 capture) with non-equity ``'Any other instrument'`` / ``'Debentures'`` mixed in. A
-literal ``== 'Equity'`` would drop ~98% of the real equity rows, so the filter is a case-insensitive
-``startswith('equity')`` (keeps 'Equity' AND 'Equity Shares'; drops 'Any other instrument',
-'Debentures', ...). Non-equity rows are skipped-and-counted.
+**Equity filter:** ``Fld_SecurityTypeName`` is overwhelmingly ``'Equity Shares'`` (rarely ``'Equity'``)
+with non-equity ``'Any other instrument'`` / ``'Debentures'`` mixed in, so the filter is a
+case-insensitive ``startswith('equity')``; a literal ``== 'Equity'`` would drop ~98% of equity rows.
+Non-equity rows are skipped-and-counted.
 
 Symbol resolution: ``Fld_ScripCode`` -> our symbol. BSE serves the WHOLE market, so an
 out-of-universe scrip is EXPECTED and skipped-and-counted, never a failure. Parsing is defensive
-and the job never raises into the scheduler; a fetch failure degrades + alerts (warning — filings are
-never entry-blocking) and leaves existing rows in force for the date-keyed catch-up.
+and the job never raises into the scheduler; a fetch failure degrades + alerts (warning) and leaves
+existing rows in force for the date-keyed catch-up.
 
-**The resolution map is rebuilt EVERY run (2026-09-12 starvation fix).** It used to be the
-``symbol_isin`` reverse map alone (:meth:`MarketStore.bse_scrip_symbol_map`) — a table nothing
-refreshed: ``isin_map`` was not scheduled until 2026-09-24, so the map stayed at the 200 symbols the 2026-07-17
-backfill seeded while the owner's NIFTY 500 widening grew the eligible universe to 480 on 09-04. 281 of 480 eligible issuers
-therefore had NO scrip code and every BSE row they filed was dropped as an unmapped scrip (measured
-2026-09-11: 257 of ~298 fetched rows), which is why the ``ins`` rule saw 22 issuers. So this feed
-now builds its own map each run: the cached index-constituents CSV gives symbol->ISIN
+**The resolution map is rebuilt EVERY run.** The ``symbol_isin`` reverse map alone
+(:meth:`MarketStore.bse_scrip_symbol_map`) has no refresh and goes stale as the universe widens;
+issuers without a scrip code have every BSE row dropped as unmapped, which starves ``ins``. So this
+feed builds its own map each run: the cached index-constituents CSV gives symbol->ISIN
 (:func:`~engine.datafeeds.isin_map.load_constituents_isin`) and ONE BSE bulk-master call gives
 ISIN->scrip code (:data:`~engine.datafeeds.isin_map.BSE_SCRIP_MASTER_URL`); the stored codes are
-unioned in and WIN any collision (they are the PeerSmartSearch resolutions the map was built from —
-verified 199/199 identical to the master on 2026-09-12). Measured coverage after the join: 478 of 480
-eligible symbols (the 2 misses, BSE and CDSL, are not BSE-listed at all).
+unioned in and WIN any collision (they are per-symbol ``PeerSmartSearch`` resolutions, verified
+identical to the master). A few constituents (NSE-only or dead scrips) never resolve.
 
 A master leg that contributes nothing — it raised, or it answered 200 with a shape
-:func:`~engine.datafeeds.isin_map.parse_scrip_master` cannot read — silently reverts the feed to that
-pre-fix coverage, which is the exact failure that went unnoticed for two months. So it is NOT left to
-the ``ins_feed_coverage_low`` alarm: that alarm is computed over the 120-day CORPUS and will sit
-well above its floor once this fix has widened the corpus, so it cannot see the regression. The map
-stage owns its own detection: ``filings_pit_fresh_scrip_map_degraded`` on every degraded run, the
-per-stage counts on the run line, and ONE owner alert on the TRANSITION into degradation (latched,
-cleared by the first healthy map — a 20-day catch-up replay therefore alerts once, not 20 times).
-The run still returns ``ok=True``: rows keep flowing at the old coverage, and the ``Isdefault=2``
-``[d-3, d]`` window re-covers a degraded day on the next three runs — cap-bounded, so partially —
-where sinking the watermark would add an unbounded retry loop against the same BSE host that is
-already failing. If a future measurement shows the cap swallowing most of that recovery, revisit the
-trade (``ok=False`` here is safe: the upsert is idempotent on the content-hash id).
+:func:`~engine.datafeeds.isin_map.parse_scrip_master` cannot read — silently reverts the feed to the
+stored-code coverage. The ``ins_feed_coverage_low`` alarm cannot see that (it is computed over the
+120-day CORPUS), so the map stage owns its detection: ``filings_pit_fresh_scrip_map_degraded`` on every
+degraded run, per-stage counts on the run line, and ONE owner alert on the TRANSITION into degradation
+(latched, cleared by the first healthy map, so a catch-up replay alerts once). The run still returns
+``ok=True``: rows keep flowing at the old coverage, and the ``Isdefault=2`` ``[d-3, d]`` window
+re-covers a degraded day (cap-bounded, so partially), where sinking the watermark would add an
+unbounded retry loop against the failing BSE host. ``ok=False`` would be safe (the upsert is
+idempotent on the content-hash id) if the cap proves to swallow most of that recovery.
 """
 
 from __future__ import annotations
@@ -107,34 +89,29 @@ from engine.notify.catalog import CatalogMessage, MessageKind
 
 _log = get_logger("engine.datafeeds.filings_pit_fresh")
 
-#: BSE fresh-insider endpoint (found 2026-07-19). [VERIFY] — browser capture.
+#: BSE fresh-insider endpoint.
 BSE_FRESH_URL = "https://api.bseindia.com/BseIndiaAPI/api/getCorp_Regulation_ng/w"
 
-#: The Isdefault=2 date-filtered surface caps at ~25 rows/call (probe-verified: two narrow captures
-#: returned EXACTLY 25). A window returning >= this is assumed truncated and subdivided per-day.
+#: The Isdefault=2 date-filtered surface caps at ~25 rows/call. A window returning >= this is assumed
+#: truncated and subdivided per-day.
 BSE_ROW_CAP = 25
 
-#: Isdefault=2 recovery-sweep lookback (days) behind the run day — the ONLY missed-day recovery path
-#: (cap-bounded, see module docstring).
+#: Isdefault=2 recovery-sweep lookback (days) behind the run day (cap-bounded, see module docstring).
 FRESH_WINDOW_DAYS = 3
 
-#: Quiet period after a FAILED scrip-master fetch before another is attempted. This job is DATE_KEYED,
-#: so a boot after a multi-day stop replays one run per missed day back-to-back; without this a BSE
-#: outage would be met with one 1.7 MB attempt (45 s x 3 tries) per replayed day, back-to-back, with
-#: no spacing — the shape that makes BSE answer with ``error_Bse.html`` in the first place. Short
-#: enough that the 19:00 scheduled run still retries hours after a morning catch-up burst.
+#: Quiet period after a FAILED scrip-master fetch. This job is DATE_KEYED, so a boot after a multi-day
+#: stop replays one run per missed day back-to-back; without this each would retry the 1.7 MB fetch
+#: unspaced, which makes BSE answer with ``error_Bse.html``. Short enough that the 19:00 run retries.
 SCRIP_MASTER_RETRY_COOLDOWN_S = 900.0
 
-#: The scrip-map COVERAGE FLOOR (2026-09-12 review): the share of index constituents that must end
-#: up with a correct scrip code (from either leg) for the map to count as healthy. Measured 478/480
-#: on 2026-09-12; a bulk master that BSE truncates (the documented `{}` / ~25-row shapes of its
-#: sibling surfaces) can still parse to hundreds of pairs, so a presence check (`not master`) would
-#: certify a map that covers a tenth of the universe as healthy — the two-month-silent shape again.
+#: The scrip-map COVERAGE FLOOR: the share of index constituents that must end up with a correct scrip
+#: code (from either leg) for the map to count as healthy. A bulk master that BSE truncates can still
+#: parse to hundreds of pairs, so a presence check (`not master`) would certify a map covering a tenth
+#: of the universe as healthy.
 MAP_COVERAGE_FLOOR_PCT = 0.90
-#: ...with an ABSOLUTE allowance: the constituents that can never resolve (NSE-only names and dead
-#: scrips — BSE, CDSL, DUMMYHEG on 2026-09-12) are a handful regardless of universe size, so the floor
-#: tolerates the larger of 10% of the universe and this many names. Without it a small universe (or
-#: a test fixture) with one legitimate NSE-only name would read as truncated.
+#: ...with an ABSOLUTE allowance: constituents that can never resolve (NSE-only names, dead scrips) are
+#: a handful regardless of universe size, so the floor tolerates the larger of 10% of the universe and
+#: this many names (a small universe with one NSE-only name must not read as truncated).
 MAP_UNRESOLVED_ALLOWANCE = 5
 
 #: Source tag folded into the content-hash id (see module docstring). NSE rows stay bare. The prefix
@@ -142,13 +119,12 @@ MAP_UNRESOLVED_ALLOWANCE = 5
 BSE_SOURCE = "bse"
 BSE_ID_PREFIX = "bse:"
 
-#: Fld_TransactionType -> canonical txn_type. Unmapped values pass through verbatim (the probe also
-#: carries 'Pledge' / 'Pledge Released' rows the brief's Acquisition/Disposal/Revoke map omits — kept
-#: as-is so is_open_market_buy (which only matches 'Buy') correctly ignores them downstream).
+#: Fld_TransactionType -> canonical txn_type. Unmapped values (e.g. 'Pledge' / 'Pledge Released') pass
+#: through verbatim so is_open_market_buy (which only matches 'Buy') ignores them downstream.
 _TXN_TYPE_MAP = {"acquisition": "Buy", "disposal": "Sell", "revoke": "Revoke"}
 
 #: ``ScripMap.cause`` -> the sentence the owner alert carries. Each leg sits on a different host with
-#: a different fix, so the alert must name the one that failed rather than point at BSE by default.
+#: a different fix, so the alert must name the one that failed.
 _MAP_CAUSE_DETAIL = {
     "symbol_isin_read": "the stored symbol_isin read failed (duckdb unreadable or locked)",
     "constituents_csv": (
@@ -192,10 +168,8 @@ def bse_insider_id(
 
 # --------------------------------------------------------------------------- defensive helpers
 def _clean(raw: Any) -> str:
-    """Deliberately NOT ``filings_pit``'s ``_clean`` (2026-09-23: kept separate, not merged — see that
-    module's docstring): this one treats a raw value that is present but falsy (``is not None``, not
-    truthiness) as real, because BSE's ``secVal='0'`` is a genuine zero-consideration value, not
-    "missing"."""
+    """Deliberately NOT ``filings_pit``'s ``_clean``: a present-but-falsy raw value (``is not None``, not
+    truthiness) is real, because BSE's ``secVal='0'`` is a genuine zero consideration."""
     return str(raw if raw is not None else "").strip()
 
 
@@ -230,16 +204,14 @@ def _dec(raw: Any) -> Decimal | None:
         v = Decimal(s)
     except InvalidOperation:
         return None
-    # A bare ``NaN`` token survives ``json.loads`` and constructs a Decimal fine, but every ORDERING
-    # comparison on it raises InvalidOperation — the ins-eligible tally (and insider_cluster_events'
-    # `v <= 0`) would take that raise out of the never-raise guard. Non-finite is "no consideration".
+    # A bare ``NaN`` token survives ``json.loads`` but raises on ordering comparisons (the ins-eligible
+    # tally, insider_cluster_events' `v <= 0`), escaping the never-raise guard. Non-finite = no consideration.
     return v if v.is_finite() else None
 
 
 def _int(raw: Any) -> int | None:
-    """Independent of :func:`engine.datafeeds.filings_pit._int` (which delegates to the Decimal-based
-    ``_dec``): ``Fld_SecurityNo`` is parsed via ``float`` first so a share count BSE serves as a
-    float-formatted string (``'1000.0'``) still resolves, matching this feed's other numeric fields."""
+    """Parsed via ``float`` first so a share count BSE serves as ``'1000.0'`` still resolves (unlike
+    :func:`engine.datafeeds.filings_pit._int`, which goes through ``Decimal``)."""
     s = _clean(raw).replace(",", "")
     if not s or s in ("-", "NA"):
         return None
@@ -260,8 +232,8 @@ def _flt(raw: Any) -> float | None:
 
 
 def _norm_scrip(raw: Any) -> str:
-    """Bare-int-string scrip code (mirrors ``store._norm_scrip_code``) so the payload code matches the
-    ``symbol_isin`` reverse map key regardless of int/str/``'.0'`` formatting."""
+    """Bare-int-string scrip code (mirrors ``store._norm_scrip_code``) so it matches the map key
+    regardless of int/str/``'.0'`` formatting."""
     s = _clean(raw)
     if not s:
         return ""
@@ -272,8 +244,7 @@ def _norm_scrip(raw: Any) -> str:
 
 
 def _is_equity(sec_type_name: Any) -> bool:
-    """Equity-instrument filter: case-insensitive ``startswith('equity')`` — keeps 'Equity' AND the
-    dominant 'Equity Shares', drops 'Any other instrument' / 'Debentures' / warrants (see docstring)."""
+    """Equity-instrument filter: case-insensitive ``startswith('equity')`` (see module docstring)."""
     return _clean(sec_type_name).lower().startswith("equity")
 
 
@@ -298,36 +269,25 @@ def _rows_of(payload: Any) -> list[dict[str, Any]]:
 class ScripMap:
     """One run's ``scrip_code -> symbol`` resolution map, with the coverage it was built from.
 
-    ``symbols``, ``unresolved`` and ``shadowed`` are counted over the INDEX-CONSTITUENT CSV (499
-    names), not the eligible universe: ``unresolved`` is the constituents that got no code from
-    either source — 3 on 2026-09-12, all of them NSE-only or dead scrips, which is the expected
-    residue, not a defect.
+    ``symbols``, ``unresolved`` and ``shadowed`` are counted over the INDEX-CONSTITUENT CSV, not the
+    eligible universe: ``unresolved`` is the constituents that got no code from either source
+    (NSE-only or dead scrips — the expected residue).
 
-    ``master_rows`` is the ISIN->code relation the BULK MASTER itself yielded and ``added_codes`` the
-    subset of it that was new to the map: they are separate numbers because a healthy master can
-    legitimately add nothing (every constituent already stored), while ``master_rows == 0`` with
-    constituents present means the leg is BROKEN — the field-rename failure mode that would silently
-    revert this feed to its pre-fix coverage.
+    ``master_rows`` is the ISIN->code relation the BULK MASTER yielded and ``added_codes`` the subset
+    new to the map: a healthy master can add nothing (every constituent already stored), while
+    ``master_rows == 0`` with constituents present means the leg is BROKEN (e.g. a field rename).
 
-    ``shadowed`` counts constituents the master DID code but whose code a STORED row already holds
-    for a DIFFERENT symbol. Stored-wins is the right precedence, but the loser must not vanish: a
-    stale ``symbol_isin`` row (that table has no refresh job) shadows the correct symbol permanently,
-    and every filing by that issuer is then written under a symbol ``ins`` drops as
-    out-of-universe. A non-zero count is the ONE signal that separates "a stale stored row" from
-    "the market filed nothing" — without it the run line would certify full resolution while the
-    issuer starved. Two CONSTITUENTS sharing one ISIN (a dual listing, a rename window) are a
-    different thing and are counted apart as ``duplicate_isin`` — they say nothing about the store.
+    ``shadowed`` counts constituents the master DID code but whose code a STORED row already holds for
+    a DIFFERENT symbol. Stored-wins is the right precedence, but a stale ``symbol_isin`` row would
+    shadow the correct symbol permanently, so every filing by that issuer is written under a symbol
+    ``ins`` drops; the count is the one signal separating that from "the market filed nothing". Two
+    CONSTITUENTS sharing one ISIN (dual listing, rename window) are counted apart as ``duplicate_isin``.
 
-    ``covered`` is the number of constituents that ended up with THEIR OWN code from either leg —
-    the one number that measures what the rebuild contributes. ``degraded`` is a FLOOR on it
-    (:data:`MAP_COVERAGE_FLOOR_PCT`, loosened by :data:`MAP_UNRESOLVED_ALLOWANCE` names for the
-    NSE-only residue), not a presence bit: a master that parsed to nothing AND a
-    master that parsed to a truncated few hundred pairs both leave the feed at the pre-2026-09-12
-    coverage, and only the first of those is ``not master``. ``cause`` names WHICH leg (a key of
-    :data:`_MAP_CAUSE_DETAIL`, ``""`` when healthy) — the legs live on different hosts with
-    different fixes, and a zero count alone cannot tell them apart. ``degraded`` is DERIVED
-    (``bool(cause)``, 2026-09-23): every construction site already set them in lockstep, so the field
-    was pure redundancy that could in principle drift from ``cause``.
+    ``covered`` is the number of constituents holding THEIR OWN code from either leg. ``degraded`` is
+    DERIVED (``bool(cause)``) from a FLOOR on it (:data:`MAP_COVERAGE_FLOOR_PCT`, loosened by
+    :data:`MAP_UNRESOLVED_ALLOWANCE`), not a presence bit: an empty master and a truncated one both
+    revert the feed toward stored-code coverage. ``cause`` names WHICH leg (a key of
+    :data:`_MAP_CAUSE_DETAIL`, ``""`` when healthy); the legs are on different hosts with different fixes.
     """
 
     by_scrip: dict[str, str]
@@ -439,10 +399,9 @@ class FilingsPitFreshResult(BaseModel):
     skipped_unmapped_scrip: int = 0
     skipped_no_broadcast: int = 0
     reason: str | None = None
-    # Per-stage funnel (2026-09-12): ``rows_fetched`` and ``rows_resolved`` are PER-FETCH
-    # SUMS over the overlapping surfaces, exactly like the three skip tallies above, so the stages
-    # close: fetched = non_equity + unmapped + no_broadcast + resolved. ``rows_parsed`` is the count
-    # AFTER the content-hash dedupe, which is why it is smaller than ``rows_resolved``.
+    # Per-stage funnel: ``rows_fetched`` and ``rows_resolved`` are PER-FETCH SUMS over the overlapping
+    # surfaces, like the skip tallies, so fetched = non_equity + unmapped + no_broadcast + resolved.
+    # ``rows_parsed`` is AFTER the content-hash dedupe, hence smaller than ``rows_resolved``.
     rows_fetched: int = 0
     rows_resolved: int = 0
     rows_ins_eligible: int = 0   # ...of the deduped rows, those the `ins` rule can ACT on
@@ -475,26 +434,20 @@ class FilingsPitFreshJob:
         self._clock = clock
         self._http = http
         #: Required, not optional: the scrip map's symbol->ISIN half comes from the cached index CSV
-        #: this locates. An optional settings would let a wiring slip silently halve the feed's
-        #: issuer coverage — which is the exact failure this job is being fixed for.
+        #: this locates; a wiring slip would silently halve issuer coverage.
         self._settings = settings
         self._notify = notify
         self._timeout = float(request_timeout_s)
-        #: Per-date alert dedup (2026-08-13, mirrors bhavcopy): keyed on ``d``; ``_alert`` can fire on a
-        #: ``degraded`` run that still has ``ok=True`` (a per-day subdivision gap with no full-surface
-        #: failure), so the dedup guards the call site, not the ``ok`` field. Discarded whenever a run
-        #: for ``d`` is fully clean (re-arms for a later streak).
+        #: Per-date alert dedup, guarding the call site (``_alert`` can fire on a ``degraded`` run that
+        #: still has ``ok=True``); discarded when a run for ``d`` is fully clean.
         self._alerted: set[date] = set()
-        #: Today's bulk ISIN->scrip master, fetched ONCE per IST day and reused across runs. The job
-        #: is DATE_KEYED and a boot after a multi-day stop replays one run per missed day through
-        #: THIS instance; the master is a today-view of BSE's active list, identical on every
-        #: replayed date, so a 30-day replay must cost one 1.7 MB fetch, not thirty.
+        #: Today's bulk ISIN->scrip master, fetched ONCE per IST day and reused across runs: it is a
+        #: today-view identical on every replayed date, so a 30-day catch-up costs one 1.7 MB fetch.
         self._master: tuple[date, dict[str, str]] | None = None
         #: Suppress-until stamp after a FAILED master fetch (see SCRIP_MASTER_RETRY_COOLDOWN_S).
         self._master_retry_after: datetime | None = None
         #: Map-degradation latch: the owner is alerted on the TRANSITION into degradation, not once
-        #: per run or per replayed date. Cleared by the first healthy map — a latching cause needs a
-        #: symmetric clear (2026-09-01 catchup_safety_jobs lesson) or the alarm never re-arms.
+        #: per run or replayed date. Cleared by the first healthy map, or the alarm never re-arms.
         self._map_degraded = False
 
     async def run(self, d: date) -> FilingsPitFreshResult:
@@ -505,8 +458,7 @@ class FilingsPitFreshJob:
         failed: list[str] = []
         reasons: list[str] = []
         subdivided = 0
-        # Every surface's parse, kept so the run's stage tallies are summed in ONE place rather than
-        # accumulated by hand at each absorb site (the funnel has to close arithmetically).
+        # Every surface's parse, so the stage tallies are summed in ONE place (the funnel must close).
         absorbed: list[PitFreshParse] = []
 
         def absorb(parse: PitFreshParse) -> None:
@@ -554,13 +506,10 @@ class FilingsPitFreshJob:
         non_equity = sum(p.skipped_non_equity for p in absorbed)
         unmapped = sum(p.skipped_unmapped_scrip for p in absorbed)
         no_broadcast = sum(p.skipped_no_broadcast for p in absorbed)
-        # The `ins` rule only ever aggregates open-market BUYs, so "rows ingested" overstates
-        # what the rule can act on by ~an order of magnitude. Counted on the DEDUPED rows and with
-        # the rule's own predicate — never a local copy of the taxonomy, which would drift. The
-        # value test mirrors what insider_cluster_events does AFTER the predicate passes (it skips
-        # `value is None` and `value <= 0`): BSE serves blank / '-' / 'NA' / '0.00' considerations,
-        # and a counter that includes them would read "6 eligible" on a day the rule can act on none
-        # — overstating on exactly the shape that would cause a silent starvation.
+        # `ins` only aggregates open-market BUYs, so "rows ingested" overstates what it can act on.
+        # Counted on the DEDUPED rows with the rule's own predicate (never a local copy of the
+        # taxonomy), plus the value test insider_cluster_events applies after it (skips None / <= 0):
+        # BSE serves blank / '-' / 'NA' / '0.00' considerations the rule cannot act on.
         ins_eligible = sum(
             1 for r in rows
             if is_open_market_buy(r["txn_type"], r["acq_mode"])
@@ -597,11 +546,9 @@ class FilingsPitFreshJob:
             scrip_covered=smap.covered,
             scrip_map_degraded=smap.degraded,
         )
-        # THE feed-side starvation line (2026-09-12): every stage of the funnel on one
-        # line, so "the market filed nothing we care about" and "we dropped it at stage N" are
-        # distinguishable without a DB query. fetched = non_equity + unmapped + no_broadcast +
-        # resolved (per-fetch sums over overlapping surfaces); parsed/written/ins_eligible are after
-        # the id dedupe; the scrip_* fields are the resolution map the run was able to build.
+        # Feed-side starvation line: every funnel stage on one line, so "the market filed nothing" and
+        # "we dropped it at stage N" are distinguishable. parsed/written/ins_eligible are after the id
+        # dedupe; the scrip_* fields describe the resolution map this run built.
         _log.info(
             "filings_pit_fresh_ingested", d=d.isoformat(), fetched=fetched, parsed=len(rows),
             written=written, subdivided=subdivided, skipped_non_equity=non_equity,
@@ -616,14 +563,12 @@ class FilingsPitFreshJob:
         return result
 
     async def _report_scrip_map(self, d: date, smap: ScripMap) -> None:
-        """Own the map stage's failure modes instead of leaving them to ``ins_feed_coverage_low``
-        (that alarm reads the 120-day CORPUS and goes quiet once this fix widens it, so it cannot see
-        a later regression of THIS stage).
+        """Own the map stage's failure modes (``ins_feed_coverage_low`` reads the 120-day CORPUS and
+        cannot see a regression of THIS stage).
 
         A degraded map warns on every run and alerts ONCE on the transition into degradation; the
-        latch clears on the first healthy map, so a 20-day catch-up replay produces one alert and a
-        recovery re-arms it. Shadowed codes warn without alerting: the feed is still ingesting, but
-        some issuers are being written under a stale symbol ``ins`` will drop.
+        latch clears on the first healthy map. Shadowed codes warn without alerting: the feed still
+        ingests, but some issuers are written under a stale symbol ``ins`` will drop.
         """
         if smap.shadowed:
             _log.warning(
@@ -631,8 +576,7 @@ class FilingsPitFreshJob:
                 stored=smap.stored_codes, symbols=smap.symbols,
             )
         if smap.duplicate_isin:
-            # Two constituents on one ISIN: a CSV fact (dual listing / rename window), not a stale
-            # store — its own line so the shadowed count keeps its one meaning.
+            # A CSV fact (dual listing / rename window), not a stale store: its own line.
             _log.info("filings_pit_fresh_duplicate_isin", d=d.isoformat(),
                       duplicate_isin=smap.duplicate_isin, symbols=smap.symbols)
         if not smap.degraded:
@@ -646,9 +590,7 @@ class FilingsPitFreshJob:
         if self._map_degraded:
             return
         self._map_degraded = True
-        # Name WHICH leg failed: the causes have different fixes (a locked store, a missing universe
-        # cache, an unreachable/renamed BSE endpoint), and an alert that pointed at BSE for a missing
-        # CSV would send the reader to the wrong host.
+        # Name WHICH leg failed: the causes have different fixes and hosts.
         detail = _MAP_CAUSE_DETAIL.get(smap.cause, smap.cause or "unknown").format(
             master_rows=smap.master_rows, symbols=smap.symbols, covered=smap.covered,
             floor_pct=int(MAP_COVERAGE_FLOOR_PCT * 100), allowance=MAP_UNRESOLVED_ALLOWANCE,
@@ -674,22 +616,18 @@ class FilingsPitFreshJob:
         """Build this run's ``scrip_code -> symbol`` map: stored codes ∪ (index CSV ⋈ BSE master).
 
         Never raises: every leg — the store read included — is inside the guard, and a failure
-        degrades to whatever half is in hand. Precedence is STORED-WINS on a scrip key: those codes
-        were resolved per-symbol by ``PeerSmartSearch`` and verified identical to the master's
-        (199/199, 2026-09-12), so a disagreement would be a master surprise, and the verified source
-        must not be silently overwritten by it — but the loser is COUNTED (``shadowed``), because the
-        other reading of a disagreement is a stale ``symbol_isin`` row shadowing the right symbol.
+        degrades to whatever half is in hand. Precedence is STORED-WINS on a scrip key (verified
+        per-symbol resolutions must not be silently overwritten), but the loser is COUNTED
+        (``shadowed``) because a disagreement may be a stale ``symbol_isin`` row.
         """
         stored: Mapping[str, str] = {}
         isin_by_symbol: Mapping[str, str] = {}
-        # Which leg is in flight, so a degraded map names the half that failed rather than being
-        # inferred from a zero count (`symbols == 0` is produced by BOTH a missing CSV and a store
-        # read that raised before the CSV was reached — different hosts, different fixes).
+        # Which leg is in flight, so a degraded map names the failing half (`symbols == 0` is produced
+        # by both a missing CSV and a store read that raised first).
         leg = "symbol_isin_read"
         try:
-            # The store read and the CSV read are inside the guard too: duckdb can fail on a locked
-            # file, and a corrupt cache raises shapes load_constituents_isin does not catch
-            # (csv.Error). This job's contract is degrade-never-raise, so nothing above may escape.
+            # Store and CSV reads are inside the guard: duckdb can fail on a locked file, and a corrupt
+            # cache raises shapes load_constituents_isin does not catch (csv.Error).
             stored = await self._store.abse_scrip_symbol_map()
             renames = await self._store.arun(self._store.get_symbol_renames, self._clock.today())
             leg = "constituents_csv"
@@ -705,9 +643,7 @@ class FilingsPitFreshJob:
             master = await self._bulk_master()
         except Exception as exc:  # noqa: BLE001 - degrade to the stored map, never raise
             _log.warning(
-                # Not ``..._master_failed``: this guard now also covers the store read and the CSV,
-                # and ``leg`` is what says which one. A name that always said "master" would send
-                # the reader to BSE for a locked duckdb file.
+                # ``leg`` says which of store / CSV / master failed.
                 "filings_pit_fresh_scrip_map_failed", leg=leg, error=f"{type(exc).__name__}: {exc}"
             )
             return ScripMap(
@@ -721,9 +657,8 @@ class FilingsPitFreshJob:
         for symbol in sorted(isin_by_symbol):  # sorted: a collision resolves the same way every run
             code = _norm_scrip(master.get(isin_by_symbol[symbol]))
             if not code:
-                # An index symbol the BSE master does not list is NSE-only or not a live scrip at
-                # all (2026-09-12: BSE, CDSL, DUMMYHEG of 499) — not a resolution failure, since it
-                # can never file a BSE disclosure in the first place. A stored code still covers it.
+                # Not in the BSE master: NSE-only or a dead scrip — not a resolution failure, it can
+                # never file a BSE disclosure. A stored code still covers it.
                 if symbol in held_symbols:
                     covered += 1
                 else:
@@ -740,14 +675,12 @@ class FilingsPitFreshJob:
                 # Stored wins, but the loss is not silent: see ScripMap.shadowed.
                 shadowed += 1
             else:
-                # The holder was added by THIS loop: two constituents on one ISIN (2026-09-12
-                # review) — a CSV fact, never a stale-store signal, so it must not read as shadowed.
+                # The holder was added by THIS loop: two constituents on one ISIN — a CSV fact, not a
+                # stale-store signal, so it must not read as shadowed.
                 duplicate_isin += 1
-        # A master that yielded NO usable pairs while constituents were present is a BROKEN leg (a
-        # renamed SCRIP_CD/ISIN_NUMBER answers 200 and parses to {}), not an empty market; a master
-        # that parsed to a TRUNCATED few hundred pairs is the same regression through a door the
-        # presence bit cannot see. Both revert the feed toward the pre-2026-09-12 coverage, so the
-        # detector is a FLOOR on covered constituents (MAP_COVERAGE_FLOOR_PCT), not `not master`.
+        # An empty master with constituents present is a BROKEN leg (a renamed SCRIP_CD/ISIN_NUMBER
+        # answers 200 and parses to {}); a TRUNCATED master is the same regression the presence bit
+        # cannot see. So the detector is a FLOOR on covered constituents, not `not master`.
         missing = len(isin_by_symbol) - covered
         tolerated = max(
             math.ceil((1.0 - MAP_COVERAGE_FLOOR_PCT) * len(isin_by_symbol)), MAP_UNRESOLVED_ALLOWANCE
@@ -768,10 +701,9 @@ class FilingsPitFreshJob:
         """Today's ``ISIN -> bse_scrip_code`` relation from the BSE bulk master — at most ONE fetch
         per IST day, and not again inside :data:`SCRIP_MASTER_RETRY_COOLDOWN_S` of a failure.
 
-        Keyed on ``clock.today()``, not on the run day: the master is a live view of BSE's active
-        list, identical for every date a catch-up replays, and a fresh key after midnight keeps the
-        rebuild-every-day property the coverage fix rests on. Raises on a failed (or cooled-down)
-        fetch — the caller's never-raise guard turns that into a degraded map."""
+        Keyed on ``clock.today()``, not the run day: the master is a live view identical for every
+        date a catch-up replays, and the key changes after midnight. Raises on a failed (or
+        cooled-down) fetch — the caller's guard turns that into a degraded map."""
         today = self._clock.today()
         if self._master is not None and self._master[0] == today:
             return self._master[1]
@@ -787,11 +719,9 @@ class FilingsPitFreshJob:
             self._master_retry_after = now + timedelta(seconds=SCRIP_MASTER_RETRY_COOLDOWN_S)
             raise
         if not master:
-            # A 200 that parsed to nothing is NOT memoised for the day (2026-09-12 review): BSE's
-            # sibling surfaces are documented to answer `{}` / `[]` transiently, and a day-long memo
-            # of that would pin the feed at the pre-fix coverage through the 19:00 run that follows
-            # a healthy BSE. It takes the failure COOLDOWN instead — the pacing the memo was
-            # reaching for — and the caller reads it as `bulk_master_empty`, degraded.
+            # A 200 that parsed to nothing is NOT memoised for the day: BSE answers `{}` / `[]`
+            # transiently, and a day-long memo would pin the degraded coverage. It takes the failure
+            # COOLDOWN instead; the caller reads it as `bulk_master_empty`.
             self._master_retry_after = now + timedelta(seconds=SCRIP_MASTER_RETRY_COOLDOWN_S)
             return master
         self._master = (today, master)
