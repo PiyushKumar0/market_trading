@@ -415,7 +415,7 @@ async def test_participation_is_budgeted_per_minute_not_per_tick(
 async def test_a_cumulative_volume_reset_fills_nothing(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """A13: ``volume_traded`` is CUMULATIVE, and the feed occasionally restates it downward (a
+    """``volume_traded`` is CUMULATIVE, and the feed occasionally restates it downward (a
     resubscribe re-baselines it to 0). That must not empty the cap -- before the fix the reset tick
     read as "this feed has no volume at all" and the order filled in full, uncapped.
     """
