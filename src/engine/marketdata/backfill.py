@@ -1,23 +1,20 @@
 """Historical candle backfill + startup warm-up gap fill.
 
-``BackfillJob`` pulls official Kite candles through :meth:`KiteClient.historical` — every request is
-paced by the shared :class:`~engine.broker.rate_limiter.RateLimiter` ``historical`` bucket (≤3 req/s)
-inside the client, so this job never sleeps or paces on its own. Requests are **chunked** per
-Kite's per-request range caps (pinned constants below), **checkpointed** per ``(symbol, interval)``
-in the SQLite ``backfill_checkpoints`` table, and **resumable**: a re-run skips everything at or
-behind the checkpoint and continues from the day after it (the initial minute history is a
-multi-evening job).
+``BackfillJob`` pulls official Kite candles through :meth:`KiteClient.historical`; the client's
+shared ``historical`` rate-limiter bucket paces every request, so this job never sleeps on its own.
+Requests are **chunked** per Kite's per-request range caps (pinned constants below),
+**checkpointed** per ``(symbol, interval)`` in the SQLite ``backfill_checkpoints`` table, and
+**resumable**: a re-run skips everything at or behind the checkpoint.
 
-**RESOLVED — NO re-adjustment:** Kite minute (and daily) candles are ALREADY corp-action
-adjusted (``settings data.minute_candles_adjusted=true``; verified 2026-07-05 against the BSE 2:1
-bonus via ``scripts/kite_candle_adjustment_check.py``). Candles are therefore written EXACTLY as fetched — this job
-must never apply split/bonus factors across ex-dates.
+**No re-adjustment:** Kite minute and daily candles are ALREADY corp-action adjusted
+(``settings data.minute_candles_adjusted=true``; ``scripts/kite_candle_adjustment_check.py``).
+Candles are written EXACTLY as fetched — never apply split/bonus factors across ex-dates.
 
 Provenance (``bars_1m.src``):
     * :meth:`run` writes ``src='kite_official'`` (canonical historical rows).
     * :meth:`warmup_gap` writes ``src='gap_backfilled'`` — the offline-span fill, which the
       nightly reconcile EXCLUDES from its drift denominator (they are not self-built bars).
-    * :meth:`warmup_gap` with ``confirm_until`` ALSO writes ``bars_1m_no_trade`` rows (2026-09-18) —
+    * :meth:`warmup_gap` with ``confirm_until`` ALSO writes ``bars_1m_no_trade`` rows —
       upstream-confirmed tradeless minutes, which are evidence and not bars: no price is synthesized
       and ``bars_1m`` is never touched by that path. See the method's contract.
 
@@ -85,22 +82,21 @@ class BackfillReport(BaseModel):
     #: Symbols that needed no request at all — every requested session was already present.
     skipped_covered: int = 0
     #: Minutes recorded in ``bars_1m_no_trade`` by :meth:`BackfillJob.warmup_gap` — upstream-confirmed
-    #: tradeless minutes, NOT bars (2026-09-18).
+    #: tradeless minutes, NOT bars.
     no_trade_confirmed: int = 0
     #: (symbol, minute) confirmations DROPPED by the correlation guard: the same minute was missing
     #: across enough of the swept symbols to be a feed/vendor gap rather than thin symbols going
-    #: quiet together, so it is left a hole (2026-09-18).
+    #: quiet together, so it is left a hole.
     no_trade_correlated_skipped: int = 0
 
     @property
     def ok(self) -> bool:
         """The job watermark's verdict (``ops.jobs._job_result_ok``): False when any span failed for
         a reason other than a missing instrument token (a rejected token, a broker or network error),
-        so catch-up retries the day, until the 7-day give-up, for the symbols still behind their
-        checkpoint (a hole a later day's fetch stepped over is the boot/post-login ``daily_gap``
-        repair's). One symbol with no token never sinks the day: no retry can fetch it, and a failed
-        ``daily_bars`` day holds ``rec_outcomes``. EVERY requested symbol without one is an empty or
-        degraded token map that a later instruments refresh rebuilds, so that does."""
+        so catch-up retries the day, until the 7-day give-up. One symbol with no token never sinks
+        the day (no retry can fetch it, and a failed ``daily_bars`` day holds ``rec_outcomes``), but
+        EVERY requested symbol without one is an empty or degraded token map that a later
+        instruments refresh rebuilds, so that does."""
         if any(span.error != _UNKNOWN_TOKEN for span in self.failed):
             return False
         unknown = {span.symbol for span in self.failed}
@@ -132,13 +128,11 @@ def _abort_remaining(
     event: str,
     **log_fields: Any,
 ) -> None:
-    """Common tail of a ``TokenException`` catch in :meth:`BackfillJob.run`/``warmup_gap``/``daily_gap``
-    (2026-07-21): a rejected token fails every subsequent historical call identically, so instead of
-    hammering the broker (and warning) once per remaining symbol, mark every un-attempted ``symbol``
-    ``aborted_token_rejected`` in one pass and log once. ``frm``/``to`` are the caller's already-
-    ``isoformat()``-ed WHOLE requested span (not the failed chunk) — every remaining symbol is
-    reported as never having been attempted at all. Callers set their own ``aborted`` flag and
-    break their own loops (the three have different loop shapes)."""
+    """Common tail of a ``TokenException`` catch in :meth:`BackfillJob.run`/``warmup_gap``/``daily_gap``:
+    a rejected token fails every subsequent historical call identically, so mark every un-attempted
+    symbol ``aborted_token_rejected`` in one pass and log once. ``frm``/``to`` are the caller's
+    already-``isoformat()``-ed WHOLE requested span. Callers set their own ``aborted`` flag and
+    break their own loops."""
     for rem in remaining:
         report.failed.append(BackfillSpan(symbol=rem, frm=frm, to=to, error="aborted_token_rejected"))
     _log.warning(event, symbols_remaining=len(remaining), **log_fields)
@@ -242,12 +236,8 @@ class BackfillJob:
                         )
                     )
                     if isinstance(exc, TokenException):
-                        # 2026-07-21: a rejected token fails EVERY subsequent historical call
-                        # identically — abort the whole run instead of hammering the broker (and
-                        # spamming a per-symbol warning) once per remaining symbol. The KiteClient
-                        # on_token_rejected circuit breaker has already frozen entries; the
-                        # un-attempted symbols are reported failed so the caller sees the full
-                        # picture and the resume (via PostLoginRecovery) refills them.
+                        # Abort the whole run; un-attempted symbols are reported failed and the
+                        # resume (via PostLoginRecovery) refills them.
                         _abort_remaining(
                             report, symbols[i + 1:], start.isoformat(), end.isoformat(),
                             "backfill_aborted_token_rejected", interval=interval,
@@ -266,11 +256,9 @@ class BackfillJob:
                 )
                 report.bars_written += written
                 if candles:
-                    # OBSERVED-through, never requested-through: a span can legitimately end on
-                    # days whose candles don't exist yet (a "today" requested pre-close, a weekend
-                    # tail). Checkpointing the requested end is how the 2026-07-28 poisoning
-                    # happened — the un-published day was recorded complete and never fetched
-                    # again ("already_complete" forever; warm-up froze on the hole).
+                    # OBSERVED-through, never requested-through: a span can end on days whose
+                    # candles don't exist yet (a "today" requested pre-close, a weekend tail);
+                    # checkpointing the requested end would record them complete forever.
                     observed = max(_candle_ts(c).date() for c in candles)
                     self._advance_checkpoint(symbol, interval, min(chunk_end, observed))
                 else:
@@ -299,60 +287,50 @@ class BackfillJob:
     ) -> BackfillReport:
         """Fill the ``[frm, to)`` minute-bar gap from official candles.
 
-        The cold-start/restart same-session (or multi-day) gap fill: ``frm`` is last-bar-seen, so
-        warm-up never requires live tick capture since 09:15 — the reference catch-up pattern.
-        Rows are written ``src='gap_backfilled'``: an offline-span fill that the nightly
-        reconcile EXCLUDES from its drift denominator. Candles are already corp-action
-        adjusted — written as fetched. NOT checkpointed: every startup computes its own gap.
+        ``frm`` is last-bar-seen, so warm-up never requires live tick capture since 09:15. Rows are
+        written ``src='gap_backfilled'`` (excluded from the nightly reconcile's drift denominator),
+        as fetched. NOT checkpointed: every startup computes its own gap.
 
-        ``confirm_until`` (2026-09-18) turns this job into the one place that can close an UNFILLABLE
-        hole. A thin, high-priced symbol (PTCIL, MRF, SHYAMMETL, KIMS, DEEPAKNTR) has minutes in
-        which nothing trades: no tick ⇒ the bar builder writes no bar, and Kite publishes no candle
-        for a tradeless minute ⇒ this fill fetches the day and writes nothing. The minute is a
-        permanent hole and the warm-up gate refused the symbol for the whole session (09-16 PTCIL 13:36; 09-17
-        DEEPAKNTR 374/375). It is not missing data — it is an observation the exchange made — so when
-        ``confirm_until`` is set, a still-missing minute that Kite DID NOT return, for a symbol whose
-        fetch completed, is recorded in ``bars_1m_no_trade`` (:meth:`MarketStore.mark_no_trade`) and
-        :meth:`MarketStore.coverage_gaps` counts it covered.
+        ``confirm_until`` closes an UNFILLABLE hole. A thin, high-priced symbol has minutes in which
+        nothing trades: no tick ⇒ no self-built bar, and Kite publishes no candle for a tradeless
+        minute ⇒ this fill writes nothing, the minute stays a hole and the warm-up gate refuses the
+        symbol for the session. When ``confirm_until`` is set, a still-missing minute that Kite did
+        not return, for a symbol whose fetch completed, is recorded in ``bars_1m_no_trade``
+        (:meth:`MarketStore.mark_no_trade`) and :meth:`MarketStore.coverage_gaps` counts it covered.
 
-        UPSTREAM-CONFIRMED ONLY — never a synthetic bar, never an invented price. ``bars_1m`` is
-        untouched by this path (its ``src`` CHECK constraint is not widened; no new ``src`` value),
-        so every feature input is unchanged by construction: only the warm-up gate's verdict moves.
+        UPSTREAM-CONFIRMED ONLY — never a synthetic bar or invented price. ``bars_1m`` is untouched
+        by this path, so every feature input is unchanged: only the warm-up gate's verdict moves.
 
-        Confirmation runs in TWO PASSES because the last guard is a cross-symbol one. The collect pass,
-        inside the per-symbol loop, only COLLECTS candidates (no write); the write pass, after the loop,
-        applies the correlation guard and writes. A minute must clear all four guards to be confirmed:
+        Confirmation runs in TWO PASSES because the last guard is cross-symbol: the collect pass
+        (inside the per-symbol loop) only collects candidates; the write pass (after the loop)
+        applies the correlation guard and writes. A minute must clear all four guards:
 
         * **A — Kite answered.** The symbol's ``returned`` set (every in-span minute Kite published,
           across chunks) must be NON-EMPTY. If Kite returned no candles at all for the span, a broker
           outage and a genuinely dead symbol are indistinguishable — confirm nothing, leave the hole.
         * **B — Kite reached past the minute.** ``m < max(returned)``. A Kite-side outage that
-          truncates a symbol's day at 13:00 must not let 13:01→cutoff be confirmed wholesale; a
-          tradeless minute at the very END of the window simply waits for the next pass, which will
-          have a later candle to prove the feed got there.
-        * **C — published.** ``m < min(confirm_until, now - 2 min)``: a minute Kite has simply not
-          published YET must never be confirmed. The −2 min is belt-and-braces over the caller's trim.
+          truncates a day must not let the rest be confirmed wholesale; a tradeless minute at the
+          END of the window waits for a later pass.
+        * **C — published.** ``m < min(confirm_until, now - 2 min)``: a minute Kite has not
+          published YET must never be confirmed.
         * **D — uncorrelated.** Across the symbols that answered, a minute missing for
           ``max(3, ceil(0.05 × answered))`` or more of them is a FEED gap, not thin symbols going
-          quiet together — it is dropped for every symbol and counted in
+          quiet together — dropped for every symbol and counted in
           ``report.no_trade_correlated_skipped``.
 
         A token-rejection abort discards the whole pending set: the sweep stopped early, so the
-        correlation denominator is not the one the guard was calibrated on. Confirm nothing.
+        correlation denominator is not the one the guard was calibrated on.
 
-        Because ``coverage_gaps`` then subtracts confirmed minutes, the NEXT ``warmup_gap`` sees no
-        gap for that symbol and makes NO Kite request at all — the confirmation is spent once.
-
-        ``confirm_until=None`` (the default) is the pre-2026-09-18 behaviour exactly: nothing is
-        confirmed and no ``bars_1m_no_trade`` row is written.
+        ``coverage_gaps`` then subtracts confirmed minutes, so the NEXT ``warmup_gap`` makes no Kite
+        request for that gap. ``confirm_until=None`` (the default) confirms nothing and writes no
+        ``bars_1m_no_trade`` row.
         """
         frm = frm.astimezone(IST)
         to = to.astimezone(IST)
         report = BackfillReport(interval="minute")
         chunk_days = self._chunk_days("minute")
         symbols = list(symbols)
-        # Collect-pass accumulators (see the contract above). ``cutoff`` is taken ONCE, before the sweep:
-        # an earlier cutoff is the conservative one, and a long sweep must not confirm later minutes
+        # ``cutoff`` is taken ONCE, before the sweep: a long sweep must not confirm later minutes
         # for the symbols it happens to reach last.
         cutoff: datetime | None = (
             None if confirm_until is None
@@ -376,11 +354,9 @@ class BackfillJob:
                 )
                 _log.warning("warmup_gap_unknown_token", symbol=symbol)
                 continue
-            # Fill GAPS ONLY — never overwrite an existing bar of ANY src (2026-07-23: a mid-session
-            # restart passed frm=09:15 and the fill CLOBBERED the morning's live self-built bars with
-            # official candles, destroying the day's reconcile evidence — 1,311 of ~9,500 self bars
-            # survived). Coverage gaps also handle INTERIOR holes (a sleep window between two live
-            # stretches), which no single last-bar-seen ``frm`` can express.
+            # Fill GAPS ONLY — never overwrite an existing bar of ANY src (it would destroy the
+            # day's reconcile evidence). Coverage gaps also handle INTERIOR holes, which no single
+            # last-bar-seen ``frm`` can express.
             gap_minutes = set(await self._store.acoverage_gaps(symbol, frm, to))
             if not gap_minutes:
                 continue      # fully covered — nothing to fill, nothing to touch
@@ -405,10 +381,7 @@ class BackfillJob:
                         )
                     )
                     if isinstance(exc, TokenException):
-                        # 2026-07-21: a rejected token fails every gap call identically — abort the
-                        # whole warm-up fill (the circuit breaker already froze entries) rather than
-                        # retry per remaining symbol. Un-attempted symbols reported failed; the
-                        # post-login re-trigger recomputes and refills the gap once the token is good.
+                        # Abort the whole fill; the post-login re-trigger recomputes the gap.
                         _abort_remaining(
                             report, symbols[i + 1:], frm.isoformat(), to.isoformat(),
                             "warmup_gap_aborted_token_rejected",
@@ -424,9 +397,8 @@ class BackfillJob:
                     BackfillSpan(symbol=symbol, frm=frm.isoformat(), to=to.isoformat(), bars=written)
                 )
                 report.bars_written += written
-                # COLLECT PASS — no writes. Guard A (Kite answered for this span) gates both the
-                # candidates and the correlation denominator; guard B (a LATER candle proves the
-                # feed reached past the minute) and guard C (the cutoff) filter the candidates.
+                # COLLECT PASS — no writes. Guard A gates candidates and the correlation
+                # denominator; guards B and C filter the candidates.
                 if cutoff is not None and returned:
                     answered += 1
                     latest = max(returned)
@@ -438,8 +410,7 @@ class BackfillJob:
                         pending[symbol] = candidates
             if aborted:
                 break
-        # WRITE PASS — guard D and the writes. An aborted sweep confirms NOTHING: it stopped early, so
-        # ``answered`` is not the denominator the correlation guard was calibrated on (conservative).
+        # WRITE PASS — guard D and the writes. An aborted sweep confirms NOTHING.
         if pending and not aborted:
             miss_count: dict[datetime, int] = {}
             for mins in pending.values():
@@ -486,9 +457,7 @@ class BackfillJob:
     async def daily_gap(self, symbols: Sequence[str], sessions: Sequence[date]) -> BackfillReport:
         """Fill missing ``bars_1d`` rows for ``symbols`` on exactly ``sessions`` — the warm-up gate's
         own daily window (:meth:`engine.ops.warmup.WarmupGate.daily_window`), newest-first or any
-        order — from official Kite day candles (2026-09-15: OLAELEC entered the watchlist with a
-        57-session hole in ``bars_1d`` that the minute-only newcomer fill never touched, freezing the
-        DAILY class for 12 hours).
+        order — from official Kite day candles.
 
         Coverage is checked from the store FIRST, per symbol, with NO network call: a symbol already
         holding every requested session costs nothing (``report.skipped_covered``). Written rows are
@@ -496,10 +465,9 @@ class BackfillJob:
         session's existing row — which may be a ``src='bhavcopy'`` cross-check row — is never
         clobbered with ``kite_official``.
 
-        NOT checkpointed: every caller recomputes coverage from the store on each call, so a fill is
-        idempotent and self-healing by construction. A monotonic checkpoint would skip exactly the
-        BACKWARD holes this repairs — the 2026-09-15 OLAELEC hole was 2025-09-09..2025-12-01, entirely
-        behind where a would-be checkpoint would already sit (2026-09-11).
+        NOT checkpointed: coverage is recomputed from the store on each call, so a fill is
+        idempotent and self-healing. A monotonic checkpoint would skip exactly the BACKWARD holes
+        this repairs.
         """
         report = BackfillReport(interval="day")
         sessions = list(sessions)
@@ -552,9 +520,6 @@ class BackfillJob:
                         )
                     )
                     if isinstance(exc, TokenException):
-                        # Same rationale as run()/warmup_gap: a rejected token fails every subsequent
-                        # call identically — abort the whole fill rather than hammering the broker
-                        # once per remaining symbol.
                         _abort_remaining(
                             report, symbols[i + 1:], oldest.isoformat(), newest.isoformat(),
                             "daily_gap_aborted_token_rejected",
@@ -606,7 +571,7 @@ class BackfillJob:
         """Write fetched candles (as-is) to bars_1d / bars_1m; optional ``[frm, to)`` filter.
 
         ``only_minutes`` (minute interval only): write ONLY candles whose ts is in the set — the
-        warmup-gap fill-gaps-never-overwrite contract (2026-07-23; see :meth:`warmup_gap`).
+        warmup-gap fill-gaps-never-overwrite contract (see :meth:`warmup_gap`).
 
         ``only_dates`` (day interval only): write ONLY candles on those dates — the daily gap fill's
         fill-gaps-never-overwrite contract (bars_1d rows may be ``src='bhavcopy'`` cross-check rows;

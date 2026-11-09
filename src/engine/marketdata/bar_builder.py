@@ -46,39 +46,31 @@ Pinned behaviors:
   ``amended=True`` when applied). Close and volume are never restated post-finalize (the
   cumulative-delta chain must stay consistent — the nightly reconcile is the canonical fix). Amended bars are NOT re-published on ``bar.1m`` (downstream consumers already acted on the
   original; divergence is the reconcile job's concern).
-    - *Why (2026-08-24 late-tick death spiral):* the old path ran ``amend_bar_1m_extremes`` (store
-      lock + BEGIN/SELECT/COMMIT) **plus** ``append_correction`` (store lock + INSERT) **plus** one
-      INFO line for EVERY late tick — ~4 DuckDB statements and 2 lock acquisitions where the fast
-      path runs none. Once processing slipped past the grace window every tick took that path, so
-      throughput fell below real time and the lag grew without bound (20 min behind by 12:42; nine
-      hours by midnight, 212,338 ``late_tick_past_grace`` lines before 12:43 — ALL of them
-      ``outcome='in_range'``, i.e. all of them paying full price for "nothing to do"). The lag makes
-      each minute's bar finalize off its FIRST tick, so every later tick of that same minute is
-      "late" — the newest finalized minute is exactly the one memory holds, which is why an N=5
-      window covers the pathological case completely.
+    - *Why:* amending on every late tick costs ~4 DuckDB statements and 2 store-lock acquisitions
+      plus a log line. Under processing lag every minute's bar finalizes off its FIRST tick, so
+      every later tick of that minute is "late"; the slow path then drives throughput below real
+      time and the lag grows without bound. The newest finalized minute is exactly the one memory
+      holds, which is why an N=5 window covers the pathological case.
     - *Log volume is part of the cost:* at most ONE ``late_tick_past_grace`` line per
       ``(symbol, minute)``, plus a per-wall-minute ``late_ticks_summary`` aggregate
       (count / distinct symbols / max lag / how many actually touched the store).
     - *Watchdog:* processing lag (``clock.now() - newest exchange_ts``) past
       :data:`LAG_THRESHOLD_S` logs ERROR ``tick_processing_lagging`` (re-logged at most every
       :data:`LAG_LOG_INTERVAL_S`) and raises ONE owner alert per episode through the injected
-      ``notify`` sink; ``tick_processing_recovered`` (INFO) closes the episode. **Reconnect grace
-      (2026-09-03):** :meth:`BarBuilder.on_feed_health` (bus topic ``feed.health``) suspends the
-      watchdog for :data:`LAG_RECONNECT_GRACE_S` after a WARMING/HEALTHY transition, because Kite's
-      connect-time snapshot carries each instrument's LAST-TRADE stamp and flapped the single global
-      episode 14 times in 83 ms. Coverage extended 2026-09-09 to in-child KiteTicker reconnects (no
-      supervisor state transition) via the heartbeat's ``connect_seq`` — a per-connect counter the
-      child bumps and flushes BEFORE it re-subscribes, so the signal precedes the snapshot burst in
-      the frame stream; the ``ws_connected`` False→True edge remains only as its fallback.
-      **Honest bound (2026-09-09 review):** one (re)connect delays a genuine alarm by up to 30 s. A
-      feed that re-transitions FASTER than the grace lapses keeps re-arming it, so this watchdog can
-      be blind for part of such a loop — that loop is itself an alerting condition, owned by the
-      supervisor (``warming_timeout`` respawns, DEGRADED/HEALTHY cycles), not by this lag alarm.
-    - *Only ``src='self'`` rows are amendable:* once reconcile/backfill has made a row
-      ``kite_official``/``gap_backfilled`` it is CANONICAL, and reconcile never revisits a
-      checkpointed day — an amendment there would be a permanent, invisible rewrite of an official
-      candle. Such a late tick is recorded with ``amended=False, reason='official_bar_untouchable'``
-      and the stored row is left byte-intact.
+      ``notify`` sink; ``tick_processing_recovered`` (INFO) closes the episode. **Reconnect grace:**
+      :meth:`BarBuilder.on_feed_health` (bus topic ``feed.health``) suspends the watchdog for
+      :data:`LAG_RECONNECT_GRACE_S` after a WARMING/HEALTHY transition, because Kite's connect-time
+      snapshot carries each instrument's LAST-TRADE stamp and would flap the single global episode.
+      In-child KiteTicker reconnects (no supervisor state transition) arrive via the heartbeat's
+      ``connect_seq`` — a per-connect counter the child bumps and flushes BEFORE it re-subscribes, so
+      the signal precedes the snapshot burst; the ``ws_connected`` False→True edge is only its
+      fallback. **Bound:** one (re)connect delays a genuine alarm by up to 30 s, and a feed that
+      re-transitions faster than the grace keeps re-arming it; that loop is the supervisor's alarm
+      (``warming_timeout`` respawns, DEGRADED/HEALTHY cycles), not this one's.
+    - *Only ``src='self'`` rows are amendable:* a ``kite_official``/``gap_backfilled`` row is
+      CANONICAL, and reconcile never revisits a checkpointed day — an amendment there would be a
+      permanent, invisible rewrite of an official candle. Such a late tick is recorded with
+      ``amended=False, reason='official_bar_untouchable'`` and the stored row is left byte-intact.
     - *No read-decide-write window:* the amendment runs through
       :meth:`MarketStore.amend_bar_1m_extremes`, which re-reads, decides and writes under a single
       store lock + transaction and compare-and-swaps on the row it read — so the 15:50 reconcile
@@ -120,31 +112,28 @@ _log = get_logger("engine.marketdata.bar_builder")
 #: Canonical bus topic for finalized 1-minute bars.
 BAR_1M_TOPIC = "bar.1m"
 
-#: NSE continuous-session open (pinned): ticks strictly before this wall time are pre-open.
+#: NSE continuous-session open: ticks strictly before this wall time are pre-open.
 #: Constructor-overridable, but the composition root passes no override and per-day bounds are not
-#: wired. Right on every regular day, and every special session (muhurat) is excluded by the live
-#: calendar (include_special=False, 2026-10-11). Shortened sessions, however, stay trading days:
-#: none is configured today, but wire per-day bounds before adding one.
+#: wired. Right on every regular day; special sessions (muhurat) are excluded by the live calendar.
+#: Shortened sessions stay trading days: none is configured today, but wire per-day bounds before
+#: adding one.
 SESSION_OPEN_IST = time(9, 15)
 
 #: NSE continuous-session close: ticks strictly AFTER this wall time are post-close and build
-#: no bar. Same trust model as ``SESSION_OPEN_IST`` — constructor-overridable, unwired in
-#: production; right on every regular day (shortened sessions need per-day bounds first).
+#: no bar. Same trust model as ``SESSION_OPEN_IST``.
 SESSION_CLOSE_IST = time(15, 30)
 
-#: Finalize grace after minute close, seconds (pinned "~5 s" — a constant, not a knob).
+#: Finalize grace after minute close, seconds (a constant, not a knob).
 FINALIZE_GRACE_S = 5
 
 #: Finalized bars retained IN MEMORY per symbol so the late-tick range check never reads DuckDB.
-#: Five is deliberate slack over the case that actually matters: under processing lag every
-#: minute's bar finalizes off its FIRST tick, so the late minute IS the newest finalized one — the
-#: window only has to survive out-of-order jitter, not a long backlog.
+#: Under processing lag the late minute IS the newest finalized one, so the window only has to
+#: survive out-of-order jitter, not a long backlog.
 RECENT_BARS_PER_SYMBOL = 5
 
 #: Processing-lag alarm threshold, seconds: ``clock.now() - newest exchange_ts`` past this means the
-#: tick stream is no longer being consumed in real time (lag watchdog). A module constant, not a
-#: knob — 120 s is far outside anything a healthy feed produces and far inside the 20-minute hole the
-#: 2026-08-24 spiral dug before anyone noticed.
+#: tick stream is no longer consumed in real time. A constant, not a knob — far outside anything a
+#: healthy feed produces.
 LAG_THRESHOLD_S = 120
 
 #: Minimum seconds between two ``tick_processing_lagging`` ERROR lines inside ONE episode. The owner
@@ -152,32 +141,25 @@ LAG_THRESHOLD_S = 120
 LAG_LOG_INTERVAL_S = 300
 
 #: Seconds after a feed-health transition into WARMING/HEALTHY during which processing lag is NOT
-#: evaluated (2026-09-03 15:40:02 reconnect-snapshot storm — see :meth:`BarBuilder.on_feed_health`).
-#: A module constant, not a knob: it only has to cover the connect-time snapshot burst, which lands
-#: in ONE batch within milliseconds of the connect (the 09-03 tape: 202 tokens, 14 flap pairs, 83 ms).
-#: 30 s is ~360x that burst and still a quarter of :data:`LAG_THRESHOLD_S`, so a real backlog that
-#: outlives ONE reconnect is reported up to 30 s later than before, not suppressed. The bound holds
-#: per (re)connect, not globally (2026-09-09 review): a feed re-transitioning faster than 30 s
-#: re-arms the grace before it lapses and this watchdog stays silent through that loop — deliberately,
-#: because a reconnect loop is the supervisor's alarm (``warming_timeout`` respawns, DEGRADED cycles,
-#: heartbeat-silence kill), and duplicating it here would page twice for one fault.
+#: evaluated (see :meth:`BarBuilder.on_feed_health`). It only has to cover the connect-time snapshot
+#: burst, which lands in ONE batch within milliseconds of the connect; a real backlog is reported at
+#: most 30 s later, not suppressed. The bound holds per (re)connect: a feed re-transitioning faster
+#: than 30 s keeps the watchdog silent through that loop — deliberately, because a reconnect loop is
+#: the supervisor's alarm and duplicating it here would page twice for one fault.
 LAG_RECONNECT_GRACE_S = 30
 
 #: ``FeedHealth.state`` values that arm the reconnect grace: the two states a (re)connect passes
-#: through, and the only two whose arrival implies a fresh ``kws.connect`` snapshot may follow.
-#: STOPPED / DEGRADED / STALE must never arm — a degraded or stale feed is exactly when the lag
-#: alarm has to stay live.
+#: through. STOPPED / DEGRADED / STALE must never arm — a degraded or stale feed is exactly when the
+#: lag alarm has to stay live.
 _LAG_GRACE_ARMING_STATES = frozenset({"WARMING", "HEALTHY"})
 
-#: Buffer past session_close the lag watchdog keeps watching (the square-off/settlement tail) before
-#: treating a stale timestamp as a snapshot echo rather than a backlog (2026-08-26 23:21 false page —
-#: see :meth:`BarBuilder._watch_lag`). Added to the (possibly overridden) session close rather than a
-#: fixed wall-clock time, so a shortened/muhurat session's watch window follows ITS close.
+#: Buffer past session_close the lag watchdog keeps watching (the settlement tail) before treating a
+#: stale timestamp as a snapshot echo rather than a backlog (see :meth:`BarBuilder._watch_lag`).
+#: Added to the (possibly overridden) session close, so the watch window follows ITS close.
 _LAG_WATCH_END_BUFFER = timedelta(minutes=15)
 
 #: ``amend_bar_1m_extremes`` outcome → ``corrections_log.reason`` for the rows we could NOT amend.
-#: ``AMEND_IN_RANGE`` (the ordinary "late print inside the bar" case) keeps a NULL reason: it is not
-#: a refusal, there was simply nothing to widen.
+#: ``AMEND_IN_RANGE`` keeps a NULL reason: it is not a refusal, there was simply nothing to widen.
 _REFUSAL_REASON: dict[str, str | None] = {
     AMEND_IN_RANGE: None,
     AMEND_FOREIGN_SRC: "official_bar_untouchable",   # reconciled/backfilled row — canonical
@@ -207,10 +189,9 @@ class _OpenBar:
 class _RecentBar:
     """What the late-tick path needs to remember about a finalized minute.
 
-    ``high``/``low`` mirror the row we wrote (and are widened in step with any amendment we apply, so
-    memory never drifts NARROWER than the store — a narrow memory would only cost an extra store
-    round-trip, never a wrong answer). ``ranged`` is False for a placeholder created by a late tick
-    for a minute we no longer remember: the entry then exists purely to carry ``logged``, and every
+    ``high``/``low`` mirror the row we wrote and are widened in step with any applied amendment (a
+    narrow memory would only cost a store round-trip, never a wrong answer). ``ranged`` is False for
+    a placeholder for a minute we no longer remember: it exists purely to carry ``logged``, and every
     such tick still goes to the store because its true range is unknown. ``logged`` enforces the
     one-``late_tick_past_grace``-line-per-(symbol, minute) budget.
     """
@@ -250,10 +231,7 @@ class BarBuilder:
         The day's continuous-session open (default 09:15 IST regular session).
     session_close:
         The day's continuous-session close (default 15:30 IST regular session); ticks strictly after
-        it build no bar. Same trust model as ``session_open``: the composition root passes no
-        override, so the pinned constants stand. Per-day bounds are not wired: the live calendar
-        excludes special sessions (include_special=False, 2026-10-11) but shortened sessions stay
-        trading days, so wire per-day bounds before adding any (none configured today).
+        it build no bar. Same trust model as ``session_open`` (see ``SESSION_OPEN_IST``).
     grace_s:
         Finalize grace after minute close (pinned ~5 s; constructor param for tests only).
     persist_raw_ticks:
@@ -284,8 +262,7 @@ class BarBuilder:
         self._bus = bus
         self._session_open = session_open
         self._session_close = session_close
-        # Lag watchdog window end (2026-08-26 guard ii): session_close + the settlement-tail
-        # buffer, so a special session's window tracks ITS close rather than the ordinary 15:45.
+        # Lag watchdog window end: session_close + the settlement-tail buffer.
         self._lag_watch_end = (
             datetime.combine(date.min, session_close) + _LAG_WATCH_END_BUFFER
         ).time()
@@ -303,8 +280,7 @@ class BarBuilder:
         # is answered from HERE, so an in-range late tick issues zero DuckDB statements).
         self._recent: dict[str, OrderedDict[datetime, _RecentBar]] = {}
 
-        # --- late-tick observability: one line per (symbol, minute) + a per-wall-minute
-        #     aggregate. The 2026-08-24 spiral logged 215,823 per-tick INFO lines in one morning. ---
+        # --- late-tick observability: one line per (symbol, minute) + a per-wall-minute aggregate ---
         self._late_window_minute: datetime | None = None
         self._late_window = _LateWindow()
 
@@ -312,12 +288,11 @@ class BarBuilder:
         self._lagging = False
         self._lag_logged_at: datetime | None = None
         self._pending_alert: CatalogMessage | None = None
-        # Reconnect grace deadline (2026-09-03): while set and in the future, _watch_lag does not
-        # evaluate. Armed by on_feed_health; cleared lazily by _watch_lag once it has passed.
+        # Reconnect grace deadline: while set and in the future, _watch_lag does not evaluate.
+        # Armed by on_feed_health; cleared lazily by _watch_lag once it has passed.
         self._lag_grace_until: datetime | None = None
 
-        # --- feed_stats counters (observability): zero-cost increments on the hot path,
-        #     drained + reset by stats_snapshot() for the periodic in-session feed_stats line. ---
+        # --- feed_stats counters: hot-path increments, drained + reset by stats_snapshot() ---
         self._bars_finalized = 0
         self._bars_written = 0
         self._ticks_dropped: dict[str, int] = {}   # bar-exclusion reason -> count (post_close, …)
@@ -330,34 +305,27 @@ class BarBuilder:
         """Ingest one live tick (spec-pinned entry point; see the module docstring for the rules)."""
         ts = tick.exchange_ts.astimezone(IST)
         symbol = tick.tradingsymbol
-        # ONE clock read per tick: it drives finalization, the late-tick summary window and
-        # the lag watchdog alike. advance() used to take it privately — _advance() takes it as an
-        # argument so the three cannot disagree and the read is not repeated.
+        # ONE clock read per tick, shared by finalization, the late-tick summary window and the lag
+        # watchdog so they cannot disagree.
         now = self._clock.now()
         self._watch_lag(now, ts)
         self._roll_day(symbol, ts.date())
 
         if self._persist_raw_ticks:
-            # Raw frames (incl. pre-open) persist to the tick Parquet dataset (flushed every
-            # flush_interval_s, 60 s default).
-            # Stage only — the flush is DuckDB+Parquet work (~seconds at watchlist scale) and must
-            # never run on the event loop; on_tick_event offloads it via aflush_ticks.
+            # Stage only — the flush is DuckDB+Parquet work and must never run on the event loop;
+            # on_tick_event offloads it via aflush_ticks.
             self._store.stage_tick(tick)
 
         if ts.time() < self._session_open:
-            # pre-open ticks never contaminate bars; the LAST pre-open print is the
-            # auction-derived open, stamped on the 09:15 row at finalize.
+            # The LAST pre-open print is the auction-derived open, stamped on the 09:15 row.
             self._auction_open[symbol] = tick.ltp
             self._advance(now)
             return
 
         if ts.time() > self._session_close:
-            # Symmetric to the pre-open rule: a post-close print (closing-auction dribble, an
-            # odd-lot/AMO echo, a stale re-broadcast) must never build a bar. A post-15:30 minute has
-            # NO official candle, so it sits outside the nightly reconcile's comparison window
-            # forever — nothing could ever heal or even detect it. Raw ticks are already staged above
-            # (the exclusion is a *bar* rule, exactly as pre-open); the drop is counted for feed_stats
-            # — a side channel, never a per-tick hot-path log.
+            # Symmetric to pre-open: a post-close print must never build a bar (no official candle
+            # exists for it, so nothing could ever heal it). Raw ticks are already staged above;
+            # the drop is counted for feed_stats, never logged per tick.
             self._drop("post_close")
             self._advance(now)
             return
@@ -403,9 +371,9 @@ class BarBuilder:
     def advance(self) -> list[Bar]:
         """Finalize every open bar whose minute close + grace has passed per ``clock.now()``.
 
-        The explicit time-control seam (finalize at minute close + 5 s grace): tests
-        drive a fake Clock and call this directly; live operation calls it on every tick (and the
-        scheduler may call it on a coarse timer for symbols that simply stop ticking).
+        The explicit time-control seam: tests drive a fake Clock and call this directly; live
+        operation calls it on every tick (and the scheduler may call it on a coarse timer for
+        symbols that stop ticking).
         """
         return self._advance(self._clock.now())
 
@@ -455,13 +423,12 @@ class BarBuilder:
             self._last_cum[symbol] = cum
             if minute.time() == self._session_open:
                 # Up from the open: the whole cumulative (incl. opening-auction volume) belongs to
-                # the session-open bar — matches the official 09:15 candle.
+                # the session-open bar, matching the official 09:15 candle.
                 return cum
-            # Mid-session first sight: the delta over the unseen span is unknowable — contribute 0;
-            # warmup_gap fills [last-bar-seen .. now) from official candles.
+            # Mid-session first sight: the unseen span's delta is unknowable; warmup_gap fills it.
             return 0
         if cum < last:
-            # Restatement/glitch guard: never a negative bar volume. High-water baseline kept.
+            # Never a negative bar volume; the high-water baseline is kept.
             self._store.append_correction(
                 symbol, minute, tick.exchange_ts, tick.ltp, cumulative_volume=cum, amended=False
             )
@@ -521,17 +488,14 @@ class BarBuilder:
         """Return + reset the since-last-call bar counters for the periodic ``feed_stats`` line.
 
         ``bars_finalized`` counts minute bars closed (minute+grace or force-flush); ``bars_written`` is
-        the batch-upsert count. They differ only transiently within a write batch. ``ticks_dropped``
-        maps bar-exclusion reason → count (``post_close``), mirroring ``TickerSupervisor``'s
-        ``frames_dropped``. Reset-on-read gives the composition-root emitter clean per-interval deltas
-        without a second clock."""
+        the batch-upsert count. ``ticks_dropped`` maps bar-exclusion reason → count (``post_close``).
+        Reset-on-read gives the emitter clean per-interval deltas without a second clock."""
         snap: dict[str, Any] = {
             "bars_finalized": self._bars_finalized,
             "bars_written": self._bars_written,
             "ticks_dropped": dict(self._ticks_dropped),
-            # Late-tick pressure and how much of it actually reached DuckDB. In a healthy
-            # session both are 0; late_ticks >> late_store_calls means the memory range check is
-            # absorbing them (the fix working), late_store_calls climbing means real amendments.
+            # late_ticks >> late_store_calls means the memory range check is absorbing them;
+            # late_store_calls climbing means real amendments.
             "late_ticks": self._late_ticks,
             "late_store_calls": self._late_store_calls,
         }
@@ -547,17 +511,14 @@ class BarBuilder:
         self._ticks_dropped[reason] = self._ticks_dropped.get(reason, 0) + 1
 
     def _remember(self, symbol: str, minute: datetime, bar: _RecentBar) -> None:
-        """Get-or-create the per-symbol OrderedDict, insert/overwrite ``bar`` at ``minute``, move it to
-        the MRU end, then evict from the LRU end past :data:`RECENT_BARS_PER_SYMBOL`. Shared
-        by :meth:`_finalize` (a real finalized range) and :meth:`_handle_late_tick` (a ``ranged=False``
-        placeholder for a minute we no longer remember).
+        """Insert/overwrite ``bar`` at ``minute`` in the per-symbol LRU, evicting past
+        :data:`RECENT_BARS_PER_SYMBOL`. Shared by :meth:`_finalize` (a real range) and
+        :meth:`_handle_late_tick` (a ``ranged=False`` placeholder).
 
-        A placeholder never evicts a REAL range (2026-09-02 review): a reconnect replaying 5+
-        distinct stale minutes used to wipe the whole cache with ``ranged=False`` entries, putting
-        every current-minute tick back on the store path — the exact death-spiral pattern,
-        during the lag episode when the store is busiest. A full-of-real-bars cache simply skips
-        remembering the placeholder; that stale minute keeps asking the store, which is what
-        ``ranged=False`` meant anyway (bounded: late ticks for unremembered minutes are rare)."""
+        A placeholder never evicts a REAL range: a reconnect replaying 5+ stale minutes would
+        otherwise wipe the cache and put every current-minute tick back on the store path during
+        the lag episode. A cache full of real bars skips the placeholder; that stale minute keeps
+        asking the store, as ``ranged=False`` means anyway."""
         recent = self._recent.get(symbol)
         if recent is None:
             recent = self._recent[symbol] = OrderedDict()
@@ -576,29 +537,21 @@ class BarBuilder:
     def _handle_late_tick(self, tick: Tick, minute: datetime, now: datetime) -> None:
         """A tick for an already-finalized minute (past minute+grace).
 
-        **The in-range case is free.** The finalized bar's range is answered from
-        :attr:`_recent` — an in-memory dict of the last :data:`RECENT_BARS_PER_SYMBOL` finalized
-        minutes per symbol. A print already inside that range has nothing to widen and nothing to
-        correct, so it issues NO store call at all: no ``amend_bar_1m_extremes`` (store lock +
-        BEGIN/SELECT/COMMIT) and no ``append_correction`` (store lock + INSERT). That is the whole
-        2026-08-24 death spiral: ~4 DuckDB statements + 2 lock acquisitions + one INFO line per tick,
-        on a path that fires for EVERY tick once processing slips past the grace window, drove
-        throughput below real time so the lag could only grow. All 201,537 ``in_range`` late ticks
-        that morning paid full price to discover there was nothing to do.
+        **The in-range case is free.** The finalized bar's range is answered from :attr:`_recent`.
+        A print already inside it has nothing to widen or correct, so it issues NO store call (no
+        ``amend_bar_1m_extremes``, no ``append_correction``) — see the module docstring for why.
 
         Only a print OUTSIDE the remembered range — or one for a minute we no longer remember, whose
-        true range is unknown — takes the store path, and it is unchanged. Two guarantees live
-        in the single ``amend_bar_1m_extremes`` call: only a ``src='self'`` row is amendable (an
-        official/backfilled row is canonical and untouchable — recorded with
-        ``reason='official_bar_untouchable'``, bar left byte-intact), and the read-decide-write runs
-        under one store lock + transaction with a compare-and-swap on the row it read, so the 15:50
-        reconcile write cannot be clobbered by a decision taken against the pre-reconcile row.
+        true range is unknown — takes the store path. Two guarantees live in the single
+        ``amend_bar_1m_extremes`` call: only a ``src='self'`` row is amendable (an official/backfilled
+        row is canonical — recorded with ``reason='official_bar_untouchable'``, bar left
+        byte-intact), and the read-decide-write runs under one store lock + transaction with a
+        compare-and-swap on the row it read, so the 15:50 reconcile write cannot be clobbered.
         Close/volume are never restated post-finalize (the nightly reconcile is the canonical fix).
 
-        Memory-vs-store consistency: an applied amendment widens the remembered range in the same
-        step, so memory never drifts NARROWER than the row. Drifting narrow would only cost a
-        redundant store round-trip; it can never make an out-of-range print look in-range, because
-        the memory range is only ever widened from values the store accepted.
+        An applied amendment widens the remembered range in the same step; memory is only ever
+        widened from values the store accepted, so it can never make an out-of-range print look
+        in-range.
         """
         symbol = tick.tradingsymbol
         recent = self._recent.get(symbol)
@@ -616,18 +569,14 @@ class BarBuilder:
             cumulative_volume=tick.volume_traded, amended=amended, reason=reason,
         )
         if known is None:
-            # A minute we no longer remember: keep a placeholder so the log-dedup budget still applies
-            # (and gets evicted normally), but leave ``ranged`` False — its true range is unknown, so
-            # every later tick for it must keep asking the store. _remember may SKIP the insert when
-            # the cache is full of real ranges (2026-09-02 review — a placeholder never evicts a real
-            # bar); the local instance then still feeds _note_late, costing only per-tick log dedup
-            # for a minute that could not be cached anyway.
+            # A minute we no longer remember: a ``ranged=False`` placeholder keeps the log-dedup
+            # budget, and every later tick for it keeps asking the store. _remember may skip the
+            # insert when the cache is full of real ranges; the local instance still feeds _note_late.
             placeholder = _RecentBar(high=Decimal(0), low=Decimal(0), ranged=False)
             self._remember(symbol, minute, placeholder)
             known = self._recent[symbol].get(minute, placeholder)
         elif known.ranged and outcome in (AMEND_APPLIED, AMEND_IN_RANGE):
-            # The store accepted this print into the row's range; widen memory to match so the next
-            # tick at this price is answered without a round-trip.
+            # The store accepted this print into the row's range; widen memory to match.
             known.high = max(known.high, tick.ltp)
             known.low = min(known.low, tick.ltp)
         self._note_late(known, symbol, minute, tick, now, outcome=outcome, touched=True)
@@ -640,10 +589,8 @@ class BarBuilder:
     ) -> None:
         """Count one late tick, and log AT MOST ONE line per (symbol, minute).
 
-        The 2026-08-24 spiral wrote 215,823 ``late_tick_past_grace`` INFO lines in a single morning —
-        structlog rendering + a synchronous file write per tick is itself part of what kept processing
-        below real time. The per-tick detail collapses to one line per (symbol, minute); volume lives
-        in the per-wall-minute ``late_ticks_summary`` aggregate instead."""
+        A per-tick log line is itself part of the cost under lag, so the detail collapses to one
+        line per (symbol, minute); volume lives in the per-wall-minute ``late_ticks_summary``."""
         self._late_ticks += 1
         window = self._late_window
         window.ticks += 1
@@ -690,51 +637,31 @@ class BarBuilder:
     async def on_feed_health(self, event: Any) -> None:
         """Arm the reconnect grace on a feed-health transition (bus topic ``feed.health``).
 
-        *2026-09-03 15:40:02.* A post-close boot spawned the ticker child; on ``kws.connect`` Kite
-        delivered ONE snapshot tick per subscribed instrument (202 tokens) carrying that instrument's
-        **last-trade** ``exchange_timestamp`` (~15:31), interleaved with near-fresh ticks (lag ~26 s).
-        :meth:`_watch_lag` keeps ONE global episode, so each stale tick re-opened it and the next
-        fresh tick closed it: 14 ERROR/``recovered`` pairs in 83 ms and 6 owner pages. Both 2026-08-26
-        guards are inert on that shape by construction — same day, and 15:30–15:45 is *deliberately*
-        watched (:data:`_LAG_WATCH_END_BUFFER`). Nothing on the wire marks a frame as a snapshot and
-        nothing is invented: the reconnect itself is the signal, and the supervisor already announces
-        it. So a transition into WARMING/HEALTHY suspends lag evaluation for
-        :data:`LAG_RECONNECT_GRACE_S` — the same WARMING-suppression the supervisor applies to its own
-        heartbeat-silence kill. An episode already open is closed here rather than left to the
-        next tick, so its staged owner page is dropped before :meth:`on_tick_event` can dispatch it.
+        On ``kws.connect`` Kite delivers one snapshot tick per subscribed instrument carrying its
+        **last-trade** ``exchange_timestamp``, interleaved with near-fresh ticks. :meth:`_watch_lag`
+        keeps ONE global episode, so each stale tick would re-open it and the next fresh tick close
+        it (a flap and an owner page per pair). Nothing on the wire marks a snapshot frame; the
+        reconnect itself is the signal. A transition into WARMING/HEALTHY therefore suspends lag
+        evaluation for :data:`LAG_RECONNECT_GRACE_S`. An episode already open is closed here, so its
+        staged owner page is dropped before :meth:`on_tick_event` can dispatch it.
 
-        *Coverage (2026-09-09 review).* Transitions are not the only reconnect. KiteTicker reconnects
-        INSIDE the child (``reconnect=True``; ``ticker/main.py`` ``TickerApp._on_connect`` re-subscribes
-        and re-asserts FULL mode, so Kite re-delivers the same connect-time snapshot) while the child
-        keeps heartbeating — no supervisor state change, so nothing used to reach this handler and the
-        09-03 flap recurred for the commonest reconnect there is. The supervisor now also publishes
-        ``feed.health`` when the heartbeat's ``connect_seq`` CHANGES
-        (``ticker_supervisor._handle_frame``), which arrives here as a HEALTHY event and arms this
-        same grace. ``connect_seq`` is the child's per-connect counter, bumped at the top of
-        ``_on_connect`` and shipped on a heartbeat emitted THERE, before ``ws.subscribe``.
+        KiteTicker also reconnects INSIDE the child (re-subscribes and re-delivers the snapshot)
+        with no supervisor state change. The supervisor publishes ``feed.health`` when the
+        heartbeat's ``connect_seq`` CHANGES (``ticker_supervisor._handle_frame``), arriving here as
+        a HEALTHY event. ``connect_seq`` is bumped at the top of the child's ``_on_connect`` and
+        shipped on a heartbeat emitted THERE, before ``ws.subscribe``: the signal is in-band and
+        precedes the snapshot burst, which a ``ws_connected`` False→True edge (seen only on the
+        next 1 s heartbeat) cannot do, and it does not depend on how the drop was reported. The
+        ``ws_connected`` edge is only the fallback for a heartbeat carrying no ``connect_seq``.
 
-        Both halves of that sentence close a residual the first cut left open. The signal is
-        *in-band*: it rides the frame stream the snapshot itself travels on, ahead of it, so the
-        grace is armed before the first snapshot tick can be evaluated — where the earlier
-        ``ws_connected`` False→True edge was only observable on the NEXT 1 s heartbeat, and Kite's
-        snapshot starts landing ~50 ms after the re-subscribe, i.e. the burst flapped this episode
-        before anything armed. And it is *unconditional on how the drop was reported*: the counter is
-        bumped by the RE-connect, so a sub-second drop or an ``on_error`` path with no ``on_close`` —
-        neither of which ever emits a ``ws_connected=False`` heartbeat, so neither shows an edge at
-        all — still reaches here. The ``ws_connected`` edge survives only as the fallback for a
-        heartbeat carrying no ``connect_seq``. One optional additive field on an existing frame; no
-        new frame type, no protocol bump, no state machine changed.
+        Bound: one (re)connect delays a genuine alarm by up to 30 s, and a feed reconnecting faster
+        than the grace keeps it armed — that loop is the supervisor's alarm, not this one's.
 
-        Honest bound, unchanged: one (re)connect delays a genuine alarm by up to 30 s, and a feed
-        reconnecting faster than the grace lapses keeps it armed — that loop is the supervisor's
-        alarm, not this one's.
-
-        Payload: ``TickerSupervisor._publish_health`` publishes ``self.health()`` — a
-        ``FeedHealth`` pydantic model (``ticker_supervisor.py`` :class:`FeedHealth`, built in
-        ``health()``) whose ``state`` is one of ``{"STOPPED","WARMING","HEALTHY","DEGRADED","STALE"}``.
-        ``state`` is the ONLY field read here, duck-typed rather than imported: ``marketdata`` does not
-        depend on ``broker`` (module docstring "Dependencies"), and an unexpected payload must degrade
-        to "no grace", never raise on the bus."""
+        Payload: ``TickerSupervisor._publish_health`` publishes a ``FeedHealth`` model whose
+        ``state`` is one of ``{"STOPPED","WARMING","HEALTHY","DEGRADED","STALE"}``. ``state`` is the
+        ONLY field read, duck-typed rather than imported: ``marketdata`` does not depend on
+        ``broker`` (module docstring "Dependencies"), and an unexpected payload must degrade to
+        "no grace", never raise on the bus."""
         state = getattr(event, "state", None)
         if state not in _LAG_GRACE_ARMING_STATES:
             return                              # STOPPED / DEGRADED / STALE keep the watchdog live
@@ -748,27 +675,19 @@ class BarBuilder:
         """Track ``now - newest exchange_ts`` and alarm past :data:`LAG_THRESHOLD_S`.
 
         Evaluated on the TICK path only, deliberately: lag is a property of tick consumption, so an
-        idle overnight engine (no ticks, ever-growing "age" of the last print) must not page anyone.
-        The ERROR line repeats at most every :data:`LAG_LOG_INTERVAL_S` while the episode lasts; the
-        owner alert is staged ONCE per episode and dispatched from :meth:`on_tick_event`.
+        idle overnight engine must not page anyone. The ERROR line repeats at most every
+        :data:`LAG_LOG_INTERVAL_S` while the episode lasts; the owner alert is staged ONCE per
+        episode and dispatched from :meth:`on_tick_event`.
 
-        Two plausibility guards (2026-08-26 23:21 false page): a ticker reconnect after hours made
-        Kite replay snapshot frames stamped ~17:35, and "now − ts" read as a 5.8 h backlog on a
-        stream with no backlog at all. (i) A tick stamped on a PREVIOUS day is definitionally a
-        snapshot echo, never consumption lag — it neither alarms nor recovers an episode. (ii) The
-        alarm only evaluates inside the session window (``self._session_open``–``self._lag_watch_end``,
-        i.e. session_close plus :data:`_LAG_WATCH_END_BUFFER` — a special session's window follows ITS
-        close, not the ordinary 15:45) — outside them an active episode is reset quietly, because the
-        spiral this watchdog exists for can only grow while the exchange is producing ticks. Residual
-        accepted: a holiday-morning reconnect echoing SAME-day stamps inside the window could still
-        page once; the calendar is deliberately not threaded in here for that rare case.
-
-        Third guard (2026-09-03 15:40:02 reconnect-snapshot storm): inside the grace armed by
-        :meth:`on_feed_health` nothing is evaluated at all — a connect-time snapshot is not
-        consumption lag, and the two are indistinguishable per-tick with no marker on the wire. The
-        deadline is cleared LAZILY here, on the first tick that outlives it, rather than by a timer:
-        the watchdog is a tick-path rule (an engine with no ticks pages nobody either way), so a
-        grace armed by a reconnect that then delivers nothing costs one comparison and no wake-up."""
+        Plausibility guards: (i) a tick stamped on a PREVIOUS day is a snapshot echo (a reconnect
+        after hours replays old stamps), never consumption lag — it neither alarms nor recovers an
+        episode. (ii) The alarm only evaluates inside the session window (``self._session_open``
+        to ``self._lag_watch_end``) — outside it an active episode is reset quietly, because the
+        spiral this watchdog exists for can only grow while the exchange is producing ticks.
+        Accepted residual: a holiday-morning reconnect echoing SAME-day stamps inside the window
+        could page once; the calendar is deliberately not threaded in for that rare case.
+        (iii) Inside the grace armed by :meth:`on_feed_health` nothing is evaluated; the deadline
+        is cleared LAZILY on the first tick that outlives it, not by a timer."""
         if ts.date() != now.date():
             return                              # previous-day snapshot echo — not consumption lag
         if not (self._session_open <= now.time() <= self._lag_watch_end):
@@ -778,9 +697,8 @@ class BarBuilder:
         grace_until = self._lag_grace_until
         if grace_until is not None:
             if now < grace_until:
-                # Belt-and-braces with on_feed_health's own close: EventBus.publish is
-                # fire-and-forget, so a tick task queued BEFORE the arming can still land here with
-                # an episode open (the two handlers race on the same loop).
+                # EventBus.publish is fire-and-forget, so a tick task queued BEFORE the arming can
+                # still land here with an episode open.
                 if self._lagging:
                     self._close_lag_episode("tick_lag_watch_reconnect_grace")
                 return

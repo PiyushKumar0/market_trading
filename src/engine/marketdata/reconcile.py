@@ -1,25 +1,23 @@
 """Daily self-built-vs-official 1-minute bar reconciliation.
 
-Nightly (15:50) — and as the startup catch-up for past trading days, driven by the
-``job_runs`` DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
+Nightly (15:50) and as the startup catch-up for past trading days, driven by the ``job_runs``
+DATE_KEYED watermark of ``JOB_RECONCILE`` (the scheduler/CatchUpRunner calls
 :meth:`ReconcileJob.run` per missing day). ``reconcile_log`` is the per-(day, symbol) audit trail
-AND the per-(day, symbol) resume checkpoint: a run skips every symbol already logged for ``d`` with
-official bars. A logged symbol's bars are already canonical official, so re-comparing it finds no self
-bars and would overwrite its drift row with ``bars_compared=0`` (2026-09-15: 119 symbols after a
-mid-run 502; 08-28, 10-05, 10-08: every symbol, the 15:50 fire racing the catch-up sweep). A row with
-``bars_official=0`` converted nothing, so it is no checkpoint: the next run of ``d`` fetches it again.
-Runs are serialized per job, so a concurrent caller waits and then finds the day logged.
+AND the resume checkpoint: a run skips every symbol already logged for ``d`` with official bars
+(re-comparing one finds no self bars and would overwrite its drift row with ``bars_compared=0``). A
+row with ``bars_official=0`` converted nothing, so it is no checkpoint: the next run fetches it
+again. Runs are serialized per job, so a concurrent caller waits and then finds the day logged.
 ``MarketStore.has_reconcile_entry`` / ``reconciled_days`` have no production caller.
 
 Each symbol's canonical bars and its log row commit in ONE store transaction
-(``MarketStore.commit_reconciled_symbol``), so no exception, cancel, store close or kill can leave a
-symbol official but unlogged. A row's ``alerted`` is set only after the drift alert naming it was
-handed to the notify sink; a run that dies first (or whose send fails) leaves flagged rows
-``alerted=False``, and the next run of ``d`` carries them into its alert (``symbols_alert_carried``).
+(``MarketStore.commit_reconciled_symbol``), so no failure can leave a symbol official but unlogged.
+A row's ``alerted`` is set only after the drift alert naming it was handed to the notify sink; a
+run that dies first (or whose send fails) leaves flagged rows ``alerted=False``, and the next run
+of ``d`` carries them into its alert (``symbols_alert_carried``).
 
 The report is ok-bearing: a run stopped by a rejected token reports ``ok=False``
-(``token_rejected``), so the DATE_KEYED watermark records the day ``failed`` and the catch-up sweep
-retries it after re-login, resuming only the unlogged symbols.
+(``token_rejected``), so the watermark records the day ``failed`` and the catch-up sweep retries it
+after re-login, resuming only the unlogged symbols.
 
 For each actively-ticked symbol of day ``d``:
 
@@ -134,9 +132,8 @@ class ReconcileJob:
         is already persisted).
     session_open / session_close:
         The session bounds used for the official fetch (defaults: regular 09:15–15:30). The
-        composition root passes neither: regular-session constants; the live calendar excludes
-        special sessions (include_special=False, 2026-10-11), so they hold on every day the engine
-        reconciles.
+        composition root passes neither; the live calendar excludes special sessions, so the
+        defaults hold on every day the engine reconciles.
     """
 
     def __init__(
@@ -208,10 +205,7 @@ class ReconcileJob:
             try:
                 official = await self._fetch_official(symbol, d)
             except TokenException:
-                # 2026-07-21: a rejected token fails every official fetch identically — stop
-                # instead of hammering the broker (the KiteClient circuit breaker has already
-                # frozen entries). ok=False sinks the DATE_KEYED watermark, so the catch-up sweep
-                # retries the day after re-login and resumes at the first unlogged symbol.
+                # A rejected token fails every fetch identically: stop instead of hammering the broker.
                 report.ok = False
                 report.aborted_reason = "token_rejected"
                 report.symbols_remaining = len(ordered) - i
@@ -317,8 +311,7 @@ class ReconcileJob:
     def _symbols_for_day(self, d: date) -> list[str]:
         """Symbols holding any bars_1m row on ``d`` — the default actively-ticked set.
 
-        Package-internal read through the single-writer store's own connection (convention 12:
-        only ``MarketStore`` opens ``market.duckdb``; this never opens a second handle).
+        Reads through the single-writer store's own connection; never opens a second handle.
         """
         rows = self._store._fetchall(  # noqa: SLF001 - in-package consumer (store module doc)
             "SELECT DISTINCT symbol FROM bars_1m WHERE CAST(ts_minute AS DATE) = ? ORDER BY symbol",

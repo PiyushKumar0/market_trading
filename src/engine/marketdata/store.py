@@ -2,37 +2,33 @@
 
 ``MarketStore`` owns every byte of the analytical store: the DuckDB tables (bars, features,
 news, universe history, calendars, maps) and the tick Parquet dataset. **All DuckDB access in the
-platform goes through this class** — DuckDB is a single-writer database and the storage split
-makes the engine that writer; no other module may open ``market.duckdb`` (the dashboard reads via the
-engine API, never the file). Enforced socially by convention and physically by DuckDB's file
-lock.
+platform goes through this class** — DuckDB is single-writer and the engine is that writer; no other
+module may open ``market.duckdb`` (the dashboard reads via the engine API, never the file).
+Enforced by convention and physically by DuckDB's file lock.
 
-Price representation (documented choice): **``DECIMAL(12,2)``** for every price column
-(NSE cash equities quote at paise = 2 decimal places; the minimum tick is 0.05), except the tick
-``avg_price`` (exchange day-VWAP) which is ``DECIMAL(14,4)`` because Kite reports it at sub-paise
-precision. DuckDB binds and returns Python ``decimal.Decimal`` natively for DECIMAL columns, so
-prices round-trip through this API **exactly** — no float ever touches a price (money convention). JSON payload columns (``features``, ``extra``) store Decimals as strings (callers
-serialize; mirrors the SQLite convention).
+Price representation: **``DECIMAL(12,2)``** for every price column (NSE cash equities quote at
+paise; minimum tick 0.05), except the tick ``avg_price`` (exchange day-VWAP), ``DECIMAL(14,4)``
+because Kite reports it at sub-paise precision. DuckDB binds and returns ``decimal.Decimal``
+natively, so prices round-trip **exactly** — no float ever touches a price. JSON payload columns
+(``features``, ``extra``) store Decimals as strings (callers serialize).
 
-Threading / async model: the core is **synchronous** (DuckDB is native/CPU-bound
-work) with every call serialized by an internal lock — safe because there is exactly one writer and
-readers go through the same connection. Scan-heavy/bulky calls have thin ``a``-prefixed async
-wrappers that offload to the store's OWN bounded worker pool so the asyncio loop is never blocked
-(heartbeat invariant); anything without a dedicated wrapper can be offloaded with
-:meth:`MarketStore.arun`. Those wrappers deliberately do **not** use ``asyncio.to_thread``: that is
-the process-wide default executor shared with every other offload, and on 2026-08-25 a slow tick
-flush filled it with blocked threads and starved the entire intelligence layer for 4.4 h.
-Store work now lives in ``mt-store`` (4 workers, reads/writes) and ``mt-flush`` (1 worker, the tick
-flush), so neither can starve the other and nothing outside can starve either.
+Threading / async model: the core is **synchronous** with every call serialized by an internal lock
+— safe because there is exactly one writer and readers share the connection. Scan-heavy/bulky calls
+have thin ``a``-prefixed async wrappers that offload to the store's OWN bounded worker pool so the
+asyncio loop is never blocked (heartbeat invariant); anything without a dedicated wrapper can be
+offloaded with :meth:`MarketStore.arun`. Those wrappers deliberately do **not** use
+``asyncio.to_thread``: that is the process-wide default executor shared with every other offload,
+and a slow tick flush filling it with blocked threads starves the entire intelligence layer. Store
+work lives in ``mt-store`` (4 workers, reads/writes) and ``mt-flush`` (1 worker, the tick flush), so
+neither can starve the other and nothing outside can starve either.
 
 Tick Parquet dataset (``ticks``): raw FULL-mode frames (cumulative volume + depth top) are
-buffered in memory and flushed every ``flush_interval_s`` (60 s default) or ``max_buffered_ticks``, whichever
+buffered in memory and flushed every ``flush_interval_s`` or ``max_buffered_ticks``, whichever
 first, into ``<parquet_root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<ulid>.parquet``. Each flush writes
 one file per (date, symbol) present in the batch; the nightly ``JOB_TICK_COMPACT``
 (``engine.marketdata.tick_compact.compact_ticks``, on its own connection) coalesces a day's small
-batch files so the 30-day retention window stays a sane file count. Timestamps are ``TIMESTAMPTZ``
-with the session timezone pinned to Asia/Kolkata; every datetime returned by this API is normalized
-tz-aware IST.
+files. Timestamps are ``TIMESTAMPTZ`` with the session timezone pinned to Asia/Kolkata; every
+datetime returned by this API is normalized tz-aware IST.
 
 Retention: ticks 30 days rolling, news + clusters + sentiment 1 year, corrections 90 days —
 :meth:`apply_retention` (pinned constants, not tunables). 1-minute bars are kept 5 years and
@@ -69,33 +65,32 @@ _log = get_logger("engine.marketdata.store")
 
 T = TypeVar("T")
 
-#: Hard ceiling on the LIVE store connection's DuckDB memory (generalizing the 53 GB incident
-#: of 2026-08-17). DuckDB's default is ~80% of RAM (~25 GB here), so one bad scan can commit the whole
-#: machine while the engine is trading — and ``POST /db/query`` now runs owner SQL on this very
-#: instance. Past the limit DuckDB spills to its temp directory instead of taking the RAM. Higher than
-#: ``tick_compact._MEMORY_LIMIT`` (4 GB) on purpose: this connection serves the session, that one is a
+#: Hard ceiling on the LIVE store connection's DuckDB memory. DuckDB's default (~80% of RAM) lets
+#: one bad scan commit the whole machine while the engine is trading — and ``POST /db/query`` runs
+#: owner SQL on this very instance. Past the limit DuckDB spills to its temp directory. Higher than
+#: ``tick_compact._MEMORY_LIMIT`` on purpose: this connection serves the session, that one is a
 #: maintenance job that must never compete with it.
 _MEMORY_LIMIT = "8GB"
 
 #: Width of the store's private worker pool (``mt-store``). Every DuckDB call serializes on
-#: ``_lock`` anyway, so this is not a parallelism knob — it is a QUEUE depth: enough that the health
-#: probe and a scan read are never behind the same single worker, small enough that a wedged store
-#: cannot bloom threads. 4 is two concurrent readers plus headroom for the probe and one job.
+#: ``_lock`` anyway, so this is a QUEUE depth, not a parallelism knob: enough that the health probe
+#: and a scan read are never behind the same worker, small enough that a wedged store cannot bloom
+#: threads.
 _STORE_EXECUTOR_WORKERS = 4
 
 #: Quiet window between ``flush_skipped_in_flight`` lines (seconds). Skips are the DESIGNED response
 #: to a burst (see :meth:`MarketStore.flush_ticks`), so one line per skip would mean one line per
-#: tick during exactly the storm the skip exists to survive. The counter carries the real signal.
+#: tick during the storm. The counter carries the real signal.
 _FLUSH_SKIP_LOG_EVERY_S = 60.0
 
 #: How long :meth:`MarketStore.close` waits for an in-flight background flush before giving up on it
-#: (seconds). It is the one caller that must not skip — the connection is about to go — but shutdown
-#: must not hang on a wedged flush either, so the wait is bounded and the give-up is logged.
+#: (seconds). It is the one caller that must not skip, but shutdown must not hang on a wedged flush
+#: either, so the wait is bounded and the give-up is logged.
 _CLOSE_FLUSH_WAIT_S = 15.0
 
 #: How long :meth:`MarketStore.close` keeps interrupting an in-flight :meth:`MarketStore.export_snapshot`
-#: (seconds). Closing the connection otherwise waits for the cursor's EXPORT to finish (measured: the
-#: parent ``close()`` blocks until it does), and a full export is ~45 s against NSSM's 30 s stop grace.
+#: (seconds). Closing the connection otherwise blocks until the cursor's EXPORT finishes, and a full
+#: export (~45 s) outlasts NSSM's 30 s stop grace.
 _CLOSE_EXPORT_WAIT_S = 5.0
 
 #: One ``load.sql`` line of an ``EXPORT DATABASE``: ``COPY <table> FROM '<file>' (...)``. The table is
@@ -103,24 +98,16 @@ _CLOSE_EXPORT_WAIT_S = 5.0
 #: ``weird_name.parquet``), so the file a table maps to is read from here, never derived.
 _EXPORT_COPY_LINE = re.compile(r"""^COPY\s+("(?:[^"]|"")+"|\S+)\s+FROM\s+'((?:[^']|'')*)'""")
 
-#: Slow-statement telemetry threshold (seconds). The 2026-09-08 11:47 mid-session stall's thread dump (store_stall_stacks) is taken
-#: sequentially and could not tell whether a feature_snapshot INSERT (``_execute``) or a tick-flush
-#: partition COPY (``_flush_locked``) was the statement actually holding ``_lock`` for 59 s. Timed
-#: (see :func:`_note_slow_statement`) via the one shared :class:`_TimedHold` context manager
-#: (:meth:`MarketStore._timed_lock`): every hold taken by the statement helpers —
-#: :meth:`MarketStore._execute`, :meth:`MarketStore._fetchall`, :meth:`MarketStore._fetch_dicts`,
-#: :meth:`MarketStore._bulk_write`, :meth:`MarketStore._upsert_rows` and the per-partition COPY in
-#: :meth:`MarketStore._flush_locked` — PLUS the hand-rolled holds that run SQL of their own:
-#: :meth:`MarketStore.amend_bar_1m_extremes`, the ``_tick_stage`` DELETE at the head of
-#: :meth:`MarketStore._flush_locked`, :meth:`MarketStore.insert_news` and
-#: :meth:`MarketStore.set_news_cluster`.
-#: :meth:`MarketStore.init_schema` is the ONE hold left
-#: deliberately untimed (with the :meth:`MarketStore.open` hold that wraps it) — boot-only DDL that no
-#: trading-session caller can ever be queued behind, so a slow hold there has no victim to name.
-#: :meth:`MarketStore.ping` is not a site either: it IS the wedge detector (a ``SELECT 1`` that does
-#: not return is the signal), so timing it would only re-report what the health monitor already sees.
-#: A single hold at or above this threshold logs ``store_slow_statement`` so the NEXT stall names its
-#: statement without needing a lucky thread dump.
+#: Slow-statement telemetry threshold (seconds): a single ``_lock`` hold at or above it logs
+#: ``store_slow_statement`` so a stall names its statement (see :func:`_note_slow_statement`). Timed
+#: via the shared :class:`_TimedHold` (:meth:`MarketStore._timed_lock`): every statement helper
+#: (:meth:`MarketStore._execute`, ``_fetchall``, ``_fetch_dicts``, ``_bulk_write``, ``_upsert_rows``),
+#: the per-partition COPY in :meth:`MarketStore._flush_locked`, and the hand-rolled holds that run SQL
+#: of their own (:meth:`MarketStore.amend_bar_1m_extremes`, the ``_tick_stage`` DELETE at the head of
+#: ``_flush_locked``, :meth:`MarketStore.insert_news`, :meth:`MarketStore.set_news_cluster`).
+#: Deliberately untimed: :meth:`MarketStore.init_schema` (with the :meth:`MarketStore.open` hold that
+#: wraps it) — boot-only DDL nobody is queued behind — and :meth:`MarketStore.ping`, which IS the
+#: wedge detector (a ``SELECT 1`` that does not return is the signal).
 _SLOW_STATEMENT_S = 5.0
 
 # ---------------------------------------------------------------------- retention (pinned)
@@ -130,8 +117,8 @@ CORRECTIONS_RETENTION_DAYS = 90    # late-tick corrections log — bounded, not 
 
 
 class DailyBar(BaseModel):
-    """A daily OHLCV bar (``bars_1d``) from Kite historical (adjusted, a verified finding: Kite
-    minute+daily candles ARE corp-action adjusted) with bhavcopy cross-check (``src``)."""
+    """A daily OHLCV bar (``bars_1d``) from Kite historical (corp-action adjusted) with bhavcopy
+    cross-check (``src``)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -164,13 +151,12 @@ def symbol_renames(
     lookback_days: int = 120,
 ) -> list[SymbolRename]:
     """NSE equity symbol changes visible in the ``instruments_daily`` snapshots of the
-    ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE). ``fetchall(sql, params)``
-    runs one DuckDB query — :meth:`MarketStore.get_symbol_renames` passes its own, a read-only
-    report its ``read_only=True`` connection's.
+    ``lookback_days`` up to ``as_of``. ``fetchall(sql, params)`` runs one DuckDB query —
+    :meth:`MarketStore.get_symbol_renames` passes its own, a read-only report its
+    ``read_only=True`` connection's.
 
-    Kite keeps the instrument token across an NSE symbol change (every token→symbol change in
-    2026-07-20..10-23 was a genuine rename, HEG→HEGAM across a 17-day suspension) while the NSE
-    index lists and the Zerodha MIS file lag it by days. A symbol is RETIRED when it named an
+    Kite keeps the instrument token across an NSE symbol change while the NSE index lists and the
+    Zerodha MIS file lag it by days. A symbol is RETIRED when it named an
     NSE cash-equity token inside the window and names nothing in the latest snapshot; it maps to
     that token's symbol in the latest snapshot. Series moves (``-BE``→``-BZ``) get a new token
     and never match; a token gone from the latest snapshot maps nothing; a retired symbol that
@@ -226,8 +212,7 @@ class RekeyCount(BaseModel):
 _SCHEMA: tuple[str, ...] = (
     # bars_1m — OHLCV from cumulative-volume deltas; src provenance; auction_open on the
     # 09:15 row only. PK (symbol, ts_minute) so reconcile can upsert official rows.
-    # A minute in which nothing traded has NO row here and never gets one (no tick to build from, no
-    # Kite candle to fetch) — its "the exchange saw nothing" evidence lives in bars_1m_no_trade below.
+    # A minute in which nothing traded has NO row here — that evidence lives in bars_1m_no_trade.
     """
     CREATE TABLE IF NOT EXISTS bars_1m (
         symbol       TEXT NOT NULL,
@@ -242,12 +227,11 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, ts_minute)
     )
     """,
-    # bars_1m_no_trade — UPSTREAM-CONFIRMED no-trade minutes (2026-09-18): Kite returned the day's
-    # candles for the span but none for this minute, which the store also lacks, so the exchange
-    # observed "nothing traded" and no bar can ever exist. Written ONLY by BackfillJob.warmup_gap
-    # (src='kite_empty'); coverage_gaps counts these minutes as covered so a thin symbol (PTCIL,
-    # MRF) is no longer refused all session for a hole nothing can fill. Never a synthetic price —
-    # bars_1m is untouched. Tiny (a few rows per thin symbol per day), kept indefinitely.
+    # bars_1m_no_trade — UPSTREAM-CONFIRMED no-trade minutes: Kite returned the day's candles for
+    # the span but none for this minute, which the store also lacks. Written ONLY by
+    # BackfillJob.warmup_gap (src='kite_empty'); coverage_gaps counts these minutes as covered so a
+    # thin symbol is not refused all session for a hole nothing can fill. Never a synthetic price —
+    # bars_1m is untouched. Tiny, kept indefinitely.
     """
     CREATE TABLE IF NOT EXISTS bars_1m_no_trade (
         symbol       TEXT NOT NULL,
@@ -260,9 +244,8 @@ _SCHEMA: tuple[str, ...] = (
     # corrections_log — late ticks past minute+5s grace: symbol, minute, tick_ts, value,
     # plus whether the late tick amended its bar before the nightly reconcile. 90-day retention.
     # ``reason`` (nullable) records WHY an unamended late tick was refused — notably
-    # 'official_bar_untouchable' when the target row is no longer src='self' (late-tick amendment rules).
-    # It is the LAST column so a fresh DB and a DB widened by _migrate_corrections_reason (which can
-    # only append) carry identical column order.
+    # 'official_bar_untouchable' when the target row is no longer src='self'. It is the LAST column
+    # so a fresh DB and one widened by _migrate_corrections_reason (append-only) share column order.
     """
     CREATE TABLE IF NOT EXISTS corrections_log (
         symbol            TEXT NOT NULL,
@@ -289,9 +272,8 @@ _SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (symbol, d)
     )
     """,
-    # reconcile_log — nightly self-vs-official drift per (day, symbol); the audit trail. The
-    # startup catch-up is driven by the job_runs DATE_KEYED watermark; within a day, ReconcileJob skips
-    # the symbols already logged here (per-(day, symbol) resume — a re-compare would overwrite drift).
+    # reconcile_log — nightly self-vs-official drift per (day, symbol); the audit trail. Within a
+    # day, ReconcileJob skips symbols already logged here (a re-compare would overwrite drift).
     # offline_bars counts the span excluded from the drift denominator (gap-backfilled, not drift).
     """
     CREATE TABLE IF NOT EXISTS reconcile_log (
@@ -311,11 +293,9 @@ _SCHEMA: tuple[str, ...] = (
     """,
     # instruments_daily — full Kite dump snapshot per day incl. tick_size, MIS leverage,
     # surveillance flags, F&O membership. `extra` = JSON overflow of the raw dump row.
-    # tick_size is DECIMAL(18,6), NOT (10,2) (2026-07-21 lossless-hydrate incident): the daily Kite dump
-    # carries sub-₹0.01 ticks (currency/commodity derivatives at ₹0.0025) that a (10,2) column silently
-    # truncated to 0.00 on write; hydrate() then rebuilt an Instrument from 0.00 and the `tick_size > 0`
-    # model REJECTED it (8072 skips, any legacy tradable-lane index row among them). Scale 6 represents
-    # every published NSE tick. Existing (10,2) DBs are widened once by _migrate_instruments_tick_scale.
+    # tick_size is DECIMAL(18,6), NOT (10,2): the daily Kite dump carries sub-₹0.01 ticks
+    # (derivatives at ₹0.0025) that a (10,2) column truncates to 0.00, which hydrate() then rejects
+    # (`tick_size > 0`). Existing (10,2) DBs are widened once by _migrate_instruments_tick_scale.
     """
     CREATE TABLE IF NOT EXISTS instruments_daily (
         d                DATE NOT NULL,
@@ -441,10 +421,8 @@ _SCHEMA: tuple[str, ...] = (
     # sentiment_agg — clipped decay-weighted SUM per (scope, scope_key, as_of);
     # the features-v2 source. Not money ⇒ DOUBLE.
     # ``raw_sum``/``n_clusters`` (both nullable) are the SATURATION MEASUREMENT: the UNCLIPPED
-    # sum and how many clusters produced it. ``value`` stays clip(raw_sum, −1, +1) — the rail told a
-    # reader nothing about how far past it the flow ran, and it railed on 7 of 17 digest days. They
-    # are the LAST columns so a fresh DB and a DB widened by _migrate_sentiment_measures (which can
-    # only append) carry identical column order.
+    # sum and how many clusters produced it; ``value`` stays clip(raw_sum, −1, +1). They are the LAST
+    # columns so a fresh DB and one widened by _migrate_sentiment_measures (append-only) share order.
     """
     CREATE TABLE IF NOT EXISTS sentiment_agg (
         scope      TEXT NOT NULL CHECK (scope IN ('symbol','sector','theme','market')),
@@ -733,9 +711,8 @@ _KEEP_ON_NULL: dict[str, frozenset[str]] = {
 }
 
 # Tables whose PK is a CONTENT HASH of the row (identical id ⇒ identical row). Conflict action for
-# these is DO NOTHING, never DO UPDATE: the update would rewrite equal values, and that no-op
-# rewrite tripped DuckDB's ART index fault on 2026-07-23 (insider_trades catch-up re-upsert →
-# "Failed to delete all rows from index" → connection-invalidating FATAL).
+# these is DO NOTHING, never DO UPDATE: a no-op rewrite of equal values can trip DuckDB's ART index
+# fault ("Failed to delete all rows from index", a connection-invalidating FATAL).
 _CONTENT_HASH_PK_TABLES: frozenset[str] = frozenset({"insider_trades"})
 
 # Values applied for keys OMITTED from a row dict (an explicit ``?`` NULL would otherwise override
@@ -764,13 +741,10 @@ AMEND_RACE_LOST = "race_lost"      # CAS predicate missed: the row changed under
 # the builder constants; ``tests/unit/test_market_store.py`` asserts the pairs match.
 _EXCL_CAP = "watchlist_cap"
 _EXCL_INDEX = "not_in_index"
-#: The pre-widening spelling of ``_EXCL_INDEX``. The extended leg shipped 2026-09-01 writing
-#: ``not_nifty200``; the owner's NIFTY 500 widening (2026-09-04) renamed the marker
-#: when the index became config. Rows written
-#: 2026-09-01…09-04 still carry the legacy string and NOTHING rewrites history (universe_daily is an
-#: append-per-day audit trail, and a day's rows are the record of what that day's build decided), so
-#: every read of the extended leg accepts EITHER marker and the day-d replace deletes both. Not a
-#: permanent widening: it can be dropped once no retained universe_daily day predates 2026-09-05.
+#: The pre-widening spelling of ``_EXCL_INDEX`` (the owner's NIFTY 500 widening renamed the marker).
+#: Rows written 2026-09-01…09-04 still carry it and NOTHING rewrites history (universe_daily is an
+#: append-per-day audit trail), so every read of the extended leg accepts EITHER marker and the
+#: day-d replace deletes both. Can be dropped once no retained universe_daily day predates 2026-09-05.
 _EXCL_INDEX_LEGACY = "not_nifty200"
 
 # Duplicated from ``engine.datafeeds.filings_pit_fresh.BSE_ID_PREFIX``: this module CANNOT import
@@ -779,7 +753,7 @@ _EXCL_INDEX_LEGACY = "not_nifty200"
 # routes) carry the bare content hash, BSE fresh-feed rows the tagged one, so the id prefix IS the
 # source partition of ``insider_trades`` — no source column exists. A THIRD source must add
 # its tag here AND be excluded from the 'nse' predicate: bare-id means NSE only while 'bse:' is the
-# only tag (verified 2026-09-13 on the live store: 44,187 bare / 405 'bse:' / no other prefix).
+# only tag.
 _INSIDER_SOURCE_PREDICATE = {
     "nse": "id NOT LIKE 'bse:%'",
     "bse": "id LIKE 'bse:%'",
@@ -879,31 +853,24 @@ def _ist(value: Any) -> Any:
 
 
 def _note_slow_statement(label: str, elapsed: float, *, failed: bool = False) -> None:
-    """Log ``store_slow_statement`` when ONE ``_lock`` hold
-    lasted ``elapsed`` >= :data:`_SLOW_STATEMENT_S` seconds — so the next mid-session stall names the
-    statement the thread dump could not.
+    """Log ``store_slow_statement`` when ONE ``_lock`` hold lasted ``elapsed`` >=
+    :data:`_SLOW_STATEMENT_S` seconds, so a stall names its statement.
 
-    Contract for every instrumented site (2026-09-09 review; enforced since 2026-09-23 by the one
-    shared :class:`_TimedHold` context manager returned from :meth:`MarketStore._timed_lock` rather
-    than by 11 hand-copied try/finally blocks): take ``t0`` right AFTER acquiring ``_lock``, compute
+    Contract for every instrumented site (implemented once by :class:`_TimedHold`, returned from
+    :meth:`MarketStore._timed_lock`): take ``t0`` right AFTER acquiring ``_lock``, compute
     ``elapsed`` right BEFORE releasing it — so a statement that RAISES after a long hold is reported
-    too, with ``failed=True`` — and call this AFTER the ``with self._lock:`` block (now: after
-    ``_TimedHold.__exit__`` releases the lock), where the WARNING can no longer add to the hold it is
-    reporting. One hold must emit exactly ONE event: that is why the read helpers run their statement
-    through :meth:`MarketStore._execute_locked` (silent) instead of nesting :meth:`MarketStore._execute`,
-    which used to log twice per read under identical labels and never timed the fetch phase at all.
+    too, with ``failed=True`` — and call this AFTER the lock is released, where the WARNING cannot
+    add to the hold it reports. One hold emits exactly ONE event: the read helpers run their
+    statement through :meth:`MarketStore._execute_locked` (silent) instead of nesting
+    :meth:`MarketStore._execute`.
 
-    HONEST EXCEPTION: ``_lock`` is an ``RLock``, and a few methods call an instrumented helper from
-    INSIDE their own hold — the delete-then-insert rewrites (:meth:`MarketStore.replace_universe_daily_index_markers`,
-    :meth:`MarketStore.replace_catalyst_watchlist`), the ``_execute``-based frame reads and the
-    Parquet exports. Those notes DO fire while the outer hold is still held, and such a hold emits
-    one event per inner statement rather than one for the hold. At least one of them IS a
-    trading-session path (2026-09-09 review corrected the earlier "none of these runs in-session"
-    claim): :meth:`MarketStore.get_bars_1d_frame` wraps a logging ``_execute``, and the risk gate's
-    co-movement rule reads it live, once per open position per candidate
-    (``src/engine/risk/gate.py`` ~1547). Accepted anyway, not plumbed around: the nested note only
-    fires when the inner statement ALREADY took >= 5 s, and one WARNING costs milliseconds beside
-    that — it cannot meaningfully lengthen the hold it is reporting."""
+    Exception: ``_lock`` is an ``RLock``, and a few methods call an instrumented helper from INSIDE
+    their own hold (the delete-then-insert rewrites :meth:`MarketStore.replace_universe_daily_index_markers`
+    and :meth:`MarketStore.replace_catalyst_watchlist`, the ``_execute``-based frame reads, the
+    Parquet exports), emitting one event per inner statement. At least one is a trading-session path
+    (:meth:`MarketStore.get_bars_1d_frame`, read live by the risk gate's co-movement rule). Accepted:
+    the nested note only fires when the inner statement ALREADY took >= 5 s, so one WARNING cannot
+    meaningfully lengthen the hold."""
     if elapsed < _SLOW_STATEMENT_S:
         return
     fields: dict[str, Any] = {
@@ -918,17 +885,14 @@ def _note_slow_statement(label: str, elapsed: float, *, failed: bool = False) ->
 
 class _TimedHold:
     """One instrumented ``_lock`` hold — the single implementation of the contract documented on
-    :func:`_note_slow_statement` (2026-09-23: replaces 11 copies of the same try/finally). Acquire
-    the lock, take ``t0`` immediately after, compute ``elapsed`` immediately before release, then
-    call :func:`_note_slow_statement` exactly once — AFTER the lock is released — with
-    ``failed=True`` iff the body raised. Exceptions propagate unchanged.
+    :func:`_note_slow_statement`: acquire, take ``t0``, compute ``elapsed`` immediately before
+    release, then call :func:`_note_slow_statement` once AFTER release with ``failed=True`` iff the
+    body raised. Exceptions propagate unchanged.
 
     ``__enter__``/``__exit__`` rather than ``@contextlib.contextmanager``: no generator frame per
     call, which matters on the hot late-tick :meth:`MarketStore.amend_bar_1m_extremes` path.
-    ``_lock`` is an ``RLock``, so a body that opens another hold (or a plain ``with self._lock:``)
-    nests safely and — per the HONEST EXCEPTION on :func:`_note_slow_statement` — gets its own note
-    while the outer hold is still open; depth is deliberately not tracked, so that stays exactly the
-    existing behaviour."""
+    ``_lock`` is an ``RLock``, so nested holds are safe; depth is deliberately not tracked, so a
+    nested hold gets its own note (the exception on :func:`_note_slow_statement`)."""
 
     __slots__ = ("_lock", "_label", "_t0")
 
@@ -996,14 +960,11 @@ class MarketStore:
         The single source of "now" — stamps ``ingested_at``/``logged_at`` and drives the tick
         flush timer and retention cutoffs.
     flush_interval_s / max_buffered_ticks:
-        Tick batching knobs. Whichever trips first flushes the buffer. 60 s default
-        (2026-08-13; was 5 s): 5 s batches produced ~752K parquet fragments/day at
-        ~1.9 KB each; 60 s cuts the fragment count ~10× and the nightly compaction merges the
-        remainder to one file per symbol-day. Cost: the raw-TICK loss window on a hard crash
-        widens 5→60 s — bars_1m is built and persisted independently, so the exposure is
-        fill-model raw ticks only, never bar/decision data. The cap is a memory valve sized above a
-        minute's peak flow (24,332 ticks, 2026-09-29; ~2.3 KB each) so the interval governs: at the
-        old 2,000 it tripped every ~9 s and the fragments stayed at 2–4 K per symbol-day.
+        Tick batching knobs. Whichever trips first flushes the buffer. The 60 s interval bounds the
+        fragment count (the nightly compaction merges the rest); the cost is a raw-TICK loss window
+        of that length on a hard crash — bars_1m is built and persisted independently, so only
+        fill-model raw ticks are exposed. The cap is a memory valve sized above a minute's peak flow
+        so the interval governs.
     """
 
     def __init__(
@@ -1028,8 +989,8 @@ class MarketStore:
         self._tick_buffer: list[Tick] = []
         self._last_flush_at: datetime = clock.now()
 
-        # --- Flush single-flight telemetry (2026-08-25): skipped flushes are normal under
-        #     load, so they are COUNTED always and logged at most once per minute.
+        # --- Flush single-flight telemetry: skipped flushes are normal under load, so they are
+        #     COUNTED always and logged at most once per minute.
         self._flush_skip_lock = threading.Lock()          # counter only — never held across I/O
         self._flush_skips = 0
         self._flush_skip_logged_at: datetime | None = None
@@ -1061,8 +1022,7 @@ class MarketStore:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._parquet_root.mkdir(parents=True, exist_ok=True)
             self._con = duckdb.connect(str(self._db_path))
-            # Every DuckDB instance in this platform carries a stated ceiling — set BEFORE
-            # any query so no job or endpoint can commit the machine's memory.
+            # Set BEFORE any query so no job or endpoint can commit the machine's memory.
             self._con.execute(f"SET memory_limit='{_MEMORY_LIMIT}'")
             # Session timezone pinned so TIMESTAMPTZ round-trips as IST wall time.
             self._con.execute("SET TimeZone='Asia/Kolkata'")
@@ -1081,9 +1041,9 @@ class MarketStore:
         per statement, so calling it while already holding ``_lock`` inverts the order against any
         in-flight background flush (aflush_ticks worker) — a reproducible AB-BA deadlock.
 
-        This is also the ONE caller that waits on an in-flight flush instead of skipping it: after this returns the connection is gone, so a skipped batch would have nowhere
-        left to go. The wait is bounded by ``_CLOSE_FLUSH_WAIT_S`` — shutdown must not hang on a
-        wedged flush, which is the failure mode this wait exists to survive.
+        This is also the ONE caller that waits on an in-flight flush instead of skipping it: after
+        this returns the connection is gone, so a skipped batch would have nowhere to go. The wait
+        is bounded by ``_CLOSE_FLUSH_WAIT_S`` — shutdown must not hang on a wedged flush.
 
         An in-flight :meth:`export_snapshot` is interrupted first and no new one can start: the
         connection close below would otherwise wait out the whole export."""
@@ -1108,15 +1068,10 @@ class MarketStore:
     def _pool(self) -> ThreadPoolExecutor:
         """The store's PRIVATE worker pool (``mt-store``) — where every async wrapper below runs.
 
-        2026-08-25 root cause: the wrappers offloaded via ``asyncio.to_thread``, i.e. the ONE
-        default executor shared by every offload in the process. A slow tick flush parked ~20
-        threads on ``_flush_lock`` inside that pool, and from then on nothing else could get a
-        worker: the health probe stayed pending 09:15→13:39 (consecutive=264) and the entire
-        intelligence layer ran empty — zero candidates, zero analyst calls, a whole session.
-
-        A pool the store owns makes that structurally impossible in both directions: store work
-        cannot starve the rest of the process, and no SDK call, HTTP parse or other ``to_thread``
-        user can starve a store read. Created lazily, released by :meth:`close`."""
+        The wrappers must not offload via ``asyncio.to_thread``: that is the ONE default executor
+        shared by every offload in the process, and a slow tick flush parked on ``_flush_lock``
+        can fill it, starving the health probe and the whole intelligence layer. A pool the store
+        owns makes that impossible in both directions. Created lazily, released by :meth:`close`."""
         with self._pool_lock:
             if self._store_executor is None:
                 self._store_executor = ThreadPoolExecutor(
@@ -1127,10 +1082,9 @@ class MarketStore:
     def _flush_pool(self) -> ThreadPoolExecutor:
         """The tick flush's own single-thread pool (``mt-flush``), separate from :meth:`_pool`.
 
-        One thread is exactly the right width because flushes are single-flight already
-        (:meth:`flush_ticks` skips rather than queues). Keeping it out of ``mt-store`` means a long
-        flush can never consume a worker that a store read — or the health probe — needs, which is
-        the other half of the 08-25 lesson."""
+        One thread suffices because flushes are single-flight (:meth:`flush_ticks` skips rather
+        than queues). Keeping it out of ``mt-store`` means a long flush can never consume a worker
+        that a store read — or the health probe — needs."""
         with self._pool_lock:
             if self._flush_executor is None:
                 self._flush_executor = ThreadPoolExecutor(
@@ -1140,10 +1094,9 @@ class MarketStore:
 
     def _shutdown_pools(self) -> None:
         """Release both pools. ``wait=False`` on purpose: :meth:`close` runs on the event loop at
-        engine shutdown (and inside another pool's worker for the CLI jobs), so joining here would
-        trade a clean stop for a hang on exactly the wedged flush this design exists to survive.
-        Already-queued work still runs; a flush that lands after the connection is gone re-stages
-        its batch and warns (``tick_flush_skipped_store_closed``)."""
+        engine shutdown, so joining could hang on a wedged flush. Already-queued work still runs; a
+        flush that lands after the connection is gone re-stages its batch and warns
+        (``tick_flush_skipped_store_closed``)."""
         with self._pool_lock:
             pools = [p for p in (self._store_executor, self._flush_executor) if p is not None]
             self._store_executor = None
@@ -1160,12 +1113,9 @@ class MarketStore:
     def ping(self) -> bool:
         """Cheapest possible proof that this store is ALIVE: take ``_lock``, run ``SELECT 1``, return.
 
-        On 2026-08-21 the 09:56 freeze stalled every store-touching path at once —
-        feature snapshots, the ``warmup_refresh`` job, the gate-context read — for 14 minutes, and
-        afterwards the platform could not say WHICH shared resource had seized, because nothing was
-        probing any of them. This is that probe. It acquires the same ``_lock`` every other method
-        acquires and runs the smallest statement DuckDB has, so a call that does not RETURN means
-        precisely one thing: nobody can get the lock, or the connection itself is wedged.
+        It acquires the same ``_lock`` every other method acquires and runs the smallest statement
+        DuckDB has, so a call that does not RETURN means nobody can get the lock or the connection
+        is wedged.
 
         Deliberately not wrapped in try/except — raising is a different and equally useful answer
         from hanging, and the caller (:class:`~engine.ops.health.HealthMonitor`) distinguishes them.
@@ -1174,18 +1124,16 @@ class MarketStore:
             self._require_con().execute("SELECT 1").fetchone()
         return True
 
-    #: Scale ``instruments_daily.tick_size`` must carry (2026-07-21 lossless-hydrate incident). The
-    #: ``DECIMAL(18,6)`` DDL applies to fresh DBs; a DB created under the old ``DECIMAL(10,2)`` is
-    #: widened once by :meth:`_migrate_instruments_tick_scale` on the next open.
+    #: Scale ``instruments_daily.tick_size`` must carry. The ``DECIMAL(18,6)`` DDL applies to fresh
+    #: DBs; a DB created under the old ``DECIMAL(10,2)`` is widened once by
+    #: :meth:`_migrate_instruments_tick_scale` on the next open.
     _INSTRUMENTS_TICK_SCALE = 6
 
     def init_schema(self) -> None:
         """Create every table and drop :data:`_DROPPED_INDEXES`. Idempotent — safe on every startup.
 
-        Also runs the one-shot ``instruments_daily.tick_size`` widen (2026-07-21): ``CREATE TABLE IF
-        NOT EXISTS`` never alters an existing column, so a legacy DB would keep truncating sub-paisa
-        ticks to 0.00 and losing them on hydrate. Same reason for the ``corrections_log.reason`` add
-        and the ``sentiment_agg`` saturation-measure adds.
+        Also runs the one-shot column migrations: ``CREATE TABLE IF NOT EXISTS`` never alters an
+        existing table, so a legacy DB needs each added or widened column applied explicitly.
         """
         with self._lock:
             con = self._require_con()
@@ -1200,19 +1148,18 @@ class MarketStore:
             for name in self._DROPPED_INDEXES:
                 con.execute(f"DROP INDEX IF EXISTS {name}")
 
-    #: Secondary indexes this store no longer creates. On 2026-09-24 the two on ``news`` and the two
-    #: on ``insider_trades`` were found missing the same rows (7,044 and 420): a lookup they served
-    #: silently skipped those rows, and the ``news`` url dedup let 4,094 duplicates in. The tables'
-    #: primary keys stayed complete. The tables are small enough to scan, so no secondary index is
-    #: kept; ``test_market_store`` asserts none exists.
+    #: Secondary indexes this store no longer creates: DuckDB ART indexes were found missing rows
+    #: (a lookup they served silently skipped those rows, and the ``news`` url dedup let duplicates
+    #: in) while the primary keys stayed complete. The tables are small enough to scan, so no
+    #: secondary index is kept; ``test_market_store`` asserts none exists.
     _DROPPED_INDEXES = (
         "idx_news_url", "idx_news_published", "idx_watchlist_day", "idx_insider_symbol",
         "idx_insider_broadcast",
     )
 
     def _migrate_results_line_items_at(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Idempotently add the nullable ``results_filings.line_items_at`` column (2026-09-24), mirroring :meth:`_migrate_watchlist_reversal`. NULL on every legacy row means
-        "line items never attempted", which is exactly what those rows are."""
+        """Idempotently add the nullable ``results_filings.line_items_at`` column. NULL on every
+        legacy row means "line items never attempted", which is what those rows are."""
         present = {
             r[0] for r in con.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = 'results_filings'"
@@ -1223,10 +1170,10 @@ class MarketStore:
             _log.info("results_filings_column_added", column="line_items_at")
 
     def _migrate_universe_core_index(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Idempotently add the nullable ``universe_daily.core_index`` column (owner decision 2026-10-08),
-        mirroring :meth:`_migrate_results_line_items_at`. NULL on every legacy row means "written
-        before the core marker existed", and :meth:`MarketStore.get_core_eligible_symbols` reads
-        that as core: every earlier index (NIFTY200, then NIFTY 500) is a subset of the core index."""
+        """Idempotently add the nullable ``universe_daily.core_index`` column. NULL on every legacy
+        row means "written before the core marker existed", and
+        :meth:`MarketStore.get_core_eligible_symbols` reads that as core: every earlier index is a
+        subset of the core index."""
         present = {
             r[0] for r in con.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = 'universe_daily'"
@@ -1237,10 +1184,9 @@ class MarketStore:
             _log.info("universe_daily_column_added", column="core_index")
 
     def _migrate_instruments_tick_scale(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to ``DECIMAL(18,6)``
-        (2026-07-21 lossless-hydrate incident). Guarded on the live column scale via ``information_schema``
-        so the ALTER runs EXACTLY ONCE (never a per-open column rewrite): a fresh DB already carries the
-        wide DDL, so ``numeric_scale`` is 6 and this no-ops."""
+        """Idempotently widen a legacy ``instruments_daily.tick_size DECIMAL(10,2)`` to
+        ``DECIMAL(18,6)``. Guarded on the live column scale so the ALTER runs EXACTLY ONCE (never a
+        per-open rewrite); a fresh DB already has scale 6 and this no-ops."""
         row = con.execute(
             "SELECT numeric_scale FROM information_schema.columns "
             "WHERE table_name = 'instruments_daily' AND column_name = 'tick_size'"
@@ -1251,11 +1197,9 @@ class MarketStore:
             _log.info("instruments_tick_scale_migrated", frm=scale, to=self._INSTRUMENTS_TICK_SCALE)
 
     def _migrate_corrections_reason(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Idempotently add the nullable ``corrections_log.reason`` column to a legacy DB:
-        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB created before the
-        column existed would reject every ``append_correction`` carrying a reason. Guarded on
-        ``information_schema`` so the ALTER runs EXACTLY ONCE; a fresh DB already has it and no-ops.
-        Nullable + appended-last ⇒ existing rows keep their values and read back unchanged."""
+        """Idempotently add the nullable ``corrections_log.reason`` column to a legacy DB. Guarded
+        on ``information_schema`` so the ALTER runs EXACTLY ONCE; a fresh DB no-ops. Nullable +
+        appended-last ⇒ existing rows read back unchanged."""
         row = con.execute(
             "SELECT 1 FROM information_schema.columns "
             "WHERE table_name = 'corrections_log' AND column_name = 'reason'"
@@ -1272,12 +1216,9 @@ class MarketStore:
 
     def _migrate_sentiment_measures(self, con: duckdb.DuckDBPyConnection) -> None:
         """Idempotently add the nullable ``sentiment_agg.raw_sum``/``n_clusters`` columns to a legacy
-        DB, mirroring :meth:`_migrate_corrections_reason`: ``CREATE TABLE IF NOT EXISTS``
-        never alters an existing table, so a DB written before the measurement existed would reject
-        every digest upsert carrying it. Guarded per column on ``information_schema`` so each ALTER
-        runs EXACTLY ONCE; a fresh DB already has both and this no-ops. Nullable + appended-last ⇒
-        digest rows written BEFORE the measure existed keep reading back with NULL measures, which is exactly what
-        the analyst render treats as "no measurement for this row"."""
+        DB (see :meth:`_migrate_corrections_reason`), guarded per column so each ALTER runs EXACTLY
+        ONCE. Older rows read back with NULL measures, which the analyst render treats as "no
+        measurement for this row"."""
         present = {
             r[0] for r in con.execute(
                 "SELECT column_name FROM information_schema.columns "
@@ -1290,14 +1231,11 @@ class MarketStore:
                 _log.info("sentiment_agg_column_added", column=column)
 
     def _migrate_watchlist_reversal(self, con: duckdb.DuckDBPyConnection) -> None:
-        """Idempotently add the nullable ``catalyst_watchlist.reversal_of`` column (``cat_reversal``, 2026-08-27), mirroring :meth:`_migrate_sentiment_measures`.
+        """Idempotently add the nullable ``catalyst_watchlist.reversal_of`` column (``cat_reversal``).
 
-        ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a DB written before the
-        reversal flag existed would reject every digest upsert carrying it — and the digest is the
-        08:35 job the whole news chain hangs off. Guarded on ``information_schema`` so the ALTER runs
-        EXACTLY ONCE; a fresh DB already has the column and this no-ops. Nullable + appended-last ⇒
-        every watchlist row written before today reads back with ``reversal_of = NULL``, i.e. "not a
-        reversal", which is the correct answer for rows graded before the detector existed."""
+        A legacy DB would reject every digest upsert carrying it, and the digest is the 08:35 job
+        the whole news chain hangs off. Guarded so the ALTER runs EXACTLY ONCE. Older rows read back
+        ``reversal_of = NULL``, i.e. "not a reversal"."""
         present = {
             r[0] for r in con.execute(
                 "SELECT column_name FROM information_schema.columns "
@@ -1334,10 +1272,9 @@ class MarketStore:
         params: Sequence[Any] | None = None,
     ) -> duckdb.DuckDBPyConnection:
         """Run ONE statement on ``con`` and return the cursor. Deliberately SILENT: the caller is
-        already inside its own :meth:`_timed_lock` hold, so it — not this helper — decides what the
-        hold's single :func:`_note_slow_statement` says and emits it after the release (2026-09-09
-        review: nesting the logging :meth:`_execute` inside a hold logged twice per read under
-        identical labels and left the fetch phase untimed)."""
+        already inside its own :meth:`_timed_lock` hold, so it — not this helper — emits the hold's
+        single :func:`_note_slow_statement` after the release (nesting the logging :meth:`_execute`
+        would log twice per read and leave the fetch phase untimed)."""
         return con.execute(sql, params) if params is not None else con.execute(sql)
 
     def _execute(self, sql: str, params: Sequence[Any] | None = None) -> duckdb.DuckDBPyConnection:
@@ -1346,8 +1283,7 @@ class MarketStore:
         return result
 
     def _fetchall(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple]:
-        # The WHOLE hold is one measurement (execute + fetch): a 5 s read split 3 s/2.5 s across the
-        # two phases went unreported when each phase was timed on its own (2026-09-09 review).
+        # The WHOLE hold is one measurement (execute + fetch), not one per phase.
         with self._timed_lock(sql[:80]):
             cur = self._execute_locked(self._require_con(), sql, params)
             rows = cur.fetchall()
@@ -1362,7 +1298,7 @@ class MarketStore:
         return out
 
     #: Row count at which _upsert_rows switches from executemany (~128 rows/s) to the vectorized
-    #: _bulk_write path (2026-07-21). In practice only instruments_daily (~113k rows/day) crosses it.
+    #: _bulk_write path. In practice only instruments_daily (~113k rows/day) crosses it.
     _VECTORIZED_UPSERT_MIN_ROWS = 2000
 
     def _bulk_write(
@@ -1375,8 +1311,8 @@ class MarketStore:
         conflict: str = "",
     ) -> None:
         """Vectorized multi-row write: register the batch as a DataFrame view, run ONE
-        ``INSERT … SELECT`` — DuckDB executes ``executemany`` row-by-row (~6 ms/row; a 15k-bar
-        backfill chunk took ~90 s), this path is ~200x faster. ``dtype=object`` keeps executemany's
+        ``INSERT … SELECT`` — DuckDB executes ``executemany`` row-by-row (~6 ms/row), this path is
+        ~200x faster. ``dtype=object`` keeps executemany's
         per-element binding semantics (Decimals exact, no int→float/NaN coercion of None-bearing
         columns). ``pk`` keeps its last-wins semantics for duplicate keys within one batch, which a
         single INSERT…SELECT would otherwise reject ("cannot update the same row twice").
@@ -1394,18 +1330,16 @@ class MarketStore:
             rows = list({tuple(r[i] for i in idx): r for r in rows}.values())
         collist = ", ".join(f'"{c}"' for c in cols)
         # Decimals go in as strings: DuckDB infers ONE DECIMAL(width,scale) per object column from a
-        # ~1000-row stride sample, so a rare wider value that dodges the sample fails the cast (a
-        # GMRAIRPORT ₹100.06 spike among ₹8x.xx bars → 'cast "100.06" to DECIMAL(4,2)' aborting the
-        # chunk). VARCHAR scans cast per value against the real table column type — exact and safe.
+        # ~1000-row stride sample, so a rare wider value that dodges the sample fails the cast.
+        # VARCHAR scans cast per value against the real table column type — exact and safe.
         df = pd.DataFrame(
             [[str(v) if isinstance(v, Decimal) else v for v in r] for r in rows],
             columns=list(cols),
             dtype=object,
         )
         view = "_mt_bulk_stage"
-        # The whole register/insert/unregister trio is ONE hold (2026-09-09 review): register
-        # materializes the frame as a DuckDB view and unregister tears it down, both under _lock —
-        # timing only the INSERT under-reported the hold every other caller actually waited on.
+        # The whole register/insert/unregister trio is ONE hold: register and unregister both run
+        # under _lock, so timing only the INSERT would under-report what other callers wait on.
         with self._timed_lock(f"bulk_write:{table}:{len(rows)}"):
             con = self._require_con()
             con.register(view, df)
@@ -1423,16 +1357,11 @@ class MarketStore:
             return 0
         cols, pk = _TABLE_SPEC[table]
         rows, conflict = self._prepare_upsert(table, rows)
-        # 2026-07-21 (third finding of the incident day): instruments_daily is ~113k rows/day and
-        # executemany binds row-at-a-time (~128 rows/s measured here) — the 08:15 persist and the
-        # degraded-snapshot heal each held the single-writer lock for ~12 MINUTES, starving every
-        # other store consumer (the 13:33 backfill silence). Large batches therefore take
-        # _bulk_write's registered-view INSERT…SELECT (~200x): its dtype=object frame keeps
-        # executemany's per-element semantics (Decimals stringified and cast per value against the
-        # REAL column type — the GMRAIRPORT lesson; None → NULL; ints stay ints), and its pk dedupe
-        # keeps last-wins for intra-batch duplicate keys, exactly like sequential upserts. The
-        # single INSERT…SELECT is one statement, so the torn-write guarantee holds (statement
-        # atomicity; a kill leaves the prior complete day).
+        # executemany binds row-at-a-time (~128 rows/s): a ~113k-row instruments_daily batch would
+        # hold the single-writer lock for ~12 MINUTES, starving every other store consumer. Large
+        # batches therefore take _bulk_write's registered-view INSERT…SELECT, which keeps
+        # executemany's per-element semantics and last-wins pk dedupe. A single INSERT…SELECT is one
+        # statement, so the torn-write guarantee holds (a kill leaves the prior complete day).
         if len(rows) >= self._VECTORIZED_UPSERT_MIN_ROWS:
             self._bulk_write(
                 table, cols, [[row.get(c) for c in cols] for row in rows], pk=pk, conflict=conflict
@@ -1440,19 +1369,16 @@ class MarketStore:
             return len(rows)
         # SMALL free-form batches stay on executemany: dict rows can mix date/datetime or
         # naive/aware values in one column, which per-row binding coerces per element but a single
-        # DataFrame column cannot (one inferred type per column). No small-batch caller needed the
-        # speed; a heterogeneous column that ever DID cross the threshold fails LOUD (ConversionException
-        # + rollback), never silently.
+        # DataFrame column cannot. A heterogeneous column that crosses the threshold fails LOUD
+        # (ConversionException + rollback), never silently.
         sql = self._upsert_sql(table, conflict)
-        # The whole transaction is the hold (2026-09-09 review): a batch that rolls back after 30 s
-        # starved every other caller for 30 s and must still name itself.
+        # The whole transaction is the hold: a batch that rolls back after 30 s starved every other
+        # caller for 30 s and must still name itself.
         with self._timed_lock(f"upsert_rows:{table}:{len(rows)}"):
             con = self._require_con()
-            # Torn-write guard (2026-07-21): a taskkill mid-executemany left instruments_daily HALF-
-            # written (112,297 of 112,826 rows — snapshot_rows appends the 233 index rows LAST, so
-            # exactly the regime tokens were lost and every later boot hydrated a broken MAX(d) day).
-            # Autocommit applies per statement; one explicit transaction makes the batch all-or-nothing —
-            # a killed process leaves the PRIOR complete snapshot, never a torn one. BaseException so a
+            # Torn-write guard: autocommit applies per statement, so a kill mid-executemany would
+            # leave the table half-written. One explicit transaction makes the batch all-or-nothing
+            # (a killed process leaves the PRIOR complete snapshot). BaseException so a
             # KeyboardInterrupt/CancelledError mid-batch also rolls back and keeps the connection usable.
             con.execute("BEGIN TRANSACTION")
             try:
@@ -1495,11 +1421,9 @@ class MarketStore:
             )
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO UPDATE SET {updates}"
         else:
-            # Content-hash-PK tables (id derives from the row's content): identical id ⇒ identical
-            # row, so a conflict UPDATE only rewrites equal values — and that no-op rewrite is what
-            # tripped DuckDB's ART fault on 2026-07-23 ("Failed to delete all rows from index",
-            # insider_trades re-upsert during catch-up; the FATAL invalidated the whole connection).
-            # DO NOTHING is semantically exact for these tables and never touches the delete path.
+            # Content-hash-PK tables: identical id ⇒ identical row, so a conflict UPDATE only
+            # rewrites equal values (the DuckDB ART fault trigger). DO NOTHING is exact for these
+            # tables and never touches the delete path.
             conflict = f"ON CONFLICT ({', '.join(pk)}) DO NOTHING"
         return list(rows), conflict
 
@@ -1547,26 +1471,21 @@ class MarketStore:
         amendment). Returns one of the module-level ``AMEND_*`` outcomes; writes nothing except on
         ``AMEND_APPLIED``, and never touches open/close/volume/src/auction_open.
 
-        This is the read-decide-write seam the late-tick path needs: ``BarBuilder`` used to
-        ``get_bars_1m`` then ``insert_bars_1m`` as two independent lock acquisitions, so the 15:50
-        ReconcileJob could upsert the canonical official candle in between and have the amendment —
-        computed against the pre-reconcile row and issued as a whole-row upsert — silently overwrite
-        it. Here the SELECT, the decision and the UPDATE happen inside ONE ``_lock`` acquisition and
-        ONE transaction, and the UPDATE re-states the row it read as its own predicate
-        (``src``/``high``/``low`` compare-and-swap) so even a lock-free future caller can only write
-        against the row it decided on — otherwise ``AMEND_RACE_LOST``, write skipped.
+        The read-decide-write seam the late-tick path needs: the SELECT, the decision and the UPDATE
+        happen inside ONE ``_lock`` acquisition and ONE transaction (two separate acquisitions would
+        let the 15:50 ReconcileJob upsert the canonical official candle in between and have a
+        stale whole-row amendment overwrite it). The UPDATE re-states the row it read as its own
+        predicate (``src``/``high``/``low`` compare-and-swap), so even a lock-free future caller can
+        only write against the row it decided on — otherwise ``AMEND_RACE_LOST``, write skipped.
 
         ``require_src`` is a hard precondition, not a filter: a row whose ``src`` has become
         ``kite_official``/``gap_backfilled`` is CANONICAL and a stray live tick may never
         rewrite it — it reports ``AMEND_FOREIGN_SRC`` and leaves the row byte-intact.
 
-        Lock note: this holds ``_lock`` across 2-3 statements (µs-scale point reads/writes on the PK),
-        marginally longer than the one-statement discipline of the flush path — the cost of atomicity.
-        The whole transaction is therefore ONE timed hold (2026-09-09) via
-        :meth:`_timed_lock` — a 2-3 statement hold that stalls starves every other store caller
-        exactly like a one-statement one. This runs on the LIVE late-tick path, so the instrumentation
-        is deliberately the cheap shape: one small ``__slots__`` object and two ``perf_counter`` reads
-        per amendment, nothing allocated per statement.
+        Lock note: ``_lock`` is held across 2-3 µs-scale PK statements — the cost of atomicity — as
+        ONE timed hold via :meth:`_timed_lock`. This is the LIVE late-tick path, so the
+        instrumentation is deliberately cheap: one small ``__slots__`` object and two
+        ``perf_counter`` reads per amendment.
         """
         with self._timed_lock(f"amend_bar_1m:{symbol}"):
             con = self._require_con()
@@ -1622,9 +1541,9 @@ class MarketStore:
         """Bulk float OHLCV frame of 1m bars (``start <= ts_minute < end``), ascending.
 
         The ANALYTICAL read path (backtest frame loading): one vectorized DuckDB→pandas fetch with
-        DOUBLE casts instead of per-row pydantic ``Bar`` construction (~50 µs/row — ~7.5 min for a
-        9M-row orb backtest load). Exactness note: DECIMAL→DOUBLE is the same correctly-rounded
-        value as ``float(Decimal)``. Ledger/live consumers keep :meth:`get_bars_1m` (Decimal)."""
+        DOUBLE casts instead of per-row pydantic ``Bar`` construction. DECIMAL→DOUBLE is the same
+        correctly-rounded value as ``float(Decimal)``. Ledger/live consumers keep
+        :meth:`get_bars_1m` (Decimal)."""
         with self._lock:
             df = self._execute(
                 'SELECT ts_minute, CAST("open" AS DOUBLE) AS "open", CAST(high AS DOUBLE) AS high, '
@@ -1676,7 +1595,7 @@ class MarketStore:
     def mark_no_trade(
         self, symbol: str, minutes: Sequence[datetime], *, confirmed_at: datetime
     ) -> int:
-        """Record ``minutes`` as UPSTREAM-CONFIRMED no-trade minutes for ``symbol`` (2026-09-18).
+        """Record ``minutes`` as UPSTREAM-CONFIRMED no-trade minutes for ``symbol``.
 
         The ONLY writer is :meth:`engine.marketdata.backfill.BackfillJob.warmup_gap`, and only for a
         minute Kite could have published and did not (see its contract). ``ON CONFLICT DO NOTHING``:
@@ -1714,7 +1633,7 @@ class MarketStore:
         every whole minute in the range is expected to have a bar. Returns the missing minutes
         ascending — empty list ⇒ contiguous coverage. An UPSTREAM-CONFIRMED no-trade minute
         (``bars_1m_no_trade``) counts as COVERED — the exchange traded nothing in it, so there is no
-        bar to have (2026-09-18: a thin symbol's tradeless minute is an observation, not a hole).
+        bar to have.
         """
         start = start.astimezone(IST).replace(second=0, microsecond=0)
         end = end.astimezone(IST)
@@ -1888,11 +1807,9 @@ class MarketStore:
 
     def commit_reconciled_symbol(self, bars: Sequence[Bar], log_row: dict[str, Any]) -> int:
         """Upsert one symbol's canonical official ``bars`` AND its ``reconcile_log`` row in ONE
-        transaction (per-(day, symbol) checkpoint). The row is the resume checkpoint:
-        bars made official without it would be re-compared on the retry against no self bars and
-        logged ``bars_compared=0``. Both land or neither does, whatever stops the run — an exception,
-        a cancel, a close (it waits on ``_lock`` for the commit) or a kill (no commit, no row, no
-        bars). Returns the bar count."""
+        transaction. The row is the resume checkpoint: bars made official without it would be
+        re-compared on the retry against no self bars and logged ``bars_compared=0``. Both land or
+        neither does, whatever stops the run. Returns the bar count."""
         stamped = {**log_row, "ran_at": log_row.get("ran_at") or self._clock.now()}
         (row,), conflict = self._prepare_upsert("reconcile_log", [stamped])
         cols, _pk = _TABLE_SPEC["reconcile_log"]
@@ -1956,8 +1873,7 @@ class MarketStore:
 
     def get_symbol_renames(self, as_of: date, *, lookback_days: int = 120) -> list[SymbolRename]:
         """NSE equity symbol changes visible in the ``instruments_daily`` snapshots of the
-        ``lookback_days`` up to ``as_of`` (2026-10-23 ICICIPRULI→ICICILIFE) — :func:`symbol_renames`
-        on this store's connection."""
+        ``lookback_days`` up to ``as_of`` — :func:`symbol_renames` on this store's connection."""
         return symbol_renames(self._fetchall, as_of, lookback_days=lookback_days)
 
     def rename_trading_gap(self, old: str, new: str) -> int:
@@ -2099,17 +2015,14 @@ class MarketStore:
         return self._upsert_rows("universe_daily", rows)
 
     def replace_universe_daily(self, d: date, rows: Sequence[dict[str, Any]]) -> int:
-        """Day-``d`` universe write with extended-leg hygiene (2026-09-01 review finding): plain
-        upserts never delete, so a same-day re-build with ``batch_universe_enabled`` flipped off —
-        or a shrunken extended candidate set — would leave stale extended rows feeding
-        :meth:`get_batch_universe_symbols` for the rest of the day, defeating the flag's documented
-        rollback guarantee. Extended rows are therefore delete-then-inserted under one lock hold
-        (the ``catalyst_watchlist`` idempotent-rewrite precedent); index-member rows stay pure
-        upserts — every build re-writes their full audit rows by construction.
+        """Day-``d`` universe write with extended-leg hygiene: plain upserts never delete, so a
+        same-day re-build with ``batch_universe_enabled`` flipped off — or a shrunken extended
+        candidate set — would leave stale extended rows feeding :meth:`get_batch_universe_symbols`
+        for the rest of the day. Extended rows are therefore delete-then-inserted under one lock
+        hold; index-member rows stay pure upserts — every build re-writes their full audit rows.
 
-        BOTH index markers are deleted (owner decision 2026-09-04): a re-build on a day whose earlier build
-        wrote the legacy ``not_nifty200`` marker must clear those rows too, or the rollback
-        guarantee holds only for rows the renamed build happened to write."""
+        BOTH index markers are deleted: a re-build on a day whose earlier build wrote the legacy
+        ``not_nifty200`` marker must clear those rows too."""
         with self._lock:
             self._execute(
                 "DELETE FROM universe_daily WHERE d = ? AND len(exclusion_reasons) = 1 "
@@ -2130,8 +2043,8 @@ class MarketStore:
         the cap alone (``exclusion_reasons == ['watchlist_cap']``). This is the brk20/ins batch-rule
         universe (``src/engine/ops/main.py`` ``run_scan_sweep``), not the ``included_only`` focus
         watchlist — use it wherever "did this symbol clear the rules" matters more than "is it in
-        today's top-N focus watchlist" (data.universe_max_watchlist; the 2026-08-04 BPCL lesson: watchlist-cap-contaminated visibility silently
-        drops otherwise-eligible symbols).
+        today's top-N focus watchlist" (data.universe_max_watchlist): cap-contaminated visibility
+        silently drops otherwise-eligible symbols.
         """
         rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
         return sorted(
@@ -2140,14 +2053,14 @@ class MarketStore:
         )
 
     def get_core_eligible_symbols(self, d: date) -> list[str]:
-        """The CORE-eligible universe for ``d`` (owner decision 2026-10-08): the eligible set (see
+        """The CORE-eligible universe for ``d`` (owner decision): the eligible set (see
         :meth:`get_universe_eligible_symbols`) restricted to members of the core (evidence) index,
         ``universe.core_index_*`` — NIFTY 500 while the index is NIFTY Total Market.
 
         This is the origination population of every leg whose registered edge or frozen shadow
         verdict was measured on NIFTY 500 (``hi52``, ``ins``, ``cat``, ``cat_reversal``) and the
         rec-outcome benchmark's averaging set: widening the index must not move those populations
-        onto names the evidence never covered (hi52's full-market cell measured −0.26% at T+20).
+        onto names the evidence never covered.
         ``core_index`` NULL — a row written before the marker existed — counts as core; an explicit
         False (a non-core index member, or a build whose core list was unavailable) does not."""
         rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
@@ -2158,18 +2071,15 @@ class MarketStore:
         )
 
     def get_batch_universe_symbols(self, d: date) -> list[str]:
-        """The BATCH universe for ``d`` (extended-leg, 2026-09-01): the eligible set
-        (see :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
+        """The BATCH universe for ``d`` (extended leg): the eligible set (see
+        :meth:`get_universe_eligible_symbols`) PLUS criteria-passing NON-index symbols persisted
         with the extended-leg marker alone. This is the widest rule-passing scan set — news
-        resolver/digest shadow and the pre-open breakout advisory. NO scanner reads it today: ``hi52``
-        read it at birth (2026-09-01), was scoped back to the eligible set 2026-09-10 and PROMOTED
-        out of shadow 2026-09-12.
+        resolver/digest shadow and the pre-open breakout advisory. NO scanner reads it today.
         NEVER feed it to anything RECOMMEND-capable: the risk gate approves ``included`` rows only,
         so an actionable strategy scanning this set would originate un-approvable candidates.
 
-        Either index marker counts (owner decision 2026-09-04) — see :data:`_EXCL_INDEX_LEGACY`: rows written
-        2026-09-01…09-04 spell it ``not_nifty200``, and reading only the new spelling would silently
-        drop every pre-rename extended name out of the batch scan set."""
+        Either index marker counts — see :data:`_EXCL_INDEX_LEGACY`: reading only the new spelling
+        would silently drop every pre-rename extended name out of the batch scan set."""
         rows = self._fetch_dicts("SELECT * FROM universe_daily WHERE d = ?", [d])
         return sorted(
             r["symbol"] for r in rows
@@ -2212,8 +2122,8 @@ class MarketStore:
         """
         inserted = 0
         now = self._clock.now()
-        # ONE hold spans the whole row loop, so the note names the batch, not a statement (2026-09-09): a backfill of hundreds of headlines is row-at-a-time INSERT
-        # under a single _lock acquisition — the batch IS the hold every other caller waits behind.
+        # ONE hold spans the whole row loop (row-at-a-time INSERT under a single _lock acquisition),
+        # so the note names the batch: the batch IS the hold every other caller waits behind.
         with self._timed_lock(f"insert_news:{len(rows)}"):
             con = self._require_con()
             for row in rows:
@@ -2238,8 +2148,7 @@ class MarketStore:
 
     def set_news_cluster(self, headline_ids: Sequence[str], cluster_id: str) -> None:
         """Assign headlines to a cluster."""
-        # executemany binds row-at-a-time, so the hold scales with the cluster's size — one note for
-        # the whole hold (2026-09-09).
+        # executemany binds row-at-a-time, so the hold scales with the cluster's size.
         with self._timed_lock(f"set_news_cluster:{len(headline_ids)}"):
             con = self._require_con()
             con.executemany(
@@ -2503,9 +2412,9 @@ class MarketStore:
     ) -> datetime | None:
         """Latest stored PIT ``broadcast_dt`` — the filings_pit incremental-window watermark.
 
-        ``source`` selects the partition by id tag (2026-09-13): ``'nse'`` = the bare-id
-        ``corporates-pit`` rows, ``'bse'`` = the ``bse:``-prefixed fresh-feed rows, ``None`` = the
-        whole table (the pre-2026-09-13 reading, kept for callers that want "any insider row").
+        ``source`` selects the partition by id tag: ``'nse'`` = the bare-id ``corporates-pit``
+        rows, ``'bse'`` = the ``bse:``-prefixed fresh-feed rows, ``None`` = the whole table (for
+        callers that want "any insider row").
         Only ``'nse'`` has an engine caller: ``filings_pit_fresh`` windows on DATES, never on a
         watermark; ``scripts/rekey_symbol.py`` reads ``'bse'`` for one ``symbol``.
         WHOLE-TABLE IS WRONG FOR A PER-JOB WINDOW: the BSE feed writes same-day rows, which pins the
@@ -2653,9 +2562,8 @@ class MarketStore:
     def tick_flush_skips(self) -> int:
         """Flushes that returned immediately because another was already running.
 
-        A steadily climbing count is not an error — it is the pile-up that used to happen instead,
-        now costing nothing. A count climbing while ``ticks_flushed`` does NOT is the shape worth
-        alerting on: it means one flush never finished."""
+        A steadily climbing count is not an error. A count climbing while ``ticks_flushed`` does NOT
+        is the shape worth alerting on: it means one flush never finished."""
         with self._flush_skip_lock:
             return self._flush_skips
 
@@ -2664,10 +2572,9 @@ class MarketStore:
 
         The live tick path stages here (never touching DuckDB — ``_tick_lock`` only, ~µs) and
         offloads the actual flush via :meth:`aflush_ticks` so the asyncio event loop never runs
-        Parquet/DuckDB work (heartbeat invariant; a 200-symbol flush measured ~2 s inline).
-        A backlog past 4× the batch cap only WARNS — flushing inline here would run DuckDB work
-        on the caller's thread (the event loop, live), the exact freeze this split exists to
-        prevent; the flusher (on_tick_event / buffer_tick) is responsible for draining.
+        Parquet/DuckDB work (heartbeat invariant). A backlog past 4× the batch cap only WARNS —
+        flushing inline would run DuckDB work on the event loop; the flusher (on_tick_event /
+        buffer_tick) is responsible for draining.
         """
         with self._tick_lock:
             self._tick_buffer.append(tick)
@@ -2689,8 +2596,8 @@ class MarketStore:
             )
 
     def buffer_tick(self, tick: Tick) -> list[Path]:
-        """Buffer one tick; flush when the batch is due (~``flush_interval_s`` s or
-        ``max_buffered_ticks``; 60 s batches since 2026-08-13). Returns files written (usually []).
+        """Buffer one tick; flush when the batch is due (``flush_interval_s`` or
+        ``max_buffered_ticks``). Returns files written (usually []).
 
         Synchronous convenience for offline/test callers; the live path uses
         :meth:`stage_tick` + :meth:`aflush_ticks` so the flush never runs on the event loop."""
@@ -2702,14 +2609,12 @@ class MarketStore:
         """Write the buffered batch to ``ticks/date=…/symbol=…/<ulid>.parquet`` (one file per
         (date, symbol) group in the batch) and reset the flush timer. Decimal/tz exact.
 
-        **Single-flight with SKIP (2026-08-25).** A flush that finds another flush already
-        running returns IMMEDIATELY — it never queues behind ``_flush_lock``. The live path calls
-        this once per tick event whose batch is due (``BarBuilder.on_tick_event``), so a flush that
-        runs long used to convert every subsequent tick into one more BLOCKED worker thread: on
-        08-25 a stack dump caught ~20 of them stopped at this lock inside the shared
-        ``asyncio.to_thread`` pool, with the whole process starved behind them. Skipping costs
-        nothing at all: the staged ticks stay in the buffer, ``_last_flush_at`` is only reset by a
-        flush that actually RUNS, so the batch is still due and the next tick event flushes it.
+        **Single-flight with SKIP.** A flush that finds another flush already running returns
+        IMMEDIATELY — it never queues behind ``_flush_lock``. The live path calls this once per tick
+        event whose batch is due (``BarBuilder.on_tick_event``), so queueing would turn every tick
+        during a long flush into one more BLOCKED worker thread. Skipping costs nothing: the staged
+        ticks stay in the buffer and ``_last_flush_at`` is only reset by a flush that actually
+        RUNS, so the batch is still due and the next tick event flushes it.
 
         ``wait_s`` > 0 waits that long for the in-flight flush instead of skipping. Only
         :meth:`close` uses it — see there for why it is the one caller that may not skip.
@@ -2763,15 +2668,10 @@ class MarketStore:
     def _tick_partition_dir(self, d: date, symbol: str) -> Path:
         """The ``ticks/date=…/symbol=…`` directory, created ONCE per (date, symbol) per process.
 
-        Before the cache, the flush used to ``mkdir(parents=True, exist_ok=True)`` for every one of the ~200
-        symbols in each batch — ~200 filesystem round-trips per pass, all of them inside
-        ``_flush_lock``, all of them re-proving what the previous flush 60 s earlier had already
-        established. On a busy Windows volume that is a large part of what made a flush long enough
-        for callers to pile up behind it in the first place.
-
-        The cache is cleared on DATE rollover, so it stays one trading day wide (~200 entries) and
-        a new day still gets its directories created. Called only under ``_flush_lock``, which is
-        what makes the unsynchronized set access safe."""
+        The cache avoids ~200 ``mkdir`` round-trips per flush inside ``_flush_lock`` (slow on a busy
+        Windows volume). It is cleared on DATE rollover, so it stays one trading day wide and a new
+        day still gets its directories created. Called only under ``_flush_lock``, which is what
+        makes the unsynchronized set access safe."""
         part_dir = self._parquet_root / "ticks" / f"date={d.isoformat()}" / f"symbol={symbol}"
         if d != self._tick_dirs_day:
             self._tick_dirs_day = d
@@ -2791,9 +2691,8 @@ class MarketStore:
         group_keys = sorted(
             {(t.exchange_ts.astimezone(IST).date(), t.tradingsymbol) for t in batch}
         )
-        # The stage wipe is its own _lock hold and its own note (2026-09-09):
-        # on a big backlog the DELETE is not free, and it runs BEFORE the bulk_write/copy_ticks pair,
-        # so leaving it untimed would have blamed the next statement for its share of a stall.
+        # The stage wipe is its own _lock hold and its own note: on a big backlog the DELETE is not
+        # free, and untimed it would blame the next statement for its share of a stall.
         with self._timed_lock("flush_stage_delete"):
             closed = self._con is None
             if not closed:
@@ -2887,8 +2786,8 @@ class MarketStore:
     # ================================================================== async wrappers
     # Thin offloads so scan-heavy DuckDB work never blocks the asyncio loop (heartbeat
     # invariant). The sync core stays the single implementation. Every one of them goes through
-    # :meth:`_off` onto the store's PRIVATE ``mt-store`` pool — never ``asyncio.to_thread``, whose
-    # shared default executor is what a slow flush drained on 2026-08-25 (see :meth:`_pool`).
+    # :meth:`_off` onto the store's PRIVATE ``mt-store`` pool — never ``asyncio.to_thread``
+    # (see :meth:`_pool`).
     async def _off(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
         """Run ``fn`` on the store's own pool — the single offload seam for the wrappers below."""
         loop = asyncio.get_running_loop()
@@ -2902,11 +2801,9 @@ class MarketStore:
     async def aping(self) -> bool:
         """:meth:`ping` off the loop — the liveness probe the health pulse awaits.
 
-        Goes through the SAME offload as every other wrapper here on purpose: a probe that took a
-        private thread would answer "the lock is free" while the path the engine actually uses was
-        starved, which is the one lie this watchdog must not be able to tell. Since the private worker pools that
-        path is the ``mt-store`` pool — so this probe now tests both halves of the real thing, the
-        lock AND the ability to get a worker, which is precisely the pair that failed on 08-25."""
+        Goes through the SAME offload as every other wrapper here on purpose: a probe on a private
+        thread would answer "the lock is free" while the path the engine actually uses was starved.
+        It tests both the lock AND the ability to get a ``mt-store`` worker."""
         return await self._off(self.ping)
 
     async def ainsert_bars_1m(self, bars: Sequence[Bar]) -> int:
@@ -2950,17 +2847,15 @@ class MarketStore:
 
         The skip is decided HERE, on the loop, when a flush is visibly already running. The live
         caller is ``BarBuilder.on_tick_event``, which awaits this once per due tick: hopping to the
-        pool only to discover the lock is taken would put both a queue entry and the tick handler's
-        own latency behind a flush that can run for seconds — the pile-up in its last remaining
-        form. The check is optimistic and the try-acquire inside :meth:`flush_ticks` remains the
-        authority; losing the race costs one skipped cycle and never a tick, because the batch
-        stays staged and stays due.
+        pool only to find the lock taken would put a queue entry and the tick handler's latency
+        behind a flush that can run for seconds. The check is optimistic and the try-acquire inside
+        :meth:`flush_ticks` remains the authority; losing the race costs one skipped cycle and
+        never a tick, because the batch stays staged and stays due.
 
         The check cannot see a flush that is queued but not yet started: every tick event of a
         burst handled before the pool thread takes the lock queues one more. Each queued flush
         re-checks ``if_due`` under the lock, so only the first writes; the rest find the batch
-        drained. Without the re-check they ran back to back (2026-09-29: a flush every 3.2 s of
-        ~630 ticks, ~280 files each, at 221 ticks/s)."""
+        drained (without the re-check they ran back to back, writing many tiny files)."""
         if self._flush_lock.locked():
             self._note_flush_skipped()
             return []
@@ -2989,9 +2884,7 @@ class MarketStore:
         return await self._off(self.get_catalyst_watchlist, d, grade=grade)
 
     # --- corporate-filings async offloads (the jobs upsert under store.arun; these are the
-    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop).
-    #     2026-09-02 review: these five predate the private worker pools and were missed by the to_thread→_off
-    #     migration — the last shared-executor path into the store, now closed. ---
+    #     dedicated wrappers for the read-side watermark checks the jobs/backfill do on the loop). ---
     async def alatest_insider_broadcast(self, source: str | None = None) -> datetime | None:
         return await self._off(self.latest_insider_broadcast, source)
 
