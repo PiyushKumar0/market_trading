@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>A</title>
+<item><title>Sensex &amp;amp; Nifty rally  today</title><link>https://a.example/1</link>
+<description><![CDATA[<p>Markets <b>rose</b> on Rs 5 &amp; more.</p>]]></description>
+<pubDate>Tue, 10 Nov 2026 04:00:00 GMT</pubDate></item>
+<item><title>No summary item</title><link>https://a.example/2</link></item>
+<item><title>Bad date</title><link>https://a.example/3</link><description>plain</description><pubDate>garbage</pubDate></item>
+</channel></rss>
