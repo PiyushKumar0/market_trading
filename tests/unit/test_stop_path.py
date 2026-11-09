@@ -1,10 +1,8 @@
-"""Reliable engine stop path (2026-07-21 13:34 IST zombie).
+"""Reliable engine stop path: a stop signal at any point of boot ends the process.
 
-The incident: Ctrl-C landed while ``lifecycle.startup`` was still running (no ``engine_ready`` yet).
-Signal handlers were installed only AFTER startup completed, so the press hit Python's default SIGINT
-handler → a raw ``KeyboardInterrupt`` at an arbitrary ``await`` (``main`` logged ``engine_interrupted``),
-and the process then NEVER EXITED — pid 46332 lingered holding ``data/engine.lock`` until a manual
-taskkill. These tests pin the three seams the fix adds:
+Handlers installed only after startup would leave a Ctrl-C during ``lifecycle.startup`` to Python's
+default SIGINT handler: a raw ``KeyboardInterrupt`` at an arbitrary ``await`` and a process that
+never exits, holding ``data/engine.lock``. Three seams are pinned:
 
   * :func:`engine.ops.stop_path.make_stop_handler` — the COUNTED two-press handler (first press requests
     a graceful stop, a second forces a hard exit), exercised WITHOUT raising real signals.
@@ -70,9 +68,9 @@ async def test_stop_handler_first_requests_second_forces(args: tuple) -> None:
 
 @pytest.mark.asyncio
 async def test_stop_handler_ignores_repeat_signals_inside_grace_window() -> None:
-    """2026-09-23: every `nssm stop` since 09-02 logged stop_forced ~0.85-1.4 s after stop_requested,
-    mid shutdown-backup, so the clean stop was never committed. NSSM's console Ctrl-C reaches the whole
-    console group more than once; repeats inside the grace window must NOT force-exit."""
+    """NSSM's console Ctrl-C reaches the whole console group more than once within ~1.4 s; repeats
+    inside the grace window must NOT force-exit (it would cut the shutdown backup and the clean
+    stop would never commit)."""
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     codes: list[int] = []
@@ -117,7 +115,7 @@ class _Composed(Exception):
 
 @pytest.mark.asyncio
 async def test_signal_handlers_installed_before_connect(tmp_path, monkeypatch) -> None:
-    """2026-07-21 regression guard: the signal handlers must be wired BEFORE ``connect()`` — i.e. before
+    """The signal handlers must be wired BEFORE ``connect()`` — i.e. before
     ``compose``, which opens every shared resource — and after the instance-lock acquire, so a wedged
     boot is interruptible. ``run`` is driven for real up to ``compose``, which ends it."""
     monkeypatch.setenv("MT_DATA_DIR", str(tmp_path / "data"))

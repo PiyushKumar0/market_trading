@@ -1,8 +1,8 @@
-"""SessionManager.verify_token — the startup live liveness probe (fourth cold-start-family defect,
-2026-07-21 lockout). Behavioural ``token_valid()`` cannot tell a still-honoured token from an expired
-one no live call has yet hit, so a boot on yesterday's token passed the self-test and ground the
-warm-up backfill on a dead token. The probe makes one authenticated ``kc.profile()`` call and pins
-``token_valid()`` to the broker's live verdict BEFORE hydrate/warm-up run.
+"""SessionManager.verify_token — the startup live liveness probe. Behavioural ``token_valid()``
+cannot tell a still-honoured token from an expired one no live call has yet hit, so a boot on
+yesterday's token would pass the self-test and grind the warm-up backfill on a dead token. The
+probe makes one authenticated ``kc.profile()`` call and pins ``token_valid()`` to the broker's
+live verdict BEFORE hydrate/warm-up run.
 
 ``_connect`` is monkeypatched to a fake pykiteconnect (mirrors test_post_login_recovery) so no network
 checksum exchange or real credential store is touched; the fake Secrets follows the seams used by the
@@ -126,10 +126,9 @@ class _GatedKC(_FakeKC):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raises", [TokenException("Incorrect `api_key` or `access_token`."), None])
 async def test_a_login_during_the_probe_discards_its_verdict(clock, raises) -> None:
-    """2026-10-21: the boot probe went out on the previous session's token, the owner's login landed at
-    09:07:21 while it was in flight, and its rejection (09:07:28) then marked the FRESH token dead:
-    post-login recovery skipped the ticker and the whole session ran with no ticks. A verdict belongs
-    to the token it probed; once a login replaced that token, it says nothing about the session."""
+    """A boot probe sent on the previous session's token whose rejection lands AFTER the owner's
+    login must not mark the FRESH token dead. A verdict belongs to the token it probed; once a
+    login replaced that token, it says nothing about the session."""
     secrets = _FakeSecrets({KITE_API_KEY: "ak", KITE_API_SECRET: "as", KITE_ACCESS_TOKEN: "stale-tok"})
     session = SessionManager(secrets, clock)
     kc = _GatedKC(profile_raises=raises)
@@ -159,11 +158,10 @@ async def test_verify_token_no_api_key_on_fresh_install(clock) -> None:
 
 
 # ===================================================================== breaker-vs-probe split
-# 2026-08-20 live incident: the 11:26:40 LIVE TokenException produced ZERO owner notifications. The
-# mid-day circuit breaker (``on_token_rejected`` → freeze entries + critical alert + login prompt)
-# deduped against ``_rejected``, which the boot probe ALSO sets (deliberately silently) — so the
-# day's first genuine rejection looked like a burst duplicate and the alert was swallowed. The
-# breaker now dedups on its own ``_breaker_fired`` flag, which the probe never touches.
+# The mid-day circuit breaker (``on_token_rejected`` → freeze entries + critical alert + login
+# prompt) dedups on its own ``_breaker_fired`` flag, never on ``_rejected``, which the boot probe
+# also sets (deliberately silently): otherwise the day's first genuine rejection would look like a
+# burst duplicate and its alert be swallowed.
 
 
 def _breaker_session(clock, kc: _FakeKC, fired: list[int]) -> SessionManager:
@@ -182,15 +180,15 @@ def _breaker_session(clock, kc: _FakeKC, fired: list[int]) -> SessionManager:
 
 @pytest.mark.asyncio
 async def test_boot_probe_rejection_no_longer_suppresses_the_live_breaker(clock) -> None:
-    """THE incident: boot probe rejected, then a live call rejects ⇒ the owner IS alerted (once)."""
+    """Boot probe rejected, then a live call rejects ⇒ the owner IS alerted (once)."""
     fired: list[int] = []
     session = _breaker_session(clock, _FakeKC(profile_raises=TokenException("bad token")), fired)
 
     assert await session.verify_token() == "rejected"
     assert fired == []                       # boot comms stay with the boot path (login_prompt)
 
-    await session.on_token_rejected(session.access_token())   # 11:26:40 — the real live rejection
-    assert fired == [1]                      # pre-fix: [] (silently swallowed)
+    await session.on_token_rejected(session.access_token())   # the real live rejection
+    assert fired == [1]
     assert session.token_valid() is False
 
 
@@ -235,7 +233,7 @@ async def test_boot_probe_rejection_alone_never_fires_the_breaker(clock) -> None
     assert session._breaker_fired is False   # nothing to dedup against later
 
 
-# ============================================ superseded-token rejection (mid-day breaker, 2026-10-21)
+# ============================================ superseded-token rejection (mid-day breaker)
 # The boot probe's superseded rule, applied to the live breaker: a call sent on the OLD token that
 # fails after the owner's re-login must not mark the NEW token dead or fire freeze + login prompt.
 

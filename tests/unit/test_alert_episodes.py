@@ -1,11 +1,7 @@
-"""Owner-alert cadence: one alert per EPISODE, not one per occurrence (2026-08-24).
+"""Owner-alert cadence: one alert per EPISODE, not one per occurrence.
 
-Measured that morning: 139-223 Telegram sends failed per day for three days, and the outbox that was
-supposed to protect them reached 203 rows — of which almost none were things the owner needed twice.
-Two sources built it:
-
-* 57 identical ``health problems: ['feed_stale']`` alerts in one morning (one per 60 s health pulse);
-* one "Intraday analyst unavailable" alert per failed agent call, for as long as the SDK stayed down.
+Without it the health pulse repeats ``health problems: ['feed_stale']`` every 60 s and each failed
+agent call sends its own "Intraday analyst unavailable" for as long as the SDK is down.
 
 The health half is pinned in ``test_health_monitor``; this module covers the generic episode clock
 (:mod:`engine.notify.episodes`) and its two agent-failure users — the harness's own
@@ -130,7 +126,7 @@ def test_a_bare_reset_closes_everything():
 
 
 def test_the_window_is_thirty_minutes():
-    """Pinned: often enough that a real outage keeps nagging, rare enough that a whole session of one
+    """Often enough that a real outage keeps nagging, rare enough that a whole session of one
     broken thing is ~13 messages rather than the ~390 a 60 s pulse produces."""
     assert REPEAT_AFTER == timedelta(minutes=30)
 
@@ -178,8 +174,8 @@ def hclock(hticker: Ticker) -> Clock:
 
 @pytest.mark.asyncio
 async def test_the_first_agent_failure_alerts_and_the_repeat_does_not(conn, hclock, hticker):
-    """A dead SDK used to raise one owner alert per call — for hours. The failure handling is
-    untouched (both calls still return Failed); only the second alert is dropped."""
+    """A dead SDK raises one owner alert, not one per call: both calls still return Failed; only the
+    second alert is dropped."""
     alerts: list[tuple[str, str]] = []
     harness = _harness(conn, hclock, alerts)
     agent = _agent_def()
@@ -259,8 +255,8 @@ async def test_a_successful_call_closes_the_episode_and_the_next_failure_alerts(
     assert "c1" in alerts[0][1] and "c3" in alerts[1][1]
 
 
-# =========================================================================== a dead login (2026-10-23)
-#: The CLI's own error text from the 2026-10-22/23 outage — classified by ``_classify``, not asserted.
+# =========================================================================== a dead login
+#: The CLI's own dead-login error text — classified by ``_classify``, not asserted.
 DEAD_LOGIN = RuntimeError(
     "Claude Code returned an error result: Failed to authenticate: OAuth session expired and could "
     "not be refreshed"
@@ -270,8 +266,8 @@ DEAD_LOGIN = RuntimeError(
 @pytest.mark.asyncio
 async def test_a_dead_login_is_one_alert_across_every_agent(conn, hclock, hticker):
     """Every agent shares the CLI's stored claude.ai login, so ``auth_failed`` is the ACCOUNT failing,
-    not one agent. Keyed per agent it sent ~70 messages over the 2026-10-22/23 dead login: each agent's
-    own 30-minute drip plus the jobs' copies. One episode for the account, whoever hits it."""
+    not one agent. One episode for the account, whoever hits it (per-agent keys would multiply the
+    30-minute drip by every agent plus the jobs' copies)."""
     alerts: list[tuple[str, str]] = []
     harness = _harness(conn, hclock, alerts)
     defs = load_agent_defs(TEST_AGENTS)
@@ -394,8 +390,8 @@ def _agent_alerts(parts) -> list:
 
 @pytest.mark.asyncio
 async def test_the_analyst_unavailable_alert_fires_once_per_episode(pipeline, pticker):
-    """The heartbeat runs all session; with the SDK down that was one "Intraday analyst unavailable"
-    per trigger, per failure — a large share of the 203-deep backlog. One per episode now."""
+    """The heartbeat runs all session; with the SDK down, one "Intraday analyst unavailable" per
+    episode, not per trigger."""
     pipe, parts = pipeline
 
     for i in range(6):
@@ -448,8 +444,8 @@ async def test_a_working_analyst_closes_the_episode(pipeline, pticker):
 
 @pytest.mark.asyncio
 async def test_the_failure_is_logged_every_time_it_happens(pipeline, pticker, caplog):
-    """The no-action rule is untouched: every occurrence still logs ``intraday_agent_failed`` and still resolves to
-    no-proposal. Only the owner-facing cadence changed."""
+    """Every occurrence still logs ``intraday_agent_failed`` and resolves to no-proposal; only the
+    owner-facing cadence is throttled."""
     pipe, _parts = pipeline
 
     with caplog.at_level("INFO", logger="engine.ops.pipeline"):
@@ -463,8 +459,8 @@ async def test_the_failure_is_logged_every_time_it_happens(pipeline, pticker, ca
 
 @pytest.mark.asyncio
 async def test_a_dead_login_is_left_to_the_harness_alert(pipeline, pticker, caplog):
-    """The harness already sent the one account-wide alert with the fix; "Intraday analyst
-    unavailable" on top of it was a second message for the same dead login. Still logged."""
+    """The harness already sent the one account-wide alert with the fix, so "Intraday analyst
+    unavailable" adds no second message for the same dead login. Still logged."""
     pipe, parts = pipeline
 
     with caplog.at_level("INFO", logger="engine.ops.pipeline"):

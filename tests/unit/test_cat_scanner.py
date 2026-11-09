@@ -1,16 +1,14 @@
-"""``cat`` v2 SHADOW scanner (2026-08-18) — watchlist row -> SignalCandidate.
+"""``cat`` v2 SHADOW scanner — watchlist row -> SignalCandidate.
 
 PINNED worked example: an ``originating``/``long`` watchlist row of weighted materiality 0.72, on a
 symbol whose PRIOR-session bhavcopy close was 100.00, at the shipped 5% stop. All arithmetic is
 hand-computed and params are passed explicitly, so an owner settings change can never silently break
 these tests.
 
-The eligibility filter (grade ∧ direction ∧ event age <= 1) is tested HERE rather than against a
-database because for ``cat`` the filter IS the rule's event — single-shot semantics included — and
-``sweep_watchlist`` owns it (``ins`` can afford to filter in SQL: its ``consumed`` flag is
-bookkeeping, not the rule). The last section pins the OTHER half of the caps story: the
-``catalyst_guard.max_catalyst_entries_day`` bound the pre-screen enforces on any candidate carrying a
-``catalyst_ref``.
+The eligibility filter (grade ∧ direction ∧ event age <= 1) is tested here rather than against a
+database because for ``cat`` the filter IS the rule's event (single-shot semantics included) and
+``sweep_watchlist`` owns it. The last section pins the ``catalyst_guard.max_catalyst_entries_day``
+bound the pre-screen enforces on any candidate carrying a ``catalyst_ref``.
 """
 
 from __future__ import annotations
@@ -52,8 +50,7 @@ def _row(
 # =========================================================================== pinned level math
 def test_pinned_level_math_entry_stop_and_no_target():
     """entry = the pre-open reference (the PRIOR session's bhavcopy close); stop = entry x (1 - 5/100);
-    target = None — the v1 ATR/rr_target band died with the retired confirmation design and
-    is never re-invented."""
+    target = None."""
     cand = scan_entry(_row(), params=P)
     assert cand is not None
     assert cand.strategy_id == "cat"
@@ -118,12 +115,10 @@ def test_alternate_stop_pct_moves_only_the_stop():
 
 # =========================================================================== fail-to-zero
 def test_tick_rounding_degeneracy_emits_nothing():
-    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the
-    ``levels_coherent`` shape is then unsatisfiable and the rule must emit NOTHING rather than ship
-    an incoherent plan (the brk20/ins convention: coherence is tested AFTER rounding).
+    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry``: the rule emits
+    NOTHING rather than an incoherent plan (coherence is tested AFTER rounding).
 
-    Hand-computed at the shipped 5%: 0.50 x 0.95 = 0.4750, which is 9.5 ticks and rounds HALF-UP to
-    10 ticks = 0.50 — straight back onto the entry, leaving no risk distance at all."""
+    At the shipped 5%: 0.50 x 0.95 = 0.4750 = 9.5 ticks, rounds HALF-UP to 10 ticks = 0.50 = entry."""
     assert scan_entry(_row(close="0.50"), params=P) is None
     # Everything below it collapses the same way (the stop distance is sub-half-tick throughout).
     for close in ("0.05", "0.15", "0.25", "0.35", "0.45"):
@@ -131,7 +126,7 @@ def test_tick_rounding_degeneracy_emits_nothing():
 
 
 def test_tick_rounding_boundary_the_smallest_price_that_still_emits():
-    """The EXACT boundary of the degeneracy above, hand-computed at the shipped 5% stop:
+    """The EXACT boundary of the degeneracy above, at the shipped 5% stop:
 
     * entry 0.50 -> 0.4750 = 9.50 ticks  -> half-up 10 ticks = 0.50 == entry => refuses (above).
     * entry 0.55 -> 0.5225 = 10.45 ticks -> half-up 10 ticks = 0.50 <  entry => emits, by one tick.
@@ -195,8 +190,7 @@ def test_is_eligible_pins_grade_direction_and_age():
 
 
 def test_sweep_owns_the_filter_so_a_widened_fetch_cannot_widen_the_rule():
-    """The caller narrows its query for cheapness; the sweep is the AUTHORITY. Handing it the whole
-    day's watchlist must still yield exactly the eligible rows."""
+    """The sweep is the AUTHORITY: the whole day's watchlist yields exactly the eligible rows."""
     rows = [
         _row("AAA"),                                   # eligible
         _row("BBB", grade="context"),                  # never originates
@@ -247,8 +241,7 @@ def test_defaults_match_the_shipped_settings_block():
 
 
 def test_cat_is_not_a_registered_scanner():
-    """`cat` v2 is a BATCH rule (like brk20/ins), not a per-bar :class:`Scanner`: the retired v1
-    confirmation design was the only reason it would have registered."""
+    """`cat` v2 is a BATCH rule (like brk20/ins), not a per-bar :class:`Scanner`."""
     from engine.strategy.scanners import SCANNER_REGISTRY
     assert "cat" not in SCANNER_REGISTRY
 
@@ -324,8 +317,7 @@ def test_shipped_cat_subcap_matches_catalyst_guard():
     """The settings.yaml ``max_per_strategy_day.cat`` sub-cap is MANUALLY kept equal to
     limits.yaml ``catalyst_guard.max_catalyst_entries_day`` — two files, one meaning, no derivation
     (the guard is a hash-verified protected store, so settings cannot import it at load time).
-    2026-08-18 review: the coupling had no regression net; a drift would let one file's cap bind
-    while the other's documentation lies. This is that net."""
+    A drift would let one file's cap bind while the other's documentation lies."""
     import yaml
 
     from engine.core.config import config_dir, load_settings

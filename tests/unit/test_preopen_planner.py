@@ -189,8 +189,8 @@ async def test_harness_failure_returns_failed_and_persists_nothing(store, conn, 
 
 
 async def test_a_dead_login_is_left_to_the_harness_alert(store, conn, assembler, agent_defs, clock, calendar):
-    """``auth_failed`` already reached the owner as the harness's one account-wide alert; this job's
-    copy repeated it on every 30-minute catch-up retry (14 on 2026-10-22/23). Still retryable."""
+    """``auth_failed`` already reached the owner as the harness's one account-wide alert, so this
+    job sends no copy on each 30-minute catch-up retry. Still retryable."""
     harness = FakeHarness(AgentResult.Failed("auth_failed", "OAuth session expired", call_id="c5"))
     alerts: list[tuple[str, str]] = []
 
@@ -243,14 +243,13 @@ async def test_movers_ranked_by_absolute_return_descending(store, conn, assemble
     )
 
 
-# ------------------------------------------------------- the digest rail, measured (2026-09-04)
+# ------------------------------------------------------- the digest rail, measured
 async def test_a_railed_market_digest_reaches_the_planner_with_its_measure(
     store, conn, assembler, agent_defs, clock, calendar
 ):
-    """2026-09-03: the planner's digest lines rendered a bare ``market: -1.000`` (no measure),
-    read it as "pinned at its floor", and wrote a risk-off day plan that every intraday verdict then
-    cited — from raw -9.48 across 759 clusters, i.e. neutral flow. The planner gets the same measured
-    rail line the analyst context already carries; an unrailed sector line is unchanged."""
+    """A bare ``market: -1.000`` (no measure) reads as "pinned at its floor" and invites a risk-off
+    day plan, so the planner gets the same measured rail line the analyst context carries; an
+    unrailed sector line is unchanged."""
     as_of = clock.now()
     store.upsert_sentiment_agg([
         {"scope": "market", "scope_key": "market", "as_of": as_of, "value": -1.0,
@@ -319,14 +318,13 @@ async def test_watchlist_renders_symbol_grade_event_without_the_retired_levels(
     assert "invalidation" not in volatile
 
 
-# ------------------------------------------------- context provenance (2026-07-30 no_trade incident)
+# ------------------------------------------------- context provenance
 async def test_context_filters_platform_bookkeeping_and_dates_the_review(
     store, conn, assembler, agent_defs, clock, calendar
 ):
-    """2026-07-30: the planner escalated yesterday's post-mortem into a present-tense platform
-    outage (no_trade_today=true) and read our own watchlist_cap rows as a mass exchange
-    surveillance action. Pins: (a) only surveillance_* exclusion reasons reach the context;
-    (b) the review summary carries its session date and the HISTORY label."""
+    """Pins: (a) only surveillance_* exclusion reasons reach the context (our own watchlist_cap
+    rows must not read as an exchange surveillance action); (b) the review summary carries its
+    session date and the HISTORY label (yesterday's post-mortem is not a present outage)."""
     store.upsert_universe_daily(
         [
             {"d": TODAY, "symbol": "CAPPED", "included": False, "mis_candidate": False,
@@ -379,10 +377,8 @@ def test_construction_rejects_a_roster_missing_the_planner(store, conn, assemble
 
 
 # ------------------------------------------------- positions the owner sold outside the ledger
-# 2026-09-11: HDFCAMC and HINDZINC were sold on 08-26 and stayed OPEN until 09-11. Eleven consecutive
-# day plans therefore reasoned about the "overnight risk" of two positions that did not exist, while
-# the one thing that would have ended it -- a /closed reply -- was never put in front of the owner
-# where he reads the morning plan.
+# A position sold outside the ledger stays OPEN until the owner replies /closed. The plan must not
+# reason about its "overnight risk", and must put the exact reply that ends it in front of the owner.
 def _position(conn, position_id: str, symbol: str, qty: int = 7, *, stop: str = "95") -> None:
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, style, product, qty, avg_entry, stop, "
@@ -421,8 +417,8 @@ async def _volatile(store, conn, assembler, agent_defs, clock, calendar) -> str:
 async def test_sold_outside_the_ledger_gets_its_own_block_and_leaves_the_risk_line(
     store, conn, assembler, agent_defs, clock, calendar
 ):
-    """The whole fix: the sold position is OUT of the overnight-risk line the planner reasons over,
-    and IN a block that names the exact reply that ends it. The genuinely held position is untouched."""
+    """The sold position is OUT of the overnight-risk line and IN a block that names the exact
+    reply that ends it. The genuinely held position is untouched."""
     _position(conn, "pos-held", "RELIANCE", 3, stop="90")
     _position(conn, "pos-sold", "HDFCAMC", 7)
     _ledger(conn, "led-1", "pos-sold", "REC-ENTRY-1")
@@ -443,9 +439,8 @@ async def test_sold_outside_the_ledger_gets_its_own_block_and_leaves_the_risk_li
     ) in volatile
 
     # The assembler renders the whole summary as ONE prompt item, so a per-line marker alone leaves
-    # the sold position as an unlabelled continuation line UNDER "open positions and overnight risk:"
-    # - which is precisely the section it has to be out of, and which a planner can still fold into
-    # its risk paragraph. A heading of its own is what separates the two groups.
+    # the sold position as an unlabelled continuation line UNDER "open positions and overnight risk:".
+    # A heading of its own separates the two groups.
     heading_at = lines.index(_SOLD_OUTSIDE_HEADING)
     assert heading_at == lines.index(risk_line) + 1              # immediately after the held block
     assert lines[heading_at + 1].startswith("HDFCAMC")           # ... and before the sold ones
@@ -456,8 +451,7 @@ async def test_sold_outside_the_ledger_gets_its_own_block_and_leaves_the_risk_li
 async def test_the_only_open_position_being_sold_leaves_the_risk_line_empty(
     store, conn, assembler, agent_defs, clock, calendar
 ):
-    """The live 09-11 shape: every tracked position had been sold. The risk line must then read
-    "none" -- a plan that lists them as open risk is what produced eleven wrong mornings."""
+    """Every tracked position has been sold: the risk line reads "none"."""
     _position(conn, "pos-sold", "HINDZINC", 5)
     _observe(conn, "pos-sold", PRIOR, tracked=5)
     _observe(conn, "pos-sold", TODAY, tracked=5)
@@ -495,9 +489,8 @@ async def test_a_partial_holding_states_what_the_broker_actually_showed(
     volatile = await _volatile(store, conn, assembler, agent_defs, clock, calendar)
 
     assert "broker holdings show 3 on 2 sessions" in volatile
-    # ... and the heading has to stay true of THIS line too. Those three shares are real overnight
-    # exposure: the heading may void the TRACKED size (7) and must point the planner at the quantity
-    # the line states, never tell it the name carries no exposure at all.
+    # The heading must stay true of THIS line: those three shares are real overnight exposure, so
+    # it may void the TRACKED size (7) but never say the name carries no exposure.
     assert "Never treat the tracked size as exposure" in _SOLD_OUTSIDE_HEADING
     assert "the quantity the broker actually showed, stated on each line" in _SOLD_OUTSIDE_HEADING
 

@@ -1,25 +1,16 @@
-"""2026-08-21: the RECOMMEND funnel can no longer freeze silently.
+"""The RECOMMEND funnel cannot freeze silently on a hung store.
 
-THE INCIDENT. At 09:56:40 the platform's first-ever proposal reached
-``RecommendationPipeline._gate_and_persist``. The proposal row was written, and the very next
-statement -- ``await self._ctx_builder.build(...)`` -- never returned. At that same instant the
-market store stopped answering everything else too (feature snapshots, the ``warmup_refresh``
-interval job), and stayed that way for 14 minutes until a restart. The drain tick was parked inside
-that await the whole time, so: no verdict, no recommendation, no alert, and no later candidate ever
-evaluated. Nothing in the platform said a word.
+``RecommendationPipeline._gate_and_persist`` writes the proposal row and then awaits
+``self._ctx_builder.build(...)``; a store that never answers would park the drain tick there with
+no verdict, recommendation or alert. Two mechanisms are pinned, deliberately separate:
 
-Two halves are pinned here, deliberately as separate mechanisms:
+* **Deadline** -- the context build carries one. Blowing it re-arms the candidate's day slot,
+  alerts the owner and RETURNS. It must NOT reach the re-queue guard: re-queueing a candidate
+  whose store is dead just spends a second analyst call to learn the same thing.
+* **Sweep** -- the deadline cannot cover a crash between the two writes, so the orphan a
+  verdict-less proposal represents is swept for directly.
 
-* **Fix A (deadline)** -- the context build is the only store-touching await on that path, so it now
-  carries one. Blowing it re-arms the candidate's day slot, alerts the owner and RETURNS. It must
-  NOT reach the re-queue guard: re-queueing a candidate whose store is dead just spends a second
-  analyst call to learn the same thing.
-* **Fix C (sweep)** -- the deadline cannot cover a crash between the two writes, so the orphan a
-  verdict-less proposal represents is swept for directly. Fix A is prevention; Fix C is the measure
-  that would have made the incident visible on the day it happened.
-
-The seams are the ones ``test_reco_pipeline`` already uses; only the context builder is new, because
-"a builder that never answers" is the entire subject.
+The seams are the ones ``test_reco_pipeline`` uses; only the context builder is new.
 """
 
 from __future__ import annotations
@@ -99,10 +90,10 @@ def book(conn, pclock: Clock, cost_model: CostModel) -> RecommendationBook:
 
 # =========================================================================== doubles
 class HangingCtxBuilder:
-    """A ``GateContextBuilder`` that accepts the call and never answers -- the 09:56:40 store.
+    """A ``GateContextBuilder`` that accepts the call and never answers.
 
-    Records what it was asked for and how many times ``asyncio.wait_for`` cancelled it, so the test
-    can prove the DEADLINE fired rather than the coroutine merely being abandoned.
+    Counts ``asyncio.wait_for`` cancellations, proving the DEADLINE fired rather than the
+    coroutine merely being abandoned.
     """
 
     def __init__(self) -> None:
@@ -137,11 +128,8 @@ def build_pipeline(
     conn, pclock, calendar, book, limit_table, cost_model, *,
     ctx_builder=None, harness=None, rearm=None, store=None,
 ):
-    """A ranked+paced pipeline whose context builder can be swapped for the hanging one.
-
-    ``make_pipeline`` hard-wires ``FakeCtxBuilder``; the attribute is replaced afterwards rather
-    than widening that shared helper for one suite.
-    """
+    """A ranked+paced pipeline whose context builder is swapped for the hanging one afterwards
+    (``make_pipeline`` hard-wires ``FakeCtxBuilder``)."""
     pipeline, parts = make_pipeline(
         conn=conn, clock=pclock, calendar=calendar, book=book,
         harness=harness or FakeHarness(),
@@ -186,12 +174,11 @@ def counted_rows(conn, table: str) -> int:
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
-# ======================================================== Fix A: the gate-context build has a deadline
+# ======================================================== the gate-context build has a deadline
 def test_the_deadline_constants_are_pinned_and_ordered():
-    """90 s is far above a healthy build (a handful of point reads) and below the 3-minute drain
-    cadence, so it can only fire on a real stall. And the orphan TTL must sit ABOVE the deadline:
-    if it did not, the sweep would announce a proposal the timeout path is still in the middle of
-    alerting about, and every such incident would arrive as two messages."""
+    """90 s is far above a healthy build and below the 3-minute drain cadence, so it fires only on
+    a real stall. The orphan TTL must sit ABOVE the deadline, or the sweep would announce a
+    proposal the timeout path is still alerting about (two messages per incident)."""
     assert pipeline_mod._GATE_CONTEXT_DEADLINE_S == 90.0
     assert pipeline_mod._ORPHAN_TTL_MIN == 10
     assert pipeline_mod._ORPHAN_SWEEP_INTERVAL_MIN == 5
@@ -201,9 +188,9 @@ def test_the_deadline_constants_are_pinned_and_ordered():
 async def test_a_hung_context_build_raises_carrying_the_orphan_it_left_behind(
     conn, pclock, calendar, book, limit_table, cost_model, monkeypatch
 ):
-    """The raise contract on its own: the proposal is ALREADY persisted, so the exception carries
-    its id. No verdict is invented for it -- an invented ``reject`` would read forever after as a
-    decision the gate made (3.4), and the sweep below is what closes the loop instead."""
+    """The proposal is ALREADY persisted, so the exception carries its id. No verdict is invented:
+    an invented ``reject`` would read forever after as a decision the gate made; the sweep below
+    closes the loop instead."""
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     hanging = HangingCtxBuilder()
     pipeline, _ = build_pipeline(
@@ -225,14 +212,10 @@ async def test_a_hung_context_build_raises_carrying_the_orphan_it_left_behind(
 async def test_a_frozen_store_costs_one_candidate_and_the_drain_keeps_going(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """The whole of Fix A on the live path, against a store that stays dead.
-
-    The 2026-08-21 shape: the deadline fires, the candidate's day slot goes back to the prescreen,
-    the owner gets ONE loud message naming the symbol, no verdict and no recommendation are written
-    -- and, load-bearing, the candidate is NOT re-queued. The re-queue guard would have put it at the
-    front of the queue for a retry that hits the same dead store; a second candidate arriving after
-    the freeze is evaluated on the very next tick instead, which is exactly what did not happen for
-    14 minutes on the day.
+    """The deadline path against a store that stays dead: the candidate's day slot goes back to the
+    prescreen, the owner gets ONE loud message naming the symbol, no verdict or recommendation is
+    written, and, load-bearing, the candidate is NOT re-queued (a retry hits the same dead store).
+    A second candidate arriving after the freeze is evaluated on the very next tick.
     """
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     rearmed: list[tuple[str, str]] = []
@@ -309,8 +292,8 @@ def timeout_alerts(parts) -> list:
 async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
     conn, ticker, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """The same dead store, reached by a different path instead. Unguarded, the timeout came out
-    of ``on_bar`` — i.e. out of the tick handler for EVERY symbol, not just this position."""
+    """The same dead store reached via ``on_bar``: the timeout must not escape into the tick
+    handler for EVERY symbol."""
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     position_id = _open_position(conn, pclock)
     exit_json = {
@@ -349,11 +332,10 @@ async def test_a_hung_context_on_a_position_event_never_escapes_on_bar(
 async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fails_the_job(
     conn, pclock, calendar, book, limit_table, cost_model, caplog, monkeypatch
 ):
-    """The time exit runs at 09:30 and as a catch-up, so an escaping timeout takes out the whole
-    check — including the due positions BEHIND the one that stalled. Each is now its own alert, and
-    the timeout is re-raised only once the check is done: a swallowed one would record a success
-    watermark for ``time_exit_check`` and defer the exit by a session instead of the catch-up
-    retrying it."""
+    """An escaping timeout would take out the whole time-exit check, including due positions BEHIND
+    the stalled one. Each is its own alert, and the timeout is re-raised only once the check is
+    done: a swallowed one would record a success watermark for ``time_exit_check`` and defer the
+    exit by a session instead of the catch-up retrying it."""
     monkeypatch.setattr(pipeline_mod, "_GATE_CONTEXT_DEADLINE_S", FAST_DEADLINE_S)
     opened = datetime(2026, 3, 2, 10, 0, tzinfo=IST)         # far more than 20 trading sessions back
     aged = {
@@ -382,7 +364,7 @@ async def test_a_hung_context_on_the_time_stop_sweep_alerts_per_position_then_fa
     assert len(log_events(caplog, "gate_context_timeout")) == 2
 
 
-# ============================================================ Fix C: the orphaned-proposal sweep
+# ============================================================ the orphaned-proposal sweep
 async def test_an_orphan_past_the_ttl_is_announced_once_and_not_again(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
@@ -416,9 +398,8 @@ async def test_an_orphan_past_the_ttl_is_announced_once_and_not_again(
 async def test_a_stale_orphan_is_noted_quietly_and_never_pages_the_owner(
     conn, pclock, calendar, book, limit_table, cost_model, caplog
 ):
-    """An orphan older than 24 h is history, not news (2026-08-24: the GVT&D orphan paged the owner
-    three times over one weekend — every boot and day-roll re-announced it). Past the cap: one INFO
-    line per process-day, zero owner messages, and the memo still stops a same-day repeat."""
+    """An orphan older than 24 h is history, not news. Past the cap: one INFO line per process-day,
+    zero owner messages, and the memo still stops a same-day repeat."""
     pipeline, parts = build_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     ancient = write_proposal(
         conn,
@@ -487,9 +468,8 @@ async def test_a_paper_verdict_never_completes_a_real_proposal(
 async def test_the_drain_tick_sweeps_on_a_five_minute_throttle(
     conn, ticker, pclock, calendar, book, limit_table, cost_model
 ):
-    """Wiring plus cadence. The 60 s forward-drain tick is what invokes the sweep -- there is no new
-    scheduler job -- and the internal throttle decides which of those pulses actually reads the DB.
-    A minute later is too soon; ``_ORPHAN_SWEEP_INTERVAL_MIN`` later is due."""
+    """The 60 s forward-drain tick invokes the sweep and the internal throttle decides which pulses
+    read the DB: a minute later is too soon; ``_ORPHAN_SWEEP_INTERVAL_MIN`` later is due."""
     pipeline, _ = build_pipeline(conn, pclock, calendar, book, limit_table, cost_model)
     swept: list[object] = []
     real_sweep = pipeline.sweep_orphaned_proposals

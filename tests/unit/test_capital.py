@@ -352,7 +352,7 @@ async def test_auto_mode_is_refused_409(tmp_path, conn):
     assert (await rig.changer.preview(None))["allowed"] is False
 
 
-# --------------------------------------------------------------------------- stale dialog (review focus 2)
+# --------------------------------------------------------------------------- stale dialog
 async def test_a_repeated_post_is_refused_409_and_changes_nothing(tmp_path, conn):
     rig = _rig(tmp_path, conn)
     await rig.changer.apply(60000, 40000)
@@ -364,7 +364,7 @@ async def test_a_repeated_post_is_refused_409_and_changes_nothing(tmp_path, conn
     assert len(rig.sent) == 1
 
 
-# --------------------------------------------------------------------------- unverified (review focus 3)
+# --------------------------------------------------------------------------- unverified
 async def test_an_unverified_file_is_503_and_nothing_is_written(tmp_path, conn):
     rig = _rig(tmp_path, conn)
     rig.limits.load()                                       # the engine booted on the signed file
@@ -390,7 +390,7 @@ async def test_a_missing_file_is_503(tmp_path, conn):
     assert exc.value.status == 503
 
 
-# --------------------------------------------------------------------------- brakes (review focus 1)
+# --------------------------------------------------------------------------- brakes
 async def test_a_cut_that_trips_the_real_equity_floor_is_refused_422(tmp_path, conn):
     rig = _rig(tmp_path, conn)
     _closed_position(conn, "P1", "-3000")                   # equity 37,000 at 40k; 17,000 at 20k
@@ -524,8 +524,8 @@ async def test_a_gate_or_bounds_refusal_comes_before_the_missing_price(tmp_path,
 
 
 async def test_a_cold_restart_does_not_falsely_refuse_for_day_loss(tmp_path, conn):
-    """A position in profit at the last snapshot. Priced at entry, today's P&L would read
-    −1,500 (−5% of 30,000: the soft line); priced at its stored close, today's P&L is 0."""
+    """A position in profit at the last snapshot: priced at entry, today's P&L would read −1,500
+    (−5% of 30,000: the soft line); priced at its stored close, it is 0."""
     rig = _rig(tmp_path, conn, real_mark=_no_mark, last_mark=_stored({"AAA": "330"}))
     _open_position(conn, "P1", "AAA")
     _snapshot(conn, "1500")

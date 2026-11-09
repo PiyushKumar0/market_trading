@@ -54,8 +54,7 @@ def _tick(ts: datetime, *, symbol: str = "RELIANCE", ltp: str = "2338.55", vol: 
 def _write_fragments(
     store: MarketStore, d: date, *, symbol: str = "RELIANCE", n: int = 5, start: int = 0
 ) -> None:
-    """``n`` separate flushes ⇒ ``n`` fragment files in that symbol-day (the live pathology: ~7.5 K
-    of these per symbol-day, 752,150 files for one session). ``start`` offsets the tick
+    """``n`` separate flushes ⇒ ``n`` fragment files in that symbol-day. ``start`` offsets the tick
     timestamps/volumes so a later batch carries genuinely new rows, not repeats."""
     base = datetime.combine(d, datetime.min.time(), tzinfo=IST) + timedelta(hours=10)
     for i in range(start, start + n):
@@ -90,10 +89,9 @@ def test_fragments_collapse_to_one_file_with_identical_rows(store, tmp_path):
 
 
 def test_a_zero_byte_fragment_is_quarantined_and_the_survivors_still_compact(store, tmp_path):
-    """2026-08-26 containment — the FOURTH manual quarantine of this class became the last: a
-    truncated (0-byte) fragment used to fail the WHOLE partition via DuckDB's read_parquet
-    ("too small to be a Parquet file"); it is now moved to the quarantine dir exactly the way the
-    manual ritual did it, and the partition compacts from the survivors with ok=True."""
+    """A truncated (0-byte) fragment is moved to the quarantine dir instead of failing the whole
+    partition (DuckDB read_parquet: "too small to be a Parquet file"); the partition compacts from
+    the survivors with ok=True."""
     _write_fragments(store, YESTERDAY, n=3)
     before = store.get_ticks("RELIANCE", YESTERDAY)   # BEFORE planting: the reader's glob would
     part = store._parquet_root / "ticks" / f"date={YESTERDAY.isoformat()}" / "symbol=RELIANCE"
@@ -211,11 +209,9 @@ def test_interrupted_unlink_is_repaired_not_duplicated(store, tmp_path):
 
 
 def test_late_rows_beside_a_compacted_file_are_merged_in(store, tmp_path):
-    """2026-10-26..11-02, the live shape: a ticker reconnect's snapshot echo (the session's last
-    stamp, volume zeroed by the weekend) written into a partition AFTER its compaction. Reported
-    "unverifiable" and left alone, it failed the symbol-day on every run — 601 of them, the watermark
-    never cleared and retention stopped. The row the compacted file lacks is merged in, and nothing
-    it already holds is doubled."""
+    """A ticker reconnect's snapshot echo (the session's last stamp, volume zeroed) written into a
+    partition AFTER its compaction is merged in, not reported "unverifiable": nothing the compacted
+    file already holds is doubled."""
     _write_fragments(store, YESTERDAY, n=3)
     compact_ticks(tmp_path / "parquet", upto=TODAY, today=TODAY)
     last = store.get_ticks("RELIANCE", YESTERDAY)[-1]
@@ -339,10 +335,10 @@ def test_two_compacted_files_are_left_alone_and_reported(store, tmp_path):
 
 
 def test_a_reconnect_echo_written_after_compaction_is_merged_by_the_next_run(tmp_path):
-    """The seam that failed live, through the REAL live write path (BarBuilder → MarketStore): a
-    session's partition compacted after midnight (the host slept through 22:30), then a reconnect
-    re-sends the last state, still stamped with that session and its volume zeroed. The writer
-    persists it beside the compacted file, and the next run must merge it and finish clean."""
+    """Through the REAL live write path (BarBuilder → MarketStore): a session's partition compacted
+    after midnight, then a reconnect re-sends the last state, still stamped with that session and
+    its volume zeroed. The writer persists it beside the compacted file; the next run merges it
+    and finishes clean."""
     wall = {"now": datetime(2026, 6, 16, 15, 29, 50, tzinfo=IST)}
     clock = Clock(time_source=lambda: wall["now"])
     s = MarketStore(tmp_path / "market.duckdb", tmp_path / "parquet", clock)
@@ -377,19 +373,17 @@ def test_missing_tick_root_is_a_clean_no_op(tmp_path):
 
 def test_skipped_result_defaults_are_watermark_neutral() -> None:
     """``engine.ops.jobs._job_result_ok`` reads a job result's ``.ok`` — a skip must leave it True
-    (and touch nothing else) so the in-flight run owns the day's real watermark outcome, not this
-    no-op (2026-08-14)."""
+    (and touch nothing else) so the in-flight run owns the day's real watermark outcome."""
     result = TickCompactionResult(skipped_in_flight=True)
     assert result.ok is True
     assert (result.dates, result.symbol_days_compacted, result.failures) == ([], 0, [])
 
 
 def test_two_concurrent_calls_exactly_one_does_the_work(store, tmp_path, monkeypatch) -> None:
-    """2026-08-14 live: the post-arm one-shot and the 22:30 scheduled slot both reached
-    ``compact_ticks`` for the same partitions (the ``CatchUpRunner`` single-flight does not
-    cover this path), producing 78 read-time failures. The module-level lock makes this
-    single-flight: exactly one caller does the work, the other returns the skip shape without ever
-    touching the store or the filesystem."""
+    """The post-arm one-shot and the 22:30 slot can both reach ``compact_ticks`` (the
+    ``CatchUpRunner`` single-flight does not cover this path). The module-level lock makes it
+    single-flight: one caller does the work, the other returns the skip shape without touching the
+    store or the filesystem."""
     _write_fragments(store, YESTERDAY, n=3)
     entered = threading.Event()
     release = threading.Event()
@@ -430,9 +424,9 @@ def test_two_concurrent_calls_exactly_one_does_the_work(store, tmp_path, monkeyp
 def test_vanished_fragments_log_a_warning_without_a_traceback_and_the_run_continues(
     store, tmp_path, monkeypatch, caplog
 ) -> None:
-    """2026-08-14: a concurrent compactor can unlink these exact fragments between this run's glob
-    and DuckDB's read of them — known and benign now, so it is a one-line WARNING (no traceback),
-    ``result.ok`` stays True, and the run still reaches the NEXT symbol-day rather than stopping."""
+    """A concurrent compactor can unlink these fragments between this run's glob and DuckDB's read:
+    benign, so a one-line WARNING (no traceback), ``result.ok`` stays True, and the run still
+    reaches the NEXT symbol-day."""
     _write_fragments(store, YESTERDAY, symbol="AAA", n=3)        # will "vanish" underneath this run
     _write_fragments(store, YESTERDAY, symbol="BBB", n=2)        # must still compact normally
     real_write_compacted = tick_compact_module._write_compacted
@@ -480,7 +474,7 @@ def test_a_run_is_bounded_and_resumes_where_it_stopped(store, tmp_path):
 
 
 def test_a_run_ends_before_the_next_symbol_day_once_stop_fires(store, tmp_path):
-    """2026-09-29: ``stop`` (the tick_compact no-run window, or a stop signal) ends a run between symbol-days —
+    """``stop`` (the tick_compact no-run window, or a stop signal) ends a run between symbol-days —
     never inside one — and the result is unfinished, so its runner records no watermark and a later
     pass resumes it."""
     for symbol in ("AAA", "BBB", "CCC"):
@@ -501,9 +495,9 @@ def test_a_run_ends_before_the_next_symbol_day_once_stop_fires(store, tmp_path):
 
 
 def test_compaction_connection_is_memory_bounded(store, tmp_path):
-    """2026-08-18 (the 53 GB incident): the compaction connection must carry an explicit DuckDB
-    memory_limit and a spill temp_directory inside ticks/, and the dot-named spill dir must be
-    invisible to the date-partition enumeration (a run with it present still succeeds)."""
+    """The compaction connection carries an explicit DuckDB memory_limit and a spill
+    temp_directory inside ticks/, and the dot-named spill dir is invisible to the date-partition
+    enumeration (a run with it present still succeeds)."""
     ticks_root = tmp_path / "ticks"
     ticks_root.mkdir(parents=True, exist_ok=True)
     con = tick_compact_module._open_connection(ticks_root)

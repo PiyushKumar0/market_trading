@@ -2,11 +2,11 @@
 ``config/costs.yaml``; the DP multi-scrip case; min_viable_qty shrink/reject boundaries; banded
 tick rounding via ``InstrumentStore.round_to_tick``; the measured bid-ask spread component; and the zero-hardcoded-rates guarantee (rates flow from the yaml).
 
-Spread convention under test (2026-08-13): the worked examples remain **fees only** and
-paisa-exact — they are the contract-note anchor, and the broker never bills a spread. ``round_trip``
-adds ONE extra component, ``spread`` = ``spread_pct`` x notional (half the quoted spread on each of
-the two legs), so ``total_cost`` = fees + spread and ``breakeven_pct`` is the full friction the risk gate's
-viability check must clear. ``fee_breakeven_pct`` is the fees-only view.
+Spread convention under test: the worked examples are **fees only** and paisa-exact (the
+contract-note anchor; the broker never bills a spread). ``round_trip`` adds ONE extra component,
+``spread`` = ``spread_pct`` x notional (half the quoted spread on each of the two legs), so
+``total_cost`` = fees + spread and ``breakeven_pct`` is the full friction the risk gate's viability
+check must clear. ``fee_breakeven_pct`` is the fees-only view.
 """
 
 from __future__ import annotations
@@ -55,13 +55,12 @@ def sizing_model(rates, instruments) -> CostModel:
 
 
 # ------------------------------------------------------------------ worked examples, to the paisa
-# Hand-derived from the 2026-06-11 config/costs.yaml rates (contract-note rounding: each component
+# Hand-derived from the config/costs.yaml rates (contract-note rounding: each component
 # exact-then-paisa-quantized, GST on the RAW brokerage+txn+SEBI bases, total = sum of quantized
 # components). If a re-scrape changes costs.yaml these literals MUST be re-derived alongside it.
 #
-# These are the STATUTORY FEE components ONLY and are UNCHANGED by the spread addition — the spread is asserted
-# separately below (SPREAD_COMPONENT / WORKED_TOTALS_WITH_SPREAD), because the contract note the
-# ~Rs21/Rs60/Rs83 anchors were verified against contains fees and no spread.
+# STATUTORY FEE components ONLY: the spread is asserted separately below (SPREAD_COMPONENT /
+# WORKED_TOTALS_WITH_SPREAD), because the ~Rs21/Rs60/Rs83 contract-note anchors contain no spread.
 WORKED_EXAMPLES = {
     # (product, notional, n_scrips): {component: paisa-exact Decimal}
     ("MIS", Decimal("20000"), 1): {           # intraday Rs 20k round trip ~= Rs 21
@@ -92,7 +91,7 @@ WORKED_EXAMPLES = {
         "dp": Decimal("0.00"),
     },
 }
-#: FEES-only totals (spread excluded) — the contract-note anchor, unchanged by the spread addition.
+#: FEES-only totals (spread excluded) — the contract-note anchor.
 WORKED_TOTALS = {
     ("MIS", Decimal("20000"), 1): (Decimal("21.26"), Decimal("0.106300")),
     ("CNC", Decimal("20000"), 1): (Decimal("59.84"), Decimal("0.299200")),
@@ -256,8 +255,8 @@ def test_min_viable_qty_small_edge_needs_size_and_boundary_is_exact(sizing_model
     assert edge < required * model.breakeven_pct(Decimal(qty - 1) * Decimal("100.00"), "CNC")
     # Sanity band: the 0.5% edge must cover 2x (proportional CNC costs + spread) = 2 x 0.2425%,
     # leaving only ~0.0075% of notional for the flat DP 15.34 -> around Rs 2.0-2.2 lakh.
-    # BEFORE the spread component this band was Rs 51-62k: the 0.02% spread does NOT amortize with size, so it eats
-    # most of the headroom the flat DP charge used to be shrunk into. Intended (gate tightens).
+    # The 0.02% spread does NOT amortize with size, so it eats most of the headroom the flat DP
+    # charge is shrunk into.
     assert 195_000 < qty * 100 < 215_000
 
 

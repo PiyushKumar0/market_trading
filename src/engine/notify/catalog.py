@@ -90,8 +90,8 @@ class MessageKind(StrEnum):
     CAPITAL_CHANGED = "capital_changed"
     """The owner changed ``limits.yaml capital_base_inr`` from the dashboard: the file was
     re-signed and reloaded, so every limit already uses the new base. Old → new for every figure that
-    moved, plus the reminder to commit the file (a stash or checkout would revert it, and the next boot would FREEZE, or KILL if a real
-    position is open)."""
+    moved, plus the reminder to commit the file (a revert would make the next boot FREEZE, or KILL
+    if a real position is open)."""
 
     LOGIN_PROMPT = "login_prompt"
     """The daily Kite login is required — the owner must open the login URL and return the
@@ -106,24 +106,21 @@ class MessageKind(StrEnum):
 
     FEED_DEGRADED = "feed_degraded"
     """The live tick feed went silent DURING market hours while the child's 1 s heartbeats keep it
-    HEALTHY (2026-07-22 tickless-HEALTHY session). Heartbeats are KiteTicker-independent, so a
-    feed delivering ZERO ticks used to read HEALTHY all day and write zero self-built bars in silence.
-    Distinct from FEED_STALE (heartbeat silence ⇒ kill+respawn+FROZEN, critical): DEGRADED is
-    ``warning`` — the child is alive, the FEED is not delivering ticks. Recovers automatically the
-    moment ticks resume."""
+    HEALTHY (heartbeats are KiteTicker-independent). Distinct from FEED_STALE (heartbeat silence ⇒
+    kill+respawn+FROZEN, critical): DEGRADED is ``warning`` — the child is alive, the FEED is not
+    delivering ticks. Recovers automatically the moment ticks resume."""
 
     FEED_WEDGED = "feed_wedged"
-    """The live tick feed is WEDGED: repeated WARMING-timeout respawns never reached HEALTHY
-    (2026-07-23 13:41 sleep/resume incident). The supervisor keeps retrying at capped backoff, but
-    after ``ticker.max_wedge_respawns`` consecutive attempts the feed has still failed to come up —
-    a structural fault (dead child / no network / rejected token) that needs owner attention. Escalated
-    ONCE per wedge episode (``warning``, not a per-respawn page); recovers automatically the moment a
-    respawn finally heartbeats."""
+    """The live tick feed is WEDGED: repeated WARMING-timeout respawns never reached HEALTHY. The
+    supervisor keeps retrying at capped backoff, but after ``ticker.max_wedge_respawns`` consecutive
+    attempts the feed has still failed to come up — a structural fault (dead child / no network /
+    rejected token). Escalated ONCE per wedge episode (``warning``, not a per-respawn page);
+    recovers automatically the moment a respawn heartbeats."""
 
     FEED_SILENT_UNRECOVERED = "feed_silent_unrecovered"
     """The live tick feed stayed silent in session through ``ticker.max_tick_silence_respawns`` fresh
-    connections (2026-11-03 silent connected feed): the child heartbeats and Kite answers pings, but no
-    tick arrives. Escalated ONCE per silence episode (``warning``); the supervisor stays DEGRADED and
+    connections: the child heartbeats and Kite answers pings, but no tick arrives. Escalated ONCE
+    per silence episode (``warning``); the supervisor stays DEGRADED and
     stops respawning until a tick arrives or the next session opens. Distinct from FEED_DEGRADED (the
     first, one-shot notice of the same episode) and FEED_WEDGED (the child never heartbeats)."""
 
@@ -135,9 +132,8 @@ class MessageKind(StrEnum):
 
     POSITION_NOT_IN_HOLDINGS = "position_not_in_holdings"
     """The holdings reconcile found a tracked OPEN CNC position that is ABSENT or SHORT in the
-    broker's holdings (owner-directed 2026-09-07): the owner almost certainly sold it and never sent
-    ``/closed``, so the platform is tracking — and blocking new buys on — a position that no longer
-    exists. One alert per position per trading day, naming the exact ``/closed <entry_rec_id> <price>``
+    broker's holdings: the owner almost certainly sold it and never sent ``/closed``, so the
+    platform is tracking — and blocking new buys on — a position that no longer exists. One alert per position per trading day, naming the exact ``/closed <entry_rec_id> <price>``
     reply. Alert-only: the platform never auto-closes a human-owned position (the exit price is the
     owner's fact) and never touches risk state on this signal."""
 
@@ -193,8 +189,8 @@ class MessageKind(StrEnum):
     deterministic strategies — it just stops originating on news (``CATALYST_DISABLED``)."""
 
     SCAN_SWEEP = "scan_sweep"
-    """An on-demand scanner sweep completed (2026-07-29): fired when the
-    trade window becomes active or the owner asks via ``/scan_now``. Carries the explicit verdict —
+    """An on-demand scanner sweep completed: fired when the trade window becomes active or the
+    owner asks via ``/scan_now``. Carries the explicit verdict —
     candidates published now, plus the deterministic PENDING arm levels ("X arms below ₹N") so the
     owner can decide whether shifting the window is worth it. Never silent: "nothing to trade right
     now" is a first-class answer."""
@@ -208,11 +204,10 @@ class MessageKind(StrEnum):
     BACKGROUND recovery is never silent. Info severity unless a step failed (then warning)."""
 
     EARLY_HYDRATION = "early_hydration"
-    """The early-hydration pass ran (owner-directed 2026-09-09): an early Kite login (~06:30) on
-    a trading day pulled the pre-open chain — surveillance, universe, news chain, catalyst digest,
-    pre-open planner — forward from its 08:20–08:50 clock, so the digest exists before the window
-    opens on days the owner is travelling at 08:15. Carries the per-job outcome (ran / already run /
-    failed); info severity unless a job failed (then warning)."""
+    """The early-hydration pass ran: an early Kite login on a trading day pulled the pre-open
+    chain — surveillance, universe, news chain, catalyst digest, pre-open planner — forward from
+    its 08:20–08:50 clock. Carries the per-job outcome (ran / already run / failed); info severity
+    unless a job failed (then warning)."""
 
     CALENDAR_HORIZON = "calendar_horizon"
     """The verified trading calendar ends within ``clock.calendar_horizon_alert_sessions`` sessions."""

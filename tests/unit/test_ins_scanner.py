@@ -1,4 +1,4 @@
-"""``ins`` scanner (2026-08-17) — crossing row -> SignalCandidate translation.
+"""``ins`` scanner — crossing row -> SignalCandidate translation.
 
 PINNED worked example: a ₹1cr-threshold crossing worth ₹3cr on a symbol whose crossing-session close
 was 100.00, at a 6% stop. All arithmetic is hand-computed and params are passed explicitly,
@@ -38,7 +38,7 @@ def _crossing(
 # =========================================================================== pinned level math
 def test_pinned_level_math_entry_stop_and_no_target():
     """entry = the pre-open reference (the crossing session's close); stop = entry x (1 - 6/100);
-    target = None — the validated design has no price target and one is never invented."""
+    target = None (the design has no price target)."""
     cand = scan_crossing(_crossing(), params=P)
     assert cand is not None
     assert cand.strategy_id == "ins"
@@ -84,12 +84,10 @@ def test_alternate_stop_pct_moves_only_the_stop():
 
 # =========================================================================== tick-rounding degeneracy
 def test_tick_rounding_degeneracy_emits_nothing():
-    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry`` — the
-    ``levels_coherent`` shape is then unsatisfiable and the rule must emit NOTHING rather than ship
-    an incoherent plan (the brk20 convention: coherence is tested AFTER rounding, not before).
+    """A stop distance that vanishes under NSE's ₹0.05 tick leaves ``stop >= entry``: the rule emits
+    NOTHING rather than an incoherent plan (coherence is tested AFTER rounding).
 
-    Hand-computed at a 6% stop: 0.40 x 0.94 = 0.376, which is 7.52 ticks and rounds HALF-UP to
-    8 ticks = 0.40 — straight back onto the entry, leaving no risk distance at all."""
+    At a 6% stop: 0.40 x 0.94 = 0.376 = 7.52 ticks, rounds HALF-UP to 8 ticks = 0.40 = entry."""
     assert scan_crossing(_crossing(close="0.40"), params=P) is None
     # Everything below it collapses the same way (the stop distance is sub-half-tick throughout).
     for close in ("0.05", "0.15", "0.25", "0.35"):
@@ -97,7 +95,7 @@ def test_tick_rounding_degeneracy_emits_nothing():
 
 
 def test_tick_rounding_boundary_the_smallest_price_that_still_emits():
-    """The EXACT boundary of the degeneracy above, hand-computed at a 6% stop:
+    """The EXACT boundary of the degeneracy above, at a 6% stop:
 
     * entry 0.40 -> 0.376 = 7.52 ticks -> half-up 8 ticks = 0.40 == entry  => refuses (above).
     * entry 0.45 -> 0.423 = 8.46 ticks -> half-up 8 ticks = 0.40 <  entry  => emits, by one tick.

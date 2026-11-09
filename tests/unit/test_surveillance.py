@@ -95,7 +95,7 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     assert lists.asm == {"ASMLONG", "ASMSHORT"}         # nested long/short shapes both walked
     assert lists.t2t == {"T2TSTK", "T2TBZ"}             # BE + BZ series; EQ row not T2T
     assert lists.esm == {"ESMSTK"}
-    assert lists.sms == frozenset()                     # retired source (NSE 404, 2026-07-28) — pinned empty
+    assert lists.sms == frozenset()                     # retired source (NSE 404) — pinned empty
     assert lists.degraded_sources == () and lists.unconfirmed_symbols == frozenset()
     assert lists.as_of == D
 
@@ -104,7 +104,7 @@ async def test_refresh_parses_all_sources(tmp_path, clock):
     assert lists.reasons_for("gsmstk") == ["surveillance_gsm"]      # case-insensitive
     assert lists.reasons_for("NORMALEQ") == []
 
-    # Listed-equity master (2026-09-01 batch-universe extended leg): EQ-series rows of the same
+    # Listed-equity master (batch-universe extended leg): EQ-series rows of the same
     # EQUITY_L pass — companies only, never part of flagged()/reasons_for.
     assert lists.equity_master == {"NORMALEQ"}
 
@@ -140,8 +140,8 @@ async def test_failed_source_reuses_yesterday_and_alerts(tmp_path, clock):
 
 async def test_failed_t2t_reuses_yesterdays_equity_master(tmp_path, clock):
     """The equity master rides the T2T download (one EQUITY_L pass) — a failed fetch reuses the
-    cached master exactly like the cached T2T list (2026-09-01 extended leg, fail-closed-not-empty
-    only when BOTH source and cache are gone)."""
+    cached master exactly like the cached T2T list (fail-closed-not-empty only when BOTH source
+    and cache are gone)."""
     await make_ingest(tmp_path, clock).refresh()        # seed the cache
 
     ingest = make_ingest(tmp_path, clock, fail_urls={sv.NSE_T2T_URL})

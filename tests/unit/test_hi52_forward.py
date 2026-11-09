@@ -65,7 +65,7 @@ def test_the_verdict_rule_is_exactly_as_pre_registered():
 
 def test_the_entry_is_the_journal_day_s_own_open_and_exits_count_sessions_across_a_holiday_gap():
     """Entry is the journal day's OWN open — the backtest's anchor — and T+k is the close of the
-    k-th session of the HOLD, never calendar days (2026-09-12 manager decision).
+    k-th session of the HOLD, never calendar days.
 
     `d` is the session AFTER the trigger `y`, so `open(d)` IS `backtest_hi52`'s `open(y+1)` and
     `close(d + k-1)` IS its `close(y+k)`: the forward test measures the same quantity the registered
@@ -90,10 +90,9 @@ def test_the_entry_is_the_journal_day_s_own_open_and_exits_count_sessions_across
 
 
 def test_the_horizon_indexing_is_the_backtest_s_own_k_session_hold():
-    """The anchor change is only worth anything if the HORIZON matches too: `hi52`'s registered edge
-    is `close(y+20)/open(y+1)`, a 20-session hold. Measured off
-    `d = y+1` that is `close[19]`, not `close[20]` — one bar of drift would quietly make the kill
-    criterion test a 21-session rule."""
+    """The HORIZON must match the anchor: `hi52`'s registered edge is `close(y+20)/open(y+1)`, a
+    20-session hold. Measured off `d = y+1` that is `close[19]`, not `close[20]` — one bar of drift
+    would make the kill criterion test a 21-session rule."""
     dates = _sessions(21)
     # A series that moves ONLY on the 21st session: a T+20 that read close[20] would see +50%.
     series = Series("EXACT", dates, [100.0] * 21, [100.0] * 20 + [150.0])

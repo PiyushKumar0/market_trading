@@ -246,7 +246,7 @@ def test_debounce_state_roundtrip(tmp_path):
 def test_trading_day_predicate_agrees_with_the_live_engine_calendar():
     """The watchdog reads the calendar YAML itself (import allowlist) and must agree with the engine's
     NSECalendar(strict=True, include_special=False) on every shipped date, else it pages
-    SCHEDULED_START_MISSED on a day the engine treats as closed (2026-10-11: special sessions closed)."""
+    SCHEDULED_START_MISSED on a day the engine treats as closed (special sessions are closed)."""
     cal_dir = config_dir() / "calendar"
     predicate = wd.make_trading_day_fn(cal_dir)
     engine = NSECalendar(cal_dir, Clock(), strict=True, include_special=False)

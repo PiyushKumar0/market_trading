@@ -1,17 +1,15 @@
-"""Early hydration login hook (owner-directed 2026-09-09).
+"""Early hydration login hook.
 
-The owner leaves at 08:15 and boots the PC 09:30–10:00 — the pre-open chain then fires after the
-trade window opens and the digest-before-open criterion reads 61%. On the days they log in early
-(~06:30), :class:`EarlyHydration` turns that login into the pre-open chain: trading day + before
-session open ⇒ wait for ``scheduler.start()`` (never run the chain ahead of arming) ⇒ wait for
-the sibling ``PostLoginRecovery`` task ⇒ ``CatchUpRunner.hydrate_ahead`` ⇒ one owner line.
+A login before the session open runs the pre-open chain early: :class:`EarlyHydration` turns it
+into trading day + before session open ⇒ wait for ``scheduler.start()`` (never run the chain ahead
+of arming) ⇒ wait for the sibling ``PostLoginRecovery`` task ⇒ ``CatchUpRunner.hydrate_ahead`` ⇒
+one owner line.
 
 These tests pin the DECISION table (the hydration itself is pinned in ``test_catchup_runner.py``):
 before-open hydrates once armed, at/after open is the boot/sweep catch-up's business, a non-trading
-day and an un-armed scheduler do nothing, and no failure ever escapes into the login path. Plus the
-two 2026-09-09 review corrections: the recovery dependency is a real EVENT (login hooks are
-concurrent tasks) that times out into a log line rather than an abort, and the session open is
-resolved per login, not frozen at boot.
+day and an un-armed scheduler do nothing, and no failure ever escapes into the login path. The
+recovery dependency is a real EVENT (login hooks are concurrent tasks) that times out into a log
+line rather than an abort, and the session open is resolved per login, not frozen at boot.
 """
 
 from __future__ import annotations
@@ -91,12 +89,11 @@ def _hook(
 async def test_the_early_hook_hydrates_once_the_scheduler_is_armed(
     calendar, method: str, reason: str
 ) -> None:
-    """The whole point: a 06:32 login runs the pre-open chain hours ahead of its clock — but only
-    behind an armed scheduler, so it WAITS while the boot is still coming up.
+    """A 06:32 login runs the pre-open chain hours ahead of its clock — but only behind an armed
+    scheduler, so it WAITS while the boot is still coming up.
 
-    ``on_boot`` (2026-09-21) runs the identical chain once at process boot, under the same gates: on
-    2026-09-16 the engine booted 06:58 with no Kite login until 10:04, the PC slept 08:00-10:00 through
-    the scheduled 08:20-08:50 fires, and the catalyst digest landed 10:18, after the open."""
+    ``on_boot`` runs the identical chain once at process boot, under the same gates (a boot with no
+    Kite login would otherwise miss the scheduled pre-open fires)."""
     catch_up = _FakeCatchUp({"universe_build": "ran"})
     armed = asyncio.Event()
     hook = _hook(catch_up, calendar, at=EARLY, armed=armed)
@@ -113,9 +110,8 @@ async def test_the_early_hook_hydrates_once_the_scheduler_is_armed(
 
 @pytest.mark.asyncio
 async def test_the_session_open_is_handed_to_the_runner_as_not_after(calendar) -> None:
-    """2026-09-10 09:06 login: the hook's own gates passed, then ``hydrate_ahead`` queued 36 minutes
-    on the pass lock and ran in-session. The runner re-checks the boundary once it holds the lock,
-    so the hook must hand it the day's open."""
+    """``hydrate_ahead`` can queue on the pass lock past the open; the runner re-checks the
+    boundary once it holds the lock, so the hook must hand it the day's open."""
     catch_up = _FakeCatchUp({"universe_build": "ran"})
     armed = asyncio.Event()
     armed.set()
@@ -175,12 +171,11 @@ async def test_arm_timeout_gives_up_without_hydrating(calendar, caplog, monkeypa
     assert [r for r in caplog.records if r.getMessage() == "early_hydration_arm_timeout"]
 
 
-# ------------------------------------------- the PostLoginRecovery dependency (2026-09-09 review)
-# ``SessionManager._fire_login_hooks`` creates ONE TASK PER HOOK, so registering this hook after the
-# recovery orders nothing — the two run concurrently. The recovery's ``completed`` event is what
-# actually sequences them, and it is a preference, not a hard requirement: the chain needs no Kite
-# session, so a recovery that never finishes must be logged and stepped over, never abort the day's
-# hydration.
+# ------------------------------------------- the PostLoginRecovery dependency
+# ``SessionManager._fire_login_hooks`` creates ONE TASK PER HOOK, so registration order orders
+# nothing — the hooks run concurrently. The recovery's ``completed`` event sequences them, and it
+# is a preference, not a requirement: the chain needs no Kite session, so a recovery that never
+# finishes must be logged and stepped over, never abort the day's hydration.
 
 
 @pytest.mark.asyncio
@@ -252,11 +247,10 @@ async def test_session_open_is_resolved_per_login_not_frozen_at_boot(calendar, c
     assert [r for r in caplog.records if r.getMessage() == "early_hydration_skipped_session_open"]
 
 
-# --------------------------------- gate re-applied after the waits (2026-09-09 review)
-# Both waits are bounded at up to 900s each — a login parked on either can cross the session open
-# before ``hydrate_ahead`` ever runs. The pre-wait ``now`` used for the initial gate is then stale for
-# BOTH the gate and the reporting stamp; the fix re-reads the clock after both waits and re-applies the
-# identical open check.
+# --------------------------------- gate re-applied after the waits
+# Both waits are bounded at up to 900s each, so a parked login can cross the session open before
+# ``hydrate_ahead`` runs. The pre-wait ``now`` is then stale for both the gate and the reporting
+# stamp: the clock is re-read after both waits and the open check re-applied.
 
 
 @pytest.mark.asyncio

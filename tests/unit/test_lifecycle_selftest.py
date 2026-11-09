@@ -120,7 +120,7 @@ async def test_selftest_equity_ladder_applies_breached_rung_on_startup(conn, clo
     mode = ModeManager(conn, clock, None, calendar)
     kill = KillSwitch(conn, clock)
     latch = RiskStateLatch(conn, clock, mode)
-    # Owner decision 2026-09-07: base 40000 / caps 6-2-4
+    # Pinned base 40000 / caps 6-2-4.
     # A closed platform position realizing −₹4,100 net ⇒ equity 35,900 ≤ 36,000 (−10% of 40k).
     conn.execute(
         "INSERT INTO positions (position_id, symbol, side, product, qty, avg_entry, state, origin,"
@@ -286,8 +286,8 @@ def test_catch_up_watermarks(conn, clock):
 
 @pytest.mark.asyncio
 async def test_warmup_lift_preserves_standing_owner_pause(conn, clock, temp_config, monkeypatch):
-    """2026-07-28 review: the post-login warm-up lift must clear ONLY its own causes — a standing
-    /pause_entries (owner_pause, FROZEN) survives the lift instead of being erased to NORMAL."""
+    """The post-login warm-up lift clears ONLY its own causes — a standing /pause_entries
+    (owner_pause, FROZEN) survives it instead of being erased to NORMAL."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE, RiskStateLatch
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -346,9 +346,8 @@ def _build_with_latch(conn, clock, temp_config, *, catch_up=None):
 
 @pytest.mark.asyncio
 async def test_startup_clears_stale_catchup_safety_latch(conn, clock, temp_config, monkeypatch):
-    """Catch-up safety latch inverse: a CLEAN catch-up pass clears a prior boot's catchup_safety_jobs latch.
-    2026-09-01: the cause had a set site (startup catch-up freeze) but no clear site anywhere, so one transient
-    08-31 boot failure kept entries FROZEN for two full sessions after the catch-up had recovered."""
+    """A CLEAN catch-up pass clears a prior boot's catchup_safety_jobs latch (otherwise one
+    transient boot failure keeps entries FROZEN after the catch-up has recovered)."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     mode, _kill, latch, lifecycle = _build_with_latch(conn, clock, temp_config)
     # The stale latch a prior boot left behind (set path: the startup catch-up freeze on frozen_reasons).
@@ -366,7 +365,7 @@ async def test_startup_clears_stale_catchup_safety_latch(conn, clock, temp_confi
 @pytest.mark.asyncio
 async def test_startup_catchup_clear_respects_other_causes(conn, clock, temp_config, monkeypatch):
     """The catch-up clear is cause-scoped: a standing owner_pause survives it (same clear-only-what-
-    was-re-verified rule as the warm-up lift, 2026-07-28 review)."""
+    was-re-verified rule as the warm-up lift)."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -404,9 +403,8 @@ async def test_startup_freezes_on_catchup_safety_failure(conn, clock, temp_confi
 
 @pytest.mark.asyncio
 async def test_startup_clears_integrity_latch_once_stores_verify(conn, clock, temp_config, monkeypatch):
-    """Inverse: a boot whose protected stores all verify clears a prior boot's
-    protected_store_integrity latch (2026-10-11: the cause had a set site and no clear site, so a
-    botched owner reseed would have kept entries FROZEN across restarts until a hand DB edit)."""
+    """A boot whose protected stores all verify clears a prior boot's protected_store_integrity
+    latch (otherwise a botched owner reseed keeps entries FROZEN across restarts)."""
     from engine.risk.causes import CAUSE_OWNER_PAUSE
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

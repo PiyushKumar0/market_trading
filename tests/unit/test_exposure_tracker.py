@@ -144,7 +144,7 @@ def test_day_mtm_counts_offline_loss_on_first_run(conn, clock):
 
 # ----------------------------------------------------------------- base-agnostic brakes
 def test_a_base_change_is_not_day_pnl(conn, clock):
-    """2026-09-07 replay: the base moved 20k -> 40k mid-session. Day MTM is the P&L move only."""
+    """The base moves 20k -> 40k mid-session: day MTM is the P&L move only."""
     base = {"v": Decimal("20000")}
     t = ExposureTracker(conn, clock, lambda: base["v"])
     _snapshot(conn, "2026-06-16T15:29:00+05:30", "19154.40", "0", "-845.60")   # prior session, base 20k
@@ -210,7 +210,7 @@ async def test_a_what_if_copy_never_writes(conn, clock):
 
 
 def test_baseline_survives_a_restart_and_a_base_change(conn, clock):
-    """Review focus 4: a fresh tracker (restart) reads the same baseline from the P&L columns."""
+    """A fresh tracker (restart) reads the same baseline from the P&L columns."""
     _snapshot(conn, "2026-06-16T15:29:00+05:30", "39500", "-500", "0")
     before = ExposureTracker(conn, clock, Decimal("40000")).day_mtm(date(2026, 6, 17))
     after = ExposureTracker(conn, clock, Decimal("60000")).day_mtm(date(2026, 6, 17))

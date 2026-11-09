@@ -1,4 +1,4 @@
-"""PaperBroker fill-model config + math (2026-09-10).
+"""PaperBroker fill-model config + math.
 
 The fill model is the conservatism contract of the paper tier: every knob here exists so a
 paper fill is never *better* than a live fill would plausibly have been. These tests pin:
@@ -58,7 +58,7 @@ def test_bucket_boundaries(cfg: FillModelConfig, at: time, expected: str) -> Non
 
 
 def test_default_k_is_conservative_at_the_edges(cfg: FillModelConfig) -> None:
-    # open/close are the thin, violent buckets: k=1.0. Mid is the calm one: k=0.5 (plan 3.2.9).
+    # open/close are the thin, violent buckets: k=1.0. Mid is the calm one: k=0.5.
     assert cfg.k_for("open") == Decimal("1.0")
     assert cfg.k_for("mid") == Decimal("0.5")
     assert cfg.k_for("close") == Decimal("1.0")
@@ -107,7 +107,7 @@ def test_half_spread_uses_per_symbol_median_before_tick_fallback() -> None:
 
 
 def test_half_spread_median_of_zero_is_rejected_and_falls_back() -> None:
-    # A calibration row that came out 0 must NOT disarm the conservatism (plan 3.2.9 "never 0").
+    # A calibration row that came out 0 must NOT disarm the conservatism (never 0).
     cfg = FillModelConfig.model_validate({"symbols": {"TCS": {"median_half_spread_pct": 0.0}}})
     hs, estimated = cfg.half_spread("TCS", None, None, Decimal("100"), TICK)
     assert hs == Decimal("0.10")
@@ -117,16 +117,13 @@ def test_half_spread_median_of_zero_is_rejected_and_falls_back() -> None:
 def test_calibrated_median_is_floored_at_half_a_tick_not_at_the_two_tick_fallback() -> None:
     """The calibrated branch's floor is HALF A TICK -- the physical floor, not the 2-tick default.
 
-    Manager decision, 2026-09-10. The measured per-symbol median tracks the real
-    L1 book to the paisa, and on this account's corpus most books are ONE tick wide, so a calibrated
-    median that lands under ``half_spread_fallback_ticks x tick_size`` is evidence, not an error --
-    the 2-tick fallback is an ignorance default for symbols with no measurement at all. What a
-    calibrated median may never do is resolve to something no book could quote: a market cannot be
-    tighter than one tick, so half of one tick is the floor.
+    Most books are ONE tick wide, so a calibrated median under ``half_spread_fallback_ticks x
+    tick_size`` is evidence, not an error; the 2-tick fallback is an ignorance default for symbols
+    with no measurement. A calibrated median may never resolve to something no book could quote:
+    a market cannot be tighter than one tick.
 
-    The bite is a symbol calibrated at a HIGH price and evaluated at a LOW ltp (a split, a collapse,
-    or simply a stale calibration): ``pct``-of-ltp then shrinks below a tick and the fill model would
-    otherwise charge a sub-paisa half-spread.
+    The floor bites for a symbol calibrated at a HIGH price and evaluated at a LOW ltp (a split, a
+    collapse, a stale calibration): ``pct``-of-ltp then shrinks below a tick.
     """
     cfg = FillModelConfig.model_validate({"symbols": {"TCS": {"median_half_spread_pct": 0.001}}})
     # 0.001% of 100 = 0.001, which is a fiftieth of a tick -- no real book quotes that.
@@ -232,10 +229,8 @@ def test_latency_timedelta(cfg: FillModelConfig) -> None:
 
 
 # --------------------------------------------------------------------------- loader default path
-# ``load_fill_model()`` with NO argument is how the engine actually calls it: it resolves
-# ``config_dir() / fill_model.yaml``. That branch is the one that ships, so both of its outcomes --
-# the file absent (e.g. an MT_CONFIG_DIR without the file, or the file deleted to roll back calibration)
-# and present -- are pinned here.
+# ``load_fill_model()`` with NO argument is how the engine calls it: it resolves
+# ``config_dir() / fill_model.yaml``. Both outcomes, file absent and present, are pinned here.
 def test_default_path_resolves_config_dir_and_defaults_when_the_file_is_absent(
     tmp_path, monkeypatch
 ) -> None:
@@ -269,25 +264,18 @@ def test_a_non_mapping_yaml_is_refused(tmp_path) -> None:
 # --------------------------------------------------------------------- shipped-config cross-check
 def test_the_shipped_calibration_speaks_this_module_s_units() -> None:
     """The SHIPPED ``config/fill_model.yaml`` must mean by ``median_half_spread_pct`` what this
-    module reads, for EVERY calibrated symbol (2026-09-10).
+    module reads, for EVERY calibrated symbol.
 
     The producer (``scripts/calibrate_fill_model.py``) and this consumer are separate programs with
-    separate loaders against one hand-written contract, and round 2 shipped them disagreeing by a
-    factor of 100: the calibrator wrote a FRACTION of mid while ``half_spread()`` below divides by
-    100. Every unit test on either side passed - each was self-consistent - and the paper broker
-    would simply have charged 1/100th of the measured spread on every non-L1 tick, the exact
-    silent-optimism failure the conservatism contract exists to prevent. Only a test that loads the real artefact through
-    the real loader can catch that, so this one does.
+    separate loaders against one hand-written contract; a unit mismatch (a FRACTION of mid vs the
+    percent ``half_spread()`` divides by 100) keeps every one-sided test green while the paper
+    broker charges 1/100th of the measured spread. Only a test that loads the real artefact through
+    the real loader catches that.
 
-    Round 4 replaces what this used to assert. It sampled three symbols and required each to resolve
-    at or above the 2-tick fallback -- a property the artefact does NOT have and should not have:
-    the 2-tick fallback is the ignorance default for a symbol with no measurement, while a large
-    minority of the shipped symbols were measured with books ONE tick wide and therefore sit below
-    it. Asserting the fallback as a floor would have forced the next calibration to inflate real
-    measurements to keep this green. What IS pinned here is the contract the consumer implements
-    over every calibrated row: the resolved half-spread is estimated, strictly positive, never
-    tighter than half a tick (the physical floor - no book quotes inside the tick), and exactly
-    ``max(ltp x pct / 100, tick / 2)``.
+    Pinned over every calibrated row: the resolved half-spread is estimated, strictly positive,
+    never tighter than half a tick (the physical floor), and exactly
+    ``max(ltp x pct / 100, tick / 2)``. The 2-tick fallback is NOT a floor here: it is the
+    ignorance default, and many symbols are measured with books ONE tick wide.
     """
     shipped = Path(__file__).resolve().parents[2] / "config" / FILL_MODEL_FILENAME
     if not shipped.exists():
@@ -311,11 +299,10 @@ def test_the_shipped_calibration_speaks_this_module_s_units() -> None:
         assert hs == max(ltp * pct / Decimal(100), floor), (symbol, pct, hs)
         pcts.append(pct)
 
-    # UNIT GUARD (this is the 100x check, and it belongs on the population, not on one row): the
-    # field is a PERCENT of mid, so a market-wide median half-spread must sit inside a plausibility
-    # band of [0.001, 1.0] percent - 0.1 bp to 100 bp. A calibrator that reverted to emitting a
-    # FRACTION drives the median to ~1e-4 and breaks the lower edge; one that multiplied by 100
-    # twice drives it to ~1.3 and breaks the upper edge. A per-symbol assertion cannot say this,
-    # because either error keeps every row internally consistent.
+    # UNIT GUARD (the 100x check; it belongs on the population, not one row): the field is a
+    # PERCENT of mid, so a market-wide median half-spread must sit in [0.001, 1.0] percent (0.1 bp
+    # to 100 bp). Emitting a FRACTION drives the median to ~1e-4 (breaks the lower edge); a double
+    # x100 drives it to ~1.3 (breaks the upper edge). Either error keeps every row internally
+    # consistent, so a per-symbol assertion cannot see it.
     median_pct = sorted(pcts)[len(pcts) // 2]
     assert Decimal("0.001") <= median_pct <= Decimal("1.0"), (median_pct, len(pcts))

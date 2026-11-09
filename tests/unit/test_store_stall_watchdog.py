@@ -1,21 +1,16 @@
-"""The store stall watchdog on the health pulse (2026-08-21).
+"""The store stall watchdog on the health pulse.
 
-The 09:56 freeze wedged every store-touching path for 14 minutes and left TWO live hypotheses
-standing, because nothing in the process was probing the resource they share. The health pulse,
-however, kept beating through the whole episode -- so it is the host for a probe that would have
-settled it: acquire the store lock, run ``SELECT 1``, and if that does not return, dump every
-thread's stack and name whoever is holding the thing.
-
-What is pinned here is the watchdog's whole contract, in the order it matters:
+The pulse hosts a probe: acquire the store lock, run ``SELECT 1``, and if that does not return,
+dump every thread's stack and name whoever is holding the lock. Pinned contract:
 
 * it detects a hang (not merely a slow call) and says so at ERROR;
 * it is SINGLE-FLIGHT -- a pulse that finds the previous probe still pending starts no new one,
   because queueing a second thread behind a seized lock is how a diagnostic becomes an incident;
 * the stacks are dumped ONCE per stall episode and again for the next one;
 * none of it can raise into, or slow down, the pulse it rides on;
-* and (2026-09-03) a stall still there on the second pulse, or a probe still swallowed after a
-  fresh one answered, is an owner-facing ``store_stalled`` problem -- in session only -- that ends
-  when the store answers, with success OR with an error.
+* a stall still there on the second pulse, or a probe still swallowed after a fresh one answered,
+  is an owner-facing ``store_stalled`` problem -- in session only -- that ends when the store
+  answers, with success OR with an error.
 """
 
 from __future__ import annotations
@@ -49,7 +44,7 @@ class Ticker:
 
 
 class HangingStore:
-    """A store whose ping ACCEPTS the call and does not answer until released -- 09:56, in a stub."""
+    """A store whose ping ACCEPTS the call and does not answer until released."""
 
     def __init__(self) -> None:
         self.gate = asyncio.Event()
@@ -97,10 +92,9 @@ async def drain_probe(mon: HealthMonitor) -> None:
 
 
 class StuckThenFreshStore:
-    """The 08-25 shape: the FIRST ping goes into the pool and never comes out (its worker was gone),
-    while the store itself is perfectly able to answer anyone who can get a thread. Under strict
-    single-flight this store looks dead forever -- the only probe that could have said otherwise was
-    the one that was never issued."""
+    """The FIRST ping goes into the pool and never comes out (its worker is gone), while the store
+    itself can answer anyone who gets a thread. Under strict single-flight it would look dead
+    forever."""
 
     def __init__(self) -> None:
         self.gate = asyncio.Event()
@@ -138,10 +132,9 @@ def paged_monitor(store, *, at: Ticker) -> tuple[HealthMonitor, list[tuple[str, 
 
 
 async def test_a_stall_that_survives_a_second_pulse_pages_the_owner_as_a_health_problem():
-    """2026-09-03: the stall was log-only (ERROR lines + a stack dump) -- the 08-21 and 08-25 freezes
-    were read off the log after the fact. One timed-out ping is an observation; the SAME stall still
-    there on the next pulse is an incident, and it rides the problem-set episode cadence: one page on the
-    change, silence while unchanged (reminder after HEALTH_REPEAT_MIN), recovery announced once."""
+    """One timed-out ping is an observation; the SAME stall still there on the next pulse is an
+    incident, and it rides the problem-set episode cadence: one page on the change, silence while
+    unchanged (reminder after HEALTH_REPEAT_MIN), recovery announced once."""
     at = Ticker(NOW)
     store = HangingStore()
     mon, alerts = paged_monitor(store, at=at)
@@ -201,8 +194,8 @@ class HangThenRaiseStore:
 
 
 async def test_a_ping_that_raises_after_a_stall_ends_the_episode(caplog):
-    """Review finding (2026-09-03): the count only ever reset on a SUCCESSFUL ping, so a store that
-    started raising after two stalled pulses would have paged 'unanswered for Ns' forever."""
+    """The stall count resets on an ERROR answer too, not only a successful ping; otherwise a store
+    that started raising after two stalled pulses would page 'unanswered for Ns' forever."""
     at = Ticker(NOW)
     store = HangThenRaiseStore()
     mon, alerts = paged_monitor(store, at=at)
@@ -227,10 +220,9 @@ async def test_a_ping_that_raises_after_a_stall_ends_the_episode(caplog):
 
 
 async def test_a_swallowed_probe_keeps_the_problem_up_until_it_returns():
-    """The anomaly (08-25 shape): the re-probe on the 5th pending pulse gets a thread and
-    answers while the first probe is still swallowed. That resets the stall count, but the pool is
-    still losing threads -- so the problem stays up (no false 'all clear', no flap back and forth
-    two pulses later) until the swallowed probe actually comes back."""
+    """The re-probe on the 5th pending pulse gets a thread and answers while the first probe is
+    still swallowed. That resets the stall count, but the pool is still losing threads -- so the
+    problem stays up (no false 'all clear', no flapping) until the swallowed probe comes back."""
     at = Ticker(NOW)
     store = StuckThenFreshStore()
     mon, alerts = paged_monitor(store, at=at)

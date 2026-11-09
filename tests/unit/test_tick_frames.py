@@ -186,12 +186,10 @@ def test_parse_tick_frame_rejects_missing_load_bearing_fields():
 
 
 def test_parse_tick_frame_rejects_an_epoch_exchange_timestamp():
-    """2026-08-20: a zeroed wire ``exchange_timestamp`` arrives as ``datetime.fromtimestamp(0)`` and
-    used to parse cleanly into a tz-aware 1970 datetime — valid to the Tick model, and a
-    ``date=1970-01-01`` tick partition in the store. It is a zeroed field, not a timestamp.
-
-    2026-08-21: this is now its OWN drop path — ``_ImplausibleTimestamp``, a ``ValueError``
-    subclass — distinct from a genuinely MISSING field (still the plain ``ValueError`` below)."""
+    """A zeroed wire ``exchange_timestamp`` arrives as ``datetime.fromtimestamp(0)``; it is a zeroed
+    field, not a timestamp, and must not parse into a tz-aware 1970 tick (a ``date=1970-01-01``
+    partition). It is its OWN drop path, ``_ImplausibleTimestamp`` (a ``ValueError`` subclass),
+    distinct from a genuinely MISSING field (the plain ``ValueError`` below)."""
     epoch_wire = dt.datetime.fromtimestamp(0).isoformat()      # what ticker/main.py would forward
     broken = {**_app()._frame_tick(_KITE_TICK), "exchange_timestamp": epoch_wire}
     with pytest.raises(_ImplausibleTimestamp, match="exchange_timestamp"):
@@ -264,14 +262,13 @@ def test_heartbeat_carries_ws_state_and_tick_age():
     assert isinstance(hb2["last_tick_age_s"], float) and hb2["last_tick_age_s"] >= 0.0
 
 
-# ------------------------------------- in-child reconnect signal (2026-09-09)
+# ------------------------------------- in-child reconnect signal
 def test_heartbeat_carries_the_connect_seq_and_it_bumps_on_every_connect():
     """`connect_seq` is the engine's in-band reconnect signal: a per-child counter on EVERY heartbeat.
 
     KiteTicker reconnects inside the child, so the supervisor sees no state transition; `ws_connected`
     alone is not enough (a sub-second drop, or an `on_error` path with no `on_close`, never reports
-    False at all — this test's second reconnect). The counter is bumped by `_on_connect` regardless of
-    how the drop was reported."""
+    False at all). The counter is bumped by `_on_connect` regardless of how the drop was reported."""
     app = _app()
     pub = _CollectingPublisher()
     app._publisher = pub
@@ -293,11 +290,11 @@ def test_heartbeat_carries_the_connect_seq_and_it_bumps_on_every_connect():
 
 
 def test_on_connect_emits_its_heartbeat_before_it_subscribes():
-    """ORDERING IS THE POINT. Kite delivers its connect-time snapshot within ~50 ms of the re-subscribe
-    — far inside the 1 s heartbeat cadence — so a reconnect signal published on the NEXT beat arrives
-    after the burst has already flapped BarBuilder's lag episode. Emitting the heartbeat at the top of
-    `_on_connect`, before `ws.subscribe`, puts the signal ahead of the snapshot ticks in the same
-    stdout pipe, which is ordered."""
+    """ORDERING IS THE POINT. Kite delivers its connect-time snapshot within ~50 ms of the
+    re-subscribe — far inside the 1 s heartbeat cadence — so a signal published on the NEXT beat
+    arrives after the burst has flapped BarBuilder's lag episode. Emitting the heartbeat at the top
+    of `_on_connect`, before `ws.subscribe`, puts it ahead of the snapshot ticks in the same
+    (ordered) stdout pipe."""
     order: list[str] = []
 
     class _OrderedPublisher(_CollectingPublisher):

@@ -234,7 +234,7 @@ async def test_a_row_with_no_official_bars_is_no_checkpoint(store, clock):
     assert {b.src for b in store.get_bars_1m("A", at(9, 15), at(9, 16))} == {"kite_official"}
 
 
-# --------------------------------------------------------------------------- TokenException abort (2026-07-21)
+# --------------------------------------------------------------------------- TokenException abort
 class _KiteTokenAfter:
     """historical() returns ``ok`` candles for the first ``die_after`` calls, then a TokenException —
     lets us assert the processed portion survives while the remaining symbols abort."""
@@ -323,9 +323,9 @@ def _official_all() -> dict[int, list[dict]]:
 
 
 async def test_rerun_resumes_only_unlogged_symbols_and_preserves_drift_rows(store, clock):
-    """2026-09-15 live bug: the retry of a partly reconciled day re-compared the processed prefix
-    against already-canonical bars (no self bars left) and overwrote its drift rows with
-    bars_compared=0. The retry must fetch only the unlogged symbols and leave A's row untouched."""
+    """The retry of a partly reconciled day must not re-compare the processed prefix against
+    already-canonical bars (it would overwrite drift rows with bars_compared=0): it fetches only
+    the unlogged symbols and leaves A's row untouched."""
     sent = []
 
     async def notify(msg):
@@ -356,7 +356,7 @@ def _drift_alerts(sent: list) -> list[list[str]]:
 
 
 async def test_non_token_exception_persists_processed_prefix_then_raises(store, clock):
-    """A 502 mid-run (2026-09-15) propagates to the runner as a failure, but the symbols processed
+    """A 502 mid-run propagates to the runner as a failure, but the symbols processed
     before it are already canonical — their rows must land, or the retry re-compares them. A's drift
     alert never went out on the failed run, so its row says alerted=False and the retry sends it:
     exactly one RECONCILE_DRIFT naming A across both runs."""
@@ -460,9 +460,9 @@ async def test_flagged_rows_stay_unalerted_without_a_notify_sink(store, clock):
 
 
 async def test_concurrent_runs_are_serialized_and_second_is_noop(store, clock):
-    """08-28 / 10-05 / 10-08 live race: the 15:50 fire and the catch-up sweep ran run(d) at the same
-    time, each fetched every symbol, and the later one zeroed every drift row. The second caller
-    must wait for the first, then find the whole day logged."""
+    """The 15:50 fire and the catch-up sweep can run run(d) at the same time; the second caller must
+    wait for the first, then find the whole day logged (otherwise it refetches every symbol and
+    zeroes every drift row)."""
     class _YieldingKite(FakeKite):
         async def historical(self, token, frm, to, interval):
             await asyncio.sleep(0)

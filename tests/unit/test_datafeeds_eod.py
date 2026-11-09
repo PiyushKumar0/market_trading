@@ -43,9 +43,8 @@ BLOCK_DEALS_JSON = json.loads((FIXTURES / "block_deals.json").read_text(encoding
 
 @pytest.fixture(autouse=True)
 def _no_backoff_wait(instant_backoff):
-    """The feeds now fetch through nse_get, which retries transient failures with exponential
-    backoff. Collapse the sleep so the degrade-path tests (failing clients) don't actually wait — the
-    retry/backoff schedule itself is asserted in test_nse_http.py."""
+    """nse_get retries transient failures with exponential backoff. Collapse the sleep so the
+    degrade-path tests don't wait — the schedule itself is asserted in test_nse_http.py."""
 
 
 @pytest.fixture
@@ -130,10 +129,9 @@ async def test_bhavcopy_failure_degrades_and_alerts(store, clock):
     ids=["bhavcopy", "earnings"],
 )
 async def test_a_repeated_failure_alerts_once(store, clock, job_cls, severity: str):
-    """2026-08-13 fix: with the watermark bug fixed, the 30-min catch-up sweeps genuinely re-run a
-    still-failing day — alerting on EVERY attempt would storm during a long NSE outage. Two
-    consecutive failing runs for the same date must produce exactly one notify, at the job's own
-    severity (earnings is SAFETY_CRITICAL)."""
+    """The 30-min catch-up sweeps re-run a still-failing day, so alerting on EVERY attempt would
+    storm during a long NSE outage. Two consecutive failing runs for the same date produce exactly
+    one notify, at the job's own severity (earnings is SAFETY_CRITICAL)."""
     msgs, sink = collect_alerts()
     job = job_cls(store, clock, failing_client(), notify=sink)
     result1 = await job.run(D)
@@ -181,7 +179,7 @@ def test_classify_purpose_deterministic():
     # Compound purpose classifies by the structural action (bonus/split before dividend).
     assert classify_purpose("Bonus 2:1 and Dividend Rs 3")[0] == "bonus"
     assert classify_purpose("Scheme of Arrangement") == ("other", None, None)   # recorded, not guessed
-    # 2026-09-03: the rescaling vocabulary the hi52 unadjusted-history veto keys on.
+    # The rescaling vocabulary the hi52 unadjusted-history veto keys on.
     assert classify_purpose("Consolidation of Equity Shares")[0] == "split"
     assert classify_purpose("Sub Division of Equity Shares From Rs 10 To Rs 1")[0] == "split"
     assert classify_purpose("Demerger")[0] == "demerger"
@@ -235,9 +233,9 @@ async def test_a_feed_failure_alerts_critical(store, clock, job_cls, job_id: str
 
 
 def test_corp_actions_url_windows_from_run_day():
-    """2026-08-14 route fix: the bare ``?index=equities`` call returns ONLY same-day ex-dates (verified
-    live) — useless for the forward-looking consumers (scan_context/preopen_planner/features.engine all
-    query ``get_corp_actions`` with an ``ex_to`` horizon), so every fetch is explicitly date-ranged."""
+    """The bare ``?index=equities`` call returns ONLY same-day ex-dates — useless for the
+    forward-looking consumers (scan_context/preopen_planner/features.engine query
+    ``get_corp_actions`` with an ``ex_to`` horizon), so every fetch is explicitly date-ranged."""
     url = ca.corp_actions_url(date(2026, 8, 14))
     assert url.startswith(ca.NSE_CORP_ACTIONS_URL)
     assert "from_date=07-08-2026" in url                  # d - 7 (_BACKWARD_WINDOW_DAYS)
@@ -293,9 +291,8 @@ async def test_earnings_run_persists_and_reads_back(store, clock):
 
 # =========================================================================== deals
 def test_parse_deals_historical_or_live_shape():
-    """The post-migration (2026-08-18) ``historicalOR/bulk-block-short-deals`` response, verbatim
-    rows from the live probe that found the new route — pins that the alias tables really do cover
-    the ``BD_*`` shape end to end (the migration shipped as a URL-only change on that claim)."""
+    """The ``historicalOR/bulk-block-short-deals`` response (verbatim live rows): the alias tables
+    cover the ``BD_*`` shape end to end."""
     payload = {"data": [
         {"BD_DT_DATE": "13-AUG-2026", "BD_DT_ORDER": "2026-08-12T18:30:00.000Z",
          "BD_SYMBOL": "APOLLOPIPE", "BD_SCRIP_NAME": "Apollo Pipes Limited",
@@ -353,10 +350,9 @@ async def test_deals_partial_failure_keeps_other_source(store, clock):
 
 
 async def test_deals_repeated_partial_failure_alerts_once(store, clock):
-    """2026-08-13 (warning-severity representative, single-alert-call-site shape that DIFFERS from
-    bhavcopy's binary ok/fail): deals' alert fires even when ``ok`` stays True (one of two sources
-    down) — the dedup guards the ``_alert`` call site itself, keyed on ``d``, not on ``ok``. Two
-    consecutive partial-failure runs for the same date must still produce exactly one notify."""
+    """Deals' alert fires even when ``ok`` stays True (one of two sources down), unlike bhavcopy's
+    binary ok/fail: the dedup guards the ``_alert`` call site itself, keyed on ``d``, not on
+    ``ok``. Two consecutive partial-failure runs for the same date produce exactly one notify."""
     def handler(request: httpx.Request) -> httpx.Response:
         if "optionType=block_deals" in str(request.url):
             raise httpx.ConnectError("blocked", request=request)

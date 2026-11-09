@@ -144,12 +144,9 @@ def test_intraday_prompt_states_the_section_5_2_hard_rules():
 
 
 def test_intraday_prompt_binds_judgement_to_the_strategy_contract():
-    """2026-08-20: the rubric half of the zero-recommendation fix.
-
-    Rule 12 used to assert that "the deterministic strategies earned their edge on price and volume
-    alone, measured over years of history" — false for six of the seven legs, and it licensed one
-    intraday day-trade rubric over all of them. Evidence status now lives per-contract
-    (``engine.strategy.contracts``), so the blanket claim must be GONE, not merely softened.
+    """The blanket claim that "the deterministic strategies earned their edge on price and volume
+    alone, measured over years of history" must be GONE from the prompt, not merely softened:
+    evidence status lives per-contract (``engine.strategy.contracts``).
     """
     prompt = intraday.SYSTEM_PROMPT
 
@@ -189,13 +186,10 @@ def test_news_prompt_anchors_the_materiality_rubric_and_the_closed_taxonomy():
     assert "below 0.2: noise or public relations" in prompt
     assert "One score per cluster" in prompt
     assert "VERBATIM STRINGS" in prompt
-    # Deliberate addition (2026-08-27 diagnostic): every original 0.8+ anchor was scaled to a single
-    # company/sector, leaving macro/market-wide news (event_type macro_data/global_market/sector_policy
-    # already exist in the closed taxonomy below) with nothing to map onto at the top tier — a real risk
-    # of under-scoring genuinely market-moving stories into the 0.2-0.5 "routine" band. This asserts the
-    # new top-tier anchor and the 0.5-0.8 tier's broadened "stock, sector or market" phrasing are both
-    # present, so a future edit that quietly drops either one fails loudly here instead of passing by
-    # omission.
+    # Macro/market-wide news (event_type macro_data/global_market/sector_policy in the closed
+    # taxonomy below) needs a top-tier anchor, or genuinely market-moving stories get under-scored
+    # into the 0.2-0.5 "routine" band. Assert the top-tier anchor and the 0.5-0.8 tier's "stock,
+    # sector or market" phrasing are both present.
     assert "OR a market-wide shock" in prompt
     assert "country-level tariff or trade-policy action" in prompt
     assert "central-bank rate decision" in prompt
@@ -213,8 +207,8 @@ def test_intraday_output_schema_is_a_discriminated_union():
     assert "discriminator" in body
     for action in ("enter", "exit", "modify-stop", "modify-target", "cancel", "no_action"):
         assert action in body
-    # The agent's KNOB schema is the FLAT guidance form (2026-07-29: the runtime's output_format
-    # silently disengages on oneOf/anyOf unions) — the union above stays the client-side contract.
+    # The agent's KNOB schema is the FLAT guidance form (the runtime's output_format silently
+    # disengages on oneOf/anyOf unions); the union above stays the client-side contract.
     assert intraday.output_json_schema() == intraday_guidance_json_schema()
 
 

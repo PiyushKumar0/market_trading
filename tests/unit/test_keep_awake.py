@@ -1,4 +1,4 @@
-"""In-session OS keep-awake (2026-07-23 13:41 sleep/resume wedge).
+"""In-session OS keep-awake.
 
 The keep-awake asserts Windows SetThreadExecutionState while the NSE session is open so the OS does not
 auto-sleep mid-session and freeze the feed; it releases at session close. Engage/release are one-shot
@@ -109,14 +109,14 @@ def test_keep_awake_never_asserts_display_required():
     assert all((flags & 0x00000002) == 0 for flags in calls)
 
 
-# ------------------------------------------------------------------ lapse check (2026-11-05 diagnosis)
+# ------------------------------------------------------------------ lapse check
 class _FakePower:
     """The two Win32 calls the lapse check uses, with both suspected lapse shapes.
 
     ``thread`` is this thread's execution state; ``registered`` is the request as the system-wide state
     counts it. It changes only when the thread's flags change, so re-asserting identical flags does not
-    re-register a request the system has lost. ``set_state(0)`` is the pure query (verified on the live
-    host 2026-11-05) and is not recorded in ``calls``.
+    re-register a request the system has lost. ``set_state(0)`` is the pure query and is not
+    recorded in ``calls``.
     """
 
     def __init__(self) -> None:
@@ -189,7 +189,7 @@ def test_lapse_check_never_touches_a_request_that_holds(caplog):
 
 def test_own_lapse_is_caught_while_another_process_keeps_the_bit_present(caplog):
     """The system-wide bit alone would hide this lapse until the other holder lets go, and the PC can
-    idle-sleep the moment that happens (11-03: sleep began the second the engine released)."""
+    idle-sleep the moment that happens."""
     power = _FakePower()
     ka = _engaged(power)
     power.others = ES_SYSTEM_REQUIRED

@@ -59,8 +59,8 @@ def store(tmp_path, clock):
 
 @pytest.mark.asyncio
 async def test_run_executes_the_cluster_pass_off_the_event_loop(store):
-    """2026-08-10: the pure-difflib pass blocked the event loop ~95 s on a weekend backlog (measured
-    90.6 s at 429×1,500). ``run()`` must execute :meth:`cluster` in a worker thread — pinned so a refactor cannot silently re-inline it."""
+    """The pure-difflib pass is slow on a large backlog: ``run()`` must execute :meth:`cluster` in a
+    worker thread so it never blocks the event loop."""
     import threading
 
     loop_thread = threading.get_ident()
@@ -229,11 +229,11 @@ async def test_run_persists_clusters_links_news_and_preserves_scores(store, cloc
     assert news_by_id["n2"]["cluster_id"] == "c-n1"
 
 
-# ----------------------------------------- partial persist -> orphan re-sweep convergence (2026-08-10)
-#: The news-chain job's orphan re-sweep's own bounds (``engine.ops.main.job_news_chain``): unclustered
+# ----------------------------------------- partial persist -> orphan re-sweep convergence
+#: The news-chain job's orphan re-sweep bounds (``engine.ops.main.job_news_chain``): unclustered
 #: headlines newer than the cutoff are re-swept, oldest-first, capped. Mirrored here so the
-#: convergence test drives the re-sweep through EXACTLY the production query (the cutoff itself is
-#: pinned in ``test_ops_main_wiring.test_orphan_resweep_abandons_headlines_older_than_four_days``).
+#: convergence test drives EXACTLY the production query (the cutoff itself is pinned in
+#: ``test_ops_main_wiring.test_orphan_resweep_abandons_headlines_older_than_four_days``).
 _RESWEEP_ABANDON_DAYS = 4
 _RESWEEP_CAP = 500
 _NEWS_ROW_KEYS = ("headline_id", "title", "source_domain", "url", "published_at")
@@ -248,13 +248,11 @@ def _persisted_state(s: MarketStore) -> tuple[list[dict], dict[str, str | None]]
 
 
 async def test_partial_persist_then_resweep_converges_on_the_clean_pass(tmp_path, clock, store):
-    """2026-08-10 filed follow-up: a resolve pass killed by the 600 s bound persists PARTIALLY — the
-    cluster upsert lands as one batch, then the per-cluster ``set_news_cluster`` loop is cut mid-way,
-    leaving inserted-but-unlinked headlines. The next chain run re-sweeps that remainder, and the
-    worklog claims it CONVERGES because :meth:`HeadlineClusterer.cluster` is pure, the cluster upsert
-    is idempotent, and ``headline_ids`` is not a persisted column. This pins that claim end-to-end:
-    the real bound (``resolve_news_bounded``), the real store, the real re-sweep query — final state
-    must be identical to a single clean pass over the same headlines, with no duplicated rows."""
+    """A resolve pass killed by the 600 s bound persists PARTIALLY: the cluster upsert lands as one
+    batch, then the per-cluster ``set_news_cluster`` loop is cut mid-way. The next chain run
+    re-sweeps the remainder and CONVERGES because :meth:`HeadlineClusterer.cluster` is pure, the
+    cluster upsert is idempotent, and ``headline_ids`` is not a persisted column. Pinned end-to-end
+    (real bound, store and re-sweep query): final state equals a single clean pass, no duplicates."""
     import asyncio
 
     from engine.ops.main import resolve_news_bounded
@@ -330,12 +328,11 @@ async def test_run_requires_store_and_handles_empty_batch(store):
     assert await wired.run([]) == []
 
 
-# --------------------------------------------------------------------------- boilerplate strip (2026-08-03)
+# --------------------------------------------------------------------------- boilerplate strip
 def test_boilerplate_phrases_do_not_contribute_to_similarity():
-    """The production-sample finding (defense-in-depth leg): template phrases are stripped from the
-    similarity input so shared boilerplate cannot glue unrelated titles together on its own. The
-    PRIMARY guard is upstream — NewsIngest drops live-blog page titles entirely (news.drop_title_patterns);
-    this strip covers residual template fragments that slip a pattern list."""
+    """Defense in depth: template phrases are stripped from the similarity input so shared
+    boilerplate cannot glue unrelated titles together. The PRIMARY guard is upstream (NewsIngest
+    drops live-blog page titles via news.drop_title_patterns); this covers residual fragments."""
     a = clusterer_normalize("Dr Reddys Share Price Live Updates")
     b = clusterer_normalize("IndusInd Bank Share Price Live Updates")
     assert "share" not in a and "updates" not in b     # template tokens gone from the similarity input
@@ -346,9 +343,9 @@ def test_boilerplate_phrases_do_not_contribute_to_similarity():
 
 
 def test_earnings_template_does_not_bridge_different_companies():
-    """Seed-6 golden pairs — the three REAL cross-company merges observed live (2026-08-03):
-    same-day "Q1 Results" template headlines cleared the 0.75 bar on shared template tokens alone.
-    With the earnings-template vocabulary stripped, similarity runs on distinctive tokens only."""
+    """Golden pairs of REAL cross-company merges: same-day "Q1 Results" template headlines cleared
+    the 0.75 bar on shared template tokens alone. With the earnings-template vocabulary stripped,
+    similarity runs on distinctive tokens only."""
     contaminated = [
         ("Maruti Suzuki Q1 Results: Profit falls 11% YoY to Rs 3,352 crore; revenue rises 36%",
          "CDSL Q1 Results: Net profit rises 15% YoY to Rs 118 crore, revenue up 13%"),
@@ -362,8 +359,7 @@ def test_earnings_template_does_not_bridge_different_companies():
 
 
 def test_same_story_rereports_still_cluster_after_template_strip():
-    """Counterpart golden pairs: near-duplicate re-reports of the SAME story (live clean clusters)
-    must stay at/above the 0.75 bar after the template strip."""
+    """Near-duplicate re-reports of the SAME story stay at/above the 0.75 bar after the strip."""
     clean = [
         ("HUL Q1 Results: Revenue rises 10% YoY to Rs 17,149 crore, but profit falls 3% on one-off tax credit",
          "HUL Q1 Results: Revenue rises 10% YoY to Rs 17,341 crore, but profit falls 3% on one-off tax credit"),
@@ -376,7 +372,7 @@ def test_same_story_rereports_still_cluster_after_template_strip():
         assert similarity(clusterer_normalize(a), clusterer_normalize(b)) >= 0.75, (a, b)
 
 
-# ------------------------------------------ token-bearing representative (2026-09-04)
+# ------------------------------------------ token-bearing representative
 def _hl(hid: str, title: str, domain: str, minutes: int) -> Headline:
     return Headline(
         headline_id=hid,

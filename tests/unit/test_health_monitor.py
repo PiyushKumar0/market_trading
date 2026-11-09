@@ -1,8 +1,8 @@
-"""HealthMonitor feed-staleness alerting — session-aware since 2026-07-31.
+"""HealthMonitor alerting: session-aware feed staleness, problem-set episodes, memory telemetry,
+origination liveness and the stopped-feed check.
 
-The midnight-rollover incident: a STALE feed out of session is DEFINITIONAL (no ticks exist at
-night), but ``check()`` flagged it unconditionally and alerted every minute from 00:32 once the
-date rolled. ``feed_stale`` is a problem ONLY while the session is open (feed lost while running).
+``feed_stale`` is a problem ONLY while the session is open: a STALE feed out of session is
+definitional (no ticks exist at night).
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ async def test_stale_in_session_is_an_incident():
 
 
 async def test_stale_out_of_session_is_definitional_not_an_incident():
-    # 00:32 the night after a trading day — the 2026-07-31 midnight-rollover alert spam.
+    # 00:32 the night after a trading day: the date has rolled but no session is open.
     mon, alerts = _monitor("STALE", datetime(2026, 6, 17, 0, 32, tzinfo=IST))
     report = await mon.check(check_skew=False)
     assert "feed_stale" not in report.problems
@@ -72,11 +72,9 @@ async def test_healthy_and_warming_raise_nothing_in_session():
         assert alerts == [], state
 
 
-# ------------------------------------------------- problem-set alert episodes (2026-08-24)
-# The pulse is 60 s and used to alert on EVERY pulse a problem existed: 57 identical
-# ``health problems: ['feed_stale']`` messages in one morning, the bulk of the 203-deep notification
-# backlog that then starved a fresh owner ack. An episode is the problem SET: a change alerts at once,
-# an unchanged set repeats at most every HEALTH_REPEAT_MIN minutes, and recovery is announced once.
+# ------------------------------------------------- problem-set alert episodes
+# An episode is the problem SET: a change alerts at once, an unchanged set repeats at most every
+# HEALTH_REPEAT_MIN minutes, and recovery is announced once.
 class _Ticker:
     """A movable time source — ``ticker.at = ...`` advances every Clock built on it."""
 
@@ -102,7 +100,7 @@ def _episodic(state: str = "STALE"):
 
 
 async def test_a_persistent_problem_alerts_once_not_once_per_pulse():
-    """The 57-messages-in-a-morning bug: ten consecutive pulses, one unchanged problem, ONE alert."""
+    """Ten consecutive pulses with one unchanged problem send ONE alert."""
     mon, alerts, ticker = _episodic()
 
     for i in range(10):
@@ -115,8 +113,7 @@ async def test_a_persistent_problem_alerts_once_not_once_per_pulse():
 
 
 async def test_an_unchanged_problem_repeats_only_after_the_quiet_window():
-    """A real outage should keep nagging — just not every minute. One reminder per
-    HEALTH_REPEAT_MIN, and the window is measured from the last alert, not from the first."""
+    """One reminder per HEALTH_REPEAT_MIN, the window measured from the last alert."""
     mon, alerts, ticker = _episodic()
 
     await mon.check(check_skew=False)                        # first pulse: alerts
@@ -131,8 +128,7 @@ async def test_an_unchanged_problem_repeats_only_after_the_quiet_window():
 
 
 async def test_recovery_is_announced_once_and_then_silence():
-    """The owner learns the incident ENDED instead of inferring it from the alerts stopping — and
-    learns it exactly once, however many clean pulses follow."""
+    """Recovery is announced exactly once, however many clean pulses follow."""
     mon, alerts, ticker = _episodic()
 
     await mon.check(check_skew=False)
@@ -146,8 +142,7 @@ async def test_recovery_is_announced_once_and_then_silence():
 
 
 async def test_a_problem_returning_after_recovery_is_a_new_episode():
-    """Post-recovery the throttle must be closed: the same problem coming back is NEWS, and waiting
-    out a window opened by the previous incident would hide it for half an hour."""
+    """Post-recovery the throttle is closed: the same problem returning alerts at once."""
     mon, alerts, ticker = _episodic()
 
     await mon.check(check_skew=False)                         # incident 1
@@ -162,9 +157,8 @@ async def test_a_problem_returning_after_recovery_is_a_new_episode():
 
 
 async def test_a_changed_problem_set_alerts_immediately():
-    """A change is news whatever the quiet window says — a problem appearing, and one clearing while
-    others remain, both alert at once. Driven through the alert seam directly so the set can be
-    varied without inventing five different machine faults."""
+    """A problem appearing, or one clearing while others remain, alerts at once whatever the quiet
+    window says. Driven through the alert seam directly to vary the set."""
     mon, alerts, ticker = _episodic()
 
     await mon._alert_problems(["feed_stale"])
@@ -194,7 +188,7 @@ async def test_an_unwired_alert_callback_is_still_a_no_op():
     assert report.problems == ["feed_stale"]
 
 
-# ------------------------------------------------------- process-memory telemetry (2026-08-17 crisis)
+# ------------------------------------------------------- process-memory telemetry
 class _FakeMemoryReader:
     """Records call count and returns a fixed :class:`ProcessMemory`."""
 
@@ -208,16 +202,14 @@ class _FakeMemoryReader:
 
 
 class _RaisingMemoryReader:
-    """Simulates an injected reader that raises directly (not caught by ProcessMemoryReader itself) —
-    exercises HealthMonitor's own defensive wrapper, not just the reader's internal try/except."""
+    """An injected reader that raises directly: exercises HealthMonitor's own defensive wrapper."""
 
     def read(self) -> ProcessMemory:
         raise RuntimeError("boom")
 
 
 async def test_process_memory_logged_every_fifth_pulse(caplog):
-    """The health pulse is 60s (settings.lifecycle.watchdog_poll_s); process_memory is sampled every
-    5th pulse (~5 min), not every pulse — see HealthMonitor.__init__ for the cadence rationale."""
+    """process_memory is sampled every 5th 60 s pulse (~5 min), not every pulse."""
     mem = ProcessMemory(private_bytes=111_222_333, working_set_bytes=44_555_666, peak_working_set_bytes=77_888_999)
     reader = _FakeMemoryReader(mem)
     clock = Clock(time_source=lambda: datetime(2026, 6, 17, 11, 0, tzinfo=IST))
@@ -235,8 +227,7 @@ async def test_process_memory_logged_every_fifth_pulse(caplog):
 
 
 async def test_process_memory_log_line_carries_the_three_counter_fields(caplog):
-    """The emitted line names exactly the fields the crisis needed: private_bytes (PagefileUsage),
-    working_set_bytes, peak_working_set_bytes."""
+    """The emitted line names private_bytes (PagefileUsage), working_set_bytes, peak_working_set_bytes."""
     mem = ProcessMemory(private_bytes=1, working_set_bytes=2, peak_working_set_bytes=3)
     reader = _FakeMemoryReader(mem)
     clock = Clock(time_source=lambda: datetime(2026, 6, 17, 11, 0, tzinfo=IST))
@@ -264,8 +255,7 @@ async def test_process_memory_reader_returning_none_logs_nothing(caplog):
 
 
 async def test_process_memory_reader_failure_does_not_block_health_check():
-    """A reader failure must never raise and must never affect the health verdict (telemetry, not a
-    check) — compared against a baseline run with no memory reader at all."""
+    """A reader failure never raises and never affects the health verdict (telemetry, not a check)."""
     clock = Clock(time_source=lambda: datetime(2026, 6, 17, 11, 0, tzinfo=IST))
     baseline = HealthMonitor(clock, load_settings(), memory_log_every=1)
     baseline_report = await baseline.check(check_skew=False)
@@ -277,10 +267,8 @@ async def test_process_memory_reader_failure_does_not_block_health_check():
     assert report.healthy == baseline_report.healthy
 
 
-# ----------------------------------------------- origination liveness (2026-09-01 latch incident)
-# The catchup_safety_jobs latch froze entries for TWO whole sessions (08-31, 09-01) with zero pages:
-# the engine hummed, exits flowed, and nothing said "you are not originating". Two problems close
-# that class: entries_frozen_in_session (armed mode + risk != NORMAL past a threshold) and
+# ----------------------------------------------- origination liveness
+# entries_frozen_in_session (armed mode + risk != NORMAL past a threshold) and
 # funnel_zero_in_session (slots published, zero forwarded, risk NORMAL past a threshold).
 class _FakeMode:
     def __init__(self, mode: str = "RECOMMEND", risk: str = "FROZEN") -> None:
@@ -316,8 +304,8 @@ def _origination_monitor(*, mode: str = "RECOMMEND", risk: str = "FROZEN", funne
 
 
 async def test_frozen_in_session_pages_after_threshold_not_before():
-    """The 08-31 replay: RECOMMEND + FROZEN from the open — quiet through the warm-up-sized grace
-    (a morning boot legitimately holds ~20 min of warm-up freeze), then a page."""
+    """RECOMMEND + FROZEN from the open: quiet through the warm-up-sized grace (a morning boot
+    legitimately holds ~20 min of warm-up freeze), then a page."""
     mon, alerts, ticker = _origination_monitor()
 
     # The episode clock starts at the FIRST OBSERVING pulse (a sampling watchdog cannot know the
@@ -331,7 +319,7 @@ async def test_frozen_in_session_pages_after_threshold_not_before():
     report = await mon.check(check_skew=False)
     assert "entries_frozen_in_session" in report.problems
     assert any("entries_frozen_in_session" in m for _s, m in alerts)
-    # The page itself is diagnosable without a shell (2026-09-01 review): cause + state ride the text.
+    # The page is diagnosable without a shell: cause + state ride the text.
     assert any("catchup_safety_jobs" in m and "FROZEN" in m for _s, m in alerts)
 
 
@@ -352,7 +340,7 @@ async def test_frozen_timer_resets_on_normal_and_counts_only_in_session():
     assert "entries_frozen_in_session" not in report.problems
     assert alerts == []
 
-    # Out-of-session: FROZEN at 07:00 for hours must never page (lag-watchdog lesson, 2026-08-26).
+    # Out-of-session: FROZEN at 07:00 for hours must never page.
     mon2, alerts2, ticker2 = _origination_monitor(at=datetime(2026, 6, 17, 7, 0, tzinfo=IST))
     for _ in range(90):
         ticker2.at = ticker2.at + timedelta(minutes=1)        # 07:01..08:30, all pre-open
@@ -370,9 +358,9 @@ async def test_frozen_timer_resets_on_normal_and_counts_only_in_session():
 
 
 async def test_funnel_zero_pages_only_when_risk_is_normal():
-    """The 08-31 shape (slots published, zero forwarded all day) pages after the threshold while
-    NORMAL; while FROZEN it stays quiet (the frozen problem owns that page — one incident, one
-    problem). The first eligible pulse only baselines, so the clock starts one pulse later."""
+    """Slots published and zero forwarded pages after the threshold while NORMAL; while FROZEN it
+    stays quiet (the frozen problem owns that page). The first eligible pulse only baselines, so
+    the clock starts one pulse later."""
     mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=lambda: (5, 0, 6))
     for _ in range(121):                                      # baseline pulse + 120 observed minutes
         ticker.at = ticker.at + timedelta(minutes=1)
@@ -409,9 +397,9 @@ async def test_funnel_zero_resets_once_anything_forwards():
 
 
 async def test_funnel_stall_after_first_forward_still_pages():
-    """2026-09-01 review (blocking): `forwarded` is day-cumulative and never returns to zero, so a
-    forward path that wedges AFTER the day's first forward must still page — new slots keep
-    publishing past the last-progress baseline while the forward count stays put."""
+    """`forwarded` is day-cumulative and never returns to zero, so a forward path that wedges AFTER
+    the day's first forward must still page: new slots keep publishing past the last-progress
+    baseline while the forward count stays put."""
     calls = {"n": 0}
 
     def funnel():
@@ -445,13 +433,10 @@ def _spent_cap_funnel():
     ids=["spent", "deliberately-zero"],
 )
 async def test_funnel_quiet_when_the_forward_cap_is_closed(make_funnel):
-    """A spent daily forward cap is quiet BY DESIGN: slots keep publishing on a busy afternoon
-    but the governor is deliberately done forwarding — paging here would train the owner to ignore
-    the alarm.
+    """A spent daily forward cap is quiet BY DESIGN: the governor is deliberately done forwarding.
 
-    2026-09-02 review: a KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from
-    minute one and must stay quiet - only cap=None (unreadable) falls back to the zero-forwarded
-    shape."""
+    A KNOWN cap of 0 (deliberate full pause on analyst spend) is spent from minute one and stays
+    quiet; only cap=None (unreadable) falls back to the zero-forwarded shape."""
     mon, alerts, ticker = _origination_monitor(risk="NORMAL", funnel=make_funnel())
     for _ in range(130):
         ticker.at = ticker.at + timedelta(minutes=1)
@@ -506,9 +491,9 @@ async def test_origination_watch_failures_never_break_the_pulse():
     assert "funnel_zero_in_session" not in report.problems
 
 
-# ------------------------------------------ stopped feed in session (2026-10-21: ticker never started)
+# ------------------------------------------ stopped feed in session
 # The health pulse only runs while the engine is UP, so an armed, in-session STOPPED feed is no market
-# data, not "intentionally off". health logged problems=[] all session on 10-21.
+# data, not "intentionally off".
 def _stopped_monitor(*, state: str = "STOPPED", mode: str = "RECOMMEND", token_valid=None,
                      at: datetime | None = None, mode_wired: bool = True):
     clock_at = _Ticker(at or datetime(2026, 6, 17, 10, 0, tzinfo=IST))

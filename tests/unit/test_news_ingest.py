@@ -5,12 +5,11 @@ tz-aware IST; unparsable ⇒ Clock ingest time), the GDELT domain allowlist + ti
 (routine vs backfill), and degradation (a dead feed contributes zero headlines and
 never raises).
 
-``fixtures/news/nse_announcements.json`` is a 7-row trim of the LIVE ``corporate-announcements?index=
-equities`` payload probed 2026-09-04 15:14 IST (same key set, rows verbatim) with four deliberate
-edits: UNITDSPR carries a "Trading Window" subject (the drop list's canonical case), ENIL has its
-attachment + ``sort_date`` blanked (URL fallback + timestamp ladder), HINDZINC carries an
-over-300-character body with unparsable timestamps (title cap + Clock fallback), and the last row has
-no ``symbol`` (unusable ⇒ skipped)."""
+``fixtures/news/nse_announcements.json`` is a 7-row trim of the live ``corporate-announcements?index=
+equities`` payload (same key set) with four deliberate edits: UNITDSPR carries a "Trading Window"
+subject (the drop list's canonical case), ENIL has its attachment + ``sort_date`` blanked (URL
+fallback + timestamp ladder), HINDZINC carries an over-300-character body with unparsable
+timestamps (title cap + Clock fallback), and the last row has no ``symbol`` (unusable ⇒ skipped)."""
 
 from __future__ import annotations
 
@@ -194,9 +193,9 @@ async def test_titles_are_html_unescaped_and_fo_talk_series_dropped(store, clock
 
 
 async def test_unclustered_store_rows_roundtrip_into_headlines(store, clock):
-    """2026-08-10 orphan re-sweep: `job_news_chain` rebuilds Headline objects from
-    `get_news(unclustered_only=True)` rows — the roundtrip must survive the model's tz-aware
-    validator (a naive store timestamp would crash the whole chain job)."""
+    """`job_news_chain` rebuilds Headline objects from `get_news(unclustered_only=True)` rows: the
+    roundtrip must survive the model's tz-aware validator (a naive store timestamp would crash the
+    whole chain job)."""
     ingest, client = _make_ingest(store, clock)
     async with client:
         inserted = await ingest.poll(feeds=("et",))
@@ -310,9 +309,9 @@ async def test_gdelt_payload_is_headline_level_only(store, clock):
 
 
 async def test_live_blog_page_titles_are_dropped_at_ingest(store, clock):
-    """news.drop_title_patterns (2026-08-03 finding): auto-generated "<Company> Share Price Live
-    Updates: ..." ticker-page titles are not news — dropped before dedupe/persist so they can never
-    reach the clusterer or burn scorer budget. Real headlines pass untouched."""
+    """news.drop_title_patterns: auto-generated "<Company> Share Price Live Updates: ..."
+    ticker-page titles are dropped before dedupe/persist so they never reach the clusterer or burn
+    scorer budget. Real headlines pass untouched."""
     cfg = NewsCfg()
     xml = b"""<?xml version="1.0"?><rss><channel>
       <item><title>Tata Steel Share Price Live Updates: Tata Steel Shows Strong Momentum</title>
@@ -337,16 +336,16 @@ ANN_PAYLOAD = (FIXTURES / "nse_announcements.json").read_bytes()
 
 def _ann_ingest(store, clock, *, cfg: NewsCfg | None = None, record=None, response=None):
     """Ingest whose ``corporate-announcements`` endpoint serves the captured payload — keyed on the
-    DATE-RANGED url for the clock's day (2026-09-09): the bare endpoint caps at its 20 newest rows."""
+    DATE-RANGED url for the clock's day: the bare endpoint caps at its 20 newest rows."""
     url = nse_ann_url(clock.now().date())
     overrides = {url: response or httpx.Response(200, content=ANN_PAYLOAD)}
     return _make_ingest(store, clock, overrides=overrides, record=record, cfg=cfg)
 
 
 def test_nse_announcements_url_is_date_ranged_for_the_day():
-    """Probe 2026-09-09: the bare endpoint answers its 20 newest rows regardless of volume, while
-    ``from_date/to_date`` (DD-MM-YYYY) returns the whole day (745 rows for 08-09-2026) — so a poll
-    asks for the clock's day and lets the store dedupe the overlap."""
+    """The bare endpoint answers its 20 newest rows regardless of volume, while
+    ``from_date/to_date`` (DD-MM-YYYY) returns the whole day — so a poll asks for the clock's day
+    and lets the store dedupe the overlap."""
     assert nse_ann_url(date(2026, 9, 8)) == (
         NSE_ANNOUNCEMENTS_URL + "&from_date=08-09-2026&to_date=08-09-2026"
     )
