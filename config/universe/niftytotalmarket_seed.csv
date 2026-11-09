@@ -1,4 +1,4 @@
-# NIFTY Total Market seed fallback (E5, §3.2.4) - the committed last-resort copy used by UniverseBuilder when
+# NIFTY Total Market seed fallback - the committed last-resort copy used by UniverseBuilder when
 # BOTH the NSE constituents download (universe.index_source_url) and the runtime cache under
 # data/universe/ are unavailable. A stale-but-real membership list beats an empty universe.
 #
@@ -7,7 +7,7 @@
 #   engine downloads from this URL daily and mirrors it to data/universe/index_cached.csv]
 # by replacing everything below this comment block with the downloaded CSV content.
 #
-# Snapshot: FULL NIFTY Total Market list as of 2026-10-08 (O18 - eligible universe widened from NIFTY 500),
+# Snapshot: FULL NIFTY Total Market list as of 2026-10-08 (the eligible universe, widened from NIFTY 500),
 # fetched verbatim from the URL above. Only the Symbol and Series columns are load-bearing for the
 # parser. config/universe/nifty500_seed.csv is now the CORE-index seed (universe.core_index_seed_path).
 Company Name,Industry,Symbol,Series,ISIN Code

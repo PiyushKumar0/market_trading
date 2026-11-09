@@ -274,10 +274,10 @@ async def test_a_confident_analyst_enter_is_never_delivered_as_a_recommendation(
     verdicts = conn.execute("SELECT verdict, payload FROM verdicts").fetchall()
     assert [v["verdict"] for v in verdicts] == ["reject"]
     checks = json.loads(verdicts[0]["payload"])["checks"]
-    c3 = [c for c in checks if c["rule_id"] == "min_viable_size"]
-    assert len(c3) == 1
-    assert c3[0]["passed"] is False
-    assert c3[0]["value"] == gate_module._SHADOW_NO_EDGE
+    size_checks = [c for c in checks if c["rule_id"] == "min_viable_size"]
+    assert len(size_checks) == 1
+    assert size_checks[0]["passed"] is False
+    assert size_checks[0]["value"] == gate_module._SHADOW_NO_EDGE
 
 
 # ===========================================================================================
@@ -587,8 +587,8 @@ async def test_a_confident_cat_analyst_enter_is_never_delivered_as_a_recommendat
     verdicts = conn.execute("SELECT verdict, payload FROM verdicts").fetchall()
     assert [v["verdict"] for v in verdicts] == ["reject"]
     checks = json.loads(verdicts[0]["payload"])["checks"]
-    c3 = [c for c in checks if c["rule_id"] == "min_viable_size"]
-    assert len(c3) == 1
-    assert c3[0]["passed"] is False
-    assert c3[0]["value"] == gate_module._SHADOW_NO_EDGE
-    assert c3[0]["value"] != gate_module._NO_TARGET
+    size_checks = [c for c in checks if c["rule_id"] == "min_viable_size"]
+    assert len(size_checks) == 1
+    assert size_checks[0]["passed"] is False
+    assert size_checks[0]["value"] == gate_module._SHADOW_NO_EDGE
+    assert size_checks[0]["value"] != gate_module._NO_TARGET

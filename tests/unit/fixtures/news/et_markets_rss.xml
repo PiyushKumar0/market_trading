@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ET Markets RSS fixture (§3.2.4 NewsIngest offline test). 4 good items + 3 malformed (no title /
+<!-- ET Markets RSS fixture (NewsIngest offline test). 4 good items + 3 malformed (no title /
      no link / relative link). One item has an unparsable pubDate (kept, published_at = ingest Clock);
      one item's URL is duplicated in the Moneycontrol fixture (cross-feed URL dedupe). -->
 <rss version="2.0">
