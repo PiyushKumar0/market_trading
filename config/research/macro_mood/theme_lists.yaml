@@ -1,0 +1,307 @@
+schema_version: 1
+frozen_on: '2026-11-10'
+note: Macro mood-signal study theme lists, frozen at registration. Constituents of each theme's NSE thematic index on the
+  freeze date. renewables has no NSE index and no list; the LLM mapper covers it.
+themes:
+  defence:
+    sources:
+    - url: https://archives.nseindia.com/content/indices/ind_niftyindiadefence_list.csv
+      sha256: 7246c93644eafaa06e16acb127fbd4ab34f2a8de6c8c352f47d6e4589ba0c191
+      rows: 22
+    symbols:
+    - AEQUS
+    - APOLLO
+    - ASTRAMICRO
+    - AXISCADES
+    - BDL
+    - BEL
+    - BEML
+    - BHARATFORG
+    - CENTUM
+    - COCHINSHIP
+    - DATAPATTNS
+    - DYNAMATECH
+    - GRSE
+    - HAL
+    - MAZDOCK
+    - MIDHANI
+    - MTARTECH
+    - PARAS
+    - SIGMAADV
+    - SOLARINDS
+    - UNIMECH
+    - ZENTEC
+  ev_mobility:
+    sources:
+    - url: https://www.niftyindices.com/IndexConstituent/ind_niftyev_newageautomotive_list.csv
+      sha256: 8a0ffabfa24fe5add9c0f08396bae308aa15e90488cb4e65ab43405bb936212f
+      rows: 37
+    symbols:
+    - ARE&M
+    - ASHOKLEY
+    - ATHERENERG
+    - BAJAJ-AUTO
+    - BHARATFORG
+    - BOSCHLTD
+    - CGPOWER
+    - EICHERMOT
+    - EXIDEIND
+    - FLUOROCHEM
+    - FORCEMOT
+    - HEROMOTOCO
+    - HSCL
+    - HYUNDAI
+    - JBMA
+    - JWL
+    - KEI
+    - KPITTECH
+    - M&M
+    - MARUTI
+    - MOTHERSON
+    - MSUMI
+    - OLAELEC
+    - OLECTRA
+    - RELIANCE
+    - SANSERA
+    - SCHAEFFLER
+    - SONACOMS
+    - TATACHEM
+    - TATAELXSI
+    - TATATECH
+    - TIINDIA
+    - TMCV
+    - TMPV
+    - TVSMOTOR
+    - UNOMINDA
+    - ZFCVINDIA
+  railways:
+    sources:
+    - url: https://www.niftyindices.com/IndexConstituent/ind_niftyindiarailwayspsu_list.csv
+      sha256: 33072cc81005e20aad462999e2eda57949f8a259ae3a07f8c6aa3b4618fc8440
+      rows: 17
+    symbols:
+    - BEL
+    - BEML
+    - BHEL
+    - BPCL
+    - CONCOR
+    - HINDPETRO
+    - IRCON
+    - IRCTC
+    - IRFC
+    - ITI
+    - MRPL
+    - NTPC
+    - ONGC
+    - RAILTEL
+    - RITES
+    - RVNL
+    - SAIL
+  infra_capex:
+    sources:
+    - url: https://archives.nseindia.com/content/indices/ind_niftyinfralist.csv
+      sha256: 30a9ce7fe0303df46d01e6ffd7e4ea17937093eecba9dba420061a7d93b15f18
+      rows: 30
+    symbols:
+    - ADANIGREEN
+    - ADANIPORTS
+    - ADANIPOWER
+    - APOLLOHOSP
+    - ASHOKLEY
+    - BHARATFORG
+    - BHARTIARTL
+    - BPCL
+    - CGPOWER
+    - CUMMINSIND
+    - DLF
+    - FORTIS
+    - GAIL
+    - GRASIM
+    - GVT&D
+    - HINDPETRO
+    - INDHOTEL
+    - INDIGO
+    - INDUSTOWER
+    - IOC
+    - LT
+    - MAXHEALTH
+    - MOTHERSON
+    - NTPC
+    - ONGC
+    - POWERGRID
+    - RELIANCE
+    - SUZLON
+    - TATAPOWER
+    - ULTRACEMCO
+  psu_disinvestment:
+    sources:
+    - url: https://archives.nseindia.com/content/indices/ind_niftycpselist.csv
+      sha256: 0bcbc63974280d4e0e50305fe657ab7023d00c5fe2a45ddf1d2da7c50bbbe46c
+      rows: 11
+    - url: https://archives.nseindia.com/content/indices/ind_niftypselist.csv
+      sha256: a6b141ba64b0c0d554342d1d54a83a36b9fe23cda43720c8ce4a1a1abce8f2f6
+      rows: 20
+    symbols:
+    - BEL
+    - BHEL
+    - BPCL
+    - COALINDIA
+    - COCHINSHIP
+    - CONCOR
+    - GAIL
+    - HAL
+    - HINDPETRO
+    - IOC
+    - IRFC
+    - NATIONALUM
+    - NBCC
+    - NHPC
+    - NLCINDIA
+    - NMDC
+    - NTPC
+    - OIL
+    - ONGC
+    - PFC
+    - POWERGRID
+    - RECLTD
+    - SAIL
+    - SJVN
+  data_ai:
+    sources:
+    - url: https://archives.nseindia.com/content/indices/ind_niftyindiadigital_list.csv
+      sha256: 2326216f6202dcf763f4c25dcaecc1fa2f3745d3a02b2448086bf534d19479f7
+      rows: 50
+    symbols:
+    - AFFLE
+    - BBOX
+    - BHARTIARTL
+    - BHARTIHEXA
+    - BLS
+    - BSOFT
+    - CARTRADE
+    - COFORGE
+    - CYIENT
+    - ETERNAL
+    - FIRSTCRY
+    - FRACTAL
+    - HCLTECH
+    - HEXT
+    - IDEA
+    - IKS
+    - INDIAMART
+    - INFY
+    - INTELLECT
+    - IRCTC
+    - ITI
+    - KPITTECH
+    - LTM
+    - LTTS
+    - MEESHO
+    - MPHASIS
+    - NAUKRI
+    - NETWEB
+    - NYKAA
+    - OFSS
+    - PAYTM
+    - PERSISTENT
+    - PINELABS
+    - POLICYBZR
+    - PWL
+    - RAILTEL
+    - SAGILITY
+    - STLTECH
+    - SWIGGY
+    - TATACOMM
+    - TATAELXSI
+    - TATATECH
+    - TBOTEK
+    - TCS
+    - TECHM
+    - TEJASNET
+    - TTML
+    - URBANCO
+    - WIPRO
+    - ZENSARTECH
+  make_in_india:
+    sources:
+    - url: https://archives.nseindia.com/content/indices/ind_niftyindiamanufacturing_list.csv
+      sha256: 031f831585ca1e72e08352a15abbf791957b16cf567272d7f7796d2bd8ac187a
+      rows: 77
+    symbols:
+    - ABB
+    - AIAENG
+    - ALKEM
+    - AMBER
+    - ANTHEM
+    - APLAPOLLO
+    - ASHOKLEY
+    - ASTRAL
+    - AUROPHARMA
+    - BAJAJ-AUTO
+    - BALKRISIND
+    - BEL
+    - BHARATFORG
+    - BLUESTARCO
+    - BOSCHLTD
+    - BPCL
+    - CGPOWER
+    - CIPLA
+    - COCHINSHIP
+    - COROMANDEL
+    - CROMPTON
+    - CUMMINSIND
+    - DIVISLAB
+    - DIXON
+    - DRREDDY
+    - EICHERMOT
+    - ENRIN
+    - ESCORTS
+    - GVT&D
+    - HAL
+    - HAVELLS
+    - HINDALCO
+    - HINDCOPPER
+    - HINDZINC
+    - HSCL
+    - HYUNDAI
+    - IOC
+    - JINDALSTEL
+    - JSWSTEEL
+    - KAYNES
+    - KEI
+    - KPRMILL
+    - LAURUSLABS
+    - LINDEINDIA
+    - LUPIN
+    - M&M
+    - MARUTI
+    - MAZDOCK
+    - MOTHERSON
+    - MRF
+    - NAVINFLUOR
+    - PAGEIND
+    - PIDILITIND
+    - PIIND
+    - POLYCAB
+    - POWERINDIA
+    - RELIANCE
+    - SIEMENS
+    - SOLARINDS
+    - SONACOMS
+    - SRF
+    - SUNPHARMA
+    - SUPREMEIND
+    - SUZLON
+    - TATASTEEL
+    - TIINDIA
+    - TMCV
+    - TMPV
+    - TORNTPHARM
+    - TVSMOTOR
+    - UNOMINDA
+    - UPL
+    - VAML
+    - VEDL
+    - VOLTAS
+    - WELCORP
+    - ZYDUSLIFE

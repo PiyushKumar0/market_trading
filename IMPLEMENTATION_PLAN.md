@@ -183,6 +183,218 @@ deploy after 09:15 IST on 2026-11-09 moves it to 2026-11-11 (11-10 is a holiday)
      limit there would be marketable").
   3. Ship a screen only if its cohort did worse than same-day approved neighbours.
 
+**Macro mood-signal study (proposed 2026-11-09; registered by the commit that adds this entry, after the owner signs
+off the thresholds).** The owner's question: do global and domestic mood signals known before the 09:15 open predict
+Indian returns over short swings, enough to profit after costs? Owner, 2026-11-09: "Go with the proposed test
+pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-turn-2026-11-anatomy`,
+`us-lead-priced-at-open`), and it is excluded from every sample. Evidence only; nothing is wired into the engine.
+
+- **Family:** `edge/macro_mood`, ten hypotheses (six backtests, four forward), so N = 10:
+  `registration_alpha(10)` = 0.005 and `fold_pass_min(10)` = 60%. Thresholds are fixed by this entry; changing one
+  is a new registration. Owner decisions on 2026-11-10:
+  - "Use LLM to map story to sectors and wide the matching as well", plus a test of whether article summaries and
+    text add leverage over headlines;
+  - add one combined score defined before any result exists ("Yes").
+- **Hypotheses.** D is the trading session the trade enters on.
+  - **US big-fall rebound:** the S&P 500 sessions dated u with D_prev ≤ u < D (D_prev = the previous NIFTY session)
+    compound to ≤ −2.0% ⇒ buy the NIFTY at D's open, sell at D's close (MIS cost).
+  - **US rally follow-through:** the same compounded S&P return is ≥ +1.0% ⇒ buy at D's open, exit at the close of
+    the 5th session counting D (CNC cost). This is the owner's "India follows the US the next day" in tradeable form.
+  - **Oil drop:** the latest Brent front-month settlement dated before D is ≤ −5.0% below the settlement three Brent
+    sessions earlier ⇒ buy at D's open, hold 5 sessions (CNC).
+  - **Foreign short-covering:** the FII long share of index futures, long / (long + short) contracts in NSE's
+    participant-wise open interest, rose over the 3 sessions ending D−1 by more than the 90th percentile of its
+    3-session changes over the 250 sessions before that ⇒ buy the NIFTY at D's open, hold 5 (CNC). A share, unlike a
+    net contract count, does not jump when the index lot size is revised.
+  - **Breadth thrust:** ≥ 75% of the liquid universe closed up on D−1 ⇒ buy the NIFTY at D's open, hold 5 (CNC).
+    The liquid universe as of D−1 is every full-market `bars_1d` stock (delisted names included) whose median
+    close × volume over the 20 sessions to D−1 is ≥ ₹10 cr. It excludes names with a corporate-action ex-date on D−1,
+    and ETFs by the hvol study's `is_etf` test (NSE's ETF list plus the `(BEES|ETF|IETF)$` suffix).
+  - **Combined mood score:** the owner's question of whether combining signals beats running them separately,
+    answered with no fitted weights.
+    - Inputs: three values known before D's open. They are the compounded S&P return of the US hypotheses, minus
+      the Brent 3-session change of the oil-drop hypothesis, and the 3-session change in the FII long share.
+    - Each is z-scored against its own previous 250 sessions (mean and SD), and the score is the mean of the three
+      z-scores. All three are required.
+    - Rule: a score in the top 10% of its previous 250 sessions' scores ⇒ buy the NIFTY at D's open, hold 5 (CNC).
+    - Pre-declared comparison (decides no verdict): each input alone, under the same top-10%-of-own-z rule and the
+      same sample, as diagnostic arms. **Combining helps** iff the score's mean net per trade exceeds every arm's.
+  - **News tone, headlines (forward only):** tone(D) is the mean of sentiment × materiality over the `market`-scope
+    scores that News Analyst calls returned in the 24 hours before 09:00 IST on D.
+    - Source: `state.db` `agent_calls` (`at` and the parsed `output_json`), taking the first successful score per
+      cluster. The table is append-only, so it keeps the state as it stood at 09:00. `news_clusters` would not: its
+      `first_seen` and `sectors` are rewritten when headlines merge later.
+    - Rule: tone(D) in the top third of its previous sessions (at most 60, and only once at least 20 exist) ⇒ buy the
+      NIFTY at D's open, hold 5 (CNC).
+    - The registered key is `(model, prompt_version)` on the first News Analyst call on or after the registration
+      date. Calls with another key are excluded and counted, so a scorer change stops accrual until the owner
+      re-registers, as with the analyst-value verdict.
+  - **Policy push, headlines (forward only):** a candidate is a cluster the News Analyst scored in the 24 hours before
+    09:00 IST on D (from `agent_calls`) with `event_type` `govt_program` or `sector_policy`, sentiment ≥ +0.4 and
+    materiality ≥ 0.6.
+    - Mapping: its groups are the union of two maps, both computed from the headline text in that call's context.
+      - Theme map: a whole-word match of a `config/themes.yaml` keyword (the resolver's rule) maps to that theme's
+        frozen stock list.
+      - LLM map: the pinned mapper model assigns groups from a closed vocabulary, the `sector_map` labels plus the
+        theme names. It is told to map a named company to its own group.
+    - Trade: for each group with at least one liquid member, buy its liquid members equal-weight at D's open and hold
+      10 sessions. A sector group's members come from the `sector_map` snapshot in force on D−1; a theme's come from
+      its frozen list. Each leg pays one CNC round trip at the research notional. One position per group at a time.
+    - Judged on the basket's return minus the equal-weight liquid universe's over the same window.
+  - **News tone, content (forward only):** the news-tone rule applied to the study's own scores of the captured
+    articles, using variant C (below) in place of the News Analyst's headline scores. Same `market` scope, window
+    and percentile rule.
+  - **Policy push, content (forward only):** the policy-push rule applied to variant C. Candidates use the same
+    `event_type`, sentiment and materiality bars. The mapper sees the headline, summary and body. The theme match
+    runs on the headline and summary.
+- **Theme stock lists:** frozen in `config/research/macro_mood/theme_lists.yaml`. Each theme holds its NSE thematic
+  index's constituents on 2026-11-10, with each source URL and sha256:
+  - defence (22);
+  - ev_mobility (37, Nifty EV & New Age Automotive);
+  - railways (17, Nifty India Railways PSU);
+  - infra_capex (30);
+  - psu_disinvestment (24, CPSE ∪ PSE);
+  - data_ai (50, Nifty India Digital);
+  - make_in_india (77, Nifty India Manufacturing).
+
+  renewables has no NSE index, so it has no list; its stories reach ENERGY or UTILITIES through the LLM map. The
+  engine's own theme lists in `themes.yaml` stay empty; filling them is a separate owner decision.
+- **Mapper:**
+  - The prompt is `config/research/macro_mood/mapper_prompt.md`, used verbatim; each call logs its sha256.
+  - Its closed vocabulary is the 23 `sector_map` labels of the 2026-11-08 snapshot (UNCLASSIFIED excluded) plus the
+    seven listed themes. Output is `{"groups": [...]}`.
+  - The parser keeps at most the first three in-vocabulary names and drops the rest. The schema carries no length
+    caps (memory `wire-schema-prose-caps-harmful`).
+- **Content capture and scoring (study-side; the engine is untouched):**
+  - **Capture:** `scripts/news_content_capture.py` runs every 15 minutes as an owner-visible Windows scheduled task
+    (logged in WORKLOG). It polls the RSS feeds in `settings.yaml` `news.feeds.rss` as they stand at registration.
+    It writes to `data/research/news_content.sqlite`:
+    - url as the key, feed, title, summary (the RSS description with tags stripped), published_at and
+      first_captured_at;
+    - the article body, fetched once at first capture: JSON-LD `articleBody` when present, else the page's `<p>`
+      text, cut to its first 400 words, plus fetched_at and the HTTP status.
+  - Bodies are never re-fetched, because articles are edited after publication. Probed 2026-11-10:
+    - every feed carries 20–60-word summaries (ET on 21 of 50 items);
+    - article pages open for 5 of 6 outlets;
+    - NDTV Profit pages answer 403, so its items keep the summary only.
+  - At most one page request every 2 seconds.
+  - **Scoring:** `scripts/news_content_score.py` runs nightly at 22:00 IST, outside market hours.
+    - Items are clustered with the engine's `HeadlineClusterer` at its pinned threshold, and each cluster is scored
+      in two blind variants, in separate calls: **H**, the representative headline only, and **C**, the headline plus
+      its summary plus its body.
+    - Both use the News Analyst's system prompt verbatim and its output schema, with batches of 30.
+    - Every call is stored append-only with its time, model and prompt hash. Scoring after the fact is safe on two
+      conditions: inputs are restricted to items captured before 09:00 IST on D, and the pinned models' training ends
+      before the forward window. The second is checked against the published model cutoffs at registration.
+  - **Models (pinned at registration):** `claude-haiku-5-5` for H and C scoring, `claude-sonnet-5-5` for the mapper.
+    - Anthropic's models page (fetched 2026-11-10) gives both a training-data cutoff of June 2026, which is before the
+      forward window.
+    - Retirement is committed no sooner than 2027-09-28 (Sonnet 5.5) and 2027-10-07 (Haiku 5.5). A pinned model
+      retired before a hypothesis's look forms makes it insufficient unless the owner re-registers.
+    - Calls go through the Claude Agent SDK path the engine already uses (the shared subscription, never the paid
+      API). They keep their own call log and never write to the engine's `agent_calls` or budget ledger.
+    - Expected use is about 20 Haiku calls and 2 Sonnet calls a night.
+    - The batch is capped at 40 calls a night and stops at the first rate-limit or session-limit error, with no
+      retries, so it cannot starve the engine's analysts on the shared subscription.
+    - A model change stops the content hypotheses' accrual until the owner re-registers.
+- **Headlines versus content (the owner's leverage question; pre-declared, decides no trading verdict):**
+  - The comparison uses the study's own H and C scores over the same clusters, so the model is held fixed.
+  - Tone: the rank correlation between tone(D) and the NIFTY's open(D) → close(D+4) return, C minus H, with a
+    moving-block bootstrap 95% CI (block = 5 sessions).
+  - Policy: the mean 10-session excess per event, C-identified minus H-identified, with a bootstrap 95% CI.
+  - For each, the answer is **content adds leverage** if the CI lies above 0, **content hurts** if it lies below,
+    and **no measurable difference** otherwise. It is read when the content hypotheses are judged, or at 18 months.
+- **Trade mechanics:**
+  - Long only. The NIFTY 50 index price stands in for an index ETF.
+  - One position at a time per hypothesis (per group for policy push); a signal inside an open holding window is
+    skipped.
+  - Time exit, no stop. Exits fill at the official close, a 15:00–15:30 VWAP that no order gets exactly. That is
+    accepted because no intraday index data exists before 2026-07-23.
+  - A stock leg (the high-beta basket diagnostic, policy push) with a structural ex-date inside its window is dropped
+    and counted.
+  - Costs: `CostModel.round_trip` at `research_common.NOTIONAL` with equity rates. That is conservative for an ETF,
+    whose STT is lower; the ETF rate card is not in `costs.yaml`.
+- **Timing (no lookahead):**
+  - A US or Brent session dated u is known before D's open iff u < D.
+  - NSE publishes D−1's participant open interest that evening.
+  - Breadth uses D−1 closes.
+  - Headline news uses News Analyst calls whose `at` is before 09:00 IST on D.
+  - Content news uses items with `published_at` and `first_captured_at` before 09:00 IST on D. A body counts only if
+    its `fetched_at` is also before 09:00; otherwise C uses the summary alone.
+- **Samples:**
+  - US big-fall rebound and US rally follow-through are confirmed on 2008-01-01 → 2022-07-13 only.
+    2022-07-14 → 2026-08-31 was already examined, so it is reported as seen and never counts as evidence.
+  - Oil drop: 2008-01-01 → 2026-08-31.
+  - Foreign short-covering: 2012-01-02, the data's first date, → 2026-08-31. Signals can start once 253 sessions of
+    history exist, for the 250-session percentile and the 3-session change.
+  - Breadth thrust: 2022-07-14 → 2026-08-31, the stock-data floor.
+  - Combined mood score: confirmed on its first signal-capable session → 2022-07-13. That session comes once 250
+    previous scores exist, about early 2014, given the FII data's 2012 start. 2022-07-14 → 2026-08-31 is reported as
+    seen, because its US input was examined there.
+  - Every backtest excludes 2026-09-01 → 2026-11-09, the motivating case, which is reported separately.
+  - The two headline hypotheses run forward from the registration date, the first regular session after the
+    registering commit. 2026-07-16 up to that date is reported as seen.
+  - The two content hypotheses start at the first regular session after both the registering commit and the
+    capture's first complete day (09:00 to 09:00, from its log).
+- **External data:**
+  - Sources: Yahoo daily chart series (`^NSEI` OHLC, `^GSPC` and `BZ=F` closes) and NSE's participant-wise F&O
+    open interest.
+  - A fetch script stores them once under `data/research/external/` with a manifest (URL, fetch time, rows, sha256).
+    The verdict run reads only stored files.
+  - Yahoo bar dates come from `meta.exchangeTimezoneName` through `zoneinfo`, never the fixed `meta.gmtoffset`. That
+    field holds the current offset, and with it every US-summer `BZ=F` bar (stamped at New York midnight) lands a day
+    early, a one-day lookahead. A test pins it: the bar stamped 2026-10-30 04:00 UTC is the 2026-10-30 session.
+  - NSE participant-wise open interest exists from 2012-01-02 (probed 2026-11-09). Its header spelling and padding
+    vary by year, so the parser matches columns by normalised name.
+  - The `^NSEI` data gate:
+    - Opens must equal our `bars_1d` NIFTY 50 opens over their overlap.
+    - Before the overlap, a day whose open equals the previous close or lies outside [low, high] is dropped from
+      the open-anchored arms and counted.
+    - A calendar year that loses more than 10% of its sessions fails the gate for that year.
+  - `BZ=F` rolls between contract months: an oil-drop signal whose 3-session window spans an ICE Brent expiry (the
+    last business day of the second month before delivery) is flagged. The verdict is computed with and without
+    flagged signals; if the two disagree, the result is null.
+- **Verdict per hypothesis:**
+  - **Supported** iff all of these hold on its confirmatory sample:
+    - at least 30 trades;
+    - mean net > 0 and median net > 0;
+    - `permutation_pvalue` < 0.05/9. Its population is every session's same-construct gross return over the same
+      sample; for policy push, every (group, session) 10-session excess;
+    - CPCV fold-pass fraction ≥ `fold_pass_min(9)` on the net series, through the shared `cpcv_report` helper with
+      purge = embargo = the holding period. At small n the helper falls back to contiguous purged folds; that is
+      accepted. The margin floor (`promotable`) is reported as a diagnostic, because promotion re-applies the full
+      research registration bar;
+    - mean net > 0 in both halves of the sample, split at its median trade date;
+    - mean net > 0 with the 3 best trades removed.
+  - **Refuted** iff at least 30 trades and mean net ≤ 0.
+  - **Insufficient** iff fewer than 30 trades, or the data gate fails.
+  - Otherwise **null**.
+  - The forward hypotheses are judged once, at their 30th closed trade; interim readings decide nothing. One with
+    fewer than 30 closed trades 18 months after the registration date is insufficient. A session with no scored
+    `market` cluster has no tone and cannot signal.
+- **Diagnostics (decide nothing):**
+  - 1-, 3- and 10-session horizons.
+  - A high-beta stock-basket arm for 2022-07 → 2026-08: the top quintile by 250-session NIFTY beta among the 200
+    names with the highest traded value, as of D−1.
+  - Splits by NIFTY regime (`engine.strategy.regime`) and by year.
+  - A 2.5×ATR(14) catastrophe-stop arm, an ETF-rate cost arm, and Nasdaq in place of the S&P for the two US
+    hypotheses.
+- **Tools and records:**
+  - Scripts:
+    - `scripts/fetch_macro_external.py`;
+    - `scripts/macro_mood_study.py` (backtests; reports through `research_common.write_reports`);
+    - `scripts/news_content_capture.py` and `scripts/news_content_score.py` (the content pipeline, which also runs the
+      mapper for both policy hypotheses);
+    - `scripts/macro_mood_forward.py` (forward looks and the headlines-versus-content comparison: read-only, always
+      exit 0).
+  - The registering commit adds three things: ten `config/research_trials.yaml` rows with result `registered`, the
+    frozen theme lists, and the mapper prompt. Each row takes its verdict when it lands; the verdicts go to memory,
+    and this entry is deleted once all ten have landed.
+  - Tests pin the timing rules (Yahoo dates, the 09:00 cut-offs), the non-overlap rule, the cost application and the
+    mapper's closed vocabulary.
+- **Promotion:** a supported hypothesis earns nothing automatically. Using it as a recommendation source needs its own
+  owner decision, plan and the research registration bar.
+
 ## Known defects and test gaps
 
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
