@@ -8,16 +8,17 @@ Newest first. About two weeks of entries are kept; older ones are in git history
   after two pilots; 250 changed, the rest already lean) plus settings.yaml and agents.yaml. Cut: incident timelines, measured figures from a day, "before the
   fix" history, review provenance, repetition and test narration. Kept: purpose, invariants, contracts, the reason that
   stops a wrong edit, fixture arithmetic, and every docstring point another file or test refers to.
-- **Size:** Python comments + docstrings 3,055 KB → 2,416 KB (−639 KB; `src/engine` share 45% → 39%); the two YAML
-  files' comments 40 KB → 30 KB. 135 lean files and the dashboard's TypeScript (17% comments, little history) were
-  left as they are; limits.yaml and envelope.yaml (signed) and the generated fill_model.yaml are untouched.
+- **Size:** Python comments + docstrings 3,055 KB → 2,408 KB (−647 KB; `src/engine` share 45% → 39%); the two YAML
+  files' comments 40 KB → 30 KB. Second sweep: the 135 lean Python files (36 changed, 8 KB) and all 57 dashboard
+  files (8 changed, 0.7 KB; the rest document API fields and UI rules). Untouched: limits.yaml and envelope.yaml
+  (signed), the generated fill_model.yaml, and the calendar, alias and sector-override data comments.
 - **Verified:** per file, HEAD's AST equals the new one with every bare-string statement removed and every
   noqa/type/pragma tag kept (one deleted `assert` was caught and restored); YAML parses to identical data; prompt
   fingerprint identical to HEAD's; unit gate 4262 passed / 19 skipped, offline 521 passed; ruff findings as at the
   start (one import-group blank line fixed in `a6dc713`). Engine not restarted: nothing it runs changed.
-- **Left as code:** some runtime strings still carry dated history (owner alert bodies in pipeline.py and
-  filings_pit_fresh.py, report text in calibrate_fill_model.py and the backtest scripts); changing them is a code
-  change, not comment pruning.
+- **Not comments, so not in this pass:** a few runtime strings carry dated history (owner alert bodies in pipeline.py
+  and filings_pit_fresh.py, printed report text in calibrate_fill_model.py and the backtest scripts). They are output
+  the owner reads, and rewording them changes program output.
 
 ## 2026-11-09 17:20 — Second citation census: about 200 retired codes the earlier passes missed; engine restarted 17:17
 
