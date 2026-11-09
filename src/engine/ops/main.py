@@ -5,24 +5,13 @@ The ONLY module allowed to import everything — it wires the dependency graph a
 manual/demand or scheduled; every startup runs the full recovery sequence via
 ``SessionLifecycle.startup``.
 
-Current shape: the deterministic core (clock, calendar, secrets, protected store, sticky
-mode/kill, dashboard, lifecycle) PLUS the full **data plane** — the single-writer
-:class:`~engine.marketdata.store.MarketStore`, the tick→bar :class:`~engine.marketdata.bar_builder.BarBuilder`
-subscribed to the ``tick`` bus topic, the daily jobs (instruments/surveillance/universe/news/
-reconcile/bhavcopy/corp-actions/earnings/deals/sector-map/daily-bars/features) registered on the
-:class:`~engine.ops.jobs.JobRegistry` and driven by BOTH the live :class:`~engine.ops.scheduler.Scheduler`
-and the startup :class:`~engine.ops.jobs.CatchUpRunner` (same registry), the cold-start
-:class:`~engine.ops.warmup.WarmupGate`, and the dedicated-thread
-:class:`~engine.ops.heartbeat.HeartbeatWriter`; plus the Tier-1 analyst harness, the RECOMMEND
-decision plane (pipeline / pre-open planner / digest / nightly reviewer), and the paper-autopilot OMS
-(OrderManager / PaperBroker / Protection / Exit managers). ``run`` drives three
-phases: :func:`compose` builds that graph, :func:`_boot` recovers and arms it, :func:`_shutdown` tears
-it down.
+``run`` drives three phases: :func:`compose` builds the graph, :func:`_boot` recovers and arms it,
+:func:`_shutdown` tears it down. Daily jobs sit on one :class:`~engine.ops.jobs.JobRegistry` driven by BOTH
+the live :class:`~engine.ops.scheduler.Scheduler` and the startup :class:`~engine.ops.jobs.CatchUpRunner`.
 
 Everything broker-touching (instruments dump, backfill, reconcile, ticker) is built only when Kite
 credentials exist — a fresh install with no secrets stays runnable and safe (entries FROZEN until
-login), which is exactly the startup-recovery posture. Live AUTO routing and the real-order shutdown guard
-are not wired.
+login). Live AUTO routing and the real-order shutdown guard are not wired.
 """
 
 from __future__ import annotations
@@ -240,10 +229,9 @@ VIX_SYMBOL = "INDIA VIX"
 #: engine.marketdata.reconcile.DEFAULT_TICK_SIZE; only ever loosens the reconcile close-drift check.
 _DEFAULT_TICK = Decimal("0.05")
 
-#: Boot fallback ONLY: the real tracker's base while the protected limit table fails verification,
-#: which also FREEZES the boot (self-test), so it prices no entry. Keep it at the shipped limits.yaml
-#: capital_base_inr (owner decision 2026-09-07); a dashboard capital change (owner decision 2026-10-17) moves the verified table, not this, so it
-#: may lag one until the next edit here.
+#: Boot fallback ONLY: the tracker's base while the protected limit table fails verification (which also
+#: FREEZES the boot, so it prices no entry). Keep at the shipped limits.yaml capital_base_inr; a dashboard
+#: capital change moves the verified table, not this, so it may lag.
 _FALLBACK_CAPITAL_BASE_INR = Decimal("40000")
 
 #: How far back to scan universe_daily for the current active watchlist (bounded, trading-day-agnostic).
@@ -252,13 +240,8 @@ _WATCHLIST_LOOKBACK_DAYS = 15
 #: Fire-times for the three jobs without a dedicated ``settings.jobs`` key: the news
 #: chain runs just before the 08:30 universe build (backfill→cluster→resolve is never entry-blocking);
 #: the nightly incremental daily-bar backfill and the feature snapshot follow the EOD data jobs.
-#: Features moved 18:50→20:45 (2026-08-18): it reads day-``d`` deals flags and corp actions, whose
-#: jobs moved to 20:30/20:15 on 2026-07-24 (NSE evening-maintenance 503s) — at 18:50 it had been
-#: reading both BEFORE their daily writes ever since, so every live-fired features row since 07-24
-#: carried ``flagged``/ex-date context from stale data (catch-up-fired rows, ordered deals→features
-#: by ``order``, did not — an inconsistency in the training data). 20:45 restores the write→read
-#: ordering the ``order=40→50`` catch-up sequence always encoded, and stays before the 21:00 nightly
-#: review/backup slots.
+#: Features must fire after the deals (20:30) and corp-actions (20:15) writes it reads (the ``order=40→50``
+#: catch-up sequence encodes the same ordering) and before the 21:00 nightly review/backup slots.
 _NEWS_CHAIN_IST = time(8, 25)
 _DAILY_BARS_IST = time(18, 5)
 _FEATURES_IST = time(20, 45)
@@ -268,11 +251,9 @@ _FEATURES_IST = time(20, 45)
 #: compacts the closed date partitions up to D (never D itself — the writer still owns it).
 _TICK_COMPACT_IST = time(22, 30)
 
-#: Daily read of the CLI's stored claude.ai login: ahead of the 08:25 pre-open chain
-#: (news chain → digest → planner), so a WARN reaches the owner before that chain needs the login. Not
-#: the day's first LLM call: the 5-min news scoring tick runs at all hours and early hydration (~06:30)
-#: runs the planner, so either can hit a dead login first; their auth_failed alerts carry the
-#: re-login hint.
+#: Daily read of the CLI's stored claude.ai login: ahead of the 08:25 pre-open chain, so a WARN reaches
+#: the owner before the chain needs the login. Not the day's first LLM call (news scoring and early
+#: hydration can hit a dead login first; their auth_failed alerts carry the re-login hint).
 _CLAUDE_LOGIN_CHECK_IST = time(8, 10)
 
 #: DuckDB backup (``EXPORT DATABASE``, :func:`_market_backup`) — after every EOD data job and the
@@ -310,18 +291,14 @@ DECISION_JOB_IDS: tuple[str, ...] = (
 #: Fire-time for the expiry labeling sweep — after the 15:30 close, before EOD reconcile.
 _RECO_EXPIRE_IST = time(15, 45)
 
-#: The catch-up jobs that are NEVER load-bearing for entries and therefore must not
-#: run INSIDE boot. The 2026-08-10 wedge was an unbounded news chain in ``lifecycle.startup``, ahead
-#: of ``scheduler.start()``: it starved every scheduled job for 8 h — including the 30-min catchup
-#: sweep that exists to self-heal — while the scheduler guard (calendar-only, no recovery awareness)
-#: made naive early arming unsafe. These now fire as one-shots through the SAME catch-up machinery
-#: (same watermarks, same dependency order) immediately AFTER the scheduler is armed, so an identical
-#: wedge costs the digest alone. Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
+#: Catch-up jobs never load-bearing for entries, so they must not run INSIDE boot (an unbounded one would
+#: starve every scheduled job, including the self-healing catchup sweep, because the scheduler guard has
+#: no recovery awareness and cannot be armed early). They fire as one-shots through the SAME catch-up
+#: machinery (same watermarks, same dependency order) immediately AFTER the scheduler is armed.
+#: Digest staleness already degrades ``cat`` safely (digest_stale_max_h).
 #: Members, in catch-up dependency order: time exit (5) → news chain (20) → digest (25) → planner
-#: (28), plus ``results_line_items``, up to 300 paced XBRL fetches (minutes) that nothing at boot
-#: reads — and ``feed_freshness``, which must judge the feeds AFTER the catch-up has refilled them —
-#: and ``rec_outcomes`` + ``signal_outcomes`` + ``weekly_summary`` (hindsight scoring and its owner
-#: digest; nothing reads any of them at boot).
+#: (28), plus ``results_line_items`` (up to 300 paced XBRL fetches), ``feed_freshness`` (must judge the
+#: feeds AFTER catch-up refills them), and ``rec_outcomes`` + ``signal_outcomes`` + ``weekly_summary``.
 #: The :data:`LANE_JOB_IDS` are not members: they run in their own runner (:class:`CompactionLane`).
 POST_ARM_JOB_IDS: tuple[str, ...] = (
     JOB_TIME_EXIT_CHECK, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
@@ -335,49 +312,34 @@ POST_ARM_JOB_IDS: tuple[str, ...] = (
 #: :func:`_arm_registry_jobs`). The main runner never holds them.
 LANE_JOB_IDS: frozenset[str] = frozenset({JOB_TICK_COMPACT, JOB_MARKET_BACKUP})
 
-#: Early hydration (owner-directed 2026-09-09): the pre-open chain an EARLY Kite login
-#: (~06:30, before session open) pulls forward from its 08:20–08:50 clock, in registry order. The
-#: owner travels at 08:15 and boots the PC 09:30–10:00 on most trading days, so on those days the
-#: whole chain fired after the trade window opened (digest-before-open 61%); on the days they log
-#: in early this turns the login into the pre-open chain. Fired by ``EarlyHydration`` through
+#: Early hydration: the pre-open chain an EARLY Kite login (~06:30, before session open) pulls forward
+#: from its 08:20–08:50 clock, in registry order. Fired by ``EarlyHydration`` through
 #: ``CatchUpRunner.hydrate_ahead`` — the same ``job_runs`` watermarks a scheduled fire writes.
-#: Those watermarks do NOT silence the 08:20–08:50 fires (``_scheduled_runner`` stays unconditional —
-#: review reversed a draft that skipped them): results and exchange filings published 07:00–09:00 IST
-#: are the largest catalyst class, so on a day the PC stays awake the chain must run AGAIN — a fresher
-#: digest and plan, and a universe rebuilt behind the 08:15 instruments refresh instead of one pinned
-#: to a pre-08:00 dump. The watermark guards the SLEEP case: a PC that sleeps through the fire times
-#: and wakes at 09:30 finds the catch-up sweep satisfied and keeps the 06:30 run. The cost — a second
-#: pre-open plan message on an awake-PC early-login day — is accepted.
-#: SLEEP-case residual: the wake-up sweep re-runs ``instruments`` (job id ``instruments``) because it
-#: is SAFETY_CRITICAL and due by 09:30, so the token map itself is fresh again — but ``universe_build``
-#: is RUN_LATEST and was already watermarked by the 06:30 ``hydrate_ahead`` run, so the sweep leaves it
-#: alone: the universe stays built on the 06:30 map for the rest of the day. Accepted: intraday token
-#: changes and F&O membership changes inside one trading day are rare, and the ticker's own
-#: subscription set is re-derived from the FRESH instruments map by the post-login recovery (``ticker``
-#: step) regardless of when the universe itself was last built.
+#: Those watermarks do NOT silence the 08:20–08:50 fires (``_scheduled_runner`` stays unconditional):
+#: results and filings published 07:00–09:00 IST are the largest catalyst class, so on an awake PC the
+#: chain runs AGAIN (fresher digest and plan, universe rebuilt behind the 08:15 instruments refresh). The
+#: watermark guards the SLEEP case: a PC waking at 09:30 finds the catch-up sweep satisfied and keeps the
+#: 06:30 run. A second pre-open plan message on an awake early-login day is accepted.
+#: SLEEP-case residual, accepted: the wake-up sweep re-runs ``instruments`` (SAFETY_CRITICAL), but
+#: ``universe_build`` (RUN_LATEST) is already watermarked, so the universe stays on the 06:30 map; the
+#: ticker's subscription set is re-derived from the fresh instruments map by the post-login recovery.
 #: Deliberately EXCLUDED:
-#:   * ``instruments`` — Kite regenerates its instruments dump around 08:00 IST, so a 06:30 refresh
-#:     could pin a STALE map for the whole day. It is SAFETY_CRITICAL: the 08:15 fire or the boot
-#:     catch-up owns it, and both run/verify it before entries open.
+#:   * ``instruments`` — Kite regenerates its dump around 08:00 IST, so a 06:30 refresh could pin a STALE
+#:     map for the day. The 08:15 fire or the boot catch-up owns it.
 #:   * ``sector_map`` — Sunday-only cadence (never a trading day, so never an early-login morning).
 #:   * ``token_check`` — not a registry job at all (no watermark by design; see ``_arm_token_check``).
 EARLY_HYDRATION_JOB_IDS: tuple[str, ...] = (
     JOB_SURVEILLANCE, JOB_UNIVERSE, JOB_NEWS_CHAIN, JOB_CATALYST_DIGEST, JOB_PREOPEN_PLANNER,
 )
 
-#: ROLLBACK FLAG. ``False`` restores the firing point used before this change exactly: the boot
-#: catch-up pass runs the whole registry (``deferred`` empty ⇒ every scope is the full registry) and
-#: the post-arm one-shot becomes a no-op. Flip + restart; no other code path changes.
+#: ``False`` makes the boot catch-up pass run the whole registry (``deferred`` empty) and the post-arm
+#: one-shot a no-op.
 DEFER_POST_ARM_JOBS = True
 
-#: The IST window in which ``tick_compact`` must NOT run: no compaction lane pass starts
-#: inside it, and a running one stops before its next symbol-day (2026-09-29).
-#: 2026-08-20, 11:26 IST — a mid-session crash-recovery boot fired the compaction backlog catch-up
-#: while the market was open: ~16 GB memory peak, tick processing fell more than an hour behind wall
-#: clock, ``/db/query`` went unresponsive and Telegram sends timed out. Compaction is idle-hours
-#: housekeeping: the first lane pass after the window replays whatever was skipped or
-#: stopped, so the veto costs a few hours of fragment retention, never a compaction. Bounds bracket
-#: the session with margin either side (08:45 is ahead of the 09:00 pre-open, 15:45 behind the close).
+#: The IST window in which ``tick_compact`` must NOT run: no compaction lane pass starts inside it, and a
+#: running one stops before its next symbol-day. Compaction mid-session starves tick processing (~16 GB
+#: peak). The first lane pass after the window replays whatever was skipped, so the veto only delays
+#: compaction. Bounds bracket the session with margin (08:45 ahead of pre-open, 15:45 behind the close).
 _IN_SESSION_START_IST = time(8, 45)
 _IN_SESSION_END_IST = time(15, 45)
 
@@ -416,13 +378,12 @@ def _last_regular_session_of_week(calendar: NSECalendar) -> Callable[[date], boo
 
 
 def _session_open_ist(calendar: NSECalendar, clock: Clock) -> time:
-    """Today's continuous-session open (IST), from the calendar the rest of the engine reads —
-    the SAME source ``HealthMonitor._session_open`` uses, never a second hardcoded 09:15 (2026-09-09).
+    """Today's continuous-session open (IST), from the same calendar source ``HealthMonitor._session_open``
+    uses, never a second hardcoded 09:15.
 
     Boot may land on a weekend/holiday, so fall back to the next trading day's open; a calendar that
-    can answer neither (unverified horizon) leaves the engine with no session concept at all, and the
-    early-hydration hook it feeds is a pre-open optimisation — so log and take the calendar's own
-    documented default (``NSECalendar.session``) rather than failing the boot over it.
+    answers neither logs and takes the calendar's own default rather than failing the boot (the
+    early-hydration hook it feeds is only a pre-open optimisation).
     """
     today = clock.today()
     try:
@@ -495,20 +456,17 @@ def build_job_registry(
     ):
         registry.register(spec)
     # Decision-plane jobs: a None fn is skipped here (tests); the composition root always passes a
-    # wrapper (an unbuilt LLM-tier object makes it raise, per the LLM-failure rule). Catch-up dependency order within RUN_LATEST: universe(10) → news_chain(20) →
-    # digest(25) → planner(28) — the digest needs scored clusters + today's universe; the planner
-    # needs the digest.
+    # wrapper. Catch-up order within RUN_LATEST: universe(10) → news_chain(20) → digest(25) → planner(28)
+    # — the digest needs scored clusters + today's universe; the planner needs the digest.
     if calendar is None and any(fns.get(j) is not None for j in (JOB_TIME_EXIT_CHECK, JOB_WEEKLY_SUMMARY)):
         raise ValueError("time_exit_check and weekly_summary need the calendar for their fire_day")
     for spec in (
         JobSpec(JOB_TIME_EXIT_CHECK, JobClass.RUN_LATEST, settings.jobs.time_exit_check_ist,
                 fns.get(JOB_TIME_EXIT_CHECK), order=5,
                 fire_day=_regular_session(calendar) if calendar is not None else None),
-        # NOTE (2026-08-18): the digest reads the PRIOR session's deals flags. In one catch-up pass
-        # RUN_LATEST runs before DATE_KEYED, so a same-pass deals catch-up lands AFTER the digest —
-        # the ordering that saves this is the deferred boot catch-up: the digest is a DEFERRED job, so the boot pass
-        # replays deals first and the digest fires in the post-arm one-shot. Un-deferring the digest
-        # would reopen a stale-flags read on multi-day-gap boots.
+        # The digest reads the PRIOR session's deals flags. RUN_LATEST runs before DATE_KEYED in one pass;
+        # the digest is a DEFERRED job, so the boot pass replays deals first. Un-deferring it would
+        # reopen a stale-flags read on multi-day-gap boots.
         JobSpec(JOB_CATALYST_DIGEST, JobClass.RUN_LATEST, settings.jobs.catalyst_digest_ist,
                 fns.get(JOB_CATALYST_DIGEST), order=25),
         JobSpec(JOB_PREOPEN_PLANNER, JobClass.RUN_LATEST, settings.jobs.preopen_planner_ist,
@@ -561,14 +519,12 @@ async def run() -> int:
     configure_logging(level="INFO", logs_dir=settings.logs_dir())
     _log.info("engine_boot", env=settings.env, tz=settings.timezone)
 
-    # --- PRIMARY single-instance guard (2026-07-21 double-run). An exclusive OS file lock,
-    #     acquired BEFORE any shared resource is touched (sqlite connect / MarketStore.open / Telegram
-    #     poll / :8400 bind). That day TWO instances ran: one wedged BEFORE lifecycle.startup ever
-    #     committed RUNNING, so the DB-row guard was blind to it, and two boots can both
-    #     pass its check-then-act read (TOCTOU). This kernel lock IS real mutual exclusion — released on
-    #     ANY process death (crash / taskkill /F), so no stale lock to reap. The DB check stays as the
-    #     secondary crash-detection / pid-alive guard. Exit code 3 is deliberate: non-zero (a refusal is
-    #     never mistaken for a clean run) and distinct from the watchdog's 2. ---
+    # --- PRIMARY single-instance guard: an exclusive OS file lock acquired BEFORE any shared resource is
+    #     touched (sqlite connect / MarketStore.open / Telegram poll / :8400 bind). The DB-row guard is
+    #     blind to a boot wedged before lifecycle.startup commits RUNNING and is TOCTOU-racy; the kernel
+    #     lock is real mutual exclusion, released on ANY process death. The DB check stays as the
+    #     secondary crash-detection / pid-alive guard. Exit code 3 is deliberate: non-zero and distinct
+    #     from the watchdog's 2. ---
     lock_path = settings.resolved_data_dir() / "engine.lock"
     instance_lock = InstanceLock(lock_path)
     if not instance_lock.acquire():
@@ -578,24 +534,18 @@ async def run() -> int:
         )
         return 3
 
-    # --- graceful-stop wiring, installed EARLY (2026-07-21 13:34 IST zombie). Ctrl-C during a wedged
-    #     lifecycle.startup used to hit Python's default SIGINT handler (raw KeyboardInterrupt, no
-    #     shutdown, process lingered on data/engine.lock). Installing here — right after the lock, before
-    #     ANY shared resource is opened — covers the ENTIRE boot; a first Ctrl-C requests a graceful stop
-    #     (honoured at await stop_event.wait()), a second forces a hard exit even if the boot is wedged. ---
+    # --- graceful-stop wiring, installed EARLY (right after the lock, before ANY shared resource opens) so
+    #     the ENTIRE boot is interruptible: a first Ctrl-C requests a graceful stop (honoured at
+    #     await stop_event.wait()), a second forces a hard exit even if the boot is wedged. ---
     stop_event = asyncio.Event()
     install_signal_handlers(stop_event)
 
-    # --- BOOT CONTRACT WATCHDOG, armed HERE — the first point at which this process is
-    #     committed to running (the instance lock is held, signals are wired) and still ahead of every
-    #     resource that can wedge: sqlite, MarketStore.open, Telegram, the :8400 bind, the token probe,
-    #     lifecycle.startup, and the warm-up seeding. On 2026-08-24 the 12:44:58 boot logged
-    #     startup_complete at 12:46:56 and then NOTHING — it parked inside the pre-arm warm-up refresh
-    #     and scheduler.start() was never reached, so not one trigger fired for the rest of the day and
-    #     no alarm existed to say so (the health pulse that would have noticed is itself an APScheduler
-    #     job). This watchdog is a PLAIN asyncio task on purpose: it must stay alive precisely when the
-    #     scheduler is the broken thing. `boot_state` is late-bound — the watchdog reads it at check
-    #     time, so it can be armed before the alert sink / scheduler / engine_ready even exist. ---
+    # --- BOOT CONTRACT WATCHDOG, armed HERE: the process is committed (lock held, signals wired) and still
+    #     ahead of every resource that can wedge (sqlite, MarketStore.open, Telegram, :8400 bind, token
+    #     probe, lifecycle.startup, warm-up seeding). A boot that never reaches scheduler.start() fires no
+    #     trigger all day, and the health pulse is itself an APScheduler job. A PLAIN asyncio task on
+    #     purpose: it must stay alive precisely when the scheduler is broken. `boot_state` is late-bound —
+    #     read at check time, so it can be armed before the alert sink / scheduler / engine_ready exist. ---
     boot_state: dict[str, Any] = {
         "engine_ready": False, "scheduler": None, "alert": None, "startup_done_at": None,
     }
@@ -606,8 +556,6 @@ async def run() -> int:
         stop_event=stop_event, boot_state=boot_state,
     )
     tasks = await _boot(engine, boot_state)
-    # stop_event + signal handlers were installed EARLY (right after the instance lock) so a wedged boot
-    # is still interruptible; here we simply idle on it until the first signal requests a graceful stop.
     await stop_event.wait()
     await _shutdown(engine, tasks, boot_watchdog=boot_watchdog)
     instance_lock.release()   # cosmetic tidiness — every non-clean exit is covered by the kernel
@@ -670,9 +618,8 @@ async def compose(
         end=settings.trade_window.end_ist,
         squareoff_buffer_min=settings.trade_window.squareoff_buffer_min,
     )
-    # include_special=False (2026-10-11): the live engine treats special sessions (muhurat) as closed
-    # days. BarBuilder/ReconcileJob take no per-day session bounds, so a settings opt-in to trade
-    # them would be half-wired; there is deliberately no such key.
+    # include_special=False: special sessions (muhurat) are closed days. BarBuilder/ReconcileJob take no
+    # per-day session bounds, so a settings opt-in would be half-wired; there is deliberately no such key.
     calendar = NSECalendar(
         config_dir() / "calendar", clock,
         strict=(settings.env == "prod"), sqlite_conn=conn, window_seed=window_seed,
@@ -705,9 +652,9 @@ async def compose(
             return None
         return max(0.0, (clock.now() - cached[1]).total_seconds())
 
-    # Capital base read live from the protected limit table (owner dashboard capital change: a `LimitsEngine.reload()` reaches
-    # the real brakes with no setter); an unregistered/tampered store must not crash the boot (the
-    # self-test FAILs it to FROZEN separately) — `_limits_capital_base` falls back to the shipped base.
+    # Capital base is read live from the protected limit table (a `LimitsEngine.reload()` reaches the
+    # real brakes with no setter); a tampered store must not crash the boot (the self-test FREEZEs it
+    # separately) — `_limits_capital_base` falls back to the shipped base.
     try:
         limits_engine.load()
     except IntegrityError:
@@ -735,10 +682,8 @@ async def compose(
         )
 
     async def notify(msg: CatalogMessage) -> None:
-        """Typed owner-notification sink: send a catalog message via Telegram if configured,
-        always mirrored to the structured log. Best-effort — a failed send never propagates. This is
-        the single ``CatalogMessage`` sink handed to every data job (reconcile drift, feed-degraded,
-        universe/sector failures) and to the lifecycle process-lifecycle signals + catch-up report."""
+        """The single ``CatalogMessage`` sink handed to every data job and the lifecycle: Telegram if
+        configured, always mirrored to the structured log. Best-effort — a failed send never propagates."""
         bot = telegram_holder["bot"]
         if bot is not None:
             try:
@@ -750,10 +695,8 @@ async def compose(
     async def kill_alert(message: str) -> None:
         await alert("critical", message)
 
-    # Hand the boot-contract watchdog its owner channel now that one exists. Telegram itself
-    # comes up later (`telegram.start()`); `alert` reads `telegram_holder` at CALL time, so a violation
-    # detected at T+180 s always uses whatever channel is live by then — and falls back to the
-    # structured CRITICAL log when none is.
+    # Watchdog owner channel: `alert` reads `telegram_holder` at CALL time, so it uses whatever channel is
+    # live then and falls back to the structured CRITICAL log.
     boot_state["alert"] = alert
 
     kill = KillSwitch(conn, clock, bus, alert_callback=kill_alert)
@@ -786,10 +729,8 @@ async def compose(
     # After _build_telegram subscribed to the bus, so the MODE_CHANGE alert is journalled.
     await mode.enforce_paper_only()
 
-    # --- Tier-1 harness: the ONLY SDK call site. Consumed by the sdk-smoke check and
-    #     (second wiring pass) the recommendation pipeline / planner / news-scoring jobs. Defs load
-    #     PER-AGENT (2026-08-03: one unmapped model name used to raise and dark the WHOLE tier for
-    #     the run); an invalid def is quarantined + surfaced by the self-test, the rest stay live.
+    # --- Tier-1 harness: the ONLY SDK call site. Defs load PER-AGENT: an invalid def is quarantined +
+    #     surfaced by the self-test, the rest stay live.
     agent_defs: dict[str, Any] = {}
     roster_quarantined: dict[str, str] = {}
     harness: AgentHarness | None = None
@@ -828,15 +769,12 @@ async def compose(
     # BarBuilder: ticks (published by TickerSupervisor on "tick") → finalized 1m bars → bar.1m +
     # single-writer batch persist. It also buffers raw ticks into the Parquet dataset (do NOT
     # buffer a second time elsewhere). advance() runs on a coarse timer; flush_all() at EOD/shutdown.
-    # notify: the processing-lag watchdog pages the owner ONCE per lag episode (2026-08-24
-    # late-tick death spiral — the engine ran 20 min behind for two hours with nothing but INFO lines).
+    # notify: the processing-lag watchdog pages the owner ONCE per lag episode.
     bar_builder = BarBuilder(store, clock, bus, notify=notify)
     bus.subscribe("tick", bar_builder.on_tick_event)
-    # feed.health drives the 2026-09-03 reconnect grace: a WARMING/HEALTHY transition suspends the
-    # lag watchdog for 30 s so Kite's connect-time snapshot (one last-trade-stamped tick per
-    # subscribed instrument) cannot flap the single lag episode — 14 ERROR/recovered pairs in 83 ms
-    # and 6 owner pages on the 15:40:02 boot. Subscribed HERE, well before the ticker is spawned
-    # (ticker_resume_hook), so the boot's own transitions are never missed.
+    # feed.health: a WARMING/HEALTHY transition suspends the lag watchdog for 30 s so Kite's connect-time
+    # snapshot (one tick per subscribed instrument) cannot flap the lag episode. Subscribed HERE, before
+    # the ticker is spawned, so the boot's own transitions are never missed.
     bus.subscribe(FEED_HEALTH_TOPIC, bar_builder.on_feed_health)
 
     # Shared injected httpx client for every best-effort feed. Owned here.
@@ -854,9 +792,8 @@ async def compose(
     if secrets.has(KITE_API_KEY):
         kc = session.kite_connect()
         if kc is not None:
-            # on_token_rejected wires the token-rejection circuit breaker: the FIRST TokenException on any
-            # broker call fires SessionManager.on_token_rejected → the invalidation hook (freeze +
-            # alert), so a mid-day token death stops entries instead of failing silently (2026-07-21).
+            # Token-rejection circuit breaker: the FIRST TokenException on any broker call fires
+            # SessionManager.on_token_rejected → the invalidation hook (freeze + alert).
             kite = KiteClient(kc, RateLimiter(clock), clock,
                               on_token_rejected=session.on_token_rejected,
                               order_guard=make_order_guard(mode, kill, calendar, clock))
@@ -897,27 +834,24 @@ async def compose(
     # reuses the earnings provider's historical leg (run_range) for board-meeting dates.
     filings_pit = FilingsPitJob(store, clock, http, settings=settings, notify=notify)
     # settings: filings_pit_fresh rebuilds its scrip->symbol map every run from the cached
-    # index-constituents CSV (symbol->ISIN) + the BSE bulk master (ISIN->scrip). Without it the map
-    # is only what symbol_isin holds, which is how the `ins` feed ended up reaching 199 of 480
-    # eligible issuers (2026-09-12).
+    # index-constituents CSV (symbol->ISIN) + the BSE bulk master (ISIN->scrip); without it the map is
+    # only what symbol_isin holds, which misses most eligible issuers.
     filings_pit_fresh = FilingsPitFreshJob(store, clock, http, settings=settings, notify=notify)
     filings_results = FilingsResultsJob(store, clock, http, earnings=earnings, notify=notify)
     results_line_items = ResultsLineItemsJob(store, clock, http)
     isin_map = IsinMapJob(settings, store, clock, http, notify=notify)
     feed_freshness = FeedFreshnessJob(store, clock, calendar, notify=notify)
     filings_shp = FilingsShpJob(store, clock, http, notify=notify)
-    # `ins` (2026-08-17): EOD insider net-buy crossing detection over the SAME validated crossing
-    # function the insider-crossing study runs (engine.datafeeds.insider_crossings). No HTTP — it reads the rows
-    # filings_pit_fresh ingested at 19:00 and journals crossings into ins_pending for the next
-    # session's sweep. threshold_inr is owner-fixed (it defines the validated event population).
+    # `ins`: EOD insider net-buy crossing detection over the SAME validated crossing function the study
+    # runs (engine.datafeeds.insider_crossings). No HTTP — it reads the rows filings_pit_fresh ingested
+    # and journals crossings into ins_pending for the next session's sweep. threshold_inr is owner-fixed
+    # (it defines the validated event population).
     ins_crossings = InsCrossingsJob(
         store, conn, clock, calendar, threshold_inr=settings.ins.threshold_inr
     )
-    # industry_paths: the third classification rung (2026-09-21) — NSE's Industry column for every
-    # NIFTY 500 name the ten sectoral indices and config/sector_overrides.yaml leave unclaimed.
-    # Runtime cache first (UniverseBuilder refreshes it daily), committed seed as the fallback;
-    # both resolved the same way UniverseBuilder resolves them (settings.universe.index_seed_path
-    # is repo-root-relative, and `/` on an absolute value keeps that value).
+    # industry_paths: the third classification rung — NSE's Industry column for NIFTY 500 names the
+    # sectoral indices and config/sector_overrides.yaml leave unclaimed. Runtime cache first, committed
+    # seed as fallback (index_seed_path is repo-root-relative; `/` on an absolute value keeps it).
     sector_map = SectorMapJob(
         store, clock, http, data_dir / "datafeeds" / "sector_lists.json", notify=notify,
         industry_paths=(
@@ -927,11 +861,10 @@ async def compose(
     )
 
     # --- news pipeline data side ---
-    # The envelope_state read at boot, same policy as `edge_multiple_min` below (re-read at boot;
-    # intra-run promotions are not built). load_cat_params ignores every non-`cat` key, so the whole
-    # mapping goes in as-is; empty ⇒ None ⇒ the envelope.yaml/settings.yaml defaults. The clusterer
-    # and CatalystDigestJob read the ONE envelope row cat.max_event_age_days off this same dict —
-    # the clusterer counts it in CALENDAR days from the headline, the digest in trading sessions.
+    # envelope_state is read at boot only (intra-run promotions are not built). load_cat_params ignores
+    # every non-`cat` key; empty ⇒ None ⇒ the envelope.yaml/settings.yaml defaults. The clusterer and
+    # CatalystDigestJob read the ONE row cat.max_event_age_days off this dict — the clusterer counts
+    # CALENDAR days from the headline, the digest trading sessions.
     _envelope_state = {
         r["parameter"]: r["value"]
         for r in conn.execute("SELECT parameter, value FROM envelope_state").fetchall()
@@ -949,13 +882,12 @@ async def compose(
 
     # =========================================================================================
     # DECISION PLANE: cost model → gate → pipeline → agent jobs.
-    # Everything below is inert without the Tier-1 harness (LLM tier disabled ⇒ scanners still
-    # run, the gate still exists, but no proposals are minted — fails to no-recommendation, per the LLM-failure rule).
+    # Inert without the Tier-1 harness (LLM tier disabled ⇒ scanners and gate still run, but no proposals
+    # are minted — fails to no-recommendation).
     # =========================================================================================
-    # `edge_multiple_min` is the ONE learner-movable gate knob: operating value from
-    # envelope_state when a promotion has written one, else the owner's limits.yaml default —
-    # never the CostModel's Python default (2026-07-28 review: an owner limit change was invisible).
-    # Re-read at boot; intra-run envelope promotions are not built.
+    # `edge_multiple_min` is the ONE learner-movable gate knob: envelope_state when a promotion has
+    # written one, else the owner's limits.yaml default — never the CostModel's Python default.
+    # Read at boot only.
     def _edge_multiple_min() -> Decimal:
         row = conn.execute(
             "SELECT value FROM envelope_state WHERE parameter='edge_multiple_min'"
@@ -968,29 +900,26 @@ async def compose(
             return Decimal("2.0")   # envelope default; the store failure is already FROZEN elsewhere
 
     cost_model = CostModel.from_config(instruments=instruments, edge_multiple_min=_edge_multiple_min())
-    # The per-strategy cost-gate edge registrations — see :func:`_strategy_expected_edge_pct`, which is this
-    # map and is module-level so BOTH halves of the hi52 promotion are assertable without booting an
-    # engine (a wiring that only exists inside compose() silently disappears). ONE live object for the gate
-    # and the pipeline: hi52 reads min(registered, derived at the CURRENT verified limits),
-    # on the gate's own cost model, so the two can never disagree after a capital change.
+    # Per-strategy cost-gate edge registrations — see :func:`_strategy_expected_edge_pct` (module-level so
+    # it is assertable without booting an engine). ONE live object for the gate and the pipeline: hi52
+    # reads min(registered, derived at the CURRENT verified limits) on the gate's own cost model, so the
+    # two never disagree after a capital change.
     strategy_edges = StrategyEdges(
         _strategy_expected_edge_pct(settings), table_fn=limits_engine.load, cost_model=cost_model,
     )
     gate = RiskGate(
         limits_engine, cost_model, clock,
         strategy_expected_edge_pct=strategy_edges,
-        # News SHADOWS: the cost gate rejects these unconditionally, before target_price is even read, so
-        # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 rather than
-        # inferred from a missing expected_edge_pct (see risk/gate.py _SHADOW_NO_EDGE for why, and
-        # NO_EDGE_SHADOW_STRATEGIES below for the membership and its history).
+        # News SHADOWS: the cost gate rejects these unconditionally, before target_price is read, so
+        # "signals are a measurement, never a recommendation" is ENFORCED at Tier 2 (see risk/gate.py
+        # _SHADOW_NO_EDGE, and NO_EDGE_SHADOW_STRATEGIES below for the membership).
         no_edge_shadow_strategies=NO_EDGE_SHADOW_STRATEGIES,
     )
 
     # Warm-up status cache for the gate context: WarmupGate.status() is async + store-heavy, so the
     # gate reads a snapshot refreshed by the equity/health cadence. Unset ⇒ a NOT-READY status with a
-    # regime blocker — both risk-gate readiness rules fail CLOSED until the first refresh lands. The
-    # "warmup:" line classifies as CLASS_UNKNOWN by design (2026-09-13): an unattributable blocker
-    # holds EVERY coverage class down, so the per-class scoping cannot open a leg pre-refresh either.
+    # regime blocker — both readiness rules fail CLOSED until the first refresh. The "warmup:" line
+    # classifies as CLASS_UNKNOWN by design: an unattributable blocker holds EVERY coverage class down.
     warmup_holder: dict[str, Any] = {"status": None}
     _WARMUP_UNREFRESHED = WarmupStatus(
         ready=False, blockers=["warmup:unrefreshed 0/0", "regime:unrefreshed 0/0"]
@@ -1010,10 +939,9 @@ async def compose(
         clock_skew_ok_fn=lambda: skew_holder["ok"],
         degrade_tier_fn=lambda: governor.degrade_tier().value,
         conn=conn, index_symbol=INDEX_SYMBOL,
-        # 2026-09-12: a position the broker has shown EMPTY on two consecutive sessions no
-        # longer produces exit recommendations, so the gate excludes it from the position/sector
-        # counts on the same journal the position-event screen reads (require_zero: a partial
-        # exit still holds its slot — it still has exposure).
+        # A position the broker has shown EMPTY on two consecutive sessions is excluded from the
+        # position/sector counts (same journal as the position-event screen; require_zero: a partial
+        # exit still holds its slot).
         missing_holdings_fn=lambda d: positions_missing_from_holdings(conn, d, require_zero=True),
         # nifty50_fn/expiry_day_fn unwired in RECOMMEND mode: the expiry-day NIFTY50-MIS leg of
         # `no_trade_windows` is inert until index membership is wired.
@@ -1025,8 +953,8 @@ async def compose(
         store, conn, clock, calendar,
         digest_ran_fn=lambda d: (catch_up.last_success_date(JOB_CATALYST_DIGEST) or date.min) >= d,
     )
-    # Re-review 2026-09-13: the /taken drift check judges a swing/position fill against the
-    # SAME overnight_gap_mult the gate sized it on, read from the hash-verified limits at call time.
+    # The /taken drift check judges a swing/position fill against the SAME overnight_gap_mult the gate
+    # sized it on, read from the hash-verified limits at call time.
     book = RecommendationBook(
         conn, clock, cost_model,
         overnight_gap_mult_fn=lambda: limits_engine.load().limits.per_trade_risk.overnight_gap_mult,
@@ -1066,29 +994,27 @@ async def compose(
         RecommendationPipeline(
             assembler, harness, agent_defs, gate, ctx_builder, book, mode, kill,
             governor, exposure, limits_engine, notify, clock, calendar, conn, store,
-            # Late-bound like momentum_universe below: `prescreen` is constructed a few lines further
-            # down; the lambda resolves it at call time (an analyst failure long after wiring).
+            # `prescreen` is constructed further down; these lambdas late-bind it at call time.
             rearm=lambda sym, sid: prescreen.rearm(sym, sid),
-            # 2026-08-21: the drain tick also flushes the RAW counters to `funnel_raw_counts`
-            # (late-bound for the same reason as `rearm`). Paired with `raw_counts_loader` below —
-            # the flush writes ABSOLUTE totals, so it must only ever run against a hydrated counter.
+            # The drain tick also flushes the RAW counters to `funnel_raw_counts`. Paired with
+            # `raw_counts_loader` below — the flush writes ABSOLUTE totals, so it must only run against
+            # a hydrated counter.
             funnel_raw=lambda d: prescreen.raw_counts(d),
-            # 2026-08-27 cap displacement, the two halves of the prescreen admission seam (same
-            # late-binding reason as `rearm`). `claim_slot` is the compare-and-set the pipeline must
-            # pass before spending an analyst call — it is what makes an EVALUATED candidate's slot
-            # permanent; `take_displaced` pulls the pre-screen's evictions onto the event loop, the
-            # only place the forward queue may be touched. Both unwired ⇒ pre-2026-08-27 behaviour.
+            # Cap displacement, the two halves of the prescreen admission seam. `claim_slot` is the
+            # compare-and-set the pipeline must pass before spending an analyst call — it makes an
+            # EVALUATED candidate's slot permanent; `take_displaced` pulls the pre-screen's evictions
+            # onto the event loop, the only place the forward queue may be touched.
             claim_slot=lambda sym, sid: prescreen.claim_slot(sym, sid),
             take_displaced=lambda: prescreen.take_displaced(),
-            # 2026-09-04: a no_action verdict makes its pair displaceable again (same late binding).
+            # A no_action verdict makes its pair displaceable again.
             decline=lambda sym, sid: prescreen.decline(sym, sid),
             # brk20 entry-band screen; the MARKET anchor of the stop re-anchor.
             ltp_fn=mark_price,
-            # 2026-09-13 per-class warm-up: the SAME snapshot the gate context reads, so an intraday
-            # candidate the gate would refuse for intraday coverage never spends an analyst call.
+            # The SAME warm-up snapshot the gate context reads, so a candidate the gate would refuse for
+            # coverage never spends an analyst call.
             warmup_status_fn=warmup_status_snapshot,
             admission_mode=settings.strategy.prescreen.admission_mode,   # rollback flag
-            # 2026-08-14 rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
+            # rollback flag: `immediate` restores the inline drain (see forward_drain_tick).
             forward_drain_mode=settings.strategy.prescreen.forward_drain_mode,
             hold_fn=hold_fn,
             round_tick_fn=_round_tick_fn(instruments),
@@ -1108,17 +1034,15 @@ async def compose(
     if telegram is not None:
         telegram.set_reco_book(book)
 
-    # --- live pre-screen: scanners → signal.candidate. Runs whenever the engine is up.
-    #     Since 2026-08-18 origination is ALSO window-gated here, on bar time, so a candidate the
-    #     pipeline is guaranteed to drop never charges an unrefundable day slot; the pipeline's own
-    #     Clock-based check remains the authoritative gate on tradability. ---
+    # --- live pre-screen: scanners → signal.candidate. Runs whenever the engine is up. Origination is
+    #     window-gated here on bar time, so a candidate the pipeline would drop never charges an
+    #     unrefundable day slot; the pipeline's own Clock-based check stays the authoritative gate. ---
     scan_provider = LiveScanContextProvider(
         store, clock, calendar, features, index_symbol=INDEX_SYMBOL,
-        # Late-bound: watchlist_symbols is defined further down this function; the lambda resolves it
-        # at day-cache build time (first bar of the day), long after the whole graph is wired.
+        # Late-bound: watchlist_symbols is defined further down; resolved at day-cache build time.
         momentum_universe=lambda: watchlist_symbols(),
-        # 2026-08-13: persists the mom rebalance-day marker (mom_rebalance_state,
-        # migration 0006) so live mom fires only every rebalance_days sessions instead of every day.
+        # Persists the mom rebalance-day marker (mom_rebalance_state) so mom fires every rebalance_days
+        # sessions, not every day.
         conn=conn,
     )
     prescreen = SignalPreScreen(
@@ -1130,54 +1054,45 @@ async def compose(
         max_candidates_per_day=settings.strategy.prescreen.max_candidates_per_day,
         max_per_strategy_day=settings.strategy.prescreen.max_per_strategy_day,
         admission_mode=settings.strategy.prescreen.admission_mode,       # rollback flag
-        # 2026-09-02: cumulative cap tranches by bar time — the window-open burst can no longer
-        # spend a whole sub-cap in its first minute (see the prescreen module docstring).
+        # Cumulative cap tranches by bar time, so the window-open burst cannot spend a whole sub-cap in
+        # its first minute (see the prescreen module docstring).
         cap_release_schedule=settings.strategy.prescreen.cap_release_schedule,
-        # News carve-out: the per-day catalyst-entry cap, read at the ENFORCEMENT site
-        # from the hash-verified limits.yaml — never a constructor number, never in the
-        # gate. A raise here (unverifiable store) refuses cat candidates; the pre-screen handles it.
+        # News carve-out: the per-day catalyst-entry cap, read at the ENFORCEMENT site from the
+        # hash-verified limits.yaml — never a constructor number, never in the gate. A raise here
+        # (unverifiable store) refuses cat candidates; the pre-screen handles it.
         catalyst_cap_fn=lambda: limits_engine.catalyst_guard().max_catalyst_entries_day,
-        # 2026-08-21: the RAW counters were the last piece of funnel state with no DB home, so
-        # every restart zeroed them and the nightly review reported `raw=None` for the whole day (4 of
-        # the last 6 trade days). Loaded on the first day roll of this process, flushed back by the
-        # drain tick above — the two halves ship together or the flush would overwrite the day's
-        # persisted total with this process's smaller one.
+        # Loaded on the first day roll of this process, flushed back by the drain tick above — the two
+        # halves ship together or the flush would overwrite the day's persisted total with a smaller one.
         raw_counts_loader=lambda d: read_funnel_raw_counts(conn, d),
-        # 2026-08-27: how much better a later candidate must score to take a full cap's slot from an
-        # unevaluated incumbent. Owner knob — the reasoning, and the orb-saturation caveat,
-        # live with the value in settings.yaml. `null` there disables displacement outright.
+        # How much better a later candidate must score to take a full cap's slot from an unevaluated
+        # incumbent. Owner knob (reasoning lives with the value in settings.yaml); `null` disables
+        # displacement.
         displacement_margin=settings.strategy.prescreen.displacement_margin,
     )
-    # 2026-08-04: dedupe/caps day-state is process memory — rehydrate it from the day-slot journal
-    # so a restart no longer resets the 20/day bound (observed: ~54 publications across two
-    # mid-session restarts) or re-sends already-evaluated candidates.
+    # Dedupe/caps day-state is process memory — rehydrate it from the day-slot journal so a restart
+    # does not reset the daily bound or re-send already-evaluated candidates.
     _hydrate_prescreen(conn, prescreen, clock.today())
     bus.subscribe("bar.1m", prescreen.handle_bar)
 
-    # --- `brk20` RETEST re-arm (2026-09-12). The 09-12 pre-registered entry-mechanism backtest
-    #     selected `limit_5_sessions` — a limit resting at the broken level for up to five sessions
-    #     — while the live rule publishes that level exactly ONCE (the unregistered, unmeasured N=1).
-    #     This book is the durable half (migration 0014, so a mid-session reboot cannot silently turn
-    #     the multi-session mechanism back into a single-session one); `forward_drain_tick` below is
-    #     the minute pulse that re-offers a rested level the moment the price is back inside the band.
-    #     It widens nothing: same levels, same band, same caps, same gate (see retest.py).
+    # --- `brk20` RETEST re-arm: a limit resting at the broken level for up to five sessions, where the
+    #     live rule would publish that level once. This book is the durable half (migration 0014, so a
+    #     reboot cannot turn it back into a single-session mechanism); `forward_drain_tick` below is the
+    #     minute pulse that re-offers a rested level when the price is back inside the band. It widens
+    #     nothing: same levels, band, caps, gate (see retest.py). ---
     retest_book = RestingLevelBook(conn, calendar, clock,
                                    sessions=settings.brk20.retest_sessions)
     #: What the DAY's sweep knows that the retest tick must respect: the eligible population brk20
-    #: originates over and the ex-date horizon, both already read by `_collect_and_scan` (so the
-    #: minute pulse pays nothing for them). `day` doubles as the retest's readiness flag — see
-    #: `sweep_ready` in `forward_drain_tick`.
+    #: originates over and the ex-date horizon, both already read by `_collect_and_scan`. `day` doubles
+    #: as the retest's readiness flag — see `sweep_ready` in `forward_drain_tick`.
     _retest_state: dict[str, Any] = {
         "day": None, "eligible": frozenset(), "ex_skip": frozenset(), "unadjusted": frozenset(),
     }
 
     def _retest_limits() -> tuple[float, float]:
-        """The two risk-limit numbers the retest enforces — the CNC ``entry_sanity_band`` and
-        ``stale_data_guard.max_tick_age_s`` — read TOGETHER at the ENFORCEMENT site from ONE
-        hash-verified load (the ``catalyst_cap_fn`` convention above). Never constructor numbers, so
-        an owner tightening either tightens the retest with it, and never two loads that could
-        straddle an owner edit. A raise here (unverifiable store) propagates as the exception
-        `_retest_republish` turns into "re-offer nothing this tick"."""
+        """The CNC ``entry_sanity_band`` and ``stale_data_guard.max_tick_age_s``, read TOGETHER at the
+        ENFORCEMENT site from ONE hash-verified load (the ``catalyst_cap_fn`` convention): never
+        constructor numbers, never two loads that could straddle an owner edit. A raise (unverifiable
+        store) propagates; `_retest_republish` turns it into "re-offer nothing this tick"."""
         lim = limits_engine.load().limits
         return (float(lim.entry_sanity_band.cnc_pct), float(lim.stale_data_guard.max_tick_age_s))
 
@@ -1194,13 +1109,8 @@ async def compose(
             pending=_pending_entry_rec_symbols(conn, clock.now()),
         )
 
-    # 2026-08-18: the scan context day-caches `trade_window` (per PROCESS per date), so an owner
-    # change mid-session was invisible to every scanner until the next restart. ModeManager has
-    # always published `trade_window.changed` — only telegram and the API relay listened. Wiring the
-    # scan provider to it is what stops `orb` intersecting a window that no longer exists (live
-    # 2026-08-18: cache built 09:52:06 holding 10:00–10:30, owner moved it to 10:10–15:30 at
-    # 09:57:52, orb fired 10:00:05–10:01:07 against the stale copy and burned its whole 6-slot
-    # sub-cap nine minutes before the real window opened).
+    # The scan context day-caches `trade_window`; subscribing to `trade_window.changed` keeps `orb` from
+    # intersecting a window the owner has since changed.
     from engine.risk.events import TOPIC_TRADE_WINDOW
 
     async def _refresh_scan_window(_event) -> None:
@@ -1233,13 +1143,12 @@ async def compose(
     )
 
     # --- ticker subprocess supervisor (started into WARMING at the startup ticker-resume step when a token exists) ---
-    # calendar+notify power the in-session tick-silence guard: a tickless-but-heartbeating child
-    # used to read HEALTHY all session (2026-07-22) — now it degrades visibly + alerts during market hours.
+    # calendar+notify power the in-session tick-silence guard (a tickless-but-heartbeating child degrades
+    # visibly and alerts during market hours).
     ticker = TickerSupervisor(
         settings, clock, bus,
         symbol_for_token=instruments.symbol_for_token, calendar=calendar, notify=notify,
-        # The WS URL needs the api_key alongside the access token; omitting it left the default ""
-        # and every websocket upgrade 400-rejected forever (2026-07-23 root cause, zero ticks ever).
+        # The WS URL needs the api_key alongside the access token; without it every upgrade is 400-rejected.
         api_key=session.api_key() or "",
     )
     # stale_data_guard: a heartbeat-silent feed latches FROZEN until the feed is HEALTHY.
@@ -1260,10 +1169,9 @@ async def compose(
         """Today's BATCH universe (latest ``universe_daily`` snapshot ≤ today): eligible + capped +
         extended names — the widest rule-passing set (``store.get_batch_universe_symbols``).
 
-        Same bounded look-back as :func:`watchlist_symbols`, and for a stronger reason: the only
-        consumer is the SUNDAY sector-map job, and Sunday has no universe row of its own. Falls back
-        to the active watchlist when nothing is found in the window (pre-first-build / a cold boot),
-        which is the behaviour before the owner's NIFTY 500 widening."""
+        Same bounded look-back as :func:`watchlist_symbols`; the only consumer is the SUNDAY sector-map
+        job, and Sunday has no universe row of its own. Falls back to the active watchlist when nothing
+        is found in the window (pre-first-build / a cold boot)."""
         d = clock.today()
         for _ in range(_WATCHLIST_LOOKBACK_DAYS):
             symbols = store.get_batch_universe_symbols(d)
@@ -1275,25 +1183,20 @@ async def compose(
     def held_symbols() -> list[str]:
         return _held_symbols(conn)
 
-    # --- batch-leg tick subscriptions (2026-09-11 forensics). The risk gate's ONLY price source is
-    #     the live tick cache (`mark_price` above): brk20 originates over the whole ELIGIBLE set and
-    #     hi52/ins/cat over its NIFTY 500 core (since the 2026-10-08 owner decision; ~480 eligible names at the time) while the
-    #     feed carries the included watchlist (~300), so an
-    #     eligible-but-unticked candidate reached the gate with ltp=None and failed CLOSED
-    #     (stale_data_guard "symbol no feed", entry_sanity_band "LIMIT with no usable LTP") — 27 of 84
-    #     brk20 slots and 1 of 16 hi52 slots. The sweep records what the pre-screen ADMITTED and the
-    #     feed follows. Per-day: tomorrow's sweep re-admits off tomorrow's universe.
-    #     These symbols are deliberately NOT in the warm-up coverage set (`warmup_gate.set_symbols`
-    #     stays on `watchlist_symbols()` — job_universe below): a missing bar on one of them would
-    #     FREEZE entries, which is the opposite of the point.
+    # --- batch-leg tick subscriptions. The risk gate's ONLY price source is the live tick cache
+    #     (`mark_price` above): brk20 originates over the whole ELIGIBLE set and hi52/ins/cat over its
+    #     NIFTY 500 core, while the feed carries only the included watchlist, so an eligible-but-unticked
+    #     candidate reached the gate with ltp=None and failed CLOSED. The sweep records what the
+    #     pre-screen ADMITTED and the feed follows. Per-day: tomorrow's sweep re-admits off tomorrow's
+    #     universe. These symbols are deliberately NOT in the warm-up coverage set
+    #     (`warmup_gate.set_symbols` stays on `watchlist_symbols()`): a missing bar on one of them would
+    #     FREEZE entries. ---
     _batch_ticks: dict[str, Any] = {"day": None, "symbols": set()}
 
     def ticker_tokens() -> list[int]:
         """Ticker subscription set: watchlist + FEED symbols + today's batch-admitted symbols +
         NIFTY 50 + India VIX → tokens. The composition — order, dedupe AND the midnight roll of
-        the batch set — lives in :func:`_ticker_tokens` so a test exercises the production function
-        instead of re-assembling the same list beside it (2026-09-11 review: a hand-rolled copy still
-        passes after the real one drops the day roll and the subscription grows every session)."""
+        the batch set — lives in :func:`_ticker_tokens` so a test exercises the production function."""
         return _ticker_tokens(
             watchlist=watchlist_symbols(), held=_feed_symbols(conn), batch_state=_batch_ticks,
             today=clock.today(), token_for_symbol=instruments.token_for_symbol,
@@ -1311,16 +1214,14 @@ async def compose(
     async def job_instruments() -> None:
         await instruments.refresh(_require_kite())
         # Persist today's dump so a restart after this job (whose watermark makes catch-up skip it) can
-        # hydrate the token map pre-login instead of an unknown_token storm. Surveillance/MIS
-        # columns are left NULL here and no job writes them: the surveillance rule is enforced by the 08:30 universe
-        # exclusion, and the gate and /why read the surveillance_* codes from universe_daily.
+        # hydrate the token map pre-login. Surveillance/MIS columns are left NULL here: the surveillance
+        # rule is enforced by the 08:30 universe exclusion, and the gate and /why read the surveillance_*
+        # codes from universe_daily.
         today = clock.today()
         rows = instruments.snapshot_rows(today)
         persisted = await store.arun(store.upsert_instruments_daily, rows)
-        # Alias SEED from this dump's company names (idempotent upsert; curated rows live under
-        # their own keys). Production ran with an EMPTY entity_aliases table until 2026-08-03 — every
-        # headline no-matched — because nothing called this; the daily job now owns it, which also
-        # tracks renames/new listings.
+        # Alias SEED from this dump's company names (idempotent upsert; curated rows live under their
+        # own keys); also tracks renames/new listings.
         seeded = await store.arun(resolver.seed_aliases, rows)
         curated = await store.arun(
             resolver.seed_curated_aliases, load_yaml(config_dir() / "aliases.yaml")
@@ -1332,8 +1233,8 @@ async def compose(
         await surveillance.refresh()
 
     async def job_earnings() -> EarningsCalendarResult:
-        # Forwarded (2026-08-13): earnings_calendar degrades-without-raising — the watermark
-        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed: earnings_calendar degrades without raising, so the watermark verdict
+        # needs the real ok/degraded outcome.
         return await earnings.run(clock.today())
 
     async def job_universe() -> None:
@@ -1341,25 +1242,20 @@ async def compose(
         await surveillance.current()
         before = set(watchlist_symbols())
         await universe_builder.build(clock.today())
-        # Re-point the feed AND the warm-up coverage set at today's universe (2026-07-28 review: both
-        # were frozen at boot, so a pre-08:30 start ran the whole day on YESTERDAY's watchlist).
+        # Re-point the feed AND the warm-up coverage set at today's universe (both are set at boot, so a
+        # pre-08:30 start would otherwise run the day on YESTERDAY's watchlist).
         warmup_gate.set_symbols(watchlist_symbols())
         try:
             if ticker.health().state != "STOPPED":
                 await ticker.update_subscriptions(ticker_tokens())
         except Exception:  # noqa: BLE001 - a resubscribe failure degrades to the old set, never fails the job
             _log.exception("ticker_resubscribe_failed")
-        # Symbols ENTERING the watchlist mid-session have no session bars yet, and the boot/post-login
-        # gap fill ran against the PREVIOUS set (2026-07-29: SWIGGY/TITAN entered 15 s after the fill
-        # and their 09:15→09:53 hole kept warm-up FROZEN all day). Fill the newcomers' minutes now —
-        # the gate is already watching them. Pre-open builds skip this (nothing missed yet). This is
-        # ONE of two newcomer repairs — the daily-history fill below is the other, and runs regardless
-        # of time of day.
+        # Symbols ENTERING the watchlist mid-session have no session bars yet (the boot/post-login gap
+        # fill ran against the PREVIOUS set), and a hole keeps warm-up FROZEN. Two newcomer repairs: the
+        # daily-history fill (the gate's exact window; runs at any time of day) and the minute fill
+        # (mid-session only; pre-open builds have nothing missed yet).
         added = [s for s in watchlist_symbols() if s not in before]
         session = calendar.session(clock.today())
-        # 2026-09-15: a newcomer's DAILY history was never repaired by anything — OLAELEC joined at
-        # 10:09 with a 57-session hole in bars_1d and the DAILY class froze every entry for 12 h. Fill
-        # the gate's exact window for the newcomers first; the minute fill below stays mid-session-only.
         if added and backfill is not None:
             sessions = warmup_gate.daily_window()
             if sessions is None:
@@ -1381,19 +1277,15 @@ async def compose(
             except Exception:  # noqa: BLE001 - a failed fill leaves the gate blocking (fail closed), never fails the job
                 _log.exception("universe_added_gap_fill_failed", symbols=added)
 
-    # ONE writer through the news chain at a time (2026-07-28 review): the three per-feed polls fire
-    # on independent intervals and the scorer writes whole cluster rows back — un-serialized, a poll
-    # updating a cluster between the scorer's read and its write-back gets clobbered by the stale
-    # snapshot (cluster assignment is also read-modify-write). Volumes are tiny; a lock is free.
-    # The invariant is that STORE read-modify-write, never the model call (2026-09-09): held
-    # around the whole scoring batch the lock also spanned one LLM await per chunk, and the polls
-    # (whose resolve deadline covers lock ACQUISITION) queued behind it — 14 news_resolve_timeout on
-    # 2026-09-07 after a post-sleep backlog, nine of them inside one second at 10:12:40. The scorer
-    # now takes this same lock itself, for its read and each conditional write-back only: under the
-    # write-back hold it re-reads the CURRENT rows and applies the score columns to those, so a poll
-    # merge that landed during the model call survives (the upsert overwrites every non-key column,
-    # so re-emitting the pre-LLM snapshot would revert it) and an id that left the queue meanwhile is
-    # skipped, never resurrected.
+    # ONE writer through the news chain at a time: the per-feed polls fire on independent intervals and
+    # the scorer writes whole cluster rows back, so un-serialized a poll's cluster update is clobbered
+    # by the scorer's stale snapshot (cluster assignment is also read-modify-write).
+    # The lock guards that STORE read-modify-write, never the model call: the polls' resolve deadline
+    # covers lock ACQUISITION, so holding it across an LLM await times them out. The scorer takes this
+    # lock itself for its read and each conditional write-back only; under the write-back hold it
+    # re-reads the CURRENT rows and applies the score columns to those (the upsert overwrites every
+    # non-key column, so re-emitting the pre-LLM snapshot would revert a poll merge), and an id that
+    # left the queue meanwhile is skipped, never resurrected.
     news_chain_lock = asyncio.Lock()
 
     async def resolve_news(headlines: list, *, alert_on_timeout: bool = False) -> None:
@@ -1405,10 +1297,9 @@ async def compose(
             await resolver.aload(clock.today())
             await resolver.run(touched)
 
-        # Bounded (2026-08-10): the 12:38 boot's resolve hung 8+ h and wedged the whole startup.
-        # The owner alert fires only from the chain/catch-up path (review round: every per-feed
-        # poll shares this closure — a persistent hang would page once per poll per 600 s forever;
-        # the poll path degrades to the helper's own error log).
+        # Bounded: an unbounded resolve can wedge the whole startup. The owner alert fires only from the
+        # chain/catch-up path (every per-feed poll shares this closure; a persistent hang would page once
+        # per poll forever — the poll path degrades to the helper's own error log).
         await resolve_news_bounded(
             news_chain_lock, _chain,
             on_timeout=(lambda: alert(
@@ -1421,24 +1312,21 @@ async def compose(
     async def score_news(*, force: bool = False) -> None:
         if scoring_job is None:
             return
-        # The batch takes the lock itself (see above) — nothing here may hold it: asyncio.Lock is
-        # not reentrant, so a wrapping `async with` would now deadlock on the first store hop.
-        # Both callers of this closure — job_news_chain's forced pre-open batch and the 300 s
-        # news_scoring_tick — are separate scheduler jobs and can overlap; run_batch single-flights
-        # itself on a lock it owns (the waiter re-reads an emptied queue), so no guard is needed here.
+        # The batch takes the lock itself (see above) — nothing here may hold it: asyncio.Lock is not
+        # reentrant, so a wrapping `async with` would deadlock. job_news_chain's forced batch and the 300 s
+        # news_scoring_tick can overlap; run_batch single-flights itself on a lock it owns.
         await scoring_job.run_batch(force=force, lock=news_chain_lock)
 
     async def job_news_chain() -> None:
-        # News-chain startup/catch-up: backfill → cluster → resolve (never entry-blocking),
-        # then the pre-open scoring batch (force=True: score ALL unscored regardless of the ≥8
-        # minimum) so the ~08:35 digest sees today's scores. Scoring failure never blocks the chain.
-        # Unclustered re-sweep (2026-08-10): a bounded/cancelled resolve leaves inserted-but-unlinked
-        # rows — fold them into this run's batch so an abandoned backlog is retried, never orphaned.
+        # backfill → cluster → resolve (never entry-blocking), then the pre-open scoring batch (force=True:
+        # score ALL unscored regardless of the ≥8 minimum) so the digest sees today's scores. Scoring
+        # failure never blocks the chain. Unclustered re-sweep: a bounded/cancelled resolve leaves
+        # inserted-but-unlinked rows — fold them into this run so an abandoned backlog is retried.
         inserted = await news_ingest.backfill()
         seen = {h.headline_id for h in inserted}
-        # Capped slice (review round): clustering is O(headlines × window clusters), so an uncapped
-        # re-sweep after repeated timeouts grows the next attempt past its own deadline forever.
-        # get_news orders by published_at ⇒ oldest-first: every run makes bounded forward progress.
+        # Capped slice: clustering is O(headlines × window clusters), so an uncapped re-sweep after
+        # repeated timeouts outgrows its own deadline. get_news orders oldest-first: bounded forward
+        # progress every run.
         orphans = [
             Headline(**{k: r[k] for k in ("headline_id", "title", "source_domain", "url", "published_at")})
             for r in await store.arun(
@@ -1456,9 +1344,8 @@ async def compose(
             _log.exception("preopen_scoring_batch_failed")
 
     async def job_catalyst_digest() -> None:
-        # Catalyst digest (~08:35): emits CATALYST_WATCHLIST on every SUCCESSFUL run — including an
-        # empty-but-fresh (0, 0); a failed run alerts CATALYST_DISABLED and re-raises so the
-        # watermark records the failure (catalyst fail-safe ladder, chaos case 20 convention).
+        # Emits CATALYST_WATCHLIST on every SUCCESSFUL run — including an empty-but-fresh (0, 0); a failed
+        # run alerts CATALYST_DISABLED and re-raises so the watermark records the failure.
         from engine.notify.catalog import catalyst_watchlist
 
         try:
@@ -1470,12 +1357,11 @@ async def compose(
 
     async def job_preopen_planner() -> AdvisoryRun:
         if planner_job is None:
-            # A FAILED watermark, not a silent success: catch-up retries once the roster is fixed
-            # (2026-08-03: the sonnet-5 roster failure made this a 29 ms "success" no-op all day).
+            # A FAILED watermark, not a silent success: catch-up retries once the roster is fixed.
             raise RuntimeError("preopen planner unavailable — LLM roster quarantined/unloaded")
-        # Translate the advisory tri-state into the ok-bearing watermark verdict here, in
-        # the wrapper — governor-blocked is a CORRECT outcome (success watermark, no retry), only a
-        # harness failure is retryable. ``_job_result_ok`` stays unwidened for bare bools.
+        # Translate the advisory tri-state into the ok-bearing watermark verdict here: governor-blocked
+        # is a CORRECT outcome (success watermark, no retry), only a harness failure is retryable.
+        # ``_job_result_ok`` stays unwidened for bare bools.
         return AdvisoryRun(await planner_job.run(clock.today()))
 
     async def job_reco_expire() -> None:
@@ -1503,28 +1389,19 @@ async def compose(
     async def job_nightly_review(d) -> AdvisoryRun:
         if nightly_job is None:
             raise RuntimeError("nightly reviewer unavailable — LLM roster quarantined/unloaded")
-        # As job_preopen_planner: blocked ⇒ success watermark (the governor said no on
-        # purpose), harness-failed ⇒ failed watermark ⇒ the next sweep retries — and that retry is
-        # itself governor-gated inside NightlyReviewJob.run, so the governor bounds the spend.
+        # As job_preopen_planner: blocked ⇒ success watermark, harness-failed ⇒ failed watermark ⇒ the
+        # next sweep retries (itself governor-gated inside NightlyReviewJob.run, bounding the spend).
         return AdvisoryRun(await nightly_job.run(d))
 
     async def job_sector_map() -> SectorMapResult:
-        # Forwarded (2026-08-13): sector_map degrades-without-raising — the watermark verdict
-        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
-        # Owner decision 2026-09-04: classify the BATCH universe, not the tick watchlist. The eligible set (the
-        # configured index, NIFTY Total Market since the 2026-10-08 owner decision)
-        # is larger than universe_max_watchlist, so a
-        # watchlist-scoped run would
-        # leave every capped and extended name without a sector_map row — and the risk limits cap the
-        # UNCLASSIFIED bucket at 1 open position, which would gate-block the widened swing legs.
-        # Only the UNCLASSIFIED fill-in list grows (~200 → ~800 set-membership checks against the
-        # already-fetched sectoral lists, then that many more upserted rows); the ten NSE fetches
-        # are per-index and unchanged.
+        # Returned, not swallowed (degrades without raising; the watermark needs the real outcome).
+        # Classifies the BATCH universe, not the tick watchlist: a watchlist-scoped run would leave every
+        # capped and extended name without a sector_map row, and the risk limits cap the UNCLASSIFIED
+        # bucket at 1 open position, which would gate-block the widened swing legs.
         return await sector_map.run(clock.today(), universe_symbols=batch_universe_symbols())
 
     async def job_corp_actions() -> CorpActionsResult:
-        # Forwarded (2026-08-13): corp_actions degrades-without-raising — the watermark verdict
-        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (degrades without raising; the watermark needs the real outcome).
         return await corp_actions.run(clock.today())
 
     async def job_backup() -> None:
@@ -1540,28 +1417,23 @@ async def compose(
             _log.info("retention_pruned", **pruned)
 
     async def job_bhavcopy(d) -> BhavcopyResult:
-        # Forwarded (2026-08-13): bhavcopy degrades-without-raising — the watermark verdict
-        # needs the real ok/degraded outcome, not a swallowed None (composition-root closure gap).
+        # Returned, not swallowed (degrades without raising; the watermark needs the real outcome).
         return await bhavcopy.run(d)
 
     async def job_deals(d) -> DealsResult:
-        # Forwarded (2026-08-13): deals degrades-without-raising — the watermark verdict needs
-        # the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (same reason as job_bhavcopy).
         return await deals.run(d)
 
     async def job_filings_pit(d) -> FilingsPitResult:
-        # Forwarded (2026-08-13): filings_pit degrades-without-raising — the watermark verdict
-        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (same reason as job_bhavcopy).
         return await filings_pit.run(d)
 
     async def job_filings_pit_fresh(d) -> FilingsPitFreshResult:
-        # Forwarded (2026-08-13): filings_pit_fresh degrades-without-raising — the watermark
-        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (same reason as job_bhavcopy).
         return await filings_pit_fresh.run(d)
 
     async def job_filings_results(d) -> FilingsResultsResult:
-        # Forwarded (2026-08-13): filings_results degrades-without-raising — the watermark
-        # verdict needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (same reason as job_bhavcopy).
         return await filings_results.run(d)
 
     async def job_results_line_items() -> ResultsLineItemsResult:
@@ -1580,8 +1452,7 @@ async def compose(
         await alert_claude_login(clock.now(), claude_credentials_path(), alert, relogin_hint)
 
     async def job_filings_shp() -> FilingsShpResult:
-        # Forwarded (2026-08-13): filings_shp degrades-without-raising — the watermark verdict
-        # needs the real ok/degraded outcome, not a swallowed None (composition-root gap).
+        # Returned, not swallowed (same reason as job_bhavcopy).
         return await filings_shp.run()
 
     async def job_ins_crossings(d) -> InsCrossingsResult:
@@ -1614,32 +1485,27 @@ async def compose(
         await asyncio.to_thread(features.daily_snapshot, d)
 
     async def job_tick_compact(d) -> TickCompactionResult:
-        # Collapse the closed tick partitions up to ``d`` into one file per symbol-day.
-        # Off the event loop (DuckDB + a large filesystem walk) and on its OWN connection —
-        # never the live MarketStore's, which is the bar/tick write path. Today's partition is
-        # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day
-        # sinks the watermark and the next sweep retries only what did not compact. ``stop`` ends
-        # the run at the tick_compact no-run window or on a stop signal (compact_ticks docstring). Buffered ticks
-        # are written first (waiting out an in-flight flush, as close() does): the tail of a session
-        # the engine stayed up through is otherwise written by the next morning's first flush,
-        # beside a date a post-midnight run already compacted, and costs a later run a merge
-        # rewrite of that symbol-day (compact_ticks module docstring).
+        # Collapse the closed tick partitions up to ``d`` into one file per symbol-day. Off the event loop
+        # and on its OWN connection — never the live MarketStore's write path. Today's partition is
+        # skipped inside compact_ticks (the writer still owns it). Ok-bearing: a failed symbol-day sinks
+        # the watermark and the next sweep retries only what did not compact. ``stop`` ends the run at
+        # the no-run window or on a stop signal (compact_ticks docstring). Buffered ticks are flushed
+        # first (waiting out an in-flight flush, as close() does), else the session tail lands beside an
+        # already-compacted date and costs a later merge rewrite (compact_ticks module docstring).
         await asyncio.to_thread(store.flush_ticks, wait_s=15.0)
         result = await asyncio.to_thread(
             compact_ticks, settings.parquet_dir(), upto=d, today=clock.today(),
             stop=lambda: stop_event.is_set() or _in_session_window(clock, calendar),
         )
-        # The tick retention sweep runs HERE, right after the nightly compaction — see
-        # ``apply_tick_retention``. It never changes this job's ok-bearing result.
+        # Retention sweep runs here (see ``apply_tick_retention``); never changes the ok-bearing result.
         await apply_tick_retention(store, result)
         return result
 
     market_backup_retry = MarketBackupRetry()
 
     async def job_market_backup() -> MarketBackupResult:
-        # DuckDB leg — a lane job only: never in boot catch-up, never on the stop path. Any lane
-        # pass may run it (the post-arm one at boot included), but it never starts 06:00-15:45 on a
-        # trading day and is held for 6 h after a failed export (``_market_backup``).
+        # DuckDB leg — a lane job only: never in boot catch-up, never on the stop path. It never starts
+        # 06:00-15:45 on a trading day and is held for 6 h after a failed export (``_market_backup``).
         return await _market_backup(store, settings, clock, calendar, retry=market_backup_retry)
 
     # ``catch_up`` is bound below, before any job can run.
@@ -1674,9 +1540,8 @@ async def compose(
         JOB_INS_CROSSINGS: job_ins_crossings,
         JOB_TICK_COMPACT: job_tick_compact,
         JOB_MARKET_BACKUP: job_market_backup,
-        # Decision-plane: every decision-plane fn is always registered; the wrappers whose object may be
-        # unbuilt (planner, nightly, time-exit) RAISE, so the watermark records a FAILURE and the catch-up
-        # sweep retries once the roster is fixed (2026-08-03).
+        # Decision-plane: always registered; the wrappers whose object may be unbuilt (planner, nightly,
+        # time-exit) RAISE, so the watermark records a FAILURE and the catch-up sweep retries.
         JOB_CATALYST_DIGEST: job_catalyst_digest,
         JOB_PREOPEN_PLANNER: job_preopen_planner,
         JOB_RECO_EXPIRE: job_reco_expire,
@@ -1691,31 +1556,27 @@ async def compose(
     # OPS: freeze seam, warm-up gate, heartbeat, catch-up (registry), self-test, lifecycle.
     # =========================================================================================
     async def freeze_entries(reason: str) -> None:
-        # Through the cause ledger (single-writer discipline, 2026-07-28 review): a direct
-        # risk_state write is invisible to clear_cause re-arms and the warm-up lift.
+        # Through the cause ledger (single-writer discipline): a direct risk_state write is invisible to
+        # clear_cause re-arms and the warm-up lift.
         if not kill.is_killed():
             await latch.set_cause(reason, RiskState.FROZEN, reason, Actor.RISK_GATE)
 
     async def clear_entries_cause(reason: str) -> None:
-        # Mirror of freeze_entries (2026-08-06): a safety-critical job verified fresh clears its
-        # own latched data_freshness cause through the same ledger (clear_cause recomputes and is
-        # idempotent on inactive causes) — without this a pre-login catch-up failure held FROZEN
-        # for the whole session after the post-login re-run had already succeeded.
+        # Mirror of freeze_entries: a safety-critical job verified fresh clears its own latched
+        # data_freshness cause through the same ledger (clear_cause is idempotent on inactive causes).
         await latch.clear_cause(reason, Actor.RISK_GATE)
 
-    # Mid-day token-death circuit breaker: the KiteClient (built above with
-    # on_token_rejected=session.on_token_rejected) fires this hook on the FIRST TokenException of a
-    # burst (SessionManager.on_token_rejected is idempotent) so entries FREEZE and the owner is
-    # alerted to re-login — the invalidation seam that was never wired before 2026-07-21.
+    # Mid-day token-death circuit breaker: the KiteClient fires this hook on the FIRST TokenException of
+    # a burst (SessionManager.on_token_rejected is idempotent) so entries FREEZE and the owner is alerted.
     async def _on_session_invalidated() -> None:
         await freeze_entries("kite_token_rejected")
         await alert(
             "critical",
             "Kite token rejected by broker — entries FROZEN; re-login via the login link or /token",
         )
-        # A tappable link, not just a notice: this path also covers the probe-'inconclusive'-then-dead
-        # boot (network flake at probe time), where NO login prompt was sent at startup. The hook only
-        # fires via the KiteClient (which exists ⇒ api_key exists), so login_url() cannot raise here.
+        # A tappable link: this path also covers the probe-'inconclusive'-then-dead boot, where NO login
+        # prompt was sent at startup. The hook fires only via the KiteClient (⇒ api_key exists), so
+        # login_url() cannot raise here.
         await notify(login_prompt(session.login_url()))
     session.set_invalidation_hook(_on_session_invalidated)
 
@@ -1735,7 +1596,7 @@ async def compose(
                              registry.select(lambda s: s.job_id not in LANE_JOB_IDS),
                              freeze=freeze_entries, notify=notify, clear=clear_entries_cause,
                              # Boot replays load-bearing data steps only; POST_ARM_JOB_IDS
-                             # fire after scheduler.start() (rollback: DEFER_POST_ARM_JOBS = False).
+                             # fire after scheduler.start().
                              deferred=POST_ARM_JOB_IDS if DEFER_POST_ARM_JOBS else ())
     compaction_lane = CompactionLane(
         CatchUpRunner(conn, clock, calendar, registry.select(lambda s: s.job_id in LANE_JOB_IDS),
@@ -1753,15 +1614,14 @@ async def compose(
         roster_quarantined=roster_quarantined, roster_loaded=len(agent_defs),
         claude_credentials=claude_credentials_path(), claude_relogin_hint=relogin_hint,
     )
-    # In-session OS keep-awake (2026-07-23 sleep/resume wedge): keeps Windows from auto-sleeping while
-    # the NSE session is open (the display may still sleep). Driven off the always-on health loop below.
+    # In-session OS keep-awake: keeps Windows from auto-sleeping while the NSE session is open (the
+    # display may still sleep). Driven off the always-on health loop below.
     keep_awake = KeepAwake(enabled=settings.ticker.keep_awake_in_session)
     def _prescreen_funnel_today() -> tuple[int, int, int | None]:
-        # Origination-liveness probe (2026-09-01): today's prescreen slot count, forward events that
-        # reached the analyst, and the governor's live daily forward cap. `forwarded` is the
-        # LLM-reach marker (`evaluated` is re-armed to 0 on age-out, so a drought day reads
-        # all-zeros there — see prescreen_day_slots semantics in pipeline.py); it is day-cumulative,
-        # which is why the monitor stalls on "no PROGRESS", not on "zero". A cap read failure
+        # Origination-liveness probe: today's prescreen slot count, forward events that reached the
+        # analyst, and the governor's live daily forward cap. `forwarded` is the LLM-reach marker
+        # (`evaluated` is re-armed to 0 on age-out — see prescreen_day_slots in pipeline.py); it is
+        # day-cumulative, so the monitor stalls on "no PROGRESS", not on "zero". A cap read failure
         # degrades to None (the monitor then alarms only on the zero-forwarded shape).
         row = conn.execute(
             "SELECT COUNT(*), COALESCE(SUM(forwarded), 0) FROM prescreen_day_slots WHERE d = ?",
@@ -1776,15 +1636,14 @@ async def compose(
     health = HealthMonitor(
         clock, settings, ticker_supervisor=ticker, alert=alert,
         calendar=calendar, keep_awake=keep_awake,
-        # The store stall watchdog rides the always-on health pulse — the one timer
-        # that kept beating through the 2026-08-21 freeze while every store path was wedged.
+        # The store stall watchdog rides the always-on health pulse — the one timer that keeps beating
+        # while every store path is wedged.
         store=store,
-        # Origination liveness (2026-09-01, catchup_safety_jobs latch incident: FROZEN entries for
-        # two whole sessions, zero pages): entries_frozen_in_session + funnel_zero_in_session ride
-        # the same always-on pulse and episode cadence.
+        # Origination liveness: entries_frozen_in_session + funnel_zero_in_session ride the same
+        # always-on pulse and episode cadence.
         mode_manager=mode, latch=latch, funnel_probe=_prescreen_funnel_today,
-        # feed_stopped_in_session (2026-10-21: the ticker never started, health said problems=[]):
-        # token_valid only qualifies the page (a dead token vs a ticker that never launched).
+        # feed_stopped_in_session: token_valid only qualifies the page (a dead token vs a ticker that
+        # never launched).
         token_valid=session.token_valid,
     )
     scheduler = Scheduler(clock, calendar)
@@ -1792,12 +1651,10 @@ async def compose(
 
     # --- injected recovery hooks (backfill; schedule re-arm and ticker resume) ---
     async def backfill_hook() -> None:
-        # Step 4: warm-up the regime history (NIFTY50/VIX daily — checkpointed, cheap on re-runs) and
-        # gap-fill today's intraday minute bars from official candles so warm-up never needs live ticks.
-        # Shared with the post-login re-trigger so both issue the IDENTICAL calls (engine.ops.post_login).
-        # 2026-07-21: a token-less (or expired-token) boot must NOT issue doomed historical calls — the
-        # live probe makes token_valid() truthful, and PostLoginRecovery re-runs this SAME hook the
-        # moment a valid token arrives.
+        # Step 4: warm up the regime history (NIFTY50/VIX daily — checkpointed) and gap-fill today's
+        # intraday minute bars from official candles so warm-up never needs live ticks. Shared with the
+        # post-login re-trigger (engine.ops.post_login). A token-less (or expired-token) boot must NOT
+        # issue doomed historical calls; PostLoginRecovery re-runs this SAME hook once a token arrives.
         if backfill is None or not session.token_valid():
             _log.info("backfill_hook_skipped", reason="no valid Kite token")
             return
@@ -1806,14 +1663,13 @@ async def compose(
         )
 
     async def ticker_resume_hook() -> None:
-        # Step 7: resume the ticker into WARMING (feed-stale alarms suppressed) once a token exists.
-        # Extracted to engine.ops.post_login so startup and the post-login re-trigger share the exact
-        # same resume logic rather than duplicating it.
+        # Step 7: resume the ticker into WARMING (feed-stale alarms suppressed) once a token exists;
+        # shared with the post-login re-trigger via engine.ops.post_login.
         await resume_ticker(session, kite, ticker, ticker_tokens)
 
     async def backup_hook() -> None:
-        # The backup is best-effort — a failure must never block the shutdown guard (whose job
-        # is capital protection, not housekeeping); swallow here so the STOPPED commit still proceeds.
+        # Best-effort: a failure must never block the shutdown guard (capital protection, not
+        # housekeeping); swallowed so the STOPPED commit still proceeds.
         try:
             await _snapshot_backup(conn, settings, clock)
         except Exception:  # noqa: BLE001 - best-effort backup never blocks a clean stop
@@ -1828,20 +1684,17 @@ async def compose(
         backfill_hook=backfill_hook, ticker_resume_hook=ticker_resume_hook, backup_hook=backup_hook,
     )
 
-    # --- holdings reconcile (owner-directed 2026-09-07): the only answer to "is this tracked
-    #     position still IN the account?" until the fill-side reconciler lands. Wired only when
-    #     a broker facade exists (no api_key ⇒ no holdings to read). Alert-only: it never writes state,
-    #     never touches the gate/risk/prescreen, and its failures are warnings. ---
+    # --- holdings reconcile: answers "is this tracked position still IN the account?". Wired only when
+    #     a broker facade exists. Alert-only: never writes state, never touches the gate/risk/prescreen;
+    #     its failures are warnings. ---
     holdings_reconcile = (
         HoldingsReconcileJob(conn, kite, clock, calendar, notify) if kite is not None else None
     )
 
-    # --- Post-login RE-TRIGGER: a boot BEFORE the daily login is token-less, so the backfill/warm-up/ticker
-    #     broker-touching recovery no-ops and (until this fix) NOTHING re-ran it when the token arrived —
-    #     the ticker never started (zero live 1m bars ever captured), warm-up stayed frozen. The
-    #     PostLoginRecovery re-runs those steps (each guarded + logged) the moment EITHER login path
-    #     mints a valid token; it registers as a SessionManager login hook fired fire-and-forget so the
-    #     login HTTP/Telegram path returns at once and the recovery reports its outcome on Telegram. ---
+    # --- Post-login RE-TRIGGER: a boot BEFORE the daily login is token-less, so the broker-touching
+    #     backfill/warm-up/ticker recovery no-ops. PostLoginRecovery re-runs those steps (each guarded +
+    #     logged) the moment EITHER login path mints a valid token; it is a SessionManager login hook
+    #     fired fire-and-forget so the login HTTP/Telegram path returns at once. ---
     post_login_recovery = PostLoginRecovery(
         instruments=instruments, store=store, kite=kite, session=session, clock=clock,
         calendar=calendar, settings=settings, backfill=backfill, ticker=ticker, lifecycle=lifecycle,
@@ -1851,16 +1704,13 @@ async def compose(
     )
     session.add_login_hook(post_login_recovery.run)
 
-    # --- EARLY HYDRATION (owner-directed 2026-09-09): the owner travels at 08:15 and boots the
-    #     PC 09:30–10:00, so the pre-open chain fired after the trade window opened and the
-    #     digest-before-open criterion fell to 61%. On the mornings they log in early (~06:30) that
-    #     login now IS the pre-open chain: surveillance → universe → news → digest → planner, run
-    #     ahead of their clock through the same catch-up watermarks.
-    #     Registration order buys NOTHING here: `SessionManager._fire_login_hooks` creates one task
-    #     per hook, so this hook and the recovery run CONCURRENTLY. What sequences them is the
-    #     recovery's own `completed` event, passed below — the chain wants the token map, backfill and
-    #     ticker it restores (bounded: a wedged recovery is logged and stepped over). The hook also
-    #     holds itself behind `scheduler.start()` via the event armed in the boot tail.
+    # --- EARLY HYDRATION: an early login (~06:30) runs the pre-open chain (surveillance → universe → news
+    #     → digest → planner) ahead of its clock through the same catch-up watermarks.
+    #     Registration order buys NOTHING: `SessionManager._fire_login_hooks` creates one task per hook,
+    #     so this hook and the recovery run CONCURRENTLY. What sequences them is the recovery's own
+    #     `completed` event, passed below — the chain wants the token map, backfill and ticker it
+    #     restores (bounded: a wedged recovery is logged and stepped over). The hook also holds itself
+    #     behind `scheduler.start()` via the event armed in the boot tail.
     #     The session open is passed as a CALLABLE: this hook outlives the day it was built on. ---
     scheduler_armed = asyncio.Event()
     early_hydration = EarlyHydration(
@@ -1871,9 +1721,9 @@ async def compose(
     session.add_login_hook(early_hydration.on_login)
 
     # --- dashboard API ---
-    # the owner's capital change. ONE changer on the live tracker, the gate's own StrategyEdges,
-    # the paper book's mark, and the last stored 1m close for a held symbol neither live cache has
-    # priced (after an out-of-session restart both are empty until the next session).
+    # The owner's capital change: ONE changer on the live tracker, the gate's own StrategyEdges, the paper
+    # book's mark, and the last stored 1m close for a held symbol neither live cache has priced (both
+    # are empty after an out-of-session restart).
     capital = CapitalChanger(
         conn=conn, clock=clock, calendar=calendar, store=protected_store, limits=limits_engine,
         mode=mode, real=exposure,
@@ -1908,7 +1758,7 @@ async def compose(
                 breaches, mode, kill, latch=latch,
                 alert=lambda m: alert("critical", m),
             )
-        # Daily-loss rungs (2026-07-28 review: −7% hard halt had no enforcement locus).
+        # Daily-loss rungs.
         rungs = exposure.evaluate_day_loss(
             Decimal(str(table.limits.daily_loss_soft.day_mtm_pct)),
             Decimal(str(table.limits.daily_loss_hard.day_mtm_pct)),
@@ -1922,34 +1772,27 @@ async def compose(
     async def scoring_tick() -> None:
         await score_news()
 
-    # --- Paced forward drain (2026-08-14): one-minute pulse; pipeline.drain_forward_queue()
-    #     owns BOTH the FORWARD_PACING_MIN cadence and the in-window/mode/kill/governor/cap
-    #     admission. This loop only provides the pulse, so the `immediate` rollback needs no
-    #     scheduler change — the drain self-disables in that mode. ---
+    # --- Paced forward drain: one-minute pulse; pipeline.drain_forward_queue() owns BOTH the
+    #     FORWARD_PACING_MIN cadence and the in-window/mode/kill/governor/cap admission. This loop only
+    #     provides the pulse; the drain self-disables in `immediate` mode. ---
     async def forward_drain_tick() -> None:
         if pipeline is None:
             return
-        # --- `brk20` RETEST re-arm, on this same 60 s pulse. Placed BEFORE the drain so a level
-        #     that came back inside the band during this minute can be chosen by this very tick's
-        #     forward slot instead of waiting for the next one. Its own try/except and its own
-        #     module-level body: a retest failure must cost neither the drain nor the scheduler,
-        #     and `_retest_republish` is testable on its candidates rather than on a source string.
-        #     The window predicate is `_retest_active`: the sweep's own `_sweep_window_active` plus
-        #     the states in which the pipeline is certain to drop the publication (FROZEN, killed)
-        #     and "a sweep is running" — the retest has no freeze-lift path to redo an offer that
-        #     was dropped, and its once-a-day offer bound is spent at offer time (2026-09-12 review).
-        #     OFF-LOOP (`asyncio.to_thread`), like every other caller of these two seams: the body
-        #     takes `SignalPreScreen._lock` and then mints a feature snapshot under
-        #     `MarketStore._lock` — `prescreen.handle_bar` and `_collect_and_scan` are both threaded
-        #     for exactly that reason, and a store lock held 59 s by a partition COPY (store.py) or
-        #     ~14 minutes by the 2026-08-21 stall would otherwise freeze the WHOLE loop: the tick
-        #     cache, the heartbeat, the kill path, Telegram and every APScheduler job.
+        # --- `brk20` RETEST re-arm, on this same 60 s pulse. BEFORE the drain so a level back inside
+        #     the band this minute can take this tick's forward slot. Own try/except and module-level
+        #     body: a retest failure must cost neither the drain nor the scheduler.
+        #     The window predicate is `_retest_active`: the sweep's `_sweep_window_active` plus the
+        #     states in which the pipeline is certain to drop the publication (FROZEN, killed) and "a
+        #     sweep is running" — the retest has no freeze-lift path to redo a dropped offer, and its
+        #     once-a-day offer bound is spent at offer time.
+        #     OFF-LOOP (`asyncio.to_thread`): the body takes `SignalPreScreen._lock` and then mints a
+        #     feature snapshot under `MarketStore._lock`; a store lock held for minutes would otherwise
+        #     freeze the WHOLE loop (tick cache, heartbeat, kill path, Telegram, every APScheduler job).
         #     `sweep_ready` is the day's admission having happened: until today's IN-WINDOW sweep has
-        #     published, the retest holds off so a fresh crossing of a resting symbol always wins the
-        #     pre-screen's `(symbol, strategy)` dedupe over a level broken days ago — and so
-        #     `_retest_skip` is reading TODAY's eligible set and ex-date horizon rather than an empty
-        #     (or yesterday's) one. Fails to zero: a day whose sweep never published re-offers
-        #     nothing, which is the behaviour before the retest re-arm.
+        #     published, the retest holds off so a fresh crossing of a resting symbol wins the
+        #     pre-screen's `(symbol, strategy)` dedupe over a level broken days ago, and `_retest_skip`
+        #     reads TODAY's eligible set and ex-date horizon. Fails to zero: a day whose sweep never
+        #     published re-offers nothing.
         try:
             for cand in await asyncio.to_thread(
                 _retest_republish,
@@ -1969,9 +1812,8 @@ async def compose(
 
     # --- refresh the gate's warm-up snapshot alongside the equity cadence (fail-closed until set),
     #     LIFT a standing warm-up freeze once coverage completes (see refresh_and_lift_warmup), and
-    #     SELF-HEAL persistent intraday coverage holes (2026-08-06 seam hole: a login-lagged boot's
-    #     gap fill ended before live ticks began — one bar missing in all 100 symbols, warm-up
-    #     unliftable without a manual restart). ---
+    #     SELF-HEAL persistent intraday coverage holes (a gap fill that ended before live ticks began
+    #     leaves a seam hole warm-up cannot lift past). ---
     _gap_repair_state: dict = {}
 
     async def warmup_refresh() -> None:
@@ -1986,23 +1828,19 @@ async def compose(
                 token_valid=session.token_valid,
             )
 
-    # --- periodic missed-job sweep (2026-07-28): boot-time catch-up cannot help a machine that SLEEPS
-    #     through a fire slot and resumes without a restart — 2026-07-27 slept 17:56→evening, missed
-    #     18:05 daily_bars, and warm-up then blocked the whole next session on the absent bar. The
-    #     runner's watermarks make a repeat pass a no-op, so sweeping on a cadence is safe. ---
+    # --- periodic missed-job sweep: boot-time catch-up cannot help a machine that SLEEPS through a fire
+    #     slot and resumes without a restart. The runner's watermarks make a repeat pass a no-op, so
+    #     sweeping on a cadence is safe. ---
     async def catchup_sweep() -> None:
         try:
-            # ALL scope: the sweep is the retry path for the post-arm one-shots too — a
-            # news chain / digest / planner run that failed after arming is swept here exactly like
-            # any other missed job. Single-flight makes a sweep landing on top of a still-running
-            # pass a logged no-op rather than a double replay. Compaction is swept in its own lane.
+            # ALL scope: also the retry path for the post-arm one-shots. Single-flight makes a sweep
+            # landing on a still-running pass a logged no-op. Compaction is swept in its own lane.
             await _catchup_sweep_once(catch_up, latch, kill, compaction_lane)
         except Exception:  # noqa: BLE001 - the sweep must never take down the scheduler loop
             _log.exception("catchup_sweep_failed")
 
-    # --- holdings reconcile pulse (2026-09-07): hourly, in-session only. The job itself is
-    #     diagnostic and swallows its own broker failures; this wrapper only supplies the cadence and
-    #     the window, and swallows anything else so a reconcile can never take down the scheduler. ---
+    # --- holdings reconcile pulse: hourly, in-session only. The job swallows its own broker failures;
+    #     this wrapper supplies the cadence and window and swallows anything else. ---
     async def holdings_reconcile_tick() -> None:
         if holdings_reconcile is None or not in_reconcile_window(clock.now(), calendar):
             return
@@ -2019,22 +1857,19 @@ async def compose(
         except Exception:  # noqa: BLE001 - a reminder must never take down the scheduler loop
             _log.exception("protection_reminder_tick_failed")
 
-    # --- on-demand scanner sweep (owner-directed 2026-07-29): the answer to "what
-    #     could I trade right now, and at what price would today's setups arm?" Runs when the trade
-    #     window becomes ACTIVE, when a freeze lifts inside the window, and on /scan_now. Live
-    #     candidates re-enter the NORMAL pipeline path (dedupe/caps intact); the verdict is never
-    #     silence. ---
+    # --- on-demand scanner sweep: "what could I trade right now, and at what price would today's setups
+    #     arm?" Runs when the trade window becomes ACTIVE, when a freeze lifts inside the window, and on
+    #     /scan_now. Live candidates re-enter the NORMAL pipeline path (dedupe/caps intact); the verdict
+    #     is never silence. ---
     #: The last sweep's three PHASE marks (start / publication / completion), its counts and the risk
     #: state it published under — the freeze-lift debounce reads all of them (see
     #: :func:`_freeze_lift_skip_reason`). Written only by a sweep that got past the session check.
     _last_sweep: dict[str, Any] = {"started_at": None, "published_at": None, "done_at": None,
                                    "published": 0, "pending": 0, "frozen": False}
 
-    #: ONE sweep at a time (2026-09-11 review). The window-edge tick and the warm-up refresh ride 60 s
-    #: timers armed by the same `scheduler.start()`, so the window_open sweep and the lift that clears
-    #: the freeze fire in the SAME tick — and a sweep is two passes over the eligible universe's daily
-    #: history, each taking MarketStore._lock. Two of them at once is the store-lock contention profile
-    #: that wedged the 2026-08-24 boot for 11 hours. Caps and the ins journal survive concurrency
+    #: ONE sweep at a time. The window_open sweep and the freeze lift can fire in the SAME tick, and a
+    #: sweep is two passes over the eligible universe's daily history, each taking MarketStore._lock;
+    #: two at once is a store-lock contention profile. Caps and the ins journal survive concurrency
     #: (prescreen.admit is lock-guarded); the store load is the reason.
     _sweep_lock = asyncio.Lock()
 
@@ -2042,9 +1877,8 @@ async def compose(
         """THE sweep entry point for every trigger (window edge, freeze lift, /scan_now), single-flight.
 
         ``queue_behind_in_flight`` is the freeze-lift path's exception: a dropped re-sweep costs the
-        day's batch origination, so the lift WAITS for the running sweep instead of being skipped by
-        it (see `_lift_scan_sweep`). Everything else — the window edge, the owner's /scan_now — gets
-        the skip, because their next cadence tick is free."""
+        day's batch origination, so the lift WAITS for the running sweep (see `_lift_scan_sweep`).
+        The window edge and /scan_now get the skip, because their next cadence tick is free."""
         return await _single_flight_sweep(_sweep_lock, _scan_sweep, trigger,
                                           queue=queue_behind_in_flight)
 
@@ -2053,22 +1887,20 @@ async def compose(
         session_day = calendar.session(now.date())
         if session_day is None or not (session_day.open <= now <= session_day.close):
             return "no session in progress — the sweep reads live bars; try during market hours"
-        # PHASE mark 1 of 3 (2026-09-11 review). `_sweep_lock` above is what stops two sweeps running
-        # at once; this mark is what lets the freeze lift tell the two in-flight cases apart — a sweep
-        # that has NOT published yet will publish under the state this lift just established (skip),
-        # one that already published while FROZEN is the one to redo (queue behind it).
+        # PHASE mark 1 of 3. `_sweep_lock` stops two sweeps running at once; this mark lets the freeze
+        # lift tell the in-flight cases apart — a sweep that has NOT published yet will publish under
+        # the state this lift just established (skip), one that already published while FROZEN is the
+        # one to redo (queue behind it).
         _last_sweep["started_at"] = now
 
         today = now.date()
-        # --- Trade-window gate for the BATCH legs (2026-08-18). The bar-driven leg below gates
-        #     itself off BAR time inside the pre-screen (which stays Clock-free); these
-        #     candidates carry no bar, so the sweep — which HAS the Clock — decides, applying the
-        #     same test as `pipeline.on_signal_candidate`. Without it a /scan_now outside the
-        #     window spends unrefundable day slots on candidates the pipeline is guaranteed to
-        #     drop as `signal_candidate_out_of_window`. The window-open sweep is unaffected: it
-        #     fires ON the INACTIVE→ACTIVE edge, so the window is open by construction.
-        #     Computed HERE rather than inside the worker (2026-09-11): the `ins` consume decision is
-        #     taken at PUBLICATION, on the loop thread, and both sides must read ONE window verdict.
+        # --- Trade-window gate for the BATCH legs. The bar-driven leg gates itself off BAR time inside
+        #     the pre-screen (which stays Clock-free); these candidates carry no bar, so the sweep —
+        #     which HAS the Clock — applies the same test as `pipeline.on_signal_candidate`, else a
+        #     /scan_now outside the window spends unrefundable day slots on candidates the pipeline
+        #     drops. The window-open sweep fires ON the INACTIVE→ACTIVE edge, so it is open by
+        #     construction. Computed HERE, not in the worker: the `ins` consume decision is taken at
+        #     PUBLICATION on the loop thread, and both sides must read ONE window verdict. ---
         try:
             _w = calendar.trade_window(today)
             batch_in_window = _w[0] <= now <= _w[1]
@@ -2083,23 +1915,17 @@ async def compose(
                     latest.append(tail[-1])
             accepted, pendings = prescreen.sweep(latest)
 
-            # --- brk20 daily leg (2026-08-04, owner-directed after the BPCL miss): completed-
-            #     daily-bar breakouts over the FULL ELIGIBLE universe — watchlist_cap symbols have
-            #     no 1m bars, so the bar-driven scanners can never see them. Admission goes through
-            #     prescreen.admit so the prescreen dedupe/caps bind identically; a second sweep the
-            #     same day re-admits nothing.
-            # 2026-09-01 refactor: the eligibility predicate lives in ONE place now
-            # (store.get_universe_eligible_symbols) — this was one of three inline duplicates of the
-            # strict reasons==['watchlist_cap'] equality that the batch-universe change would have
-            # silently missed. Every batch leg reads this ONE set: hi52 was the last on the wider
-            # batch universe and came back to it on 2026-09-09, before the 09-12 promotion made the
-            # eligible population part of its registered rule.
+            # --- brk20 daily leg: completed-daily-bar breakouts over the FULL ELIGIBLE universe —
+            #     watchlist_cap symbols have no 1m bars, so the bar-driven scanners never see them.
+            #     Admission goes through prescreen.admit so dedupe/caps bind identically; a second
+            #     sweep the same day re-admits nothing.
+            # The eligibility predicate lives in ONE place (store.get_universe_eligible_symbols); every
+            # batch leg reads this ONE set.
             eligible = store.get_universe_eligible_symbols(today)
-            # Owner decision 2026-10-08: the index widened to NIFTY Total Market; brk20 (no registered edge —
-            # the cost gate prices each candidate from its own levels) scans the full eligible set
-            # above. hi52, ins and both cat legs originate from the CORE (NIFTY 500) subset only:
-            # their registered edge / frozen shadow verdict was measured there, and hi52's
-            # full-market cell was negative (−0.26% at T+20).
+            # brk20 (no registered edge — the cost gate prices each candidate from its own levels) scans
+            # the full eligible set. hi52, ins and both cat legs originate from the CORE (NIFTY 500)
+            # subset only: their registered edge / frozen shadow verdict was measured there, and hi52's
+            # full-market cell was negative.
             core_eligible = store.get_core_eligible_symbols(today)
             histories: dict[str, list[brk20.DailyRow]] = {}
             hist_start = today - timedelta(days=70)   # comfortably ≥ lookback+2 sessions
@@ -2115,9 +1941,8 @@ async def compose(
                         )
                     ]
             ex_map: dict[str, list[date]] = {}
-            # Horizon = the WIDEST ex_skip_days of every rule that reuses this map (2026-09-01
-            # review: a hardcoded brk20 horizon would silently under-fetch for hi52 if either
-            # default is ever retuned — the veto then sees an empty list and fires anyway).
+            # Horizon = the WIDEST ex_skip_days of every rule that reuses this map (a hardcoded brk20
+            # horizon would under-fetch for hi52 if either default is retuned).
             _ex_horizon = max(
                 int(brk20.DEFAULT_PARAMS["ex_skip_days"]),
                 int(hi52.DEFAULT_PARAMS["ex_skip_days"]),
@@ -2128,10 +1953,9 @@ async def compose(
             ):
                 if row.get("ex_date") is not None:
                     ex_map.setdefault(row["symbol"], []).append(row["ex_date"])
-            # Trailing structural corp actions (2026-09-09, the hi52 veto's premise): stored bars_1d
-            # is never re-adjusted across an ex-date, so a bonus/split/rights/demerger inside the
-            # 20-session window leaves a phantom pre-ex high for the breakout test to clear.
-            # 35 calendar days ≥ lookback+1 sessions with weekend/holiday margin.
+            # Trailing structural corp actions (the hi52 veto's premise): stored bars_1d is never
+            # re-adjusted across an ex-date, so a bonus/split/rights/demerger inside the 20-session window
+            # leaves a phantom pre-ex high. 35 calendar days ≥ lookback+1 sessions with holiday margin.
             brk20_unadjusted = hi52.unadjusted_history(
                 store.get_corp_actions(ex_from=today - timedelta(days=35), ex_to=yesterday)
             )
@@ -2154,11 +1978,9 @@ async def compose(
                 except Exception:  # noqa: BLE001 - an unreadable regime costs brk20 alone, never the sweep
                     _log.exception("brk20_regime_unreadable", d=today.isoformat())
                     regime_keep, idx_regime, regime_reason = False, None, "undefined"
-            # Veto visibility (the `cat` line's discipline): the stop-geometry floor
-            # refuses candidates that used to ship, so a run where it eats everything must be
-            # readable as a floor decision rather than as an empty tape. Counts are ORIGINATION-
-            # stage — pre-admission, so candidates + vetoes reconcile against symbols_scanned on one
-            # line; what the prescreen caps then do with the survivors is the prescreen's own logging.
+            # Veto visibility: a run where the stop-geometry floor eats everything must read as a floor
+            # decision, not an empty tape. Counts are ORIGINATION-stage (pre-admission), so candidates +
+            # vetoes reconcile against symbols_scanned; the prescreen logs what its caps then do.
             _log.info(
                 "brk20_sweep", d=today.isoformat(), trigger=trigger,
                 symbols_scanned=len(histories),
@@ -2180,13 +2002,11 @@ async def compose(
                 )
                 brk20_blocked, brk20_raw = brk20_raw, []
 
-            # --- `ins` daily leg (owner-directed 2026-08-17): the crossings last
-            #     night's ins_crossings job journalled into ins_pending. Same batch shape as brk20 —
-            #     admitted through prescreen.admit so the prescreen dedupe/caps bind identically — but
-            #     the EVENT was decided EOD by the validated crossing function; nothing is re-derived
-            #     here. Rows are marked consumed as part of admission, so a second sweep the same day
-            #     (or a sweep after a mid-session restart) re-admits nothing: the flag is persisted
-            #     state, not process memory.
+            # --- `ins` daily leg: the crossings last night's ins_crossings job journalled into
+            #     ins_pending. Same batch shape as brk20 (admitted through prescreen.admit), but the
+            #     EVENT was decided EOD by the validated crossing function; nothing is re-derived here.
+            #     Rows are marked consumed as part of admission, so a second sweep the same day (or after
+            #     a restart) re-admits nothing: the flag is persisted state, not process memory.
             ins_pending = _read_ins_pending(conn, today)
             ins_raw: list = []
             if ins_pending:
@@ -2199,24 +2019,18 @@ async def compose(
                     },
                 )
 
-            # --- `cat` v2 SHADOW leg (owner-directed 2026-08-18): today's
-            #     `originating` catalyst_watchlist rows, graded by the ~08:35 digest, on the SAME
-            #     ins-shaped batch path. No consumed flag is needed for once-only: the age<=1 filter
-            #     inside sweep_watchlist IS the single-shot rule (an age-2 re-grade of the same story
-            #     never re-originates), and a second sweep the same day hits the prescreen dedupe.
-            #     Downstream, the gate's cost check rejects every one of these by construction — no
-            #     cat.expected_edge_pct exists — so ADMISSION here is the shadow's validation
-            #     population, not RECOMMEND. An absent/empty digest simply yields no rows
-            #     (fail-safe ladder: cat originates nothing, every other strategy unaffected).
+            # --- `cat` v2 SHADOW leg: today's `originating` catalyst_watchlist rows, graded by the digest,
+            #     on the SAME ins-shaped batch path. Once-only needs no consumed flag: the age<=1 filter
+            #     inside sweep_watchlist IS the single-shot rule, and a second sweep the same day hits
+            #     the prescreen dedupe. The gate's cost check rejects every one of these by construction
+            #     (no cat.expected_edge_pct exists), so ADMISSION is the shadow's validation population,
+            #     not RECOMMEND. An absent/empty digest yields no rows (cat originates nothing, every
+            #     other strategy unaffected).
             cat_rows, cat_rev_rows = _read_cat_watchlist(store, today)
-            # 2026-09-01 review (widening): the news layer now grades the BATCH universe, but
-            # BOTH cat legs' origination stays pinned to the ELIGIBLE (index) set — their
-            # verdict populations and clocks are FROZEN (restarted 2026-08-28, verdict ~mid-Oct), and
-            # an extended-symbol candidate would both skew that population (different cost/liquidity
-            # class) and burn the shared 2/day catalyst budget an index story may need. Extended
-            # symbols' originating-grade rows still journal in catalyst_watchlist (analyzable later);
-            # they just never become cat/cat_reversal candidates inside the frozen window.
-            # Owner decision 2026-10-08: pinned to the CORE subset for the same reason (the frozen populations are NIFTY 500).
+            # BOTH cat legs' origination stays pinned to the CORE (NIFTY 500) set although the news layer
+            # grades the wider batch universe: the shadow verdict populations and clocks are FROZEN, and
+            # an extended-symbol candidate would skew that population and burn the shared 2/day catalyst
+            # budget. Extended symbols' rows still journal in catalyst_watchlist (analyzable later).
             _core_set = set(core_eligible)
             cat_rows = _watchlist_rows_for_symbols(cat_rows, _core_set)
             cat_rev_rows = _watchlist_rows_for_symbols(cat_rev_rows, _core_set)
@@ -2230,18 +2044,15 @@ async def compose(
                     },
                 )
 
-            # --- `cat_reversal` SHADOW leg (2026-08-27 — the HINDZINC denial): the SUBSET of
-            #     today's originating rows whose winning cluster REVERSES an earlier, floor-clearing,
-            #     opposite-direction cluster of the same (symbol, event_type) story. A separate
-            #     experiment from `cat` v2 with its own thresholds, its own T+5/T+10 clock and its own
-            #     journal series — `cat`'s in-flight shadow window is untouched, which is also why a
-            #     reversal row deliberately still originates for `cat` as well (narrowing `cat` would
-            #     restart its clock). Both legs' entries share the ONE
-            #     catalyst_guard.max_catalyst_entries_day budget — the pre-screen keys that cap off
-            #     catalyst_ref, not strategy_id — so adding this strategy widens no exposure surface.
-            #     Downstream the gate's cost check rejects every one of these UNCONDITIONALLY (registered
-            #     in the gate's no_edge_shadow_strategies, so an analyst-supplied target cannot buy it
-            #     an edge basis either): ADMISSION here is the shadow's validation population.
+            # --- `cat_reversal` SHADOW leg: the SUBSET of today's originating rows whose winning cluster
+            #     REVERSES an earlier, floor-clearing, opposite-direction cluster of the same
+            #     (symbol, event_type) story. A separate experiment from `cat` v2 (own thresholds, own
+            #     T+5/T+10 clock, own journal series); a reversal row deliberately still originates for
+            #     `cat` too (narrowing `cat` would restart its clock). Both legs share the ONE
+            #     catalyst_guard.max_catalyst_entries_day budget (the pre-screen keys that cap off
+            #     catalyst_ref, not strategy_id), so this widens no exposure surface. The gate's cost
+            #     check rejects every one UNCONDITIONALLY (no_edge_shadow_strategies): ADMISSION is the
+            #     shadow's validation population.
             cat_rev_raw: list = []
             if cat_rev_rows:
                 cat_rev_raw = cat_reversal.sweep_watchlist(
@@ -2252,34 +2063,25 @@ async def compose(
                     },
                 )
 
-            # The once-per-session `hi52` leg — the only trigger-keyed branch in the sweep. A
-            # module-level function (2026-09-11 review) so "freeze_lift takes the same branch as
-            # window_open" is assertable on its candidates rather than on a source string. Called
-            # HERE, before the admission below, because since the 2026-09-12 promotion its
-            # candidates are part of that ONE ranked batch (see the leg's own docstring).
+            # The once-per-session `hi52` leg — the only trigger-keyed branch in the sweep; module-level
+            # so "freeze_lift takes the same branch as window_open" is assertable. Called HERE, before
+            # the admission below, because its candidates join that ONE ranked batch.
             hi52_raw = _hi52_daily_leg(
                 store, trigger=trigger, eligible=core_eligible, today=today,
                 yesterday=yesterday, ex_map=ex_map,
             )
 
-            # --- ONE ranked admission across all three batch legs (2026-08-18). Until now brk20,
-            #     ins and cat each made their OWN prescreen.admit call, and the ranking orders
-            #     only WITHIN one batch — so the legs were effectively first-come, in source order,
-            #     and cat ran last. Live 2026-08-18: brk20 OBEROIRLTY (0.552) and BHEL (0.523) took
-            #     the day's final slots and cat LT (0.82) was suppressed on the day cap 94 ms later.
-            #     That is unrecoverable, not merely unlucky: `cat` is single-shot by construction
-            #     (cat.MAX_EVENT_AGE_SESSIONS = 1), so a story that loses the race can never
-            #     re-originate at age 2. Concatenating first lets _rank see all three legs as one
-            #     batch and a binding cap keeps the best of them, whatever leg produced it.
-            #     Snapshot mint stays AFTER admit (dedupe/caps first — a suppressed candidate never
-            #     spends a snapshot write); without it the analyst's Rule 6 refuses every batch
-            #     candidate unseen.
-            #     `hi52` joined this batch on 2026-09-12 (promotion): a rule that can reach
-            #     RECOMMEND must contest the same slots as every other actionable leg, and its own
-            #     per-strategy cap (3) is what bounds it.
-            #     ADMISSION is that one ranked call; PUBLICATION order is a second, separable
-            #     consequence of its result and `_publication_order` owns it (see that function for
-            #     why a promoted hi52 must not inherit the front of the queue).
+            # --- ONE ranked admission across all batch legs. Ranking orders only WITHIN one batch, so
+            #     separate admit calls would make the legs first-come in source order — and `cat` is
+            #     single-shot by construction (cat.MAX_EVENT_AGE_SESSIONS = 1), so a story that loses
+            #     the race on the day cap can never re-originate. Concatenating first lets _rank see all
+            #     legs as one batch and a binding cap keeps the best of them, whatever leg produced it.
+            #     `hi52` is in it because a rule that can reach RECOMMEND must contest the same slots;
+            #     its per-strategy cap (3) bounds it.
+            #     Snapshot mint stays AFTER admit (a suppressed candidate never spends a snapshot
+            #     write); without it the analyst's Rule 6 refuses every batch candidate unseen.
+            #     ADMISSION is that one ranked call; PUBLICATION order is a separate consequence owned
+            #     by `_publication_order` (see it for why a promoted hi52 must not take the queue front).
             batch = _attach_feature_snapshots(
                 features,
                 _publication_order(prescreen.admit(
@@ -2287,14 +2089,10 @@ async def compose(
                     in_window=batch_in_window,
                 )),
             )
-            # THE starvation-visibility line (the `ins` convention): sustained zeros must be
-            # readable as "the news layer went quiet" vs "rows arrived and the rule/caps declined
-            # them" — the cat shadow pre-registers <0.2 signals/session for 3 weeks as a STARVATION finding,
-            # which is only detectable if the three counts sit on one line.
-            # `cat_reversal` shares this line rather than adding a second one: its own starvation
-            # criterion (pre-registered in scanners/cat_reversal.py's docstring) is only checkable
-            # against the originating flow it is a subset OF, and splitting the counts across two log
-            # events is how that comparison stops being greppable.
+            # THE starvation-visibility line: sustained zeros must read as "the news layer went quiet" vs
+            # "rows arrived and the rule/caps declined them" — only detectable if the counts sit on one
+            # line. `cat_reversal` shares it: its starvation criterion (scanners/cat_reversal.py
+            # docstring) is checked against the originating flow it is a subset OF.
             _log.info(
                 "cat_watchlist_sweep", d=today.isoformat(), trigger=trigger,
                 originating_rows=len(cat_rows),
@@ -2312,19 +2110,15 @@ async def compose(
             # watchlist symbols the feed already carries. Fourth = every `ins_pending` row this sweep
             # READ; whether it may be consumed is decided at publication (_ins_rows_to_consume).
             #
-            # The resting brk20 levels ride the SAME list. `_batch_ticks` rolls at midnight, so
-            # without this a level admitted on day 1 has no tick on days 2-5 and `RestingLevelBook
-            # .due` — which bands against the LIVE price — could never offer it again. That would
-            # kill the retest silently for the sub-cap symbols brk20 exists to catch, the same hole
-            # the 2026-09-11 forensics found at the gate (27 of 84 brk20 slots, ltp=None).
+            # The resting brk20 levels ride the SAME list: `_batch_ticks` rolls at midnight, so without
+            # this a level admitted on day 1 has no tick on days 2-5 and `RestingLevelBook.due` (which
+            # bands against the LIVE price) could never offer it again.
             #
-            # Fifth = the two NARROWINGS the retest tick re-applies to a level broken days ago, both
-            # already read here so the 60 s pulse pays nothing for them: today's ELIGIBLE population
-            # (`brk20` originates over it, and a name that churned out mid-window would otherwise
-            # keep originating outside the registered scope) and the ex-date veto over brk20's
-            # OWN `ex_skip_days` horizon (`bars_1d` is never re-adjusted, so a stored level is a
-            # pre-ex price the tape stops quoting — `brk20.scan_daily` refuses such a symbol on the
-            # crossing day and the re-offer must refuse it on the retest day for the same reason).
+            # Fifth = the two NARROWINGS the retest tick re-applies to a level broken days ago: today's
+            # ELIGIBLE population (a name that churned out must not keep originating) and the ex-date
+            # veto over brk20's OWN `ex_skip_days` horizon (`bars_1d` is never re-adjusted, so a stored
+            # level is a pre-ex price the tape stops quoting — `brk20.scan_daily` refuses such a symbol
+            # on the crossing day and the re-offer must refuse it for the same reason).
             _brk20_ex_horizon = today + timedelta(days=int(brk20.DEFAULT_PARAMS["ex_skip_days"]))
             retest_ctx = {
                 "eligible": frozenset(eligible),
@@ -2332,10 +2126,8 @@ async def compose(
                     sym for sym, dates in ex_map.items()
                     if any(today <= xd <= _brk20_ex_horizon for xd in dates)
                 ),
-                # The BACKWARD-looking half of the corporate-action veto (2026-09-12 review): the
-                # sweep skips a symbol whose bars_1d holds two units after a structural ex-date
-                # inside the 35-day lookback; a stored level is a pre-ex price on the same series,
-                # so the re-offer must refuse it too — `ex_skip` above looks forward only.
+                # The BACKWARD-looking half of the corporate-action veto: a stored level is a pre-ex price
+                # on the same unadjusted series, so the re-offer must refuse it — `ex_skip` looks forward only.
                 "unadjusted": frozenset(brk20_unadjusted),
             }
             return (
@@ -2350,10 +2142,9 @@ async def compose(
         accepted, pendings, batch_symbols, ins_read, retest_ctx, regime_blocked = await asyncio.to_thread(
             _collect_and_scan
         )
-        # Point the feed at today's batch admissions BEFORE publishing them (2026-09-11): the risk
-        # gate reads the tick cache and nothing else, and the pipeline's analyst hop is the only
-        # window in which a first tick can arrive. Guarded exactly like the job_universe resubscribe
-        # — a failed control frame degrades to the previous set and never fails the sweep.
+        # Point the feed at today's batch admissions BEFORE publishing them: the risk gate reads the tick
+        # cache and nothing else, and the pipeline's analyst hop is the only window in which a first tick
+        # can arrive. Guarded like the job_universe resubscribe — a failure degrades to the previous set.
         _todays_batch = _roll_batch_ticks(_batch_ticks, clock.today())
         _new_batch = sorted(set(batch_symbols) - _todays_batch)
         _todays_batch.update(_new_batch)
@@ -2371,38 +2162,33 @@ async def compose(
         # that debounce and the `ins` consume decision below — they must never disagree.
         _published_frozen = mode.risk_state() != RiskState.NORMAL
         _last_sweep.update(published_at=clock.now(), frozen=_published_frozen)
-        # The once-only bound, applied at the moment the rows' fate is decided rather than back
-        # in the worker (2026-09-11 review): the whole worker — since 2026-09-12 the hi52 leg's
-        # ~480×400-session read included — sits between the rows' READ and this decision.
+        # The once-only bound is applied at the moment the rows' fate is decided, not in the worker (the
+        # whole worker, hi52's large read included, sits between the rows' READ and this decision).
         _consume_ins_pending(
             conn, now.date(),
             _ins_rows_to_consume(ins_read, in_window=batch_in_window,
                                  published_frozen=_published_frozen),
             now=now,
         )
-        # 2026-09-12: every ADMITTED brk20 level starts RESTING here, so the next
-        # `retest_sessions` − 1 sessions can re-offer it when the price comes back to it — the
-        # `limit_5_sessions` mechanism the pre-registered entry backtest selected. ADMITTED, never
-        # raw: the pre-screen has already decided which levels are worth judgement, and resting a
-        # capped-out fire would re-offer tomorrow what the caps refused today (`accepted` is the
-        # bar-driven candidates plus the post-admit `batch`, and no bar-driven rule is brk20).
-        # On the LOOP THREAD, beside `_consume_ins_pending` and for the same reason: this connection
-        # is `isolation_level=None` with `check_same_thread=False` because the engine serialises its
-        # writes on this thread. A bare INSERT issued from the sweep WORKER while the loop is
-        # between BEGIN and COMMIT in `core.db.transaction` joins that transaction and dies with its
-        # ROLLBACK — silently, since `record` has already returned True and logged. The level would
-        # then never be re-offered while the log said it was resting for five sessions.
+        # Every ADMITTED brk20 level starts RESTING here, so the next `retest_sessions` − 1 sessions can
+        # re-offer it when the price comes back. ADMITTED, never raw: resting a capped-out fire would
+        # re-offer tomorrow what the caps refused today (`accepted` is the bar-driven candidates plus
+        # the post-admit `batch`, and no bar-driven rule is brk20).
+        # On the LOOP THREAD, beside `_consume_ins_pending`: this connection is `isolation_level=None`
+        # with `check_same_thread=False` because the engine serialises its writes on this thread. A bare
+        # INSERT from the sweep WORKER while the loop is between BEGIN and COMMIT in
+        # `core.db.transaction` joins that transaction and dies with its ROLLBACK — silently, since
+        # `record` has already returned True and logged.
         for _cand in accepted:
             if _cand.strategy_id == brk20.STRATEGY_ID:
                 retest_book.record(_cand)
         # The regime gate's blocked arm, on the same thread; in-window only, as only an in-window sweep admits.
         if batch_in_window and regime_blocked[0]:
             _journal_regime_blocked(conn, *regime_blocked, today, now=clock.now())
-        # …and the retest tick is armed for today only by an IN-WINDOW sweep — the one that can
-        # actually admit a fresh crossing. Pre-open `/scan_now` admits nothing (in_window False), so
-        # arming on it would let the minute pulse publish a days-old level into the pre-screen's
-        # `(symbol, strategy)` dedupe moments before the window-open sweep's fresh cross of the same
-        # symbol, which would then be dropped as a duplicate and never journalled.
+        # The retest tick is armed for today only by an IN-WINDOW sweep — the one that can admit a fresh
+        # crossing. Pre-open `/scan_now` admits nothing, so arming on it would let the minute pulse
+        # publish a days-old level into the `(symbol, strategy)` dedupe just before the window-open
+        # sweep's fresh cross of the same symbol, which would then be dropped as a duplicate.
         if batch_in_window:
             _retest_state.update(day=today, eligible=retest_ctx["eligible"],
                                  ex_skip=retest_ctx["ex_skip"],
@@ -2443,17 +2229,15 @@ async def compose(
         )
         _log.info("scan_sweep_done", trigger=trigger, published=len(live_rows),
                   pending=len(pending_rows), suppressed=prescreen.seen_today())
-        # Completion stamp (`frozen` was set at publication, which is the moment it describes): the
-        # freeze-lift debounce asks both "is a sweep still RUNNING?" and "did one just FINISH?", and
-        # the eligible-universe history read is the slow part between the two.
+        # Completion stamp (`frozen` was set at publication, the moment it describes): the freeze-lift
+        # debounce asks both "is a sweep still RUNNING?" and "did one just FINISH?".
         _last_sweep.update(done_at=clock.now(), published=len(live_rows),
                            pending=len(pending_rows))
         if trigger != "scan_now":       # /scan_now gets the body as its direct reply — no double send
             await notify(msg)
         if batch_in_window:
-            # Without today's digest `cat` originated nothing in this sweep. Said even
-            # when no digest run raised (a late boot sweeps before the catch-up digest), and only
-            # after the sweep, so a slow page never delays it.
+            # Without today's digest `cat` originated nothing in this sweep. Said even when no digest run
+            # raised (a late boot sweeps before the catch-up digest), and only after the sweep.
             try:
                 await catalyst_disabled_alert.if_no_digest_today(store, today)
             except Exception:  # noqa: BLE001 - an alert must never fail the sweep
@@ -2470,28 +2254,24 @@ async def compose(
         if active and not was:
             try:
                 if await run_scan_sweep("window_open") == _SWEEP_IN_FLIGHT_REPLY:
-                    # The edge is a ONCE-PER-DAY event and the single-flight guard just declined it:
-                    # give it back rather than spend it on a sweep that never ran, and the next 60 s
-                    # tick re-fires it. The in-flight sweep is not a substitute — an owner /scan_now
-                    # skips the once-per-session hi52 leg and sends the owner no window-open digest.
+                    # The edge is a ONCE-PER-DAY event and the single-flight guard just declined it: give
+                    # it back so the next 60 s tick re-fires it. An in-flight owner /scan_now is no
+                    # substitute (it skips the once-per-session hi52 leg and the window-open digest).
                     _window_active["was"] = False
             except Exception:  # noqa: BLE001 - a sweep failure must never take down the scheduler
-                # A FAILED sweep keeps the edge spent (unchanged): a duckdb stall would otherwise
-                # re-fire the whole eligible-universe read every 60 s for the rest of the session.
+                # A FAILED sweep keeps the edge spent: a stall would otherwise re-fire the whole
+                # eligible-universe read every 60 s.
                 _log.exception("window_open_sweep_failed")
 
-    # --- freeze-lift re-sweep (2026-09-11 forensics). The batch legs (brk20/hi52/cat/ins) originate
-    #     ONLY from this sweep, and a candidate published INTO a standing freeze is re-armed by
-    #     `pipeline.on_signal_candidate` with nothing left to re-publish it — batch rules have no next
-    #     bar. Every in-session boot re-applies a warm-up freeze (the lifecycle's warm-up gate) AND re-fires the
-    #     window edge (`_window_active` is per-process), so a boot inside the window lost the whole
-    #     day's batch origination: 08-28 (freeze 09:55–10:52, 3 pairs re-armed), 08-31 (5 published,
-    #     0 forwarded), 09-04 (3 boots, sweeps 09:50/10:32/11:11 all inside freezes, 5 pairs). The
-    #     LIFT is the missing re-publication trigger. Idempotent for everything else: the pre-screen's
-    #     same-day (symbol, strategy) dedupe drops every pair that was not re-armed.
+    # --- freeze-lift re-sweep. The batch legs (brk20/hi52/cat/ins) originate ONLY from the sweep, and a
+    #     candidate published INTO a standing freeze is re-armed by `pipeline.on_signal_candidate` with
+    #     nothing left to re-publish it (batch rules have no next bar). Every in-session boot re-applies
+    #     a warm-up freeze AND re-fires the window edge (`_window_active` is per-process), so the LIFT is
+    #     the re-publication trigger. Idempotent otherwise: the pre-screen's same-day (symbol, strategy)
+    #     dedupe drops every pair that was not re-armed.
     #     Armed HERE, ahead of `lifecycle.startup()`, because the subscription must exist before the
-    #     first transition can be published — and gated on `engine_ready` for the same reason (the
-    #     boot itself publishes lifts; see `_freeze_lift_sweep`'s `ready`). ---
+    #     first transition is published — and gated on `engine_ready` for the same reason (the boot
+    #     itself publishes lifts; see `_freeze_lift_sweep`'s `ready`). ---
     from engine.risk.events import TOPIC_RISK_STATE
 
     _freeze_lift = {"fired": None}
@@ -2499,21 +2279,18 @@ async def compose(
 
     async def _lift_scan_sweep(trigger: str) -> str:
         """The lift's sweep call: it QUEUES behind an in-flight sweep rather than taking the
-        single-flight skip. The skip is right for a cadence trigger (the next tick is free) and wrong
-        here — the lift is the day's ONLY re-publication of the batch legs, and a sweep that is still
-        running can already have published its whole batch INTO the freeze this lift just cleared
+        single-flight skip — the lift is the day's ONLY re-publication of the batch legs, and a running
+        sweep can already have published its batch INTO the freeze this lift just cleared
         (`_last_sweep["frozen"]`). `_freeze_lift_skip_reason` has already dropped the case where the
-        running sweep has NOT published yet, which is the common one; what reaches here waits seconds
-        for the store, then re-sweeps."""
+        running sweep has NOT published yet."""
         return await run_scan_sweep(trigger, queue_behind_in_flight=True)
 
     async def _on_risk_state_sweep(evt: Any) -> None:
         # DETACHED: `apublish` awaits its subscribers in turn, and a sweep is a full eligible-universe
-        # daily-history read — inline, it would stall the 60 s warm-up-refresh job that publishes most
-        # lifts (the job that lifts freezes at all) and any owner /resume reply behind it. The debounce
-        # claim inside `_freeze_lift_sweep` happens before that coroutine's first await, so two lifts
-        # in one minute still sweep exactly once. The set holds a strong reference until the task
-        # finishes — the loop keeps only a weak one.
+        # history read — inline, it would stall the 60 s warm-up-refresh job that publishes most lifts
+        # and any owner /resume reply. The debounce claim inside `_freeze_lift_sweep` happens before
+        # that coroutine's first await, so two lifts in one minute still sweep once. The set holds a
+        # strong reference (the loop keeps only a weak one).
         task = asyncio.create_task(
             _freeze_lift_sweep(evt, clock, calendar, mode, _lift_scan_sweep, _freeze_lift,
                                _last_sweep, ready=lambda: bool(boot_state["engine_ready"]),
@@ -2531,8 +2308,8 @@ async def compose(
 
     # --- arm the schedule (calendar-guarded) BEFORE recovery so a late startup still fires today ---
     _arm_registry_jobs(scheduler, registry, catch_up, clock, lane=compaction_lane)
-    # Pre-open token probe at 08:40. Wired only when a broker facade exists (no api_key
-    # ⇒ nothing to authenticate); NOT a registry job — a pre-open check has no meaningful catch-up.
+    # Pre-open token probe at 08:40. Only with a broker facade; NOT a registry job (a pre-open check
+    # has no meaningful catch-up).
     if kite is not None:
         _arm_token_check(
             scheduler,
@@ -2575,15 +2352,13 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
         await engine.telegram.start()
     await check_calendar_horizon(engine.calendar, engine.clock, engine.settings.clock.calendar_horizon_alert_sessions, engine.notify)
 
-    # --- BIND THE LOGIN CALLBACK API *BEFORE* startup recovery (2026-07-21 lockout). The owner's only
-    #     browser login route (GET /kite/callback, :8400) is hosted by THIS uvicorn server, and it used
-    #     to bind only AFTER lifecycle.startup(). A boot on an expired token then wedged inside the
-    #     warm-up backfill (every historical call TokenException) and the port never bound — login was
-    #     locked out both ways. The app is already fully wired (session_manager in app.state), so
-    #     /kite/callback works the instant the socket binds; a login mid-startup just fires the
-    #     idempotent PostLoginRecovery hook. _serve_api binds the socket ITSELF (uvicorn's own bind
-    #     paths sys.exit(1), which would kill the loop) and returns None on failure — the engine
-    #     CONTINUES either way (Telegram /token still permits the daily login). ---
+    # --- BIND THE LOGIN CALLBACK API *BEFORE* startup recovery. The owner's only browser login route
+    #     (GET /kite/callback, :8400) is hosted by THIS uvicorn server; a boot on an expired token can
+    #     wedge inside the warm-up backfill, so binding after lifecycle.startup() locks login out. The
+    #     app is fully wired, so /kite/callback works the instant the socket binds; a login mid-startup
+    #     just fires the idempotent PostLoginRecovery hook. _serve_api binds the socket ITSELF (uvicorn's
+    #     own bind paths sys.exit(1), which would kill the loop) and returns None on failure — the
+    #     engine CONTINUES either way (Telegram /token still permits the daily login). ---
     server_task = await _serve_api(engine.app, engine.settings)
     _bound = getattr(server_task, "_mt_server", None)
     if _bound is None or not _bound.started:
@@ -2593,11 +2368,10 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
             "browser login unreachable; use Telegram /token",
         )
 
-    # --- LIVE token probe: behavioural token_valid() answers True on a stale-but-not-yet-
-    #     rejected token, so a boot on yesterday's expired token passed the self-test and ground the
-    #     warm-up backfill on a dead token (2026-07-21). Probe it live ONCE here so token_valid() is
-    #     truthful for the hydrate + startup below, and send the login link the instant we KNOW the token
-    #     is rejected/absent (guarded on kite so login_url() never raises on a fresh, api-key-less install). ---
+    # --- LIVE token probe: behavioural token_valid() answers True on a stale-but-not-yet-rejected token.
+    #     Probe ONCE here so token_valid() is truthful for the hydrate + startup below, and send the
+    #     login link the instant the token is known rejected/absent (guarded on kite so login_url()
+    #     never raises on an api-key-less install). ---
     probe = await engine.session.verify_token()
     _log.info("token_probe", outcome=probe)
     login_prompt_sent = False
@@ -2605,10 +2379,9 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
         await engine.notify(login_prompt(engine.session.login_url()))
         login_prompt_sent = True
 
-    # --- cold-start token-map recovery: rebuild the in-memory instruments index (from the persisted
-    #     snapshot pre-login, or a live refresh) BEFORE the backfill + warm-up run
-    #     inside lifecycle.startup — otherwise a restart after 08:15 finds an empty map (unknown_token).
-    #     session_valid here is now the LIVE-probed truth (above), not a stale behavioural guess. ---
+    # --- cold-start token-map recovery: rebuild the in-memory instruments index (persisted snapshot
+    #     pre-login, or a live refresh) BEFORE the backfill + warm-up inside lifecycle.startup, else a
+    #     restart after 08:15 finds an empty map (unknown_token). session_valid is the LIVE-probed truth. ---
     try:
         instruments_source = await hydrate_instruments_at_startup(
             engine.instruments, engine.store, engine.kite, session_valid=engine.session.token_valid(), clock=engine.clock,
@@ -2619,10 +2392,10 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
         instruments_source = "failed"
 
     # --- every-startup recovery. check_skew honours NTP; degrades to FROZEN if unreachable.
-    #     Boot-phase safety ticks run alongside it (2026-08-07): OBSERVATION-ONLY — the warm-up
-    #     SNAPSHOT (never the lift/repair; see boot_phase_ticks) + the health/keep-awake pulse must
-    #     not wait out a news-backlog-sized catch-up; cancelled AND awaited before startup handling
-    #     continues, so no tick body overlaps the post-boot warmup_refresh. ---
+    #     Boot-phase safety ticks run alongside it: OBSERVATION-ONLY — the warm-up SNAPSHOT (never the
+    #     lift/repair; see boot_phase_ticks) + the health/keep-awake pulse must not wait out a long
+    #     catch-up; cancelled AND awaited before startup handling continues, so no tick body overlaps
+    #     the post-boot warmup_refresh. ---
     _boot_ticks = asyncio.create_task(
         boot_phase_ticks(
             lambda: refresh_warmup_snapshot(engine.warmup_gate, engine.warmup_holder),
@@ -2645,20 +2418,14 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
     # Boot-scoped skew verdict for the gate's clock_skew rule (self-test measured it above);
     # seed the warm-up snapshot immediately so the gate isn't blind until the first 60s refresh.
     engine.skew_holder["ok"] = "clock_skew" not in report.frozen_reasons
-    # ROOT CAUSE. These two seeding refreshes used to be bare awaits sitting between
-    # startup_complete and scheduler.start(), and on 2026-08-24 the 12:44:58 mid-session boot parked
-    # in the first one FOREVER: the ticker came up 1.5 s earlier, the tick flush loop began taking
-    # MarketStore._lock a few hundred times per flush (one COPY per (date, symbol) partition —
-    # store.flush_ticks), and WarmupGate._evaluate's ~400 sequential to_thread hops for the same lock
-    # never got through. The scheduler was never armed; no forward drain, no health pulse, no EOD job
-    # fired for 11 h. An earlier change established the invariant — nothing unbounded ahead of scheduler.start() —
-    # but only moved the CATCH-UP behind it; these two awaits were left in front and are the same bug.
-    #
+    # Invariant: nothing unbounded ahead of scheduler.start(). A bare await here can park forever (the
+    # tick flush loop takes MarketStore._lock per partition COPY and starves WarmupGate._evaluate's
+    # sequential to_thread hops), leaving the scheduler unarmed all day.
     # The seeding is a convenience, never a safety property: an unseeded warm-up holder reads
     # _WARMUP_UNREFRESHED (fail-CLOSED, both gate readiness rules blocking) and the 60 s
-    # warmup_status_refresh / health_check jobs re-seed both the moment the scheduler is up. So the
-    # correct trade is a hard deadline and carry on — losing a snapshot costs one fail-closed minute,
-    # losing the scheduler costs the trading day.
+    # warmup_status_refresh / health_check jobs re-seed both once the scheduler is up. So: a hard
+    # deadline and carry on — losing a snapshot costs one fail-closed minute, losing the scheduler
+    # costs the trading day.
     await seed_boot_snapshots(
         engine.warmup_refresh, lambda: engine.health.check(check_skew=False), alert=engine.alert,
     )
@@ -2666,13 +2433,13 @@ async def _boot(engine: Engine, boot_state: dict[str, Any]) -> _BootTasks:
     # --- start remaining services; run() then idles until a stop signal (being up is an active
     #     period). The login API is already bound (above); only prompt again here if startup still needs
     #     a login AND we did not already send the link off the token probe (no double link). ---
-    # Arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it
-    # as a background task. engine_ready (below) must not wait on the news chain — a wedged chain now
-    # costs the digest, not the whole scheduled day (2026-08-10). Its own 600 s resolve cap bounds it.
+    # Arm the scheduler FIRST, then fire the never-load-bearing one-shots behind it as a background
+    # task. engine_ready (below) must not wait on the news chain — a wedged chain costs the digest, not
+    # the scheduled day. Its own 600 s resolve cap bounds it.
     post_arm_task = start_scheduler_and_fire_post_arm(engine.scheduler, engine.catch_up, armed=engine.scheduler_armed)
     engine.compaction_lane.spawn("post_arm")
-    # EARLY HYDRATION boot trigger (2026-09-21): a boot on a trading day before the open hydrates
-    # under the same gates as an early login — the watermarks it leaves make a later login free.
+    # EARLY HYDRATION boot trigger: a boot on a trading day before the open hydrates under the same
+    # gates as an early login — the watermarks it leaves make a later login free.
     early_hydration_task = asyncio.create_task(engine.early_hydration.on_boot(), name="early_hydration_boot")
     if engine.telegram is not None and report.needs_login and not login_prompt_sent:
         await engine.notify(login_prompt(engine.session.login_url()))
@@ -2687,17 +2454,15 @@ async def _shutdown(engine: Engine, tasks: _BootTasks, *, boot_watchdog: asyncio
     #     the lifecycle guard (backup + STOPPED commit + heartbeat join), then tear down the rest. ---
     _log.info("engine_stopping")
     await cancel_post_arm(boot_watchdog)      # retire the contract watchdog BEFORE the
-    # scheduler stops — otherwise a slow teardown re-reads is_running()==False and pages a violation
-    # for an engine that is deliberately shutting down.
+    # scheduler stops, else a slow teardown reads is_running()==False and pages a violation.
     engine.scheduler.shutdown()                      # no new job fires can race the teardown
     await cancel_post_arm(tasks.post_arm_task)      # a still-running post-arm one-shot never blocks a stop
     await engine.compaction_lane.cancel()            # …nor a compaction lane pass
     await cancel_post_arm(tasks.early_hydration_task)  # a still-running boot hydration never blocks a stop
     if engine.freeze_lift_tasks:
-        # …nor a detached freeze-lift re-sweep. WAIT it out first (a sweep is seconds): the task parks
-        # in `asyncio.to_thread`, and cancelling the TASK does not stop the worker THREAD — it would
-        # keep reading the store that `store.close()` below is about to take away. The cancel after
-        # the wait is the bound: a stop can never hang on a wedged sweep.
+        # …nor a detached freeze-lift re-sweep. WAIT it out first: cancelling the TASK does not stop its
+        # `asyncio.to_thread` worker, which would keep reading the store `store.close()` is about to take
+        # away. The cancel after the wait is the bound: a stop never hangs on a wedged sweep.
         await asyncio.wait(list(engine.freeze_lift_tasks), timeout=_SHUTDOWN_LIFT_WAIT_S)
     for _lift_task in list(engine.freeze_lift_tasks):
         await cancel_post_arm(_lift_task)
@@ -2717,35 +2482,28 @@ async def _shutdown(engine: Engine, tasks: _BootTasks, *, boot_watchdog: asyncio
     engine.conn.close()
 
 
-# NOTE: ``hydrate_instruments_at_startup`` (the cold-start ladder) now lives in
-# ``engine.ops.post_login`` so the composition root AND the post-login re-trigger share the exact same
-# ladder; it is imported above and re-exported here (existing callers/tests keep importing it from
-# ``engine.ops.main``).
+# NOTE: ``hydrate_instruments_at_startup`` lives in ``engine.ops.post_login`` (shared with the
+# post-login re-trigger) and is re-exported here; callers/tests import it from ``engine.ops.main``.
 
 
 # --------------------------------------------------------------------------- boot tail
 def _in_session_window(clock: Clock, calendar: NSECalendar) -> bool:
     """Inside :data:`_IN_SESSION_START_IST`..:data:`_IN_SESSION_END_IST` on an NSE trading
-    day, where tick compaction must not run — it competes with the tick writer for exactly the
-    resources the session needs (2026-08-20 11:26 IST; on 09-04 an 11:39 sweep replay cost the
-    afternoon in store stalls and late ticks). A non-trading day inside the same clock window is
-    outside it: there is no session to protect, and a Saturday is precisely when the backlog SHOULD
-    be collapsed."""
+    day, where tick compaction must not run — it competes with the tick writer for the resources the
+    session needs. A non-trading day inside the same clock window is outside it: a Saturday is
+    precisely when the backlog SHOULD be collapsed."""
     now = clock.now()
     return calendar.is_trading_day(now.date()) and _IN_SESSION_START_IST <= now.time() <= _IN_SESSION_END_IST
 
 
 class CompactionLane:
-    """``tick_compact`` in its OWN single-flight catch-up runner (2026-09-29).
+    """Every :data:`LANE_JOB_IDS` job (``tick_compact``, the ``market_backup`` export) in its OWN
+    single-flight catch-up runner.
 
-    In the shared runner a backlog compaction held the pass lock for its whole run: the 21:27 post-arm
-    pass of 2026-09-28 was still compacting at 10:07 the next morning, every 30-min sweep in between
-    logged ``catch_up_skipped_in_flight``, and the 08:35 digest the host slept through was never
-    caught up. This runner shares only the ``job_runs`` table with the main one, so a long compaction
-    delays nothing but compaction. At most one lane pass runs at a time, and none starts inside the
+    In the shared runner a backlog compaction would hold the pass lock for hours and starve the main
+    sweep. This runner shares only the ``job_runs`` table with the main one, so a long compaction delays
+    nothing but compaction. At most one lane pass runs at a time, and none starts inside the
     tick_compact no-run window; a running one stops there by itself (``job_tick_compact``'s ``stop``).
-
-    Since 2026-10-11 it runs every :data:`LANE_JOB_IDS` job, the ``market_backup`` export included.
     ``interrupt`` (``MarketStore.interrupt_export``) ends an export's worker thread on :meth:`cancel`.
     """
 
@@ -2794,9 +2552,8 @@ class CompactionLane:
 
 
 async def _catchup_sweep_once(catch_up: CatchUpRunner, latch, kill, lane: CompactionLane) -> CatchUpResult:
-    """One 30-min catch-up sweep: ALL scope, the catchup_safety_jobs freeze reconciliation
-    (2026-09-02), then a compaction lane pass (:meth:`CompactionLane.spawn`). Extracted from the
-    scheduler closure so this path is testable (2026-09-04)."""
+    """One 30-min catch-up sweep: ALL scope, the catchup_safety_jobs freeze reconciliation, then a
+    compaction lane pass (:meth:`CompactionLane.spawn`). Extracted from the scheduler closure to be testable."""
     result = await catch_up.catch_up(scope=CatchUpScope.ALL)
     await _reconcile_catchup_freeze(result, latch, kill)
     lane.spawn("sweep")
@@ -2808,22 +2565,18 @@ def start_scheduler_and_fire_post_arm(
 ) -> asyncio.Task | None:
     """Arm the scheduler, THEN fire the deferred one-shots behind it — never the other way round.
 
-    The boot order before this change was: catch-up (news chain inside it) → scheduler.start(). The
-    2026-08-10 wedge proved the cost: a chain that never returns starves every scheduled job for 8 h,
-    including the 30-min catchup sweep that exists to self-heal. Reversing the two makes the chain's
-    worst case local to itself.
+    A chain that never returns would starve every scheduled job, including the self-healing 30-min
+    catchup sweep; arming first makes its worst case local to itself.
 
-    The one-shot IS a catch-up pass (``DEFERRED`` scope): identical code, identical ``job_runs``
-    watermarks, identical dependency order — only the firing point moved. A run that fails records a
-    FAILED watermark and the next sweep (``ALL``) retries it. It is deliberately NOT awaited: the
-    caller logs ``engine_ready`` immediately after, and that is the invariant this ordering demands.
-    Returns the task (``None`` when the rollback flag is off / nothing is deferred) so shutdown can
-    cancel it; a crash inside is logged, never raised into the boot path.
+    The one-shot IS a catch-up pass (``DEFERRED`` scope): identical code, ``job_runs`` watermarks and
+    dependency order — only the firing point moved. A run that fails records a FAILED watermark and the
+    next sweep (``ALL``) retries it. Deliberately NOT awaited: the caller logs ``engine_ready``
+    immediately after. Returns the task (``None`` when the flag is off / nothing is deferred) so
+    shutdown can cancel it; a crash inside is logged, never raised into the boot path.
 
-    ``armed`` (early hydration, 2026-09-09) is the composition root's "the scheduler is up"
-    event that the early-login hook waits on, so its pre-open chain is held to the SAME firing-point
-    rule this function exists to enforce. REQUIRED, not optional: a caller that forgot it would park
-    every early login until the hook's own 15-minute timeout.
+    ``armed`` is the "the scheduler is up" event the early-login hook waits on, so its pre-open chain
+    obeys the SAME firing-point rule. REQUIRED: a caller that forgot it would park every early login
+    until the hook's own 15-minute timeout.
     """
     scheduler.start()
     if not (DEFER_POST_ARM_JOBS and POST_ARM_JOB_IDS):
@@ -2843,10 +2596,9 @@ def start_scheduler_and_fire_post_arm(
 
     _log.info("post_arm_jobs_fired", jobs=list(POST_ARM_JOB_IDS))
     task = asyncio.create_task(_fire(), name="post_arm_catchup")
-    # Early hydration (2026-09-09): release the login hook only AFTER the one-shot is dispatched.
-    # Both are the same single-flighted CatchUpRunner: released first, the woken hook takes the pass
-    # lock and this one-shot degrades to a `skipped_in_flight` no-op — the deferred chain would then
-    # wait for its own 08:25 clock. Dispatched first, it holds the lock and the hook queues behind it.
+    # Release the early-hydration hook only AFTER the one-shot is dispatched. Both use the same
+    # single-flighted CatchUpRunner: released first, the hook takes the pass lock and this one-shot
+    # degrades to a `skipped_in_flight` no-op (the deferred chain would wait for its 08:25 clock).
     armed.set()
     return task
 
@@ -2873,7 +2625,7 @@ def _arm_registry_jobs(
 
     With ``lane``, a :data:`LANE_JOB_IDS` fire starts a lane pass instead of running its job: the
     lane's single-flight pass is then the only runner of those jobs, so the 22:00 export can never
-    overlap a sweep's lane pass or the 22:30 compaction (2026-10-11)."""
+    overlap a sweep's lane pass or the 22:30 compaction."""
     for spec in registry.specs():
         if lane is not None and spec.job_id in LANE_JOB_IDS:
             fire = _lane_fire(lane, spec.job_id, clock)
@@ -2892,9 +2644,9 @@ def _arm_registry_jobs(
 
 def _lane_fire(lane: CompactionLane, job_id: str, clock: Clock):
     """The scheduled fire of a lane job: start a lane pass, whose runner finds the job due and records
-    its watermark. A pass already in flight (or the tick_compact no-run window veto) starts nothing; the next sweep's pass
-    picks the job up. Only this fire's own run is quiet: the runner's ``job_id:<today>`` entry, the
-    run-for day of a lane job due today. Missed days the pass also replays still report."""
+    its watermark. A pass already in flight (or the no-run window veto) starts nothing; the next sweep's
+    pass picks the job up. Only this fire's own run is quiet: the runner's ``job_id:<today>`` entry.
+    Missed days the pass also replays still report."""
     async def _fire() -> None:
         quiet = frozenset({f"{job_id}:{clock.today().isoformat()}"})
         started = lane.spawn(f"scheduled:{job_id}", quiet=quiet) is not None
@@ -2920,15 +2672,10 @@ def _arm_token_check(scheduler: Scheduler, job: TokenCheckJob) -> None:
 def _scheduled_runner(spec: JobSpec, catch_up: CatchUpRunner, clock: Clock):
     """The live-scheduler wrapper: run the job, then record its ``job_runs`` watermark.
 
-    The fire is UNCONDITIONAL even when today's watermark already exists — a 2026-09-09 draft skipped
-    it, and review reversed that: the skip pinned the 06:30 early-hydration digest/planner, and a
-    universe built on a pre-08:00 instruments dump, for the whole day. Results and exchange filings
-    published 07:00–09:00 IST are the largest catalyst class, so on a day the PC stays awake the
-    08:25/08:35/08:50 fires MUST still run (a fresher digest and plan; the universe rebuilt behind the
-    08:15 instruments refresh). The watermark ``CatchUpRunner.hydrate_ahead`` records guards only the
-    SLEEP case: a PC that sleeps through the fire times and wakes at 09:30 finds the catch-up sweep
-    satisfied and keeps the 06:30 run. A second pre-open plan message on an awake-PC early-login day
-    is the accepted, documented cost.
+    The fire is UNCONDITIONAL even when today's watermark already exists: skipping would pin the 06:30
+    early-hydration digest/planner, and a universe built on a pre-08:00 instruments dump, for the whole
+    day (see :data:`EARLY_HYDRATION_JOB_IDS`). The watermark ``CatchUpRunner.hydrate_ahead`` records
+    guards only the SLEEP case.
 
     An unfinished run (:func:`~engine.ops.jobs._job_unfinished`) records nothing: the day stays missed
     and the next catch-up pass replays it. A day ``spec.fire_day`` excludes runs nothing and records
@@ -2980,9 +2727,7 @@ def _arm_live_jobs(
         await health.check(check_skew=False)
 
     async def _feed_stats() -> None:
-        # In-session only (no all-night noise; the 22:57 STALE in the 2026-07-22 log is expected). One
-        # INFO line so an operator can see AT A GLANCE whether ticks/bars are flowing: the tickless
-        # session would have shown ticks_received=0, bars_written=0 every 5 minutes.
+        # In-session only (no all-night noise). One INFO line to see AT A GLANCE whether ticks/bars flow.
         now = clock.now()
         session = calendar.session(now.date())
         if session is None or not (session.open <= now <= session.close):
@@ -2993,8 +2738,7 @@ def _arm_live_jobs(
             "feed_stats",
             ticks_received=ts["ticks_received"], frames_dropped=ts["frames_dropped"],
             bars_finalized=bs["bars_finalized"], bars_written=bs["bars_written"],
-            # Late-tick pressure, and how much of it reached DuckDB. late_ticks >>
-            # late_store_calls is the in-memory range check absorbing them (healthy); the two
+            # late_ticks >> late_store_calls is the in-memory range check absorbing them (healthy); both
             # climbing together means real amendments — or the recent-bars window being missed.
             late_ticks=bs["late_ticks"], late_store_calls=bs["late_store_calls"],
             feed_state=ticker.health().state,
@@ -3017,8 +2761,7 @@ def _arm_live_jobs(
                           job_id=f"news_poll_{name}", guard=False)
     scheduler.add_job(_news_poll("gdelt"), trigger=IntervalTrigger(seconds=settings.news.gdelt_poll_s),
                       job_id="news_poll_gdelt", guard=False)
-    # The exchange-announcements feed (2026-09-04) keeps its own cadence and its own
-    # off switch: disabled ⇒ the job is never armed (the poll key stays valid either way).
+    # The exchange-announcements feed keeps its own cadence and off switch: disabled ⇒ never armed.
     nse_ann = settings.news.feeds.nse_announcements
     if nse_ann.enabled:
         scheduler.add_job(_news_poll(NSE_ANN_KEY), trigger=IntervalTrigger(seconds=nse_ann.poll_s),
@@ -3040,8 +2783,7 @@ def _arm_live_jobs(
         scheduler.add_job(catchup_sweep, trigger=IntervalTrigger(seconds=1800),
                           job_id="catchup_sweep", guard=False)
     if window_sweep_tick is not None:
-        # 2026-07-29: fire the scanner sweep on the trade-window
-        # INACTIVE→ACTIVE edge — the "what could I trade right now?" verdict is never silent.
+        # Fire the scanner sweep on the trade-window INACTIVE→ACTIVE edge.
         scheduler.add_job(window_sweep_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="window_sweep_tick", guard=False)
     if forward_drain_tick is not None:
@@ -3049,8 +2791,8 @@ def _arm_live_jobs(
         scheduler.add_job(forward_drain_tick, trigger=IntervalTrigger(seconds=60),
                           job_id="forward_drain_tick", guard=False)
     if holdings_reconcile_tick is not None:
-        # Holdings reconcile (2026-09-07) — hourly; the tick self-gates on the trading day and
-        # the 09:20–15:30 window (holdings_reconcile.in_reconcile_window).
+        # Hourly; the tick self-gates on the trading day and the 09:20–15:30 window
+        # (holdings_reconcile.in_reconcile_window).
         scheduler.add_job(holdings_reconcile_tick, trigger=IntervalTrigger(seconds=3600),
                           job_id="holdings_reconcile", guard=False)
     if protection_reminder_tick is not None:
@@ -3065,14 +2807,14 @@ def _arm_live_jobs(
 
 # --------------------------------------------------------------------------- warm-up lift
 async def _reconcile_catchup_freeze(result: CatchUpResult, latch, kill) -> None:
-    """``catchup_safety_jobs`` symmetry on the SWEEP path (2026-09-02 review: the 09-01 fix cleared
-    only at boot, so a boot-latched freeze survived a mid-session recovery until the next reboot).
+    """``catchup_safety_jobs`` symmetry on the SWEEP path, so a boot-latched freeze does not survive a
+    mid-session recovery.
 
-    Same rule as the lifecycle's catch-up step: a pass with safety-critical failures latches, a CLEAN pass — the
-    re-verification of exactly this cause's predicate — clears. A ``skipped_in_flight`` pass
+    Same rule as the lifecycle's catch-up step: a pass with safety-critical failures latches, a CLEAN
+    pass (the re-verification of exactly this cause's predicate) clears. A ``skipped_in_flight`` pass
     verified nothing and leaves the latch alone; so does a killed engine. The clear fires only when
-    the cause is actually ACTIVE — ``clear_cause`` is idempotent but logs every call, and an
-    unconditional clear would add ~48 no-op WARNING lines a day (review, minor)."""
+    the cause is ACTIVE — ``clear_cause`` logs every call, so an unconditional clear adds no-op
+    WARNING lines."""
     if result.skipped_in_flight or kill.is_killed():
         return
     if result.frozen_reasons:
@@ -3087,12 +2829,11 @@ async def _reconcile_catchup_freeze(result: CatchUpResult, latch, kill) -> None:
 async def refresh_warmup_snapshot(warmup_gate, warmup_holder: dict):
     """Refresh the gate's warm-up snapshot ONLY — no latch mutation, no lift, no repair.
 
-    This is the piece safe to run at ANY time, including mid-``lifecycle.startup()`` (the boot
-    ticks, 2026-08-07 review round: a mid-boot LIFT races the catch-up's safety-critical freeze —
-    ``_maybe_lift_warmup_freeze`` clears causes the still-running recovery believes are set — and
-    a mid-boot REPAIR chases a tail hole the not-yet-started ticker regrows forever, burning the
-    day's budget; both belong on the post-boot scheduler cadence). A refresh failure keeps the
-    PREVIOUS snapshot (holder untouched ⇒ stays fail-closed). Returns the status, or None."""
+    Safe at ANY time, including mid-``lifecycle.startup()`` (the boot ticks): a mid-boot LIFT races the
+    catch-up's safety-critical freeze (``_maybe_lift_warmup_freeze`` clears causes the running recovery
+    believes are set) and a mid-boot REPAIR chases a tail hole the not-yet-started ticker regrows; both
+    belong on the post-boot scheduler cadence. A refresh failure keeps the PREVIOUS snapshot (holder
+    untouched ⇒ stays fail-closed). Returns the status, or None."""
     try:
         status = await warmup_gate.status()
         warmup_holder["status"] = status
@@ -3106,30 +2847,23 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
                                   *, alert=None, clock=None) -> None:
     """Refresh the gate's warm-up snapshot AND lift a standing warm-up freeze once coverage completes.
 
-    The lift used to hang off the post-login hook only — a VALID-TOKEN mid-session restart (first
-    seen 2026-08-03: boot 12:22 IST, ORB lookbacks ~17 min short) froze entries and nothing ever
-    lifted them, because no login event fires on such a boot. Runs on the 60 s
-    ``warmup_status_refresh`` cadence; ``reapply_warmup_gate`` resolves through the cause latch
-    (never a blanket NORMAL write) and is a no-op unless the state is FROZEN with the FREEZING
-    classes (regime ∪ unattributable) covered — since 2026-09-13 the lift is owed to those alone,
-    and since 2026-09-17 the DAILY class joined INTRADAY on the non-freezing side, so neither one
-    blocks it.
+    The lift hangs off this cadence, not the post-login hook, because a VALID-TOKEN mid-session restart
+    fires no login event. Runs on the 60 s ``warmup_status_refresh`` cadence; ``reapply_warmup_gate``
+    resolves through the cause latch (never a blanket NORMAL write) and is a no-op unless the state is
+    FROZEN with the FREEZING classes (regime ∪ unattributable) covered; the INTRADAY and DAILY classes
+    never block it.
 
     ``alert`` is the owner channel for the NON-FREEZING classes' transitions (best-effort, once per
-    transition, one notice per class): neither reaches the risk state nor a WARMUP_FROZEN page any
-    more, so a hole that opens MID-SESSION — the 2026-09-09 14:47 reconnect, the 2026-09-16 13:36
-    PTCIL tradeless minute — would otherwise be visible only in the structured log, and a
-    market-wide DAILY hole would page nobody at all. Unwired ⇒ log-only. ``clock`` scopes the
-    transition memos to the IST day (unwired ⇒ per-process, the pre-2026-09-13 memo).
+    transition, one notice per class): neither reaches the risk state nor a WARMUP_FROZEN page, so a
+    hole opening MID-SESSION would otherwise be visible only in the structured log. Unwired ⇒ log-only.
+    ``clock`` scopes the transition memos to the IST day (unwired ⇒ per-process).
     """
     status = await refresh_warmup_snapshot(warmup_gate, warmup_holder)
     if status is None:
         return
-    # 2026-09-13/2026-09-17 (per-CLASS then per-SYMBOL scoping): the lift is owed to the REGIME class
-    # (plus unattributable blockers), not to a flat ``ready``. One symbol's intraday hole — 11:09 on
-    # 09-04, the market-wide one-bar hole a reconnect leaves, PTCIL's tradeless 13:36 — or one
-    # symbol's daily hole (OLAELEC on 09-15) no longer holds the book frozen for the session; the
-    # gate and the pre-screen refuse the short symbols on their own, per candidate.
+    # The lift is owed to the REGIME class (plus unattributable blockers), not to a flat ``ready``. One
+    # symbol's intraday or daily hole no longer holds the book frozen for the session; the gate and the
+    # pre-screen refuse the short symbols on their own, per candidate.
     if _freezing_classes_ready(status) and mode.risk_state() == RiskState.FROZEN:
         try:
             await lifecycle.reapply_warmup_gate()
@@ -3149,19 +2883,17 @@ async def refresh_and_lift_warmup(warmup_gate, warmup_holder: dict, mode, lifecy
 
 
 def _freezing_classes_ready(status) -> bool:
-    """Are the FREEZING coverage classes satisfied? Since 2026-09-17 that is REGIME alone — an
-    unattributable blocker is handled INSIDE ``ready_for`` (it holds every class down), so asking
-    for REGIME asks for both. Duck-typed like every other gate seam here: a status without
-    ``ready_for`` (a fake, or an older snapshot) falls back to the flat ``ready``, which is the
-    pre-2026-09-13 behaviour and never looser than it."""
+    """Are the FREEZING coverage classes satisfied? That is REGIME alone — an unattributable blocker is
+    handled INSIDE ``ready_for`` (it holds every class down). Duck-typed: a status without
+    ``ready_for`` (a fake) falls back to the flat ``ready``, never looser."""
     ready_for = getattr(status, "ready_for", None)
     if ready_for is None:
         return bool(getattr(status, "ready", False))
     return bool(ready_for(CLASS_REGIME))
 
 
-#: Per-class wording for :func:`_log_class_transition` (the INTRADAY text is verbatim what shipped
-#: on 2026-09-13). ``{detail}`` is the parenthesised sample; ``{n}`` the symbol count.
+#: Per-class wording for :func:`_log_class_transition`. ``{detail}`` is the parenthesised sample; ``{n}``
+#: the symbol count.
 _CLASS_NOTICE_SHORT = {
     CLASS_INTRADAY: ("warm-up: INTRADAY coverage short{detail} — intraday candidates are "
                      "refused one by one; entries are NOT frozen by warm-up and the daily-bar legs "
@@ -3189,30 +2921,23 @@ def _log_class_transition(warmup_holder: dict, status, cls: str, *, today=None) 
     """Log ONE non-freezing class's readiness ONCE PER TRANSITION and return the owner notice to
     send, as ``(severity, message)``, or None when there is nothing new to say.
 
-    Generalised from the intraday-only notice on 2026-09-17, when the DAILY class stopped freezing
-    entries and therefore stopped paging the owner through ``WARMUP_FROZEN``: a market-wide daily
-    hole (the nightly ``daily_bars`` job failed) must still reach a human, and this notice plus the
-    STARTUP_REPORT ``warm-up short:`` line are now the two signals that carry it.
+    The DAILY class does not freeze entries, so a market-wide daily hole (the nightly ``daily_bars``
+    job failed) reaches a human only through this notice and the STARTUP_REPORT ``warm-up short:`` line.
 
-    This runs on the 60 s cadence, and a hole that survives the session would otherwise print the
-    same line ~375 times. The memos (``{cls}_short`` / ``{cls}_short_day``) live in the snapshot
-    holder, so they are per-process (a restart logs the standing state once more, which is the
-    harmless side); with ``today`` they are also per IST DAY — the intraday class reads trivially
-    "ready" whenever there is no session yet (``WarmupGate._missing_intraday`` returns nothing before
-    the open and on a non-trading day), so a memo that survived the midnight rollover would
-    manufacture a "coverage restored" that no repair produced.
+    This runs on the 60 s cadence, so the memos (``{cls}_short`` / ``{cls}_short_day``) in the snapshot
+    holder suppress repeats; they are per-process (a restart logs the standing state once more) and,
+    with ``today``, per IST DAY — the intraday class reads trivially "ready" whenever there is no
+    session yet (``WarmupGate._missing_intraday`` returns nothing before the open and on a non-trading
+    day), so a memo surviving midnight would manufacture a "coverage restored" no repair produced.
 
     **Only non-freezing classes are judged here.** While a FREEZING class (regime ∪ unattributable)
-    is short, entries ARE frozen and ``WARMUP_FROZEN`` owns that state — a notice saying "entries are
-    NOT frozen" in that state would be the opposite of the truth, so nothing is said and the memo is
-    left alone; the shortfall is reported on the first tick after the freeze lifts, when the wording
-    is true. (``ready_for(cls)`` is False in that compound state too, because an unknown-class
-    blocker holds every class down.)
+    is short, entries ARE frozen and ``WARMUP_FROZEN`` owns that state; "entries are NOT frozen" would
+    be false, so nothing is said and the memo is left alone — the shortfall is reported on the first
+    tick after the freeze lifts. (``ready_for(cls)`` is False in that compound state too, because an
+    unknown-class blocker holds every class down.)
 
-    The FIRST observation of a ready class is a transition for the log but NOT a notice: there is
-    nothing to recover from, and every clean boot would page "coverage restored". A first observation
-    of a SHORT one is a notice — the owner needs that on the tick it is learned, not only from the
-    boot report."""
+    The FIRST observation of a ready class is a transition for the log but NOT a notice (every clean
+    boot would page "coverage restored"). A first observation of a SHORT one IS a notice."""
     ready_for = getattr(status, "ready_for", None)
     if ready_for is None:
         return None
@@ -3253,22 +2978,19 @@ def _log_class_transition(warmup_holder: dict, status, cls: str, *, today=None) 
 
 
 def _log_intraday_class_transition(warmup_holder: dict, status, *, today=None) -> tuple[str, str] | None:
-    """The INTRADAY class's transition notice — a thin wrapper kept as the name the 2026-09-13
-    tests and callers use. See :func:`_log_class_transition`."""
+    """The INTRADAY class's transition notice; see :func:`_log_class_transition`."""
     return _log_class_transition(warmup_holder, status, CLASS_INTRADAY, today=today)
 
 
 # --------------------------------------------------------------------------- bounded news resolve
-#: 2026-08-10 boot wedge: a post-clustering await inside the resolve chain hung 8+ hours during
-#: catch-up — the boot never completed and NOTHING flagged it. The chain is never-load-bearing,
-#: so a bounded skip + alert strictly beats a wedged boot. Budget = ~6× the measured
-#: worst case (429 weekend headlines × 1,500 window clusters = 90.6 s clustering) plus store hops.
+#: The chain is never-load-bearing, so a bounded skip + alert strictly beats a wedged boot. Budget =
+#: ~6× the measured worst case (a weekend backlog clusters in ~90 s) plus store hops.
 _NEWS_RESOLVE_TIMEOUT_S = 600.0
 
 
 async def resolve_news_bounded(lock: asyncio.Lock, chain, *, timeout_s: float = _NEWS_RESOLVE_TIMEOUT_S,
                                on_timeout=None) -> bool:
-    """Run one news resolve pass under the chain lock with a hard deadline (2026-08-10).
+    """Run one news resolve pass under the chain lock with a hard deadline.
 
     The deadline covers LOCK ACQUISITION too (a wedged holder must not wedge every later caller).
     On expiry: cancellation releases the lock at the ``async with`` exit, partially-persisted
@@ -3293,21 +3015,18 @@ async def resolve_news_bounded(lock: asyncio.Lock, chain, *, timeout_s: float = 
 
 # --------------------------------------------------------------------------- boot-phase safety ticks
 async def boot_phase_ticks(refresh, health_check, *, interval_s: float = 60.0) -> None:
-    """Run the two OBSERVATION-ONLY refreshes on a cadence DURING boot recovery (2026-08-07).
+    """Run the two OBSERVATION-ONLY refreshes on a cadence DURING boot recovery.
 
-    The scheduler — owner of ``warmup_status_refresh`` and ``health_check`` — starts only after
-    ``lifecycle.startup()`` returns, and the catch-up inside it scales with the news backlog (a
-    122-cluster scoring batch held the 10:52 boot ~17 min): until this existed the box had no
-    health/keep-awake pulse and a stale warm-up snapshot for that whole window. DELIBERATELY
-    observation-only (2026-08-07 review round): the callables must be :func:`refresh_warmup_snapshot`
-    (never the lifting/repairing ``warmup_refresh`` — a mid-boot lift races the still-running
-    recovery's cause state, and a mid-boot repair chases the tail hole the not-yet-started ticker
-    regrows, burning the day's repair budget) and the health check (whose ``keep_awake.update()``
-    is the real prize on a sleep-prone box). The lift itself costs nothing by waiting: the
-    composition root calls the full ``warmup_refresh()`` immediately after startup returns. The
-    task is spawned right before recovery and cancelled (and awaited) when the scheduler takes
-    over. Sleep-first: a normal boot finishes in well under a tick and never fires. One tick's
-    failure never ends the loop (fail-open on observation, fail-closed on state)."""
+    The scheduler (owner of ``warmup_status_refresh`` and ``health_check``) starts only after
+    ``lifecycle.startup()`` returns, and the catch-up inside it can run long: without this the box has
+    no health/keep-awake pulse and a stale warm-up snapshot for that window. DELIBERATELY
+    observation-only: the callables must be :func:`refresh_warmup_snapshot` (never the
+    lifting/repairing ``warmup_refresh`` — a mid-boot lift races the running recovery's cause state, a
+    mid-boot repair burns the day's repair budget) and the health check (whose ``keep_awake.update()``
+    matters on a sleep-prone box). The lift loses nothing by waiting: the composition root calls the
+    full ``warmup_refresh()`` right after startup returns. Spawned right before recovery, cancelled
+    (and awaited) when the scheduler takes over. Sleep-first: a normal boot never fires a tick. One
+    tick's failure never ends the loop (fail-open on observation, fail-closed on state)."""
     while True:
         await asyncio.sleep(interval_s)
         try:
@@ -3319,8 +3038,7 @@ async def boot_phase_ticks(refresh, health_check, *, interval_s: float = 60.0) -
 
 # --------------------------------------------------------------------------- boot tail hardening
 #: Budget for the two pre-arm seeding refreshes (warm-up snapshot + first health pulse). Generous
-#: against their measured cost — the healthy 2026-08-24 10:41:20 boot did both in 1.66 s — because the
-#: point is not to trim a slow boot but to put a CEILING on a wedged one.
+#: (they take seconds): the point is a CEILING on a wedged boot, not trimming a slow one.
 _BOOT_SEED_TIMEOUT_S = 45.0
 
 
@@ -3329,17 +3047,14 @@ async def seed_boot_snapshots(
 ) -> bool:
     """Seed the warm-up + health snapshots before arming — under a deadline that CANNOT be missed.
 
-    The 2026-08-24 12:44:58 boot died here: ``await warmup_refresh()`` never returned, so
-    ``scheduler.start()`` was never called and the engine ran the whole day with no timers at all.
-    The invariant this restores was already applied to the catch-up, here applied to the last two awaits it did not cover: **the
-    boot tail reaches ``scheduler.start()`` no matter what the seeding does.**
+    Invariant: **the boot tail reaches ``scheduler.start()`` no matter what the seeding does.** A
+    ``warmup_refresh()`` that never returns would leave the engine with no timers at all.
 
-    Bulletproofing detail (the reason this is not just ``asyncio.wait_for``): ``wait_for`` cancels the
-    inner task and then AWAITS the cancellation, so a coroutine parked on a thread-offload that will
-    not come back can wedge the timeout too. :func:`asyncio.wait` returns after ``timeout_s``
-    unconditionally — it neither cancels nor joins — so the deadline is real. The straggler is
-    cancelled afterwards and deliberately never awaited; the 60 s ``warmup_status_refresh`` /
-    ``health_check`` interval jobs re-do this work the moment the scheduler is up.
+    Not ``asyncio.wait_for``: it cancels the inner task and then AWAITS the cancellation, so a
+    coroutine parked on a thread-offload that will not come back can wedge the timeout too.
+    :func:`asyncio.wait` returns after ``timeout_s`` unconditionally — it neither cancels nor joins.
+    The straggler is cancelled afterwards and deliberately never awaited; the 60 s
+    ``warmup_status_refresh`` / ``health_check`` interval jobs re-do the work once the scheduler is up.
 
     Returns True when the seeding completed inside the budget, False on the loud timeout path.
     """
@@ -3381,11 +3096,11 @@ async def seed_boot_snapshots(
 
 # --------------------------------------------------------------------------- boot contract
 #: Arming deadline, measured from the END of startup recovery: seeding (capped at 45 s) +
-#: scheduler.start() + engine_ready took <= 66 s across the 103 boots since 2026-09-01.
+#: scheduler.start() + engine_ready take well under this.
 _BOOT_CONTRACT_DEADLINE_S = 180.0
 
-#: Startup-recovery ceiling, measured from watchdog start: catch-up + backfills legitimately took up
-#: to 1,397 s (2026-10-20, a 16-minute BSE scrape); a 420 s rule falsely paged on 09-15, 10-20, 10-23.
+#: Startup-recovery ceiling, measured from watchdog start: catch-up + backfills legitimately take
+#: over 20 minutes (a slow BSE scrape); a 420 s ceiling paged falsely.
 _BOOT_STARTUP_CEILING_S = 3600.0
 
 #: Re-check/re-log cadence while the contract stands violated.
@@ -3416,11 +3131,8 @@ async def boot_contract_watchdog(
 ) -> None:
     """Verify the boot actually COMPLETED, and page the owner when it did not.
 
-    The 2026-08-24 12:44:58 boot is the case this exists for: ``startup_complete`` logged, ticks
-    processed, bars built, features written — every outward sign of a live engine — while APScheduler
-    had never been started and no scheduled job fired again until the process was killed at midnight.
-    Nothing noticed for 11 hours, because everything that could have noticed was itself a scheduled
-    job.
+    Guards a boot that logs ``startup_complete`` and processes ticks while APScheduler was never
+    started, so no scheduled job (including anything that could notice) ever fires again.
 
     So this is a PLAIN asyncio task, armed at the top of :func:`run` and owned by nobody else. It must
     keep working when the scheduler is the broken component, which rules out an APScheduler job; the
@@ -3430,11 +3142,10 @@ async def boot_contract_watchdog(
     state, never from a flag the boot path sets (see :meth:`engine.ops.scheduler.Scheduler.is_running`).
     Polled every ``poll_s``; satisfied at any poll ⇒ one INFO ``boot_contract_ok`` and the task
     retires. Two phases decide when an unmet contract is DUE: ``arming`` — ``deadline_s`` after
-    startup recovery returned (``boot_state["startup_done_at"]``; seeding + scheduler start took
-    <= 66 s across 103 boots, the 2026-08-24 zombie wedged here); ``startup`` — startup recovery
-    itself has not returned ``startup_ceiling_s`` after the watchdog began (honest catch-up took up to
-    1,397 s). Due and unmet ⇒ CRITICAL ``boot_incomplete`` (with ``phase``), ONE owner page per phase,
-    then a re-log every ``recheck_s`` until it resolves; a paged owner gets an all-clear when it does.
+    startup recovery returned (``boot_state["startup_done_at"]``); ``startup`` — startup recovery
+    itself has not returned ``startup_ceiling_s`` after the watchdog began. Due and unmet ⇒ CRITICAL
+    ``boot_incomplete`` (with ``phase``), ONE owner page per phase, then a re-log every ``recheck_s``
+    until it resolves; a paged owner gets an all-clear when it does.
 
     Never crashes the boot: it is detached, and every failure inside it — including a raising alert
     sink — is swallowed. Cancelled at shutdown via :func:`cancel_post_arm`.
@@ -3503,9 +3214,8 @@ async def boot_contract_watchdog(
 # --------------------------------------------------------------------------- warm-up gap self-repair
 #: One repair attempt per this window, and at most _GAP_REPAIR_MAX_REQUESTS_PER_DAY Kite REQUESTS
 #: per session day: a hole the fill cannot close will never close by retrying harder, so broker
-#: spend must be capped; local-only scans are free. 900 = 3 sweeps x a 300-symbol watchlist — the
-#: spend the old 3-ATTEMPT cap allowed, now spent where the holes are: one thin symbol's
-#: confirmation is one request, not a sweep (2026-09-18; see maybe_repair_warmup_gaps).
+#: spend must be capped; local-only scans are free. 900 = 3 sweeps x a 300-symbol watchlist (see
+#: maybe_repair_warmup_gaps).
 _GAP_REPAIR_COOLDOWN_S = 300
 _GAP_REPAIR_MAX_REQUESTS_PER_DAY = 900
 
@@ -3524,24 +3234,16 @@ def _has_intraday_gap_blockers(blockers: list[str]) -> bool:
 async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repair,
                                    token_valid=None,
                                    max_requests_per_day: int = _GAP_REPAIR_MAX_REQUESTS_PER_DAY) -> bool:
-    """Re-trigger the warm-up gap backfill when intraday coverage holes persist (2026-08-06:
-    a login-lagged boot left the 11:24 bar missing in ALL 100 symbols — ``bars 146/147`` with one
-    permanent gap, warm-up could never lift, and only a manual restart re-ran the fill).
+    """Re-trigger the warm-up gap backfill when intraday coverage holes persist (a login-lagged boot can
+    leave a permanent seam hole warm-up could never lift past).
 
-    Bounds (2026-08-06 review round): in-session only; NEVER on an invalid token (a doomed
-    historical call must not fire, and — the review's key finding — must not spend the repair
-    budget pre-login, or the budget is gone before the login-lag seam hole even exists);
-    ``to`` is trimmed 2 minutes back from ``now`` so the repair never touches minutes the live
-    bar builder still owns (the 2026-07-23 provenance-clobber class) and a transient
-    just-closed-minute deficit sees ZERO gaps — the fill's per-symbol gap check then skips every
-    symbol without a broker call.
+    Bounds: in-session only; NEVER on an invalid token (a doomed historical call must not fire, nor
+    spend the repair budget pre-login); ``to`` is trimmed 2 minutes back from ``now`` so the repair
+    never touches minutes the live bar builder still owns and a transient just-closed-minute deficit
+    sees ZERO gaps — the fill's per-symbol gap check then skips every symbol without a broker call.
 
-    The budget is denominated in KITE REQUESTS, not attempts (2026-09-18). It exists to bound BROKER
-    SPEND, and an attempt is not a unit of spend: on 2026-09-16 three PRODUCTIVE market-wide repairs
-    (10:06, 10:11, 12:50) — each sweeping the whole ~300-symbol watchlist — spent the day's three
-    attempts before the real single-symbol hole appeared at 13:37, and ``warmup_gap_repair_exhausted``
-    fired one second later. :data:`_GAP_REPAIR_MAX_REQUESTS_PER_DAY` is the same spend those three
-    sweeps cost, now spent where the holes are: one thin symbol's confirmation is ONE request.
+    The budget is denominated in KITE REQUESTS, not attempts: it bounds BROKER SPEND, and an attempt
+    is not a unit of spend (a market-wide sweep and a one-symbol confirmation differ ~300×).
     Charging: each completed per-symbol span is one Kite request for its minute interval (spans are
     ≤60 days, so one span is one call) and a broker-failure span also cost a request; a RAISING
     repair charges ``max(1, intraday blockers)`` because we cannot know how far it got (spend-safe);
@@ -3589,11 +3291,11 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
         _log.exception("warmup_gap_repair_failed", attempt=state["attempts"], requests=charged,
                        requests_today=state["requests"])
         return True
-    # Budget charges on BROKER SPEND, not on bars landed (review round 2): each ``fetched`` span is
-    # one completed historical call — an UNFILLABLE hole (no candle upstream) is charged exactly like
-    # a productive one instead of resweeping the broker every cooldown all session. Real broker
-    # failures also charge (spend-safe); ``unknown_instrument_token`` spans are recorded pre-network
-    # (a broken instruments map — post-login's repair, not ours) and are deliberately free.
+    # Budget charges on BROKER SPEND, not on bars landed: each ``fetched`` span is one completed
+    # historical call — an UNFILLABLE hole (no candle upstream) is charged like a productive one rather
+    # than resweeping the broker every cooldown. Real broker failures also charge (spend-safe);
+    # ``unknown_instrument_token`` spans are recorded pre-network (a broken instruments map —
+    # post-login's repair, not ours) and are deliberately free.
     fetched = getattr(report, "fetched", ()) or ()
     broker_failures = [
         f for f in (getattr(report, "failed", ()) or ())
@@ -3616,17 +3318,15 @@ async def maybe_repair_warmup_gaps(status, state: dict, *, clock, calendar, repa
 
 # --------------------------------------------------------------------------- prescreen day-state
 def _hydrate_prescreen(conn: sqlite3.Connection, prescreen, today: date) -> None:
-    """Rebuild the prescreen's in-memory day state from ``prescreen_day_slots`` at boot (2026-08-04).
+    """Rebuild the prescreen's in-memory day state from ``prescreen_day_slots`` at boot.
 
     ``charged`` = every pair published today (the caps bound — counts attempts, never refunded);
     ``seen`` = pairs whose slot is spent (``evaluated=1``). A charged-but-unseen pair was lost
-    in flight (or re-armed) and may re-publish within its already-paid quota — the 2026-07-29
-    rearm semantics, now restart-proof.
+    in flight (or re-armed) and may re-publish within its already-paid quota.
 
-    ``catalyst_strategies`` is what lets the pre-screen rebuild the
-    ``catalyst_guard.max_catalyst_entries_day`` budget from the same rows (2026-08-28); the journal
-    has no ref column, so the reconstruction and its one fail-open direction are documented at
-    :meth:`~engine.strategy.prescreen.SignalPreScreen.hydrate`."""
+    ``catalyst_strategies`` lets the pre-screen rebuild the ``catalyst_guard.max_catalyst_entries_day``
+    budget from the same rows; the journal has no ref column, so the reconstruction and its one
+    fail-open direction are documented at :meth:`~engine.strategy.prescreen.SignalPreScreen.hydrate`."""
     rows = conn.execute(
         "SELECT symbol, strategy_id, evaluated FROM prescreen_day_slots WHERE d = ?",
         (today.isoformat(),),
@@ -3744,21 +3444,16 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: booting the engine — a wiring that only exists inside ``compose`` is a wiring that silently
 #: disappears. Removing an id from here is the owner promotion gate, never a refactor.
 #:
-#: ``cat`` joined 2026-08-28: it rested on the SAME indirect argument ``cat_reversal``'s docstring
-#: identifies the hole in (ship no ``expected_edge_pct``, rely on the cost check's targetless branch) — an
-#: analyst-volunteered ``target_price`` defeats that argument for ``cat`` exactly as it would have
-#: for ``cat_reversal``. Zero ``cat`` recommendations have ever been delivered (queried live), so
-#: this closes a real but not-yet-exploited hole rather than fixing an incident.
-#: ``hi52`` joined at birth 2026-09-01 and LEFT 2026-09-12. Promoted as a FORWARD TEST, not as a validated edge:
-#: the v2 backtest is CPCV-promotable (T+20 median net +1.71%, fold pass 86.7% under N=2) but its
-#: edge lives in an index cell labelled by CURRENT membership applied backwards, so RECOMMEND mode
-#: IS the soak and it ships with a mechanical kill rule (``scripts/hi52_forward_verdict.py``:
-#: n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit rate < 50%) ⇒ DEMOTE). DEMOTION IS THIS
-#: LINE: re-add ``hi52.STRATEGY_ID`` here and delete ``hi52.expected_edge_pct`` from settings.yaml —
-#: both, since either alone leaves a half-promoted rule (the shadow set wins a contradiction, but a
-#: dangling edge key reads as a live registration). BOTH edits are real edits: ``Hi52Cfg
-#: .expected_edge_pct`` defaults to ``None``, so deleting the settings key un-registers the edge in
-#: ``compose`` above rather than falling back to a value hidden in code.
+#: ``cat`` is here because an analyst-volunteered ``target_price`` would defeat the indirect argument
+#: "ship no ``expected_edge_pct`` and rely on the cost check's targetless branch" (see
+#: ``cat_reversal``'s docstring).
+#: ``hi52`` is NOT here: it is a FORWARD TEST, not a validated edge (its backtest edge lives in an
+#: index cell labelled by CURRENT membership applied backwards), with a mechanical kill rule
+#: (``scripts/hi52_forward_verdict.py``: n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit
+#: rate < 50%) ⇒ DEMOTE). DEMOTION IS THIS LINE: re-add ``hi52.STRATEGY_ID`` here AND delete
+#: ``hi52.expected_edge_pct`` from settings.yaml — either alone leaves a half-promoted rule (the shadow
+#: set wins a contradiction, but a dangling edge key reads as a live registration). ``Hi52Cfg
+#: .expected_edge_pct`` defaults to ``None``, so deleting the key un-registers the edge in ``compose``.
 NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
     {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID}
 )
@@ -3768,23 +3463,18 @@ def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
     """The per-strategy edge registrations the gate is built with — the OTHER half of the
     promotion state above, extracted so both halves are assertable without booting an engine.
 
-    ``ins`` (2026-08-17): the cost-gate edge check derives the expected move from the proposal's
-    TARGET, and ``ins`` has none by design (its exit is the 20-td time cap, and the drift it
-    captures was MEASURED, not predicted). Rather than invent a target to feed the arithmetic, the
-    strategy registers its validated T+20 NET drift (owner-set in ``settings.yaml``, never
-    learner-movable). Used ONLY when ``target_price`` is None; every other strategy and every
-    targetless proposal without a registered edge behaves exactly as before.
+    ``ins``: the cost-gate edge check derives the expected move from the proposal's TARGET, and ``ins``
+    has none by design (its exit is the 20-td time cap, and the drift it captures was MEASURED, not
+    predicted). Rather than invent a target, the strategy registers its validated T+20 NET drift
+    (owner-set in ``settings.yaml``, never learner-movable). Used ONLY when ``target_price`` is None.
 
-    ``hi52`` (2026-09-12): registered on the SAME seam for the same reason — its exit is the
-    20-session time cap and its drift was MEASURED, not predicted to a level, so it ships
-    ``target=None`` and the gate has no levels to derive an edge from. Its number is a FORWARD-TEST
-    edge, not a validated one (``settings.yaml`` carries the derivation and the kill rule).
-    CONDITIONAL on the key being PRESENT, unlike ``ins``'s: ``Hi52Cfg.expected_edge_pct`` defaults to
-    ``None`` precisely so that deleting the ``settings.yaml`` key — the second of the two demotion edits —
-    actually demotes. Registering it unconditionally off a model default would make that edit a
-    no-op and leave the gate consuming an edge from a number ``settings.yaml`` does not show. A
-    targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject, so the
-    absence fails closed.
+    ``hi52``: registered on the SAME seam for the same reason (20-session time cap, MEASURED drift,
+    ``target=None``). Its number is a FORWARD-TEST edge, not a validated one (``settings.yaml`` carries
+    the derivation and the kill rule). CONDITIONAL on the key being PRESENT, unlike ``ins``'s:
+    ``Hi52Cfg.expected_edge_pct`` defaults to ``None`` so that deleting the ``settings.yaml`` key — the
+    second demotion edit — actually demotes; registering off a model default would make that edit a
+    no-op. A targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject,
+    so the absence fails closed.
     """
     edges = {ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct))}
     if settings.hi52.expected_edge_pct is not None:
@@ -3793,7 +3483,7 @@ def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
 
 
 def _limits_capital_base(limits_engine: LimitsEngine) -> Callable[[], Decimal]:
-    """The real tracker's base, read through the verified limit table on every call (``load()`` is cached, so O(1)). ``IntegrityError`` ONLY returns
+    """The real tracker's base, read through the verified limit table on every call (``load()`` is cached). ``IntegrityError`` ONLY returns
     :data:`_FALLBACK_CAPITAL_BASE_INR` — the boot is FROZEN then — logged once per process: an
     unverified table is never cached, so the next call after a reseed reads the verified base. Any
     other error propagates; a malformed table must never be silently priced at the fallback."""
@@ -3834,12 +3524,10 @@ def _round_tick_fn(instruments: InstrumentStore) -> Callable[[str, Decimal], Dec
 #: from here still faces the cap while it runs; it only loses budget continuity over a boot.
 CATALYST_STRATEGY_IDS: frozenset[str] = frozenset({cat.STRATEGY_ID, cat_reversal.STRATEGY_ID})
 
-#: Sweep triggers that ALSO run the once-per-session legs (today: ``hi52``'s ~480-symbol × 400-session
-#: daily read). ``freeze_lift`` is a ``window_open`` sweep re-run because a freeze swallowed the first one,
-#: so it must take every ``window_open`` branch — keying those branches on this set rather than on the
-#: literal is what stops the two triggers drifting apart. ``scan_now`` stays out: its cadence is the
-#: owner's, and the legs read completed sessions only. Module-level so the membership is assertable
-#: without booting the engine.
+#: Sweep triggers that ALSO run the once-per-session legs (today: ``hi52``'s large daily read).
+#: ``freeze_lift`` is a ``window_open`` sweep re-run because a freeze swallowed the first one, so it
+#: must take every ``window_open`` branch — keying on this set, not the literal, stops the two drifting
+#: apart. ``scan_now`` stays out: its cadence is the owner's. Module-level so it is assertable.
 _FULL_SWEEP_TRIGGERS: frozenset[str] = frozenset({"window_open", "freeze_lift"})
 
 #: A lift this close behind a FINISHED sweep re-publishes nothing that sweep did not (the pre-screen
@@ -3853,9 +3541,9 @@ _FREEZE_LIFT_MIN_GAP = timedelta(minutes=2)
 _SHUTDOWN_LIFT_WAIT_S = 15.0
 
 #: How long a graceful stop waits for event-bus deliveries (mostly tick handlers awaiting a flush)
-#: before `store.close()`, which then waits up to 15 s on the same flush. Measured stops take 13-20 s,
-#: the backup alone 3-11 s (2026-09-24/25). A wedged flush on top can pass the 30 s the service manager
-#: allows and end in a kill; the next boot then replays the store's WAL.
+#: before `store.close()`, which then waits up to 15 s on the same flush. A stop takes 13-20 s, the
+#: backup alone 3-11 s; a wedged flush on top can pass the 30 s the service manager allows and end in a
+#: kill (the next boot then replays the store's WAL).
 _SHUTDOWN_BUS_DRAIN_S = 5.0
 
 
@@ -4050,7 +3738,7 @@ def _feed_symbols(conn: sqlite3.Connection) -> list[str]:
     """The ticker's held leg, and nothing else's: real held symbols, then every paper position and
     every working order or ACTIVE GTT. They MUST stay in the feed after the universe drops them —
     an unsubscribed holding marks at avg_entry, so its loss is invisible to the floor ladder and
-    day-MTM rungs (2026-07-28 review), and a paper order or GTT only fills on ticks."""
+    day-MTM rungs, and a paper order or GTT only fills on ticks."""
     rows = conn.execute(
         "SELECT symbol FROM positions "
         f"WHERE {HELD_STATES_SQL['paper']} AND {scope_sql('paper', has_origin=True)} "
@@ -4085,9 +3773,8 @@ def _ticker_tokens(*, watchlist: Sequence[str], held: Sequence[str], batch_state
     """THE ticker subscription set: watchlist → HELD → TODAY's batch admissions → index → VIX.
 
     Order is priority order — :func:`_subscription_tokens` keeps the FIRST occurrence, so a batch
-    symbol that is already on the watchlist does not duplicate. The day roll happens HERE rather than
-    in the caller: a composition handed an already-rolled list would keep passing its test after the
-    reset was dropped, and an ever-growing subscription walks into the per-connection cap."""
+    symbol already on the watchlist does not duplicate. The day roll happens HERE, not in the caller,
+    so a test exercises it and an ever-growing subscription cannot reach the per-connection cap."""
     return _subscription_tokens(
         [*watchlist, *held, *sorted(_roll_batch_ticks(batch_state, today)),
          INDEX_SYMBOL, VIX_SYMBOL],
@@ -4123,8 +3810,6 @@ async def _single_flight_sweep(lock: asyncio.Lock, sweep: Callable[[str], Awaita
         if not queue:
             _log.info("scan_sweep_skipped_in_flight", trigger=trigger)
             return _SWEEP_IN_FLIGHT_REPLY
-        # Named too: a lift that silently waited out a slow sweep is the "nothing happened" log 09-04
-        # took a day to read.
         _log.info("scan_sweep_queued_behind_in_flight", trigger=trigger)
     async with lock:
         return await sweep(trigger)
@@ -4146,16 +3831,15 @@ def _sweep_window_active(now: datetime, calendar: NSECalendar, mode: ModeManager
 
 def _retest_active(now: datetime, calendar: NSECalendar, mode: ModeManager, kill: KillSwitch,
                    sweep_lock: asyncio.Lock) -> bool:
-    """May the brk20 RETEST re-offer a level at ``now``? (2026-09-12 review.)
+    """May the brk20 RETEST re-offer a level at ``now``?
 
     The sweep's window predicate, AND the states in which the pipeline is certain to DROP the
     publication: ``risk_state != NORMAL`` and the kill switch (``pipeline.on_signal_candidate``
     re-arms the pair on either). The sweep may publish into a freeze because the freeze-lift sweep
-    re-publishes it afterwards; the retest has no lift path, and its once-a-day offer bound is spent
-    at OFFER time — so an offer into a freeze would silence that level for the rest of the day. It
-    also waits while a sweep is RUNNING (``sweep_lock.locked()``, the same signal the freeze lift
-    reads): a pair that sweep re-armed has an open ``(symbol, strategy)`` dedupe slot, and a
-    days-old level must not take it ahead of today's fresh crossing of the same symbol."""
+    re-publishes it; the retest has no lift path and its once-a-day offer bound is spent at OFFER
+    time, so an offer into a freeze would silence that level for the day. It also waits while a sweep
+    is RUNNING (``sweep_lock.locked()``): a pair that sweep re-armed has an open ``(symbol, strategy)``
+    dedupe slot, which a days-old level must not take ahead of today's fresh crossing."""
     return (
         _sweep_window_active(now, calendar, mode)
         and mode.risk_state() == RiskState.NORMAL
@@ -4175,17 +3859,15 @@ def _freeze_lift_skip_reason(now: datetime, last_fired, last_sweep: Mapping[str,
     second one beside it; and a lift landing on the heels of a finished sweep has nothing new to
     publish.
 
-    ``in_flight`` is the single-flight lock's own ``locked()`` (2026-09-12 review), never an
-    inference from the phase marks: a sweep that RAISES never stamps ``done_at``, and a "running"
-    derived from ``started_at`` would latch the lift shut for as long as any grace period — the
-    set-without-clear shape that froze entries for two sessions on 2026-09-01. The lock is released
-    by ``async with`` on every exit path, so it is the one signal that cannot stick.
+    ``in_flight`` is the single-flight lock's own ``locked()``, never an inference from the phase
+    marks: a sweep that RAISES never stamps ``done_at``, so a "running" derived from ``started_at``
+    would latch the lift shut (a set-without-clear shape). The lock is released by ``async with`` on
+    every exit path, so it is the one signal that cannot stick.
 
-    ``last_sweep["frozen"]`` is what keeps the third rule from eating the case it was written around.
-    The window-edge tick and the warm-up refresh both ride 60 s timers armed at the same boot, so on
-    an in-session boot the window_open sweep and the lift that follows it land within the SAME two
-    minutes — and that sweep published its whole batch into the freeze. A sweep that published while
-    FROZEN is the one to redo, never the one to debounce against."""
+    ``last_sweep["frozen"]`` keeps the third rule from eating its own case: on an in-session boot the
+    window_open sweep and the lift that follows it land within the SAME two minutes, and that sweep
+    published its whole batch into the freeze. A sweep that published while FROZEN is the one to
+    redo, never the one to debounce against."""
     if last_fired == (now.date(), now.hour, now.minute):
         return "already_swept_this_minute"
     started = last_sweep.get("started_at")
@@ -4212,13 +3894,11 @@ def _ins_rows_to_consume(symbols: Sequence[str], *, in_window: bool,
     later sweep — a consumed crossing is gone for the day (the EOD job decided the event; nothing
     here re-computes it):
 
-      * a WINDOW refusal (2026-08-18 review): the whole premise of the batch window gate is that a
-        shut-window candidate was never evaluated, so an out-of-window /scan_now must leave the day's
-        crossings pending for the next in-window sweep;
-      * a publication into a FREEZE (2026-09-11 forensics): ``pipeline.on_signal_candidate`` re-arms
-        the pair and no next bar re-publishes a batch rule — the freeze-lift re-sweep is that
-        re-publication, and it can only re-derive `ins` from rows still marked pending. This is the
-        one leg 08-28/08-31/09-04 could not have recovered even with the lift wired.
+      * a WINDOW refusal: a shut-window candidate was never evaluated, so an out-of-window /scan_now
+        must leave the day's crossings pending for the next in-window sweep;
+      * a publication into a FREEZE: ``pipeline.on_signal_candidate`` re-arms the pair and no next bar
+        re-publishes a batch rule — the freeze-lift re-sweep is that re-publication, and it can only
+        re-derive `ins` from rows still marked pending.
 
     Never a widening of the bound: an unconsumed row that is never re-published simply dies with its
     ``for_session`` date, and the pre-screen's same-day dedupe keeps a re-offer from spending
@@ -4232,32 +3912,28 @@ async def _freeze_lift_sweep(evt, clock: Clock, calendar: NSECalendar, mode: Mod
                              sweep, state: dict, last_sweep: dict, *,
                              ready: Callable[[], bool],
                              in_flight: Callable[[], bool] = lambda: False) -> None:
-    """Re-run the scanner sweep when a freeze LIFTS inside the trade window (2026-09-11 forensics).
+    """Re-run the scanner sweep when a freeze LIFTS inside the trade window.
 
     The batch legs originate only from the sweep, and a candidate published into a standing freeze is
     re-armed by the pipeline with nothing left to re-publish it — batch rules have no next bar. Every
-    in-session boot re-applies a warm-up freeze at the lifecycle's warm-up gate and re-fires the window edge, so
-    the sweep landed inside the freeze and the day's brk20/hi52/cat/ins origination was lost (08-28,
-    08-31, 09-04). ONLY the FROZEN-side→NORMAL edge fires: a NORMAL→FROZEN transition has nothing to
-    re-publish, and a FROZEN→KILLED one must not trade. ``ready`` is the boot contract's
-    ``engine_ready`` — the recovery itself clears causes, and a sweep must never run ahead of the
-    backfill/catch-up/ticker steps it reads from. ``in_flight`` is the sweep lock's ``locked``
-    (the composition root passes ``_sweep_lock.locked``; the default exists for the unit harness
-    only and is asserted against in the wiring test). Extracted from the composition root so the
-    predicate, the debounce and the edge are testable without booting the engine."""
+    in-session boot re-applies a warm-up freeze and re-fires the window edge, so without this the
+    day's brk20/hi52/cat/ins origination is lost. ONLY the FROZEN-side→NORMAL edge fires: a
+    NORMAL→FROZEN transition has nothing to re-publish, and a FROZEN→KILLED one must not trade.
+    ``ready`` is the boot contract's ``engine_ready`` — the recovery itself clears causes, and a sweep
+    must never run ahead of the backfill/catch-up/ticker steps it reads from. ``in_flight`` is the
+    sweep lock's ``locked`` (the composition root passes ``_sweep_lock.locked``; the default exists
+    for the unit harness only). Extracted so the predicate, the debounce and the edge are testable."""
     if evt.new_state != RiskState.NORMAL or evt.old_state == RiskState.NORMAL:
         return
     now = clock.now()
     if not ready():
-        # BOOT GUARD (2026-09-11 review). Two lift paths fire from INSIDE the recovery — the
-        # self-test's `clear_stale_daily` and the catch-up's `catchup_safety_jobs` clear — i.e.
-        # ahead of the data-gap backfill, the daily_bars catch-up, the warm-up gate and
-        # the ticker resume. A sweep there reads a daily history still missing the last
-        # session(s) (wrong brk20/hi52 breakout references in both directions), CHARGES those pairs
-        # through prescreen.admit so the real window-open sweep is deduped out of exactly them, and
-        # resubscribes nothing (the ticker is still STOPPED). Nothing is lost by waiting: a lift this
-        # early precedes every sweep, so there is nothing to redo, and the INACTIVE→ACTIVE window
-        # edge sweeps in NORMAL once the scheduler is armed.
+        # BOOT GUARD. Two lift paths fire from INSIDE the recovery (the self-test's `clear_stale_daily`
+        # and the catch-up's `catchup_safety_jobs` clear), ahead of the data-gap backfill, the daily_bars
+        # catch-up, the warm-up gate and the ticker resume. A sweep there reads a daily history still
+        # missing the last session(s) (wrong breakout references), CHARGES those pairs through
+        # prescreen.admit so the real window-open sweep is deduped out of them, and resubscribes nothing
+        # (the ticker is STOPPED). Nothing is lost by waiting: a lift this early precedes every sweep,
+        # and the INACTIVE→ACTIVE window edge sweeps in NORMAL once the scheduler is armed.
         _log.info("freeze_lift_sweep_skipped", reason="boot_in_progress",
                   old_state=evt.old_state.value, at=now.isoformat())
         return
@@ -4283,10 +3959,9 @@ async def _freeze_lift_sweep(evt, clock: Clock, calendar: NSECalendar, mode: Mod
               pending=last_sweep.get("pending", 0) if swept else 0)
 
 
-#: PUBLICATION order of the batch legs (2026-09-12 review decision), by strategy id. Module-level
-#: so the property is assertable without booting the engine. This is the order the legs are
-#: CONCATENATED in for the ranked admit — publication simply stops depending on the sort that
-#: allocates the caps. A strategy not listed here publishes after the listed ones, in admit order.
+#: PUBLICATION order of the batch legs, by strategy id; publication does not depend on the sort that
+#: allocates the caps. Module-level so it is assertable. A strategy not listed here publishes after the
+#: listed ones, in admit order.
 _PUBLICATION_LEG_ORDER: tuple[str, ...] = (
     brk20.STRATEGY_ID, ins.STRATEGY_ID, cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID,
 )
@@ -4307,29 +3982,20 @@ def _publication_order(admitted: list) -> list:
     """PUBLICATION order for one batch admission: LEG order (:data:`_PUBLICATION_LEG_ORDER`), and
     inside one leg the order ``SignalPreScreen.admit`` returned (its own score-descending rank).
 
-    ADMISSION and PUBLICATION are two separable consequences of one ranked list, and only the first
-    one ``prescreen._rank`` reasons about ("a batch competes for the shared daily cap, and the
-    per-strategy sub-caps — not this sort — are what bound one strategy's share"). The second is
-    ``fired_at``: ``bus.apublish`` order stamps it, and ``pipeline._forward_key`` breaks ties INSIDE
-    a per-strategy quantile band by ``fired_at`` ASCENDING — so whoever publishes first wins the
-    scarce analyst slot among candidates of comparable standing, which under
-    ``MIN_RANK_POPULATION`` = 3 is every strategy's first two candidates of the day (all in the
-    middle band).
+    ADMISSION and PUBLICATION are two separable consequences of one ranked list. Publication order
+    stamps ``fired_at`` (``bus.apublish`` order), and ``pipeline._forward_key`` breaks ties INSIDE a
+    per-strategy quantile band by ``fired_at`` ASCENDING — so whoever publishes first wins the scarce
+    analyst slot among candidates of comparable standing.
 
-    The raw scores that sort that ranked list are NOT comparable across strategies: ``hi52`` scores
-    ``prox`` in [0.95, 1.0], ``ins`` ~0.5 at a bare ₹1cr crossing, ``brk20`` ~0.5-0.6 — which is
-    exactly why the forward slot ranks by per-strategy QUANTILE and not by raw score. Letting that
-    same cross-strategy sort also stamp ``fired_at`` would smuggle the incomparable scale back in
-    through the tie-break: folding hi52 into the ranked batch (the promotion) put an
-    UNVALIDATED forward test at the head of the publication queue every morning and handed it those
-    ties against the platform's only validated leg, under a DG1-degraded forward cap (4/day, run at
-    cap all of 2026-09-10). Publishing in LEG order removes the whole class: no strategy's score
-    SCALE can buy it queue priority, and the fixed order is a stated, auditable precedence — the
-    actionable legs by seniority, the 2026-09-12 forward test last — rather than an emergent
-    property of three unrelated scoring formulas.
+    Raw scores are NOT comparable across strategies (``hi52`` ``prox`` in [0.95, 1.0], ``ins`` ~0.5,
+    ``brk20`` ~0.5-0.6), which is why the forward slot ranks by per-strategy QUANTILE. Letting the
+    cross-strategy sort also stamp ``fired_at`` would smuggle that incomparable scale back in through
+    the tie-break (the unvalidated hi52 forward test would head the queue). Publishing in LEG order
+    means no strategy's score SCALE can buy queue priority: a fixed, auditable precedence — the
+    actionable legs by seniority, the forward test last.
 
     ``sorted`` is stable, so within each leg the admit order (score descending) is untouched, and
-    replay determinism is unaffected — the key reads only ``strategy_id``, never a clock.
+    replay determinism holds — the key reads only ``strategy_id``, never a clock.
     """
     rank = {sid: i for i, sid in enumerate(_PUBLICATION_LEG_ORDER)}
     return sorted(admitted, key=lambda c: rank.get(c.strategy_id, len(rank)))
@@ -4340,30 +4006,20 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
     """The `hi52` v2 daily leg: 52-week-high-proximity FRESH-CROSSES over COMPLETED daily
     sessions. Returns RAW candidates for the sweep's ONE ranked batch admission.
 
-    Scoped to the CORE (NIFTY 500) subset: the eligible universe from 2026-09-09, and since the owner decision
-    (2026-10-08, eligible = NIFTY Total Market) the caller passes ``store.get_core_eligible_symbols``
-    — the 09-03 full-market backtest measured the edge as index-class only (extended names −0.26% net
-    / 49% hit at T+20, n=13,922), so the extended-name population is no longer originated. Swing thesis (T+5..T+20, George & Hwang drift; intraday
-    capture is cost-refuted).
+    Scoped to the CORE (NIFTY 500) subset: the caller passes ``store.get_core_eligible_symbols``, as
+    the full-market backtest measured the edge as index-class only (extended names −0.26% net / 49%
+    hit at T+20). Swing thesis (T+5..T+20, George & Hwang drift; intraday capture is cost-refuted).
 
-    PROMOTED 2026-09-12: until then this was a shadow whose own SECOND
-    ``prescreen.admit`` ran AFTER the actionable one, so candidates scoring in [0.95, 1] could only
-    take LEFTOVER day-cap capacity. A promoted rule cannot keep that seat — its candidates now go
-    into the SAME concatenated batch as brk20/ins/cat/cat_reversal and are ranked against them under
-    the ordinary per-strategy cap (``max_per_strategy_day.hi52`` = 3, unchanged). The 08-18 fairness
-    lesson that motivated the second admit is served by that single ranked admit, which is what it
-    was built for; what the merge costs is LATENCY — this leg's ~480-symbol × 400-session history
-    read now sits BEFORE the batch admit instead of after it. The bar-driven ``prescreen.sweep`` at
-    the top of the worker is untouched and still admits first. What the merge deliberately does NOT
-    buy hi52 is the front of the PUBLICATION queue: :func:`_publication_order` keeps it last, so the
-    forward-slot ``fired_at`` tie-break stays where it was before the promotion.
+    Its candidates go into the SAME concatenated batch as brk20/ins/cat/cat_reversal and are ranked
+    against them under the ordinary per-strategy cap (``max_per_strategy_day.hi52`` = 3); the cost is
+    LATENCY — this leg's large history read sits BEFORE the batch admit. The bar-driven
+    ``prescreen.sweep`` at the top of the worker still admits first. hi52 does NOT get the front of
+    the PUBLICATION queue: :func:`_publication_order` keeps it last.
 
     Session-cadence triggers only (``_FULL_SWEEP_TRIGGERS``): the signal derives from COMPLETED
     sessions, so one scan per session is its natural cadence and /scan_now stays cheap. ``freeze_lift``
-    is IN that set — it is the window_open sweep re-run because a freeze swallowed the first one
-    (2026-09-11), so excluding it would lose the leg for the day exactly as the swallowed sweep did.
-    Extracted from the sweep body so THAT is testable on the candidates rather than on a source
-    string."""
+    is IN that set (the window_open sweep re-run because a freeze swallowed the first one), else the
+    leg is lost for the day. Extracted so that is testable on the candidates."""
     if trigger not in _FULL_SWEEP_TRIGGERS:
         return []
     hi52_histories: dict[str, list[brk20.DailyRow]] = {}
@@ -4371,7 +4027,7 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
     # No bars_1d source re-adjusts STORED history across an ex-date (Kite candles are adjusted at
     # fetch time, but the series is seeded once and extended one session at a time; bhavcopy rows are
     # raw), so a bonus/split/rights/demerger inside the window leaves phantom pre-ex highs: those
-    # symbols sit out until it rolls past (2026-09-03).
+    # symbols sit out until it rolls past.
     hi52_unadjusted = hi52.unadjusted_history(
         store.get_corp_actions(ex_from=hi52_start, ex_to=yesterday)
     )
@@ -4389,12 +4045,10 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
         hi52_histories, today=today, ex_dates_by_symbol=ex_map,
         unadjusted_symbols=hi52_unadjusted, veto_counts=hi52_vetoes,
     )
-    # The v2 GATE's own inputs, per SURVIVING candidate. The aggregate veto counts say how much flow
-    # the filters ate; they say nothing about the shape of the population that PASSED, and the
-    # pre-registered 20- and 40-signal reviews ask exactly that — was the live smooth distribution
-    # the 09-09 study's? Nothing else records it: these two numbers have no place on SignalCandidate
-    # and no row of their own. Computed off the SAME rows and the SAME helper the
-    # gate used, and only for candidates (a handful), so the per-symbol cost discipline holds.
+    # The v2 GATE's own inputs, per SURVIVING candidate: the aggregate veto counts say nothing about the
+    # shape of the population that PASSED, which the pre-registered signal-count reviews ask. Nothing
+    # else records these two numbers (no place on SignalCandidate). Computed off the SAME rows and
+    # helper the gate used, and only for candidates (a handful).
     candidate_diag = {}
     for cand in hi52_raw:
         diag = hi52.diagnostics_for(hi52_histories.get(cand.symbol, ()))
@@ -4403,11 +4057,8 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
                 "up_day_frac": diag.up_day_frac, "max_day_move": diag.max_day_move,
             }
     # ORIGINATION-stage counts (the brk20/cat convention): candidates + vetoes reconcile against
-    # symbols_scanned on one line, and what the prescreen caps then do with the survivors is the
-    # prescreen's own logging — no `admitted` here any more, because this leg no longer admits.
-    # The v2 filters are the two counts that can eat a whole day's flow (the 09-09 v2 run dropped
-    # 12,218 of its 16,663 discrete signals on them — smooth 11,405 + gap 813), so a quiet tape must
-    # be readable as their decision.
+    # symbols_scanned on one line; this leg no longer admits, so there is no `admitted`. The smooth/gap
+    # filters can eat most of a day's flow, so a quiet tape must be readable as their decision.
     _log.info(
         "hi52_sweep", d=today.isoformat(), trigger=trigger,
         symbols_scanned=len(hi52_histories),
@@ -4423,11 +4074,8 @@ def _hi52_daily_leg(store: MarketStore, *, trigger: str, eligible: Sequence[str]
 
 def _watchlist_rows_for_symbols(rows: list, symbols: set[str]) -> list:
     """Watchlist rows (cat/cat_reversal ``WatchlistRow`` NamedTuples) whose ``symbol`` is in
-    ``symbols`` — the eligible-pin filter (2026-09-01 review). ATTRIBUTE access, never
-    ``.get``: the 2026-09-02 10:51 window_open sweep died on exactly that (``'WatchlistRow' object
-    has no attribute 'get'`` — the whole batch admission incl. hi52's first sweep aborted), because
-    the filter shipped inline without a test on the real row type. Now a helper, tested with the
-    real NamedTuples."""
+    ``symbols`` — the eligible-pin filter. ATTRIBUTE access, never ``.get`` (a NamedTuple has none,
+    and the failure aborts the whole batch admission); tested with the real NamedTuples."""
     return [r for r in rows if r.symbol in symbols]
 
 
@@ -4461,20 +4109,17 @@ def _read_cat_watchlist(
 ) -> tuple[list[cat.WatchlistRow], list[cat_reversal.WatchlistRow]]:
     """Today's ``originating`` ``catalyst_watchlist`` rows, as BOTH scanners' row tuples.
 
-    The ~08:35 ``CatalystDigestJob`` wrote these; nothing here re-grades one. The ONE thing this adds
-    is ``reference_close`` — the PRIOR SESSION's bhavcopy-final close from ``bars_1d`` (the last bar
-    strictly before today), which is the freshest committed price at sweep time and the anchor for
-    the whole level set (2026-08-18). The grade filter is pushed into the store query
-    because it is cheap there; each RULE's own filter (``cat``: grade ∧ direction ∧ age<=1;
-    ``cat_reversal``: the same PLUS ``reversal_of``) is re-applied inside its ``sweep_watchlist``,
-    which is the authority. A malformed row costs itself and nothing else — the sweep must not die on
-    one bad row (fail-to-zero).
+    The ``CatalystDigestJob`` wrote these; nothing here re-grades one. The ONE thing this adds is
+    ``reference_close`` — the PRIOR SESSION's bhavcopy-final close from ``bars_1d`` (the last bar
+    strictly before today), the freshest committed price at sweep time and the anchor for the whole
+    level set. The grade filter is pushed into the store query; each RULE's own filter (``cat``: grade ∧
+    direction ∧ age<=1; ``cat_reversal``: the same PLUS ``reversal_of``) is re-applied inside its
+    ``sweep_watchlist``, which is the authority. A malformed row costs itself and nothing else
+    (fail-to-zero).
 
-    ONE fetch, two projections (2026-08-27): the ``cat_reversal`` shadow reads exactly the same rows
-    and the same per-symbol ``bars_1d`` lookup ``cat`` already does, so building both here keeps the
-    added strategy free at the store — a second pass would double the sweep's query count for a leg
-    that fires on a strict subset of the same rows. The projections are independent tuples so the two
-    pre-registered event definitions can diverge later without a lockstep edit.
+    ONE fetch, two projections: ``cat_reversal`` reads the same rows and the same per-symbol
+    ``bars_1d`` lookup as ``cat``, so a second pass would double the query count. The projections are
+    independent tuples so the two pre-registered event definitions can diverge without a lockstep edit.
     """
     out: list[cat.WatchlistRow] = []
     rev: list[cat_reversal.WatchlistRow] = []
@@ -4507,13 +4152,10 @@ def _read_cat_watchlist(
                 reference_close=reference_close,
             )
             out.append(cat.WatchlistRow(**shared_fields))
-            # `reversal_of` is NULL on every ordinary row and on every row a pre-2026-08-27 DB wrote
-            # (the column is nullable and back-filled by no one) — both read as "not a reversal". Such
-            # a row can never satisfy ``cat_reversal.is_eligible`` (it requires a NON-EMPTY
-            # ``reversal_of``), so it is skipped here rather than built and discarded downstream —
-            # harmless either way: the starvation-visibility ``reversal_eligible`` count sums
-            # ``is_eligible`` over this list, and a row that can never pass it contributes 0 whether
-            # or not it is in the population being summed.
+            # `reversal_of` is NULL on every ordinary row and on rows written before the column existed
+            # — both read as "not a reversal". Such a row can never satisfy
+            # ``cat_reversal.is_eligible`` (needs a NON-EMPTY ``reversal_of``), so it is skipped here;
+            # the ``reversal_eligible`` count is unaffected either way.
             reversal_of = r.get("reversal_of")
             if reversal_of:
                 rev.append(cat_reversal.WatchlistRow(**shared_fields, reversal_of=str(reversal_of)))
@@ -4528,7 +4170,7 @@ def _attach_feature_snapshots(features: FeatureEngine, candidates: list) -> list
 
     The per-bar path gets its id from ScanContext at signal time; batch rules bypass ScanContext, and
     a candidate with a null id is structurally un-recommendable (intraday.py Rule 6 mandates
-    no_action on a missing identifier — the 2026-08-04 all-15-refused sweep). Runs AFTER
+    no_action on a missing identifier). Runs AFTER
     ``prescreen.admit`` so suppressed/capped candidates never spend a snapshot write. A minting
     failure costs that one candidate its feature link, never the sweep (scan-path posture)."""
     out = []
@@ -4580,11 +4222,11 @@ def _retest_skip_reasons(
     * **ex_skip** — a known ex-date inside brk20's own ex-date horizon. ``bars_1d`` is never re-adjusted,
       so the stored level is a pre-ex price; ``brk20.scan_daily`` refuses such a symbol on the
       crossing day and a re-offer must refuse it on the retest day for the same reason.
-    * **unadjusted** — the BACKWARD half of the same veto (2026-09-12 review): a structural ex-date
+    * **unadjusted** — the BACKWARD half of the same veto: a structural ex-date
       (bonus/split/rights/demerger) already inside the 35-day lookback, the set the sweep feeds to
-      ``brk20.sweep_daily(unadjusted_symbols=...)``. ``ex_skip`` looks forward from today only, so an
-      ex-date that passed BETWEEN the crossing and the retest would otherwise re-offer a pre-ex
-      level as a limit ABOVE the adjusted tape.
+      ``brk20.sweep_daily(unadjusted_symbols=...)``. ``ex_skip`` looks forward only, so an ex-date
+      that passed BETWEEN the crossing and the retest would otherwise re-offer a pre-ex level as a
+      limit ABOVE the adjusted tape.
     * **not eligible** — the symbol has left the eligible universe since the crossing (liquidity or
       index churn). ``brk20``'s registered origination scope IS that population; a level may not
       outlive it just because it was journalled while the symbol was still in.
@@ -4622,53 +4264,44 @@ def _retest_republish(
     """One 60 s retest tick: expire, find the levels back inside the band, admit them.
 
     SYNCHRONOUS AND OFF-LOOP. ``prescreen.admit`` takes ``SignalPreScreen._lock`` and the post-admit
-    mint takes ``MarketStore._lock``; the caller runs this whole body through ``asyncio.to_thread``,
-    as ``prescreen.handle_bar`` and ``_collect_and_scan`` do, because either lock can be held for
-    tens of seconds (a partition COPY) and the event loop owns the tick cache, the heartbeat and
-    the kill path.
+    mint takes ``MarketStore._lock``; the caller runs this whole body through ``asyncio.to_thread``
+    (as ``prescreen.handle_bar`` and ``_collect_and_scan`` do) because either lock can be held for
+    tens of seconds and the event loop owns the tick cache, the heartbeat and the kill path.
 
     The book's three operations are TOTAL (a journal failure logs and yields nothing), and an
-    unreadable band returns early; what can still raise is ``prescreen.admit`` itself, which
-    propagates to the drain tick's own guard — logged there, with the drain still running after it.
-    Nothing in this function may take the scheduler loop down.
+    unreadable band returns early; what can still raise is ``prescreen.admit``, which propagates to the
+    drain tick's own guard. Nothing in this function may take the scheduler loop down.
 
     The `brk20` levels admitted over the last ``retest_sessions`` sessions rest in
-    ``brk20_resting_levels`` (migration 0014); this is the pulse that re-offers one the moment its
-    price returns to it — the ``limit_5_sessions`` mechanism the 2026-09-12 pre-registered
-    entry-mechanism backtest selected over both market-on-confirmation and the shipped single-session
-    publication (see ``engine.strategy.retest``).
+    ``brk20_resting_levels``; this is the pulse that re-offers one the moment its price returns to it
+    (see ``engine.strategy.retest``).
 
-    ``active`` is the caller's ``_sweep_window_active`` verdict — a live session, inside the owner
-    trade window, in a mode that originates. INACTIVE does nothing at all, not even the expiry sweep:
-    outside the window there is no live LTP worth banding against and nothing may spend a day
-    slot, and expiry is idempotent housekeeping that the next in-window tick performs anyway (``due``
-    re-tests the window itself, so a day with no in-window tick re-offers nothing it should not).
+    ``active`` is the caller's ``_sweep_window_active`` verdict. INACTIVE does nothing at all, not even
+    the expiry sweep: outside the window there is no live LTP worth banding against and nothing may
+    spend a day slot; expiry is idempotent housekeeping the next in-window tick performs anyway
+    (``due`` re-tests the window itself).
 
-    ADMISSION is ``prescreen.admit`` — the SAME call, the same day cap, the same per-strategy cap and
-    the same same-day ``(symbol, strategy)`` dedupe the sweep faces. ``in_window=True`` is a
-    statement of ``active``, not a bypass of anything: the pre-screen is Clock-free by design and the
-    caller owns the window verdict (see ``SignalPreScreen.admit``). The ``features_snapshot_id`` is
-    minted AFTER that admit by the sweep's own ``_attach_feature_snapshots``, so a candidate the caps
-    suppress never spends a snapshot write — and a candidate with a null id is structurally
-    un-recommendable (intraday.py Rule 6), which is why it cannot simply be left off.
+    ADMISSION is ``prescreen.admit`` — the SAME call, day cap, per-strategy cap and same-day
+    ``(symbol, strategy)`` dedupe the sweep faces. ``in_window=True`` states ``active``, it bypasses
+    nothing: the pre-screen is Clock-free by design and the caller owns the window verdict (see
+    ``SignalPreScreen.admit``). The ``features_snapshot_id`` is minted AFTER that admit by the sweep's
+    own ``_attach_feature_snapshots``, so a suppressed candidate never spends a snapshot write — and a
+    null id is structurally un-recommendable (intraday.py Rule 6).
 
     ``sweep_ready`` is "today's IN-WINDOW sweep has published". Until it has, this tick only expires:
     the day's ranked admission must reach ``prescreen.admit`` FIRST, or a level broken days ago can
-    take the ``(symbol, strategy)`` dedupe slot moments before the same symbol's fresh crossing —
-    which would then be dropped as a duplicate and, being un-admitted, never journalled either, so
-    the book would carry the stale geometry for the rest of the window. It is also what guarantees
-    ``skip_fn`` reads TODAY's eligible set and ex-date horizon rather than an empty one.
+    take the ``(symbol, strategy)`` dedupe slot just before the same symbol's fresh crossing, which
+    would then be dropped as a duplicate and never journalled. It also guarantees ``skip_fn`` reads
+    TODAY's eligible set and ex-date horizon rather than an empty one.
 
     A band that cannot be read (an unverifiable limits store) re-offers NOTHING: the band is the only
-    thing standing between this mechanism and re-publishing a level the gate is certain to reject, so
-    an unreadable one fails to zero rather than to a constant (limits are read at the
-    enforcement site or not used). ``max_tick_age_s`` rides the SAME load: the trigger price must be
-    as fresh as the gate will demand of it.
+    thing between this mechanism and re-publishing a level the gate is certain to reject, so it fails
+    to zero rather than to a constant. ``max_tick_age_s`` rides the SAME load: the trigger price must
+    be as fresh as the gate will demand.
 
-    ``brk20_retest_republished`` is emitted here, per candidate ``prescreen.admit`` ACCEPTED, off the
-    ``offers`` detail the book fills in place. The book's own line is ``brk20_retest_offered``, so
-    the two stages of the funnel are separately greppable instead of a re-publication count
-    that includes everything the caps suppressed.
+    ``brk20_retest_republished`` is emitted here per candidate ``prescreen.admit`` ACCEPTED, off the
+    ``offers`` detail the book fills in place; the book's own line is ``brk20_retest_offered``, so the
+    two funnel stages are separately greppable.
     """
     if not active:
         return []
@@ -4701,15 +4334,14 @@ async def apply_tick_retention(store: MarketStore, result: TickCompactionResult)
     """Run the retention purge after a successful nightly compaction pass.
 
     ``MarketStore.apply_retention`` (ticks 30 d by partition dir, news/clusters/sentiment 1 y,
-    corrections 90 d) was designed, implemented and unit-tested — and never CALLED from any
-    scheduled job. This is the missing wiring, hung off ``tick_compact`` because that job already
-    owns the closed tick partitions and runs nightly after the writer is done with them.
+    corrections 90 d) is hung off ``tick_compact`` because that job already owns the closed tick
+    partitions and runs nightly after the writer is done with them.
 
     Gated on a clean pass: ``ok=False`` means a symbol-day is still un-compacted (retention would be
     purging under a job that is going to be retried), ``skipped_in_flight=True`` means ANOTHER
-    compaction run holds the lock right now — ``rmtree`` of an old partition while that run is
-    walking it is the one race worth avoiding — and ``stopped=True`` means the run was cut off at the
-    tick_compact no-run window or by a stop signal, where no store work belongs. The next completed pass sweeps.
+    compaction run holds the lock (``rmtree`` of a partition that run is walking is the race to avoid),
+    and ``stopped=True`` means the run was cut off at the no-run window or by a stop signal, where no
+    store work belongs. The next completed pass sweeps.
 
     Failure is contained: a retention error WARNs and returns, never touching the compaction job's
     ok-bearing result (a purge that could not run is not a data-freshness failure).
@@ -4749,8 +4381,7 @@ async def _snapshot_backup(conn: sqlite3.Connection, settings, clock: Clock) -> 
     _log.info("backup_written", path=str(dst))
 
 
-#: Retention for state snapshots and NSSM-rotated service logs; neither pruned itself before
-#: 2026-10 (251 snapshots, 367 rotated logs). engine.log keeps its own 90 days (core.log).
+#: Retention for state snapshots and NSSM-rotated service logs. engine.log keeps its own 90 days (core.log).
 BACKUP_KEEP_ALL_DAYS = 14
 RETENTION_DAYS = 90
 
@@ -4784,7 +4415,7 @@ def _prune_retained_files(backups: Path, logs: Path, now: datetime) -> dict[str,
     return {"snapshots_deleted": len(doomed), "service_logs_deleted": len(logs_doomed)}
 
 
-#: Retention for ``market-<stamp>`` DuckDB exports (~2.1 GB each, 2026-10): the newest 3, plus the
+#: Retention for ``market-<stamp>`` DuckDB exports (~2 GB each): the newest 3, plus the
 #: newest of each ISO week for 4 weeks — about 7 generations. The newest always survives.
 MARKET_SNAPSHOT_KEEP_NEWEST = 3
 MARKET_SNAPSHOT_WEEKLY_DAYS = 28
@@ -4801,8 +4432,8 @@ _MARKET_SNAPSHOT_STAMP = "%Y%m%dT%H%M%S"
 #: written) started just before 08:45 would run into the session window.
 _MARKET_BACKUP_DAY_START_IST = time(6, 0)
 
-#: After a failed export, later attempts in the same process wait this long. Every 30-min sweep's
-#: lane pass otherwise re-ran the whole export (~34 attempts, ~70 GB written per idle day).
+#: After a failed export, later attempts in the same process wait this long; otherwise every 30-min
+#: sweep's lane pass would re-run the whole export.
 MARKET_BACKUP_RETRY_AFTER = timedelta(hours=6)
 
 
@@ -4988,8 +4619,7 @@ def _create_app(session, mode, kill, secrets, clock, bus, *, conn=None, protecte
 async def _serve_api(app, settings):
     """Bind + serve the dashboard/login API; return the serve task, or ``None`` if the bind failed.
 
-    2026-07-21 (both halves of the lockout): the login callback (:8400 ``GET /kite/callback``) must
-    come up EARLY and must fail LOUDLY. Two uvicorn traps make the naive version deadly:
+    The login callback (:8400 ``GET /kite/callback``) must come up EARLY and fail LOUDLY. Two traps:
 
     * uvicorn's own bind paths call ``sys.exit(1)`` on a bind ``OSError`` (``Config.bind_socket`` and
       the host/port branch of ``Server.startup``). Inside a task that ``SystemExit`` escapes the
@@ -5066,9 +4696,8 @@ def main() -> NoReturn:
     # The interpreter MUST NOT be trusted to exit on its own after run() returns (abandoned executor
     # workers, see hard_exit), so BOTH the normal-return and the KeyboardInterrupt path funnel through the
     # os._exit backstop via `finally` — no path may fall through to a bare return. A raw KeyboardInterrupt
-    # escaping asyncio.run (2026-07-21: run() wedged before its own handlers could honour the stop) is
-    # still caught here and mapped to 130. A crash is logged here: os._exit skips the interpreter's own
-    # traceback print, so without this a boot crash left only `exit_clean` in the log.
+    # escaping asyncio.run is still caught here and mapped to 130. A crash is logged here: os._exit skips
+    # the interpreter's own traceback print.
     code = 1
     try:
         code = asyncio.run(run())
