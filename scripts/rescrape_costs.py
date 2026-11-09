@@ -1,17 +1,15 @@
 #!/usr/bin/env python
 """Best-effort re-scrape of the Zerodha charges page -> prints a config/costs.yaml DIFF proposal.
 
-Run before EACH release (broker fees now change mid-year). This script NEVER writes
-``config/costs.yaml`` — it prints a human-reviewed proposal (path, current value, scraped value,
-and the matched page snippet as evidence). The owner applies accepted changes by hand and bumps
-``verified_on``; the CostModel worked-example tests then re-anchor against the new rates.
+Run before each release. This script NEVER writes ``config/costs.yaml`` — it prints a proposal
+(path, current value, scraped value, matched page snippet). The owner applies accepted changes by
+hand and bumps ``verified_on``; the CostModel worked-example tests then re-anchor.
 
-Method: fetch https://zerodha.com/charges (or ``--html-file`` for an offline/saved copy), strip the
-HTML to text, and run a table of labelled regexes for the equity charge classes the CostModel
-consumes (brokerage, STT, exchange txn, SEBI, stamp, GST, DP). Extraction is deliberately
-BEST-EFFORT (the page is marketing HTML, not an API): anything not confidently matched is reported
-as "not found — verify by hand", never guessed. The DP charge published as "Rs X + GST per scrip"
-is normalized to the GST-inclusive per-scrip-per-sell-day figure costs.yaml stores.
+Method: fetch https://zerodha.com/charges (or ``--html-file``), strip the HTML to text, and run
+labelled regexes for the equity charge classes the CostModel consumes. Extraction is BEST-EFFORT
+(marketing HTML, not an API): anything not confidently matched is reported as "not found — verify
+by hand", never guessed. The DP charge published as "Rs X + GST per scrip" is normalized to the
+GST-inclusive per-scrip-per-sell-day figure costs.yaml stores.
 
 Exit codes: 0 = scrape ran and the diff (possibly empty) was printed; 1 = fetch/read failure;
 2 = page fetched but nothing recognizable was extracted (page structure changed — update patterns).

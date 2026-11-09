@@ -102,7 +102,7 @@ def _equity(row: sqlite3.Row | None, capital_base: Decimal | None) -> dict[str, 
         pnl = _dec(row["realized_pnl"]) + _dec(row["open_mtm"])
         base = _dec(row["equity"]) - pnl
     else:
-        # A NULL P&L column: equity − the live base, the brakes' own fallback.
+        # NULL P&L column: equity − the live base, the brakes' own fallback.
         base = capital_base
         stored = snapshot_pnl(row)
         pnl = _dec(row["equity"]) - base if stored is None else stored

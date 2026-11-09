@@ -1,8 +1,7 @@
 """Rebuild today's ``sector_map`` snapshot outside the engine.
 
-The job is Sunday-only in the scheduler, so a classification change (a new override, the
-2026-09-21 industry fallback) otherwise waits up to a week. This runs the SAME ``SectorMapJob`` the
-engine wires, against the same store, cache and industry sources.
+The job is Sunday-only in the scheduler, so a classification change otherwise waits up to a week.
+This runs the SAME ``SectorMapJob`` the engine wires, against the same store, cache and industry sources.
 
 The market store is single-writer: **stop mt-engine first** (``Stop-Service mt-engine``), run this,
 start it again. Usage::

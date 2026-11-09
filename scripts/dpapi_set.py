@@ -25,7 +25,6 @@ import secrets as _secrets
 import sys
 from getpass import getpass
 
-# Make the repo's ``src`` tree importable when run as a loose script (engine.* lives under src/).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from engine.core.secrets import (  # noqa: E402  (path insert must precede engine import)
@@ -52,11 +51,7 @@ _DASHBOARD_TOKEN_NBYTES = 32
 
 
 def _validate_key(key: str) -> str:
-    """Return ``key`` if it is a known seedable secret, else exit with a helpful message.
-
-    Refuses unknown keys outright (never invent credential-store entries). Gives a targeted
-    hint for ``kite_access_token`` since it is a real secret but is minted daily, not seeded here.
-    """
+    """``key`` if seedable, else exit. Unknown keys are refused: never invent credential-store entries."""
     if key in SEEDABLE:
         return key
     if key == KITE_ACCESS_TOKEN:
@@ -68,7 +63,7 @@ def _validate_key(key: str) -> str:
 
 
 def _set_key(store: Secrets, key: str) -> None:
-    """Prompt (no echo) for a value and store it under ``key``. Never prints the value."""
+    """Prompt (no echo) for a value and store it under ``key``."""
     desc = SEEDABLE[key]
     print(f"\nSetting '{key}' -- {desc}")
     if store.has(key):
@@ -85,12 +80,11 @@ def _set_key(store: Secrets, key: str) -> None:
 
 
 def _list_present(store: Secrets) -> None:
-    """Print presence/absence of every seedable key (plus the daily token) -- WITHOUT any value."""
+    """Print presence/absence of every seedable key (plus the daily token), never a value."""
     print("Secret presence in the credential store (values never shown):")
     for key in sorted(SEEDABLE):
         mark = "present" if store.has(key) else "MISSING"
         print(f"  [{mark:>7}] {key}")
-    # The daily Kite access token is informational: shown but flagged as login-flow managed.
     mark = "present" if store.has(KITE_ACCESS_TOKEN) else "absent"
     print(f"  [{mark:>7}] {KITE_ACCESS_TOKEN}  (minted daily by login flow; not seeded here)")
 
@@ -110,7 +104,7 @@ def _generate_dashboard_token(store: Secrets) -> None:
 
 
 def _interactive_menu(store: Secrets) -> None:
-    """Drive a simple numbered menu to set any seedable key or list presence."""
+    """Numbered menu: set a key, generate the dashboard token, or list presence."""
     keys = sorted(SEEDABLE)
     while True:
         print("\nSeed a secret into the Windows Credential Manager:")
@@ -136,7 +130,7 @@ def _interactive_menu(store: Secrets) -> None:
 
 
 def _die(message: str) -> None:
-    """Print an error to stderr and exit non-zero. Used for refusals/validation only."""
+    """Print an error to stderr and exit 2."""
     print(f"error: {message}", file=sys.stderr)
     raise SystemExit(2)
 

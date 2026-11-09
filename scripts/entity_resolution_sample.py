@@ -59,12 +59,9 @@ def main() -> int:
             WHERE len(c.symbols) = 0 AND len(c.entities) = 0
             """
         ).fetchall()
-        # FRESH rows only: unresolved_entities is APPEND-ONLY, so without this filter the sample
-        # resurrects verdicts from superseded alias tables (2026-08-03 seed-5 row 48: option-chain
-        # "ambiguous" candidates recorded during the 20-minute full-dump-seed window, long fixed).
-        # Freshness = the LATEST resolve pass only. A full re-resolve of the whole corpus logs its
-        # burst in seconds, so a 5-minute window isolates one pass even when two ran back-to-back
-        # in the same evening (1h was too wide for exactly that reason).
+        # FRESH rows only: unresolved_entities is APPEND-ONLY, so older rows carry verdicts from
+        # superseded alias tables. A full re-resolve logs its burst in seconds, so a 5-minute window
+        # isolates the latest pass even when two ran back-to-back.
         unresolved = conn.execute(
             """
             SELECT u.entity_text, u.reason, u.candidate_symbols, n.title, n.source_domain

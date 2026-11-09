@@ -7,11 +7,6 @@ never here. A prompt that changes bytes between calls is a guaranteed cache miss
 
 ``AGENT_ID`` is the ``config/agents.yaml`` key: the budget governor's ledger, the allocation table and
 the degrade ladder all key off this exact string.
-
-Byte-stability is a property of the constant, not of its history: the 2026-08-20 change rewrote rules
-12-15 once, deliberately, so the analyst judges each candidate inside its own strategy contract
-(``engine.strategy.contracts``) instead of one intraday day-trade rubric — a one-time cache reset,
-after which the prompt is again identical call to call.
 """
 
 from __future__ import annotations

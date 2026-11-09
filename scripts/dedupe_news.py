@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Delete the duplicate ``news`` rows the damaged url index let in (found 2026-09-24). Engine OFF.
+"""Delete the duplicate ``news`` rows the damaged url index let in. Engine OFF.
 
     python scripts/dedupe_news.py
 

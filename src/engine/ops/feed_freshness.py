@@ -1,13 +1,10 @@
 """Daily census of every ingested feed's newest data (job ``feed_freshness``, 21:30).
 
-Each feed's own job alerts when a fetch FAILS. What none of them catch is a fetch that succeeds and
-delivers nothing new — NSE ``corporates-pit`` (empty after 2026-05-02, when NSE moved insider
-filings to a new route) and the results listing (no period after Dec-2024) both ran "green" for
-months that way. This census compares each feed's
-newest delivered data (:meth:`MarketStore.feed_newest`) with the lag its own history shows it can
-have, and alerts the owner when a feed goes past it — once per stale streak, so a feed that stays
-dead does not bury the next one in a daily repeat. Not entry-blocking. The results feed carries its
-own alarm (``filings_results``) and is not repeated here.
+Each feed's own job alerts when a fetch FAILS; none catches a fetch that succeeds and delivers
+nothing new. This census compares each feed's newest delivered data (:meth:`MarketStore.feed_newest`)
+with the lag its own history shows it can have, and alerts the owner when a feed goes past it —
+once per stale streak, so a dead feed does not bury the next one in a daily repeat. Not
+entry-blocking. The results feed carries its own alarm (``filings_results``) and is not repeated here.
 """
 
 from __future__ import annotations
