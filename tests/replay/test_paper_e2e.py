@@ -78,7 +78,7 @@ REAL_ROW_WATCH = ["CREATE TEMP TABLE real_rows (tbl TEXT)", *(
 # ------------------------------------------------------------------ doubles
 class KiteDouble(KiteClient):
     """The real broker client, reachable where production holds it (the backfill). Every order and
-    GTT method records and raises; the paper path swallows exceptions, so the test reads ``calls``."""
+    GTT method records and raises; the paper path swallows exceptions, so tests read ``calls``."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []

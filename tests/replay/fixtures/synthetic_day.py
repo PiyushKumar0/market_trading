@@ -1,27 +1,24 @@
-"""Deterministic synthetic tick day written in the PRODUCTION Parquet layout (2026-09-10).
+"""Deterministic synthetic tick day written in the PRODUCTION Parquet layout.
 
-Why generated and not committed: the golden replay day must be
-byte-reproducible from source, and a committed binary fixture is neither reviewable nor regenerable —
-it also drags real recorded market data into the repo. Everything here is a closed-form integer
-recurrence (no RNG, no clock read), so two calls produce identical bytes-in, identical bars-out.
+Generated, not committed: the golden replay day must be byte-reproducible from source and must not
+carry real recorded market data. Everything is a closed-form integer recurrence (no RNG, no clock
+read), so two calls produce identical bytes-in, identical bars-out.
 
-Layout mirrors :meth:`engine.marketdata.store.MarketStore._tick_partition_dir` exactly —
-``<root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<name>.parquet`` — and the column set/types mirror
-``store._TICK_STAGE_DDL`` / ``store._TICK_COLUMNS`` (the golden test asserts that lockstep). Written
-through ``duckdb COPY`` because pyarrow is NOT installed on this box; DuckDB is the only Parquet
-writer available and is the one the store itself uses.
+Layout mirrors :meth:`engine.marketdata.store.MarketStore._tick_partition_dir` —
+``<root>/ticks/date=YYYY-MM-DD/symbol=<SYM>/<name>.parquet`` — and the columns/types mirror
+``store._TICK_STAGE_DDL`` / ``store._TICK_COLUMNS`` (the golden test asserts the lockstep). Written
+through ``duckdb COPY`` because pyarrow is not installed.
 
-Shape of the day (what each segment exists to prove):
+Shape of the day:
 
-* **pre-open 09:00:00–09:14:xx** — these must build no bar, and the LAST pre-open print is the
-  auction open stamped on the 09:15 row.
-* **session 09:15:00–15:29:xx**, 5 prints per minute, with **one whole minute missing** (the gap
-  minute) — a replay must not invent a bar for a minute that had no prints.
-* **one post-close print strictly after 15:30** — post-close symmetry: no bar, but counted.
+* **pre-open 09:00:00–09:14:xx** — builds no bar; the LAST pre-open print is the auction open
+  stamped on the 09:15 row.
+* **session 09:15:00–15:29:xx**, 6 prints per minute, with **one whole minute missing** (the gap
+  minute) — a replay must not invent a bar for it.
+* **one post-close print strictly after 15:30** — no bar, but counted.
 
 Each symbol's ticks are split across TWO Parquet files per partition so the harness's single
-``read_parquet`` glob is exercised against a multi-fragment partition (the live archive holds
-thousands of per-flush fragments per symbol-day).
+``read_parquet`` glob is exercised against a multi-fragment partition.
 """
 
 from __future__ import annotations
@@ -35,8 +32,7 @@ import duckdb
 
 from engine.core.clock import IST
 
-#: The three synthetic symbols. Deliberately NOT real tradingsymbols — nothing here may be mistaken
-#: for recorded market data.
+#: The three synthetic symbols, deliberately not real tradingsymbols.
 SYMBOLS: tuple[str, ...] = ("SYNA", "SYNB", "SYNC")
 
 #: Session boundaries the fixture is built against (the BarBuilder defaults).
@@ -47,12 +43,11 @@ SESSION_CLOSE = time(15, 30)
 PRE_OPEN_TICKS = 20
 PRE_OPEN_STEP_S = 45
 
-#: Seconds-within-minute at which each session minute's prints land. Six per minute puts the day over
-#: the 6,000 ticks the warm perf smoke asserts against, while staying a whole number of prints.
+#: Seconds-within-minute of each session minute's prints. Six per minute puts the day over the 6,000
+#: ticks the warm perf smoke asserts against.
 SECONDS_IN_MINUTE: tuple[int, ...] = (1, 11, 21, 31, 41, 51)
 
-#: The one session minute with NO prints at all (a real feed drops minutes; the harness must not
-#: fabricate a bar for one).
+#: The one session minute with NO prints (a real feed drops minutes; no bar may be fabricated).
 GAP_MINUTE = time(11, 30)
 
 #: The single post-close print (strictly after ``SESSION_CLOSE`` ⇒ no bar, counted instead).
@@ -64,9 +59,8 @@ TICK_COLUMNS: tuple[str, ...] = (
     "ohlc_open", "ohlc_high", "ohlc_low", "ohlc_close", "avg_price", "bid", "ask",
 )
 
-#: Mirrors ``store._TICK_STAGE_DDL`` — the widths are load-bearing (DECIMAL(12,2) prices, the
-#: DECIMAL(14,4) exchange day-VWAP): a fixture written at a different width would prove the
-#: harness works on data the engine never produces.
+#: Mirrors ``store._TICK_STAGE_DDL``; the widths (DECIMAL(12,2) prices, DECIMAL(14,4) day-VWAP) are
+#: load-bearing so the fixture matches data the engine really produces.
 _STAGE_DDL = """
     CREATE OR REPLACE TEMP TABLE _fixture_ticks (
         instrument_token BIGINT,
@@ -87,7 +81,7 @@ _STAGE_DDL = """
 
 @dataclass(frozen=True)
 class SyntheticDay:
-    """What the golden test needs to assert against, computed by the SAME code that wrote the files."""
+    """What the golden test asserts against, computed by the SAME code that wrote the files."""
 
     day: date
     root: Path                                   # the parquet root (files under <root>/ticks/…)
@@ -109,11 +103,8 @@ class SyntheticDay:
 
 
 def _paise(sym_idx: int, k: int, base: int) -> int:
-    """Closed-form deterministic price jitter in paise — no RNG, no state, no clock.
-
-    A pseudo-walk built from two coprime multipliers: it produces a price that moves within a ±₹2.00
-    band around ``base`` and is reproducible from ``(sym_idx, k)`` alone, which is what makes the
-    golden day regenerable byte-for-byte on any machine."""
+    """Closed-form deterministic price jitter in paise: a pseudo-walk within ±₹2.00 of ``base``,
+    reproducible from ``(sym_idx, k)`` alone."""
     return base + ((sym_idx * 7919 + k * 104729) % 401) - 200
 
 
@@ -141,11 +132,10 @@ def _rows_for_symbol(
         auction_open = ltp
         rows.append(_row(token, symbol, ltp, cum, start + timedelta(seconds=i * PRE_OPEN_STEP_S), ohlc))
         k += 1
-        # Pre-open prints carry a cumulative volume of 0: the auction volume is reported into the
-        # session's first cumulative value, which is exactly what the "up from the open ⇒ the whole
-        # cumulative belongs to the 09:15 bar" rule consumes.
+        # Pre-open prints carry cumulative volume 0: the auction volume is reported into the
+        # session's first cumulative value.
 
-    # --- session (5 prints/minute, one whole minute missing) --------------------------------------
+    # --- session (6 prints/minute, one whole minute missing) --------------------------------------
     first_ltp: Decimal | None = None
     first_cum = 0
     open_bar_volume = 0
@@ -164,9 +154,7 @@ def _rows_for_symbol(
             rows.append(_row(token, symbol, ltp, cum, minute + timedelta(seconds=sec), ohlc))
             k += 1
         if minute.time() == SESSION_OPEN:
-            # "engine up from the open": the WHOLE cumulative belongs to the 09:15 bar, so the
-            # cumulative standing at the end of that minute IS the bar's volume — an exact number the
-            # golden test asserts (a delta-only builder would produce cum_last − cum_first instead).
+            # Engine up from the open: the cumulative at the end of this minute IS the 09:15 bar's volume.
             open_bar_volume = cum
         minute += timedelta(minutes=1)
 
@@ -221,9 +209,8 @@ def write_synthetic_day(root: Path, day: date) -> SyntheticDay:
             part_dir.mkdir(parents=True, exist_ok=True)
             con.execute("DELETE FROM _fixture_ticks")
             con.executemany(f"INSERT INTO _fixture_ticks VALUES ({placeholders})", rows)
-            # TWO fragments per partition (the live archive holds thousands per symbol-day): the
-            # harness must glob the whole partition, not assume one file. Split by row number so the
-            # fragments are non-overlapping and the union is the full stream.
+            # TWO fragments per partition: the harness must glob the whole partition. Split by row
+            # number so the fragments do not overlap.
             half = len(rows) // 2
             for name, predicate in (("part-0", f"rn <= {half}"), ("part-1", f"rn > {half}")):
                 out = part_dir / f"{name}.parquet"
@@ -256,24 +243,23 @@ def write_synthetic_day(root: Path, day: date) -> SyntheticDay:
 
 
 # ---------------------------------------------------------------------- the total-order fixture
-#: Symbol for :func:`write_tie_day`. One symbol only — the tie this fixture exists to create is
-#: WITHIN a symbol-second, which is the case ``(exchange_ts, tradingsymbol)`` alone cannot order.
+#: Symbol for :func:`write_tie_day`. One symbol: the tie is WITHIN a symbol-second, which
+#: ``(exchange_ts, tradingsymbol)`` alone cannot order.
 TIE_SYMBOL = "SYNT"
 
-#: The tied prints: same second, same cumulative volume, same ltp — differing ONLY in the L1 quote.
-#: The archive really does hold these (a depth-only update carries the previous trade's ltp and
-#: cumulative volume forward), and the broker's half-spread — hence its fill price — reads bid/ask,
-#: so the run-to-run order of these two rows is a behaviour difference, not a cosmetic one.
+#: The tied prints: same second, cumulative volume and ltp, differing ONLY in the L1 quote (a
+#: depth-only update carries the previous trade's ltp and volume forward). The broker's half-spread,
+#: hence its fill price, reads bid/ask, so the order of these rows is behaviour, not cosmetics.
 TIE_BIDS: tuple[Decimal, ...] = (Decimal("99.90"), Decimal("99.95"))
 
 
 def write_tie_day(root: Path, day: date) -> tuple[Path, date, tuple[Decimal, ...]]:
-    """Write a one-symbol day whose 09:15 minute contains rows tying on the OLD four-key sort.
+    """Write a one-symbol day whose 09:15 minute has rows tying on ``(exchange_ts, tradingsymbol,
+    volume_traded, ltp)``.
 
-    The rows are written to Parquet in DESCENDING bid order, so a scan that preserved file order
-    (which is what an under-specified ``ORDER BY`` is free to do) delivers them descending, while the
-    total key of :data:`~engine.paper.replay.ORDER_BY_COLUMNS` delivers them ascending. That makes
-    the golden test's assertion falsifiable rather than merely "happened to match".
+    The rows are written in DESCENDING bid order, so a scan preserving file order delivers them
+    descending while the total key of :data:`~engine.paper.replay.ORDER_BY_COLUMNS` delivers them
+    ascending, which makes the golden assertion falsifiable.
 
     Returns ``(root, day, expected bids in total-key order)``.
     """
@@ -283,8 +269,7 @@ def write_tie_day(root: Path, day: date) -> tuple[Path, date, tuple[Decimal, ...
     ohlc = (Decimal("99.50"), Decimal("101.00"), Decimal("99.00"), Decimal("100.10"))
     token = 4242
 
-    # Two tied rows at 09:15:01 (same ts, symbol, volume_traded and ltp), then a later print so the
-    # minute closes with a normal bar. Deliberately emitted here highest-bid-first.
+    # Two tied rows at 09:15:01, highest-bid-first, then later prints so the minute closes with a bar.
     rows = [
         _row(token, TIE_SYMBOL, ltp, cum, open_at + timedelta(seconds=1), ohlc)[:10]
         + (bid, bid + Decimal("0.10"))
@@ -305,8 +290,7 @@ def write_tie_day(root: Path, day: date) -> tuple[Path, date, tuple[Decimal, ...
         placeholders = ", ".join("?" for _ in TICK_COLUMNS)
         con.executemany(f"INSERT INTO _fixture_ticks VALUES ({placeholders})", rows)
         out = part_dir / "part-0.parquet"
-        # No ORDER BY on the way out: the insertion order above IS the file order, which is the
-        # whole point of the fixture.
+        # No ORDER BY: the insertion order IS the file order.
         con.execute(
             "COPY (SELECT " + ", ".join(TICK_COLUMNS) + " FROM _fixture_ticks) "
             f"TO '{out.as_posix()}' (FORMAT PARQUET)"

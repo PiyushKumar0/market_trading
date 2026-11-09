@@ -3,11 +3,9 @@ not ``engine.intelligence.schemas``, so ``engine.risk``/``engine.oms`` can const
 without importing the LLM tier.
 
 Asserts:
-- ``engine.intelligence.schemas`` RE-EXPORTS the moved names (same object, not a copy) — a consumer that
-  still does ``from engine.intelligence.schemas import GateVerdict`` gets the identical class engine.risk
-  builds against;
-- ``engine.strategy.cost_model`` (which needs ``CostBreakdown``) no longer imports ``engine.intelligence``
-  at all, reusing the AST import-graph helpers from ``tests/unit/test_import_graph.py``.
+- ``engine.intelligence.schemas`` RE-EXPORTS the moved names (same object, not a copy);
+- ``engine.strategy.cost_model`` does not import ``engine.intelligence`` at all (AST import-graph
+  helpers from ``tests/unit/test_import_graph.py``).
 """
 
 from __future__ import annotations
@@ -43,10 +41,7 @@ def test_schemas_reexports_are_identical_objects(name: str) -> None:
 
     core_obj = getattr(contracts, name)
     schemas_obj = getattr(schemas, name)
-    # `is` (not ==): engine.intelligence.schemas must re-export the SAME object engine.core.contracts
-    # defines, not a redefined/copied lookalike — otherwise `isinstance` / discriminator identity across
-    # the two import paths would silently diverge (e.g. a GateVerdict built by engine.risk failing an
-    # isinstance check against the class imported via engine.intelligence.schemas).
+    # `is` (not ==): a copied lookalike would make isinstance checks diverge across the two import paths.
     assert schemas_obj is core_obj, (
         f"engine.intelligence.schemas.{name} is not the same object as engine.core.contracts.{name}"
     )

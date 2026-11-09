@@ -1,4 +1,4 @@
-"""Process-memory telemetry (2026-08-17 unbounded-commit crisis: ~53 GB/18h, one snapshot, no curve).
+"""Process-memory telemetry.
 
 ``ProcessMemoryReader`` reads Win32 ``PROCESS_MEMORY_COUNTERS_EX`` for the current process. It is
 telemetry, not a check: a read failure must log one DEBUG line, never raise, and never propagate.
@@ -13,8 +13,7 @@ from engine.ops.process_memory import ProcessMemory, ProcessMemoryReader
 
 # --------------------------------------------------------------------------- real Win32 read (this box)
 def test_read_returns_plausible_positive_integers_on_windows():
-    """On the real Win32 API (this dev/CI box is win32), all three counters are positive, and the
-    working set never exceeds its own peak."""
+    """On the real Win32 API all three counters are positive and the working set never exceeds its peak."""
     reader = ProcessMemoryReader()
     assert reader._is_windows is True  # sanity: this suite runs on win32
 

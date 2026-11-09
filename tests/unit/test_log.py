@@ -6,16 +6,14 @@ import logging
 
 from engine.core.log import get_logger
 
-# NOTE: these tests deliberately do NOT call configure_logging() — it replaces the root handlers, which
-# would evict pytest's caplog handler. The reserved-key remapping under test runs in BoundLogger
-# regardless of configuration.
+# These tests do NOT call configure_logging(): it replaces the root handlers, evicting caplog's. The
+# reserved-key remapping under test runs in BoundLogger regardless of configuration.
 
 
 def test_reserved_field_keys_do_not_crash(caplog):
     log = get_logger("test.log")
     with caplog.at_level(logging.INFO):
-        # 'name', 'module', 'process', 'msg' all collide with reserved LogRecord attributes — historically
-        # this raised "Attempt to overwrite 'name' in LogRecord". The logger must remap, not crash.
+        # These keys collide with reserved LogRecord attributes; the logger must remap, not crash.
         log.info("an_event", name="something", module="x", process=123, ok=True)
     assert any(r.getMessage() =="an_event" for r in caplog.records)
 

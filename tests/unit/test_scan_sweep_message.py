@@ -1,9 +1,8 @@
-"""SCAN_SWEEP owner-message rendering (2026-07-29 owner feedback).
+"""SCAN_SWEEP owner-message rendering.
 
-Pins the four readability requirements: trade types grouped intraday/swing, every setup carries its
-full plan (entry + stop + target or exit rule), friendly strategy names instead of scanner ids, and
-held positions flagged — plus the arms_when direction coming from the SCANNER, never inferred
-(the price-comparison inference mislabeled a BUY breakout "below" when trigger == last price).
+Pins: trade types grouped intraday/swing, every setup carries its full plan (entry + stop + target or
+exit rule), friendly strategy names instead of scanner ids, held positions flagged, and the
+arms_when direction coming from the SCANNER, never inferred from prices.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ LIVE = [
      "entry": "1371.90", "stop": "1396.60", "target": "1334.85", "held": False},
 ]
 PENDING = [
-    # The DLF case that was mislabeled: BUY breakout with trigger == last MUST say "breaks above".
+    # BUY breakout with trigger == last MUST say "breaks above".
     {"symbol": "DLF", "side": "BUY", "strategy_id": "orb", "style": "intraday",
      "trigger": "669.90", "arms_when": "above", "last": "669.90",
      "stop": "660.00", "target": "684.75", "exit_rule": "", "held": False},
@@ -58,8 +57,7 @@ def test_sweep_message_nothing_to_trade_is_explicit():
 
 
 def test_freeze_lift_trigger_is_carried_in_the_audit_data():
-    """The 2026-09-11 freeze-lift re-sweep: the owner sees the same message for a re-sweep as for the
-    window-open sweep it replaces, and ``data.trigger`` is what tells the two apart after the fact."""
+    """A freeze-lift re-sweep renders like a window-open sweep; ``data.trigger`` tells them apart."""
     msg = scan_sweep(trigger="freeze_lift", live=LIVE, pending=[], suppressed_today=3)
     assert msg.data["trigger"] == "freeze_lift"
     assert "1 candidate(s) qualify" in msg.body

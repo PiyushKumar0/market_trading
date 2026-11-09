@@ -1,29 +1,27 @@
-"""OMS state-machine property tests (2026-09-10).
+"""OMS state-machine property tests.
 
 Random sequences of broker postbacks (acks, partial fills, rejects, cancels, modify storms,
 duplicates, out-of-order replays — the WebSocket can replay) are driven through the ONE parser
-(:func:`engine.oms.updates.parse_postback`) and the pure transition function. The properties are the
-invariants that must hold in EVERY reachable state:
+(:func:`engine.oms.updates.parse_postback`) and the pure transition function. Invariants asserted in
+EVERY reachable state:
 
 - no transition out of a terminal state;
-- **the platform-intent invariant (ratified 2026-09-10):** a non-terminal order never regresses along
-  the platform's intent chain — a cancel intent is cleared only by a cancel outcome, by a REAL fill,
-  or by the explicit :func:`~engine.oms.state.cancel_rejected` door, and a modify intent only by a
-  REAL fill, by a broker frame that does not predate the intent, or by the explicit
-  :func:`~engine.oms.state.modify_rejected` door. A replayed OPEN frame clears neither — and the
-  modify half of that holds for BOTH working destinations (ACKED and PARTIALLY_FILLED), which is the
-  round-3 finding: an order with fills has its stale re-report parsed as PARTIALLY_FILLED, so an
-  ACKED-only gate let it clear the intent and revert the amended fields;
-- **a broker frame never raises:** every postback yields an order plus a recordable event, whether it
+- the platform-intent invariant: a non-terminal order never regresses along the platform's intent
+  chain. A cancel intent is cleared only by a cancel outcome, a REAL fill, or the explicit
+  :func:`~engine.oms.state.cancel_rejected` door; a modify intent only by a REAL fill, a broker frame
+  that does not predate the intent, or the explicit :func:`~engine.oms.state.modify_rejected` door. A
+  replayed OPEN frame clears neither, for BOTH working destinations (ACKED and PARTIALLY_FILLED: an
+  order with fills has its stale re-report parsed as PARTIALLY_FILLED);
+- a broker frame never raises: every postback yields an order plus a recordable event, whether it
   transitions or lands as one of the :data:`~engine.oms.updates.NOOP_FLAGS`-annotated no-ops;
-- ``filled_qty`` monotone non-decreasing and equal, at every step, to the high-water fill an APPLIED
-  postback reported (an independent model of the fill count, not a restatement of the machine's);
+- ``filled_qty`` is monotone non-decreasing and equals, at every step, the high-water fill an APPLIED
+  postback reported (an independent model, not a restatement of the machine's);
 - the modification counter never exceeds 20;
-- exactly one recorded event per applied transition (and never a silently dropped update);
+- exactly one recorded event per applied transition;
 - an annotated no-op is exactly pure: the returned order **is** the one passed in;
 - a residual cancel preserves the fill count snapshotted when the cancel intent was raised;
-- PendingCorrelation never drops an update: held == pending + resolved + evicted + expired, and
-  an order that starts UNCORRELATED buffers its postbacks until :func:`correlate` resolves the id.
+- PendingCorrelation never drops an update: held == pending + resolved + evicted + expired, and an
+  order that starts UNCORRELATED buffers its postbacks until :func:`correlate` resolves the id.
 
 The broker-resident protection invariant belongs to ProtectionManager and is not asserted here.
 """
@@ -58,11 +56,8 @@ AT = datetime(2026, 9, 10, 10, 5, tzinfo=IST)
 
 #: Broker statuses the generator can emit, plus the platform-issued intents and the replay ops.
 #:
-#: WEIGHTED (repeat count = weight): terminal-producing ops are rare on purpose. Uniform sampling
-#: killed the order within the first few steps of most examples — measured with ``hypothesis.event``
-#: statistics, ~20% of ALL applied steps were SUBMITTED -> CANCELLED/FILLED/REJECTED and the deep
-#: states (MODIFY_PENDING especially) were never reached at all, so the modify and cancel-intent
-#: invariants were being asserted over sequences that could not exercise them.
+#: WEIGHTED (repeat count = weight): terminal-producing ops are rare on purpose, so sequences reach
+#: the deep states (MODIFY_PENDING especially) that the modify and cancel-intent invariants need.
 OPS = st.sampled_from(
     [
         *["ack"] * 4,
@@ -94,10 +89,10 @@ BROKER_ORDER_ID = "251009000123456"
 
 
 def _postback(qty: int, *, status: str, filled: int, ts: datetime) -> dict:
-    """A verbatim-shaped Kite order postback (``OrderUpdateFrame.data`` field names).
+    """A Kite order postback (``OrderUpdateFrame.data`` field names).
 
-    ``ts`` is the BROKER clock (``exchange_update_timestamp``), which is what gates the
-    MODIFY_PENDING -> ACKED edge — a replayed frame carries its original, older timestamp.
+    ``ts`` is the BROKER clock (``exchange_update_timestamp``), which gates the MODIFY_PENDING -> ACKED
+    edge; a replayed frame carries its original, older timestamp.
     """
     return {
         "order_id": BROKER_ORDER_ID,
@@ -157,8 +152,8 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         "cancel_snapshot": None,    # filled_qty when a cancel intent was first raised
         "fills_after_cancel": 0,    # fills that landed after that snapshot (a real fill still lands)
     }
-    # What the CURRENT modify intent replaced, read from the amend's own event payload — exactly how
-    # the OrderManager recovers it from the persisted order_events row when the broker refuses.
+    # What the CURRENT modify intent replaced, read from the amend's own event payload — how the
+    # OrderManager recovers it from the persisted order_events row when the broker refuses.
     pending_prior: dict | None = None
 
     def apply_postback(cur: PlatformOrder, data: dict, at: datetime) -> PlatformOrder:
@@ -177,13 +172,11 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         stats["events"] += 1
 
         # A no-op is ANNOTATED, not merely from_state == to_state: a PARTIALLY_FILLED accretion is a
-        # real transition on the self-edge, and the ProtectionManager must act on it (SL-M
-        # qty-modified upward as fills accrete) — so the flag is the contract. NOOP_FLAGS is
-        # the published set, so a flag added later (illegal_transition was, in round 3) cannot slip
-        # past this branch and be asserted as a transition.
-        # The generator only emits legal shapes against legal states, so a table refusal surfacing as
-        # the round-3 `illegal_transition` no-op is a TABLE bug, not broker reality — assert it never
-        # happens here; the swallow itself is pinned by a unit test (2026-09-10 round-3 review).
+        # real transition on the self-edge that the ProtectionManager must act on, so the flag is the
+        # contract. NOOP_FLAGS is the published set, so a later-added flag cannot be asserted as a
+        # transition.
+        # The generator emits only legal shapes against legal states, so an `illegal_transition` no-op
+        # here is a TABLE bug, not broker reality; the swallow itself is pinned by a unit test.
         assert not ev.payload.get("illegal_transition"), ev.payload.get("illegal_transition_detail")
         if any(ev.payload.get(flag) for flag in NOOP_FLAGS):
             assert new is before, "an annotated no-op must return the SAME order object (purity)"
@@ -192,7 +185,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
             stats["applied"] += 1
             stats["expected_filled"] = max(stats["expected_filled"], upd.filled_qty)
 
-        # ---- the platform-intent invariant (ratified 2026-09-10)
+        # ---- the platform-intent invariant
         if prev_state is OrderState.CANCEL_PENDING:
             assert new.state is not OrderState.ACKED, (
                 "a postback must never clear a cancel intent — the square-off would then "
@@ -205,10 +198,9 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
             OrderState.ACKED,
             OrderState.PARTIALLY_FILLED,
         ):
-            # BOTH working destinations are gated (round-3 finding): an order carrying fills has its
-            # stale OPEN re-report parsed as PARTIALLY_FILLED, which an ACKED-only gate waved through
-            # — clearing the intent AND reverting the amended qty/price. Compared at the BROKER's
-            # whole-second resolution (see updates._postdates_intent); a REAL fill is never gated.
+            # BOTH working destinations are gated: an order carrying fills has its stale OPEN re-report
+            # parsed as PARTIALLY_FILLED. Compared at the BROKER's whole-second resolution (see
+            # updates._postdates_intent); a REAL fill is never gated.
             assert new.filled_qty > prev_filled or (
                 upd.broker_ts is not None
                 and upd.broker_ts >= before.updated_at.replace(microsecond=0)
@@ -254,21 +246,20 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
         if data is not None:
             history.append(data)
             if order.broker_order_id is None:
-                # the postback beat place_order()'s return. Buffered, never dropped, never
-                # applied to an order whose broker id the platform does not yet know.
+                # the postback beat place_order()'s return: buffered, never dropped, never applied
+                # to an order whose broker id is not yet known.
                 buffer.hold(BROKER_ORDER_ID, data, at=at)
                 stats["buffered"] += 1
                 continue
             order = apply_postback(order, data, at)
             if op == "ack" and prev_state is OrderState.CANCEL_PENDING:
-                # An OPEN frame against a CANCEL intent is a no-op whatever its clock says — unlike
-                # a modify ack, which a broker frame that postdates the modify legitimately clears.
+                # An OPEN frame against a CANCEL intent is a no-op whatever its clock says, unlike
+                # a modify ack that postdates the modify.
                 assert order is before
         elif op == "correlate":
             if order.broker_order_id is None and order.state in TERMINAL_ORDER_STATES:
-                # 2026-09-10 round-3: a broker id can arrive after the platform lapsed/rejected the
-                # order; the state layer REFUSES it (the store cannot persist it) and the buffered
-                # frames are audited through record_noop instead, never applied — pinned here.
+                # A broker id can arrive after the platform lapsed/rejected the order; the state
+                # layer REFUSES it and the buffered frames are audited through record_noop, never applied.
                 with pytest.raises(IllegalTransition):
                     correlate(order, BROKER_ORDER_ID)
                 assert order.broker_order_id is None
@@ -293,8 +284,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                     OrderState.ACKED,
                     OrderState.PARTIALLY_FILLED,
                 ):
-                    # The protective SL-M is qty-modified as fills accrete; the amend carries
-                    # the new quantity onto the row (never below what is already filled).
+                    # The protective SL-M is qty-modified as fills accrete (never below what is filled).
                     order, ev = amend(order, qty=max(order.filled_qty, (n % qty) + 1), at=at)
                     pending_prior = ev.payload["prior_fields"]
                 elif op == "modify_done" and order.state is OrderState.MODIFY_PENDING:
@@ -316,8 +306,7 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
                         at=at,
                     )
                 elif op == "modify_reject" and order.state is OrderState.MODIFY_PENDING:
-                    # The broker refused the modify: the row goes back to what it held before the
-                    # amend, and the modification budget stays spent (the call was made).
+                    # The row reverts to its pre-amend fields; the modification budget stays spent.
                     order, ev = modify_rejected(
                         order, payload={"status": "REJECTED", "status_message": "modify failed"},
                         at=at, prior_fields=pending_prior,
@@ -365,9 +354,8 @@ def test_state_machine_invariants_hold_for_any_update_sequence(
     assert acc.held == stats["buffered"]
     assert acc.held == acc.pending + acc.resolved + acc.evicted + acc.expired
 
-    # Residual cancel / lapse never leaks the filled portion (quantity conservation):
-    # the terminal fill count is the one snapshotted when the cancel intent was raised, unless a
-    # REAL fill landed in the gap between the cancel request and its outcome.
+    # Residual cancel / lapse never leaks the filled portion: the terminal fill count is the one
+    # snapshotted when the cancel intent was raised, unless a REAL fill landed before its outcome.
     if stats["cancel_snapshot"] is not None and order.state in (
         OrderState.CANCELLED,
         OrderState.LAPSED,

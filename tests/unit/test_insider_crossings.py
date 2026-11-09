@@ -101,12 +101,8 @@ def test_insider_single_big_filing_fires_once_only():
 
 
 def test_after_hours_treats_unknown_midnight_time_as_after_close():
-    """A date-only broadcast parses to 00:00 — unknown time, NOT 'public before dawn'.
-
-    The feeds' date-only fallbacks and scripts/event_study.py's date-only earnings fallback both produce
-    midnight; treating it as intraday would enter at that session's close on a filing that was in
-    reality disseminated after hours (every real PIT row in the fixture is an evening broadcast).
-    """
+    """A date-only broadcast parses to 00:00 — unknown time, NOT 'public before dawn'; treating it as
+    intraday would enter at that session's close on a filing likely disseminated after hours."""
     sess = [date(2026, 1, 8), date(2026, 1, 9), date(2026, 1, 12)]
     assert after_hours(_bdt(sess[0], 0, 0)) is True
     assert after_hours(_bdt(sess[0], 0, 1)) is False               # a real 00:01 stamp is not the guard

@@ -17,10 +17,9 @@ from engine.core.db import connect
 from engine.core.eventbus import EventBus
 from engine.core.migrations import apply_migrations
 
-# Since 2026-10-17 the owner changes the capital from the dashboard, which rewrites these three value lines
-# in the live config/limits.yaml. The suite is written against the registration values, so a
-# session-scoped copy of config/ is pinned to them and MT_CONFIG_DIR points at it: no test may
-# depend on the live capital.
+# The owner changes the capital from the dashboard, which rewrites these three lines in the live
+# config/limits.yaml. The suite is written against the registration values, so a session-scoped copy
+# of config/ is pinned to them and MT_CONFIG_DIR points at it: no test may depend on the live capital.
 PINNED_CAPITAL = {"capital_base_inr": 40000, "max_deployed_capital_inr": 40000, "cnc_notional_inr": 12000}
 
 _PIN_STATE: dict = {}
@@ -36,9 +35,8 @@ def _pin_limits_text(text: str) -> str:
 def pytest_configure(config) -> None:
     """Build the pinned config copy before collection, so module-level ``config_dir()`` sees it.
 
-    An MT_CONFIG_DIR already set by the caller is respected (nothing is pinned). Test-infrastructure
-    hook: MT_PIN_SOURCE, when set, is the directory copied instead of ``repo_root()/config`` (used to
-    prove the suite does not depend on the live capital, with a scratch limits.yaml at other values).
+    An MT_CONFIG_DIR already set by the caller is respected (nothing is pinned). MT_PIN_SOURCE, when
+    set, is the directory copied instead of ``repo_root()/config``.
     """
     _PIN_STATE["prior_env"] = os.environ.get("MT_CONFIG_DIR")
     _PIN_STATE["tmp"] = None
@@ -66,8 +64,7 @@ def pytest_unconfigure(config) -> None:
         os.environ["MT_CONFIG_DIR"] = prior
     shutil.rmtree(tmp, ignore_errors=True)
 
-# A fixed "now" on a real 2026 trading day (Wed 2026-06-17, not a holiday in config/calendar/2026.yaml),
-# inside the seeded 10:00–10:30 trade window. Frozen so the golden decision log is deterministic.
+# A fixed "now" on a real trading day (Wed 2026-06-17), inside the seeded 10:00–10:30 trade window.
 FIXED_NOW = datetime(2026, 6, 17, 10, 5, tzinfo=IST)
 
 
@@ -84,9 +81,7 @@ def db_path(tmp_path):
 @pytest.fixture(scope="session")
 def migrated_db_template(tmp_path_factory) -> Path:
     """One fully migrated SQLite file per session, checkpointed and closed so the main file holds
-    everything. ``conn`` copies it instead of re-running every migration per test; the per-test copy
-    keeps isolation per test. test_migrations.py still migrates from scratch and pins the copy to a
-    fresh migration (schema, user_version, applied set, seeded rows)."""
+    everything. ``conn`` copies it per test instead of re-running every migration."""
     path = tmp_path_factory.mktemp("migrated_template") / "state.db"
     c = connect(path)
     try:
@@ -121,8 +116,7 @@ _BACKOFF_SEAMS = (
 
 @pytest.fixture
 def instant_backoff(monkeypatch) -> None:
-    """Retry backoff and request pacing complete instantly. Each module awaits a module-level
-    ``_sleep`` seam built for this, so a failing fake endpoint costs no real 1 s/2 s/4 s waits.
+    """Retry backoff and request pacing complete instantly via each module's ``_sleep`` seam.
     Opt-in: test_nse_http.py observes the backoff schedule through its own recorder."""
 
     async def _instant(_delay: float) -> None:

@@ -1,9 +1,8 @@
 """HeartbeatWriter — the dedicated-thread liveness writer.
 
 The load-bearing property: the heartbeat keeps writing ``engine_lifecycle.last_alive_at`` while the
-MAIN thread is busy (a long backfill/scan would starve an asyncio-loop-hosted heartbeat and
-self-alarm the watchdog — the whole reason for a dedicated OS thread with its own sqlite3
-connection). Uses the real migrated temp SQLite db from conftest.
+MAIN thread is busy (a loop-hosted heartbeat would be starved by a long backfill/scan and self-alarm
+the watchdog, hence a dedicated OS thread with its own sqlite3 connection).
 """
 
 from __future__ import annotations
@@ -27,8 +26,7 @@ def _read_last_alive(db_path: str) -> str | None:
 
 
 def test_heartbeat_writes_while_main_thread_is_busy(conn, db_path):
-    """The thread must make progress while the main thread spins (GIL-bound busy work) — writes
-    accumulate and last_alive_at lands in the row, advancing with the (test-advanced) clock."""
+    """The thread makes progress while the main thread spins on GIL-bound work."""
     ticks = {"n": 0}
 
     def advancing_now():
@@ -38,8 +36,7 @@ def test_heartbeat_writes_while_main_thread_is_busy(conn, db_path):
     hb = HeartbeatWriter(db_path, Clock(time_source=advancing_now), interval_s=0.02)
     hb.start()
     try:
-        # Busy-spin the main thread (~0.4 s). A loop-hosted heartbeat would be starved by exactly
-        # this pattern; the dedicated thread keeps beating through it.
+        # Busy-spin the main thread (~0.4 s).
         t0 = time_mod.perf_counter()
         while time_mod.perf_counter() - t0 < 0.4:
             pass
@@ -66,8 +63,8 @@ def test_heartbeat_start_stop_idempotent(db_path, clock):
 
 
 def test_heartbeat_survives_write_failure(tmp_path, clock):
-    """A missing table (schema not migrated / disk trouble) must never crash the thread — the miss
-    is logged and retried; the watchdog's down_stale_s absorbs it."""
+    """A missing table must never crash the thread: the miss is logged and retried (the watchdog's
+    down_stale_s absorbs it)."""
     bare = tmp_path / "bare.db"
     sqlite3.connect(str(bare)).close()  # empty db: no engine_lifecycle table
     hb = HeartbeatWriter(bare, clock, interval_s=0.02)
@@ -89,6 +86,5 @@ def test_pid_alive_probe():
     assert pid_alive(os.getpid()) is True
     assert pid_alive(None) is False
     assert pid_alive(-1) is False
-    # A pid far beyond plausible allocation on this box (pids are multiples of 4 on Windows,
-    # bounded well under this) — dead or inaccessible either way probes False.
+    # Far beyond plausible pid allocation: dead or inaccessible either way probes False.
     assert pid_alive(0x7FFFFFF0) is False

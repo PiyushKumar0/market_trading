@@ -1,34 +1,26 @@
-"""Golden replay day (2026-09-10) — ``engine.paper.replay.ReplayHarness``.
+"""Golden replay day — ``engine.paper.replay.ReplayHarness``.
 
-The requirement this file exists for is: *same inputs ⇒ byte-identical decision log*. For now the "decision log" is the harness digest — the finalized bars plus the
-``order.update`` frame stream the harness collected, with platform-minted ULIDs masked (the ONE
-accepted non-determinism). Everything else asserted here is a behaviour the digest
-would hide if it drifted:
+Contract: *same inputs ⇒ byte-identical decision log*. The "decision log" is the harness digest — the
+finalized bars plus the ``order.update`` frame stream the harness collected, with platform-minted
+ULIDs masked (the ONE accepted non-determinism). Also asserted, because the digest would hide drift:
 
-(a) two runs over the same partitions ⇒ identical digest AND identical bar lists; the day's sort key
-    is TOTAL, so rows tying on ``(exchange_ts, tradingsymbol, volume_traded, ltp)`` and differing
-    only in their L1 quote still deliver in one fixed order
-(b) pre-open ticks build no bar; the open bar's open is the first IN-SESSION print
-(c) the post-close tick builds no bar and is counted (post-close symmetry)
-(d) the attached broker sees every in-session tick and every bar, in order, with the clock standing
-    at the tick's own ``exchange_ts`` — nothing in a replay may read wall time
-(e) the harness OWNS the publish collector: the REAL ``PaperBroker`` is constructed with
-    ``harness.publish``, an order placed mid-replay produces postbacks/fills on the report and moves
-    the digest; a broker whose book GROWS while it published nothing is a hard error; a ULID that
-    changes between runs does not move the digest
-(f) replay actions are a function of the STREAM, not of task scheduling (fix round, 2026-09-10):
-    the order goes in through ``harness.schedule`` at a NAMED minute, so three consecutive runs
-    produce the same fill count and the same digest. The predecessor placed it from a fire-and-forget
-    ``create_task`` that ran at whichever cooperative yield the OS chose, which made this test's
-    fill count 0 or 1 depending on thread timing
-(g) the day is streamed, not materialised: the tick loop yields once per ``_YIELD_EVERY_TICKS``
-    slice — counted, not timed — and never holds the loop for a second
-(h) multi-day: per-day bar counts, disjoint and complete days, and day order that does not matter
-(i) the live ``market.duckdb`` is never opened, even when one is sitting in the archive root
-(j) performance smoke on the WARM run ("a session-day in minutes")
-
-No pytest marker: ``pyproject.toml`` defines only ``needs_heavy_deps`` (duckdb/pandas are core deps,
-not the heavy tier), so a replay marker would have to be registered first — out of scope here.
+- two runs over the same partitions ⇒ identical digest and bars; the day's sort key is TOTAL, so rows
+  tying on ``(exchange_ts, tradingsymbol, volume_traded, ltp)`` and differing only in their L1 quote
+  still deliver in one fixed order
+- pre-open ticks build no bar; the open bar's open is the first IN-SESSION print
+- the post-close tick builds no bar and is counted
+- the attached broker sees every in-session tick and bar, in order, with the clock standing at the
+  tick's own ``exchange_ts`` — nothing in a replay may read wall time
+- the harness OWNS the publish collector: a real ``PaperBroker`` built with ``harness.publish`` puts
+  postbacks/fills on the report and moves the digest; a broker whose book GROWS while it published
+  nothing is a hard error; a changing ULID does not move the digest
+- replay actions are a function of the STREAM, not task scheduling: ``harness.schedule`` at a NAMED
+  minute gives the same fill count and digest on every run
+- the day is streamed: the tick loop yields once per ``_YIELD_EVERY_TICKS`` slice (counted, not
+  timed) and never holds the loop for a second
+- multi-day: per-day bar counts, disjoint days, day order irrelevant
+- the live ``market.duckdb`` is never opened, even when one sits in the archive root
+- warm-run performance smoke ("a session-day in minutes")
 """
 
 from __future__ import annotations
@@ -69,8 +61,7 @@ from engine.paper.replay import (
 from tests.replay.conftest import REPLAY_DAY, REPLAY_DAY_2
 from tests.replay.fixtures.synthetic_day import TICK_COLUMNS, TIE_BIDS, TIE_SYMBOL, SyntheticDay
 
-# A ULID-shaped token (26 chars, Crockford base32, leading time char) standing in for the order ids
-# the OMS mints. Two DIFFERENT ones so (e) proves masking, not luck.
+# ULID-shaped tokens standing in for OMS order ids; two different ones so masking is proven, not luck.
 ULID_A = "01JBQ7X2K3MNP4RSTV5WXY6Z7A"
 ULID_B = "01JBQ8Y3M4NPQ5STVW6XYZ7A8B"
 
@@ -78,10 +69,9 @@ ULID_B = "01JBQ8Y3M4NPQ5STVW6XYZ7A8B"
 class StubBroker:
     """The duck-typed broker seam the harness drives (``on_tick`` / ``on_bar``).
 
-    Deliberately NOT ``PaperBroker`` (the real one gets its own test below): the harness must stay
-    usable with a two-method stub, which is the contract :class:`~engine.paper.replay.ReplayBroker`
-    states. It publishes ONE ``order.update`` frame on its first tick through the harness's own
-    publish seam — the same way a real broker does, and the only way anything reaches the digest.
+    Deliberately NOT ``PaperBroker``: the harness must stay usable with a two-method stub (the
+    :class:`~engine.paper.replay.ReplayBroker` contract). It publishes ONE ``order.update`` frame on
+    its first tick through the harness's publish seam, the only way anything reaches the digest.
     """
 
     def __init__(self, clock: Clock, publish: Any, order_id: str) -> None:
@@ -136,10 +126,7 @@ def _await(coro):
 
 # ------------------------------------------------------------------ lockstep with the store's schema
 def test_tick_column_lockstep() -> None:
-    """The harness and the fixture must read/write exactly the columns the STORE writes.
-
-    A column added to ``store._TICK_COLUMNS`` without being added here would make the harness replay
-    a silently narrower tick than the engine records."""
+    """The harness and the fixture read/write exactly the columns the STORE writes."""
     from engine.paper import replay
 
     assert replay.TICK_COLUMNS == _TICK_COLUMNS
@@ -147,15 +134,12 @@ def test_tick_column_lockstep() -> None:
 
 
 def test_sort_key_covers_every_tick_column() -> None:
-    """The day's ``ORDER BY`` must be a permutation of the columns — that is what makes it TOTAL.
-
-    A column added to the dataset and to ``TICK_COLUMNS`` but not to the sort key would leave rows
-    differing only in it free to swap between runs."""
+    """The day's ``ORDER BY`` is a permutation of the columns — that is what makes it TOTAL."""
     assert sorted(ORDER_BY_COLUMNS) == sorted(TICK_COLUMNS)
     assert ORDER_BY_COLUMNS[:2] == ("exchange_ts", "tradingsymbol")
 
 
-# ------------------------------------------------------------------ (a) determinism (golden day)
+# ------------------------------------------------------------------ determinism (golden day)
 def test_two_runs_are_byte_identical(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
     h1, r1, _ = _run(synthetic_day, tmp_path / "run1")
     h2, r2, _ = _run(synthetic_day, tmp_path / "run2")
@@ -169,12 +153,10 @@ def test_two_runs_are_byte_identical(synthetic_day: SyntheticDay, tmp_path: Path
 
 def test_tied_rows_deliver_in_total_key_order(tie_day: tuple[Path, Any], tmp_path: Path) -> None:
     """Two prints tying on ``(exchange_ts, tradingsymbol, volume_traded, ltp)`` and differing only in
-    ``bid``/``ask`` must deliver in ONE fixed order, run after run.
+    ``bid``/``ask`` deliver in ONE fixed order (by bid), run after run.
 
-    The fixture writes them to Parquet highest-bid-first, so a sort that only knew the four keys is
-    free to hand them back in file order; the total key of ``ORDER_BY_COLUMNS`` orders them by bid.
-    That matters because the L1 quote is what the broker's half-spread reads — a flip here is a
-    different fill price for identical input.
+    The fixture writes them highest-bid-first, so a four-key sort would return file order. The L1
+    quote drives the broker's half-spread, so a flip is a different fill price for identical input.
     """
     root, day = tie_day
     seen: list[list[Decimal]] = []
@@ -199,7 +181,7 @@ def test_report_counts_partition_the_stream(synthetic_day: SyntheticDay, tmp_pat
     assert report.pre_open_excluded == synthetic_day.pre_open_ticks
     assert report.post_close_dropped == synthetic_day.post_close_ticks
     assert report.ticks_delivered == synthetic_day.session_ticks
-    # Every row read is accounted for exactly once — the counters are a partition, not three tallies.
+    # The counters partition the rows read.
     assert (
         report.pre_open_excluded + report.post_close_dropped + report.ticks_delivered
         == report.ticks_read
@@ -220,7 +202,7 @@ def test_symbol_filter_restricts_the_read(synthetic_day: SyntheticDay, tmp_path:
     assert report.ticks_read == synthetic_day.total_ticks // len(synthetic_day.symbols)
 
 
-# ------------------------------------------------------------------ (b) pre-open semantics
+# ------------------------------------------------------------------ pre-open semantics
 def test_pre_open_builds_no_bar_and_open_is_first_session_print(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
@@ -232,15 +214,14 @@ def test_pre_open_builds_no_bar_and_open_is_first_session_print(
 
     for symbol in synthetic_day.symbols:
         first = next(b for b in bars if b.symbol == symbol and b.ts_minute == open_at)
-        # The pre-open rule as BarBuilder implements it: the open is the first IN-SESSION print, and the auction
-        # price rides along in its own column on the 09:15 row only.
+        # The open is the first IN-SESSION print; the auction price rides in its own column on the
+        # 09:15 row only.
         assert first.open == synthetic_day.first_session_ltp[symbol]
         assert first.open != synthetic_day.auction_open[symbol]
         assert first.auction_open == synthetic_day.auction_open[symbol]
         assert first.src == "self"
-        # engine up from the open ⇒ the WHOLE cumulative belongs to the 09:15 bar, so its
-        # volume is the cumulative standing at the end of that minute — exactly, not merely "large".
-        # A delta-only builder would report (cum_last − cum_first) here and this would fail.
+        # Engine up from the open ⇒ the WHOLE cumulative belongs to the 09:15 bar (a delta-only
+        # builder would report cum_last − cum_first).
         assert first.volume == synthetic_day.open_bar_volume[symbol]
         assert first.volume > synthetic_day.first_session_cum[symbol]
         later = next(b for b in bars if b.symbol == symbol and b.ts_minute > open_at)
@@ -251,12 +232,12 @@ def test_gap_minute_produces_no_bar(synthetic_day: SyntheticDay, tmp_path: Path)
     harness, _, _ = _run(synthetic_day, tmp_path / "gap")
     bars = harness.bars(synthetic_day.day)
     assert [b for b in bars if b.ts_minute == synthetic_day.gap_minute] == []
-    # …and the minutes either side DO exist, so the gap is a hole and not a truncation.
+    # The minutes either side exist, so the gap is a hole and not a truncation.
     assert [b for b in bars if b.ts_minute == synthetic_day.gap_minute - timedelta(minutes=1)]
     assert [b for b in bars if b.ts_minute == synthetic_day.gap_minute + timedelta(minutes=1)]
 
 
-# ------------------------------------------------------------------ (c) post-close symmetry
+# ------------------------------------------------------------------ post-close symmetry
 def test_post_close_tick_builds_no_bar_and_is_counted(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
@@ -267,11 +248,10 @@ def test_post_close_tick_builds_no_bar_and_is_counted(
     assert [b for b in bars if b.ts_minute >= close_at] == []
     assert report.post_close_dropped == len(synthetic_day.symbols)
     assert broker is not None
-    # The broker never sees a print that cannot legally trade in the continuous session.
     assert [t for t in broker.ticks if t.exchange_ts >= close_at] == []
 
 
-# ------------------------------------------------------------------ (d) broker seam + replay clock
+# ------------------------------------------------------------------ broker seam + replay clock
 def test_broker_sees_every_session_tick_and_bar_in_order(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
@@ -279,33 +259,29 @@ def test_broker_sees_every_session_tick_and_bar_in_order(
     assert broker is not None
 
     assert len(broker.ticks) == report.ticks_delivered == synthetic_day.session_ticks
-    # The clock is the tick stream: at every delivery ``Clock.now()`` IS this tick's exchange_ts.
+    # At every delivery ``Clock.now()`` IS this tick's exchange_ts.
     assert broker.tick_clock == [t.exchange_ts for t in broker.ticks]
     assert all(ts.tzinfo is not None for ts in broker.tick_clock)
-    # Stream order: non-decreasing exchange timestamps, and never a pre-open/post-close print.
     stamps = [t.exchange_ts for t in broker.ticks]
     assert stamps == sorted(stamps)
     assert broker.bars == harness.bars(synthetic_day.day)
 
-    # Bars arrive interleaved with ticks (a bar is delivered at the minute boundary at or after its
-    # minute+grace), not batched at the end of the day: the last event must be a tick, not a bar.
+    # Bars arrive interleaved with ticks (at the minute boundary at or after minute+grace), not
+    # batched at the end of the day.
     kinds = [kind for kind, _, _ in broker.sequence]
     assert kinds[0] == "tick"
     assert "bar" in kinds[: len(kinds) // 2]
 
 
 def test_harness_clock_never_reads_wall_time(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
-    """After the run the clock stands at the LAST tick of the day — a wall-clock read would land in
-    the present instead (the run happens years after 2026-06-17 only in the sense that ``now`` is a
-    different value; the assertion is that the clock is pinned to the stream)."""
+    """After the run the clock stands at the LAST tick of the day, not at wall time."""
     harness, _, _ = _run(synthetic_day, tmp_path / "clock")
     assert harness.clock.now() == synthetic_day.post_close_at
 
 
-# ------------------------------------------------------------------ (e) the harness owns the collector
+# ------------------------------------------------------------------ the harness owns the collector
 #: The named minute the scripted order goes in at. The fixture prints at seconds 1/11/21/31/41/51 of
-#: every session minute, so the first tick at or after 10:00:00 is SYNA's 10:00:01 print — an exact
-#: instant the postback's ``order_timestamp`` is asserted against below.
+#: every session minute, so the first tick at or after 10:00:00 is SYNA's 10:00:01 print.
 ORDER_AT = time(10, 0)
 ORDER_TICK_TS = "10:00:01"
 
@@ -313,12 +289,9 @@ ORDER_TICK_TS = "10:00:01"
 class ScriptedTrader:
     """Wraps the REAL :class:`~engine.paper.broker.PaperBroker` and places ONE SCRIPTED order.
 
-    :meth:`place` is handed to ``harness.schedule``, so the harness itself calls it inside the tick
-    loop, immediately before a named tick, with the replay clock already standing at that tick. The
-    predecessor of this class created an ``asyncio`` task from inside ``on_tick`` and let it run at
-    whichever cooperative yield the OS scheduled it on — the order then landed 0 or 1 ticks before
-    the day ended and the run produced 0 or 1 fills for identical input (fix round, 2026-09-10).
-    Nothing in a replay may depend on task timing; ``on_tick`` here is a pure pass-through.
+    :meth:`place` is handed to ``harness.schedule``, so the harness calls it inside the tick loop,
+    immediately before a named tick, with the replay clock already standing at that tick. Nothing in a
+    replay may depend on task timing; ``on_tick`` is a pure pass-through.
     """
 
     def __init__(self, broker: PaperBroker, symbol: str, quantity: int) -> None:
@@ -345,7 +318,7 @@ class ScriptedTrader:
 
 
 def _paper_broker(harness: ReplayHarness) -> PaperBroker:
-    """The real PaperBroker, wired to the harness's clock and — the point of this test — its publish."""
+    """The real PaperBroker, wired to the harness's clock and publish."""
     return PaperBroker(
         clock=harness.clock,
         publish=harness.publish,
@@ -374,15 +347,8 @@ def _scripted_paper_run(
 def test_real_paper_broker_postbacks_reach_the_report_and_digest(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
-    """The harness OWNS the publish collector AND drives the order itself.
-
-    Two failures are pinned here. The first was a ``postback_log()`` getattr seam that matched
-    nothing the PaperBroker exposes: it degraded to ``[]`` and reported a bars-only digest as a
-    golden day. The second was this test itself — the order used to go out on a fire-and-forget
-    task, so ``fills`` was 0 or 1 depending on when the OS scheduled it. THREE consecutive runs are
-    asserted identical, which is the property a golden day actually needs and which the previous
-    shape could not have.
-    """
+    """The harness OWNS the publish collector AND drives the order itself: three consecutive runs
+    produce identical digests, and the real broker's postbacks reach the report and move the digest."""
     digests: list[str] = []
     bars_built: dict | None = None
     for run in ("paper1", "paper2", "paper3"):
@@ -392,12 +358,11 @@ def test_real_paper_broker_postbacks_reach_the_report_and_digest(
         assert trader.order_id is not None             # the order really went through the surface
         assert report.postbacks > 0                    # …and its postbacks reached the harness
         assert report.orders == 1
-        assert report.fills == 1                       # exactly one, every run — the fix
+        assert report.fills == 1                       # exactly one, every run
         frames = harness.postbacks()
         assert len(frames) == report.postbacks
         assert {f.data["order_id"] for f in frames} == {trader.order_id}
-        # The order was stamped by the STREAM: the clock stood on the scheduled tick, not on
-        # whatever instant a task happened to run at.
+        # The order is stamped by the STREAM: the clock stood on the scheduled tick.
         assert frames[0].data["order_timestamp"] == f"{synthetic_day.day.isoformat()} {ORDER_TICK_TS}"
         assert frames[-1].data["status"] == "COMPLETE"
         assert frames[-1].data["filled_quantity"] == 5
@@ -407,10 +372,10 @@ def test_real_paper_broker_postbacks_reach_the_report_and_digest(
 
     assert len(set(digests)) == 1, f"three runs of identical input produced {len(set(digests))} digests"
 
-    # The digest covers the frames: the same day with no order placed hashes differently.
+    # The digest covers the frames: the same day with no order placed hashes differently, while the
+    # bars are untouched.
     _, quiet, _ = _run(synthetic_day, tmp_path / "paper_quiet")
     assert digests[0] != quiet.digest
-    # …and the bars themselves are untouched by the order (the control on the line above).
     assert bars_built == quiet.bars_built
 
 
@@ -419,8 +384,8 @@ def test_at_tick_action_fires_before_that_stream_ordinal(
 ) -> None:
     """``at_tick(n, fn)`` runs ``fn`` immediately before the n-th tick of the stream is fed.
 
-    The stream ordinal counts every tick READ (pre-open included), which is what makes it a property
-    of the archive rather than of what the broker happened to be shown.
+    The ordinal counts every tick READ (pre-open included): a property of the archive, not of what
+    the broker was shown.
     """
     harness = ReplayHarness(synthetic_day.root, tmp_path / "at_tick")
     broker = StubBroker(harness.clock, harness.publish, ULID_A)
@@ -434,10 +399,9 @@ def test_at_tick_action_fires_before_that_stream_ordinal(
         harness.close()
 
     assert report.actions_fired == 2
-    # Tick 0 is the first PRE-OPEN print of the day (09:00:00), not the first in-session one.
+    # Tick 0 is the first PRE-OPEN print (09:00:00). Same ordinals ⇒ same instants, run after run.
     assert seen[0] == datetime.combine(synthetic_day.day, time(9, 0), tzinfo=IST)
     assert seen[1] > seen[0]
-    # Same ordinals ⇒ same instants, run after run.
     harness2 = ReplayHarness(synthetic_day.root, tmp_path / "at_tick2")
     again: list[datetime] = []
     harness2.at_tick(0, lambda: again.append(harness2.clock.now()))
@@ -467,9 +431,8 @@ def test_scripted_action_the_stream_never_reaches_is_an_error(
 class MuteBroker:
     """A broker that BOOKS an order during the run and publishes NOTHING — the wiring bug.
 
-    Its book has to GROW while the replay is running, not merely be non-empty at the end: the check
-    is about order work THIS run did (fix round, 2026-09-10). A book that was already full when the
-    run started is the ordinary second-run case, asserted below.
+    The check is about order work THIS run did, so the book must GROW during the replay; one already
+    full at the start is the ordinary second-run case.
     """
 
     def __init__(self, booked: list | None = None) -> None:
@@ -534,12 +497,10 @@ def test_the_harness_collects_only_the_attached_brokers_topic(
 def test_second_run_on_the_same_broker_is_not_a_false_positive(
     two_day_archive: tuple[SyntheticDay, SyntheticDay], tmp_path: Path
 ) -> None:
-    """A REAL PaperBroker that ordered on day 1 and did nothing on day 2 must not raise (fix round).
+    """A REAL PaperBroker that ordered on day 1 and did nothing on day 2 must not raise: the check
+    compares the book's growth, not its cumulative size, against the current run's frames.
 
-    The predecessor compared the broker's CUMULATIVE orderbook against the CURRENT run's frames, so
-    the second ``run()`` saw "1 order, 0 frames" and raised — on a harness that was wired exactly
-    right. Two days rather than the same day twice because the :class:`ReplayClock` is monotonic by
-    contract: a replay cannot rewind.
+    Two days rather than one twice because the :class:`ReplayClock` is monotonic: a replay cannot rewind.
     """
     day1, day2 = two_day_archive
     harness = ReplayHarness(day1.root, tmp_path / "two_runs")
@@ -548,7 +509,7 @@ def test_second_run_on_the_same_broker_is_not_a_false_positive(
     harness.schedule(datetime.combine(day1.day, ORDER_AT, tzinfo=IST), trader.place)
     try:
         first = _await(harness.run([day1.day]))
-        # Day 2: no scripted action, so nothing new is ordered — but the broker still holds day 1's.
+        # Day 2: nothing new is ordered, but the broker still holds day 1's.
         second = _await(harness.run([day2.day]))
         book = _await(trader.orders())
     finally:
@@ -561,7 +522,7 @@ def test_second_run_on_the_same_broker_is_not_a_false_positive(
 
 
 def test_broker_without_orders_is_not_an_error(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
-    """v1 has no order origination: a silent broker with an empty book is the NORMAL case."""
+    """A silent broker with an empty book is the NORMAL case."""
     _, report, broker = _run(synthetic_day, tmp_path / "silent", order_id=ULID_A)
     assert broker is not None
     assert report.postbacks == 1 and report.orders == 1 and report.fills == 0
@@ -581,26 +542,20 @@ def test_changing_ulid_does_not_move_the_digest(
     _, r2, b2 = _run(synthetic_day, tmp_path / "ulid_b", order_id=ULID_B)
     assert b1 is not None and b2 is not None
 
-    assert r1.postbacks == r2.postbacks == 1                       # the input really did change…
-    assert r1.digest == r2.digest                                  # …and the digest did not
+    assert r1.postbacks == r2.postbacks == 1
+    assert r1.digest == r2.digest
 
     # Control: the frame stream IS in the digest — a non-ULID change must move it.
     _, r3, _ = _run(synthetic_day, tmp_path / "no_broker")
     assert r3.digest != r1.digest
 
 
-# ------------------------------------------------------------------ (f) streamed, loop not blocked
+# ------------------------------------------------------------------ streamed, loop not blocked
 def test_run_never_blocks_the_event_loop(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
     """A heartbeat coroutine ticking every 50 ms alongside ``run()`` sees no gap over 1 s.
 
-    This is the streaming/cooperative-yield contract: the day is fed in
-    bounded chunks with an ``await`` between them, so anything else on the loop keeps running, and
-    the paper leg (test_paper_e2e) is async end to end.
-
-    The 1 s bound is the CONTRACT, not a discriminating measurement: the synthetic day replays in
-    well under a second, so a fully-blocking loop would also clear it here. What the yield actually
-    does is asserted next door in ``test_tick_loop_yields_once_per_slice_and_never_blocks_long``,
-    which COUNTS the harness's yields instead of timing them.
+    The 1 s bound is the contract, not a discriminating measurement (the synthetic day replays in
+    under a second); the yields are counted in ``test_tick_loop_yields_once_per_slice_and_never_blocks_long``.
     """
     harness = ReplayHarness(synthetic_day.root, tmp_path / "heartbeat")
     beats: list[float] = []
@@ -625,19 +580,14 @@ def test_run_never_blocks_the_event_loop(synthetic_day: SyntheticDay, tmp_path: 
         harness.close()
 
     assert report.ticks_read == synthetic_day.total_ticks
-    # A handful, not a target: the beat COUNT is a function of how fast the box is. What is being
-    # asserted is the GAP — the longest the replay held the loop.
+    # The beat COUNT depends on box speed; the assertion is the GAP, the longest the replay held the loop.
     assert len(beats) >= 3, "the heartbeat never interleaved with the replay at all"
     gaps = [b - a for a, b in zip(beats, beats[1:], strict=False)]
     assert max(gaps) < 1.0, f"event loop blocked for {max(gaps):.2f}s during replay"
 
 
 class _LoopTurn:
-    """Yield control to the event loop WITHOUT going through ``asyncio.sleep``.
-
-    The spinner below must not add to the yield count the test is measuring, and the cleanest way to
-    guarantee that is to not call the function being counted at all.
-    """
+    """Yield control to the event loop WITHOUT ``asyncio.sleep``, which the test counts."""
 
     def __await__(self):
         yield
@@ -648,21 +598,11 @@ def test_tick_loop_yields_once_per_slice_and_never_blocks_long(
 ) -> None:
     """The tick loop yields once per ``_YIELD_EVERY_TICKS`` slice — COUNTED, not timed.
 
-    The predecessor asserted the longest block was under 25% of the run's own elapsed time, which
-    made it a load test: after a heavier suite in the same process the run got slower, one stretch
-    got relatively longer, and it went red for reasons that had nothing to do with the harness. Worse,
-    it could not see the actual defect — ``_to_ticks`` converted a whole ``_FETCH_ROWS`` chunk on the
-    loop thread BEFORE the first yield, so the real bound on a block was 20,000 ticks regardless of
-    what ``_YIELD_EVERY_TICKS`` said.
-
-    So the yields are counted at the source: every ``asyncio.sleep(0)`` made from inside
-    ``engine.paper.replay``. With the slice patched down to 250 rows, a day of N ticks must produce
-    at least ``ceil(N / 250)`` of them — a number that is a function of the FIXTURE and cannot drift
-    with machine load. The timing assertion that remains is an absolute ceiling (a second), not a
-    ratio: it says the loop is alive, and the count says why.
-
-    The slice size is patched DOWN only to widen the margin — the shipped constant is pinned by the
-    assertion above it, so this cannot hide a regression in the real value.
+    Counts every ``asyncio.sleep(0)`` made from inside ``engine.paper.replay``: with the slice patched
+    down to 250 rows, a day of N ticks must produce at least ``ceil(N / 250)``, a number that is a
+    function of the fixture and cannot drift with machine load. The remaining timing assertion is an
+    absolute one-second ceiling. The shipped constant is pinned separately, so patching the slice
+    down only widens the margin.
     """
     from engine.paper import replay as replay_mod
 
@@ -673,8 +613,7 @@ def test_tick_loop_yields_once_per_slice_and_never_blocks_long(
     real_sleep = asyncio.sleep
 
     def _counting_sleep(delay: float, *args: Any, **kwargs: Any):
-        # Frame-filtered so only the harness's own cooperative yields are counted — asyncio's
-        # shutdown path and anything else on the loop must not inflate the number.
+        # Frame-filtered so only the harness's own yields are counted.
         if delay == 0 and sys._getframe(1).f_globals.get("__name__") == "engine.paper.replay":
             yields[0] += 1
         return real_sleep(delay, *args, **kwargs)
@@ -718,7 +657,7 @@ def test_tick_loop_yields_once_per_slice_and_never_blocks_long(
     )
 
 
-# ------------------------------------------------------------------ (g) multi-day
+# ------------------------------------------------------------------ multi-day
 def test_multi_day_run_is_per_day_and_order_independent(
     two_day_archive: tuple[SyntheticDay, SyntheticDay], tmp_path: Path
 ) -> None:
@@ -736,12 +675,12 @@ def test_multi_day_run_is_per_day_and_order_independent(
     assert r_fwd.ticks_read == day1.total_ticks + day2.total_ticks
     assert len(bars1) == len(bars2) == expected
 
-    # Disjoint and complete: every bar sits on its own day, and no minute leaks across the rollover.
+    # Every bar sits on its own day; no minute leaks across the rollover.
     assert {b.ts_minute.date() for b in bars1} == {day1.day}
     assert {b.ts_minute.date() for b in bars2} == {day2.day}
     assert len({(b.symbol, b.ts_minute) for b in bars1 + bars2}) == 2 * expected
 
-    # Day ORDER is not an input: run() sorts, so the two calls are the same replay.
+    # Day ORDER is not an input: run() sorts.
     reverse = ReplayHarness(day1.root, tmp_path / "d2d1")
     try:
         r_rev = _await(reverse.run([day2.day, day1.day]))
@@ -751,17 +690,15 @@ def test_multi_day_run_is_per_day_and_order_independent(
     assert r_rev.digest == r_fwd.digest
 
 
-# ------------------------------------------------------------------ (h) never the live store
+# ------------------------------------------------------------------ never the live store
 def test_replay_never_opens_the_live_market_duckdb(
     synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every DuckDB connection a RUN opens is ``:memory:`` (single-writer).
 
-    The archive root gets a real ``market.duckdb`` file first, so "it did not open it" is a fact
-    about the harness and not about the file being absent. The scratch store's own connection is
-    opened by ``harness.open()`` BEFORE the patch goes on — that one is the throwaway store and is
-    supposed to exist; what must never happen is a connection opened *during the replay* to anything
-    but an in-memory instance.
+    A real ``market.duckdb`` is planted in the archive root first. The throwaway scratch store is
+    opened by ``harness.open()`` before the spy goes on; only connections opened during the replay
+    are checked.
     """
     live = synthetic_day.root / "market.duckdb"
     duckdb.connect(str(live)).close()
@@ -788,16 +725,13 @@ def test_replay_never_opens_the_live_market_duckdb(
     assert set(seen) == {":memory:"}, f"replay opened a file-backed DuckDB: {seen}"
 
 
-# ------------------------------------------------------------------ (i) performance smoke
+# ------------------------------------------------------------------ performance smoke
 def test_replay_is_fast_enough(synthetic_day: SyntheticDay, tmp_path: Path) -> None:
-    """WARM-run wall-clock bound. DuckDB's per-process start-up and the schema DDL are burned by
-    the session ``_warm_duckdb`` fixture, so this measures the replay loop and nothing else.
+    """WARM-run wall-clock bound; the session ``_warm_duckdb`` fixture burns DuckDB start-up and DDL.
 
-    Measured 2026-09-10 on this box: 0.73 s warm for 6,795 ticks / 1,122 bars (the same day before
-    the fix round: 7.65 s warm, 24 s cold). The 25 s bound is the "a session-day in minutes"
-    contract with room for a loaded CI box — it is deliberately NOT the regression pin, because a
-    wall-clock number on a shared runner is a statement about the runner. The two pathologies this
-    round removed are pinned by counting instead, next door.
+    The 25 s bound is the "a session-day in minutes" contract with room for a loaded box, deliberately
+    NOT the regression pin; the per-minute cost shape is pinned by counting in
+    ``test_hot_path_work_is_per_minute_not_per_tick``.
     """
     _, report, _ = _run(synthetic_day, tmp_path / "perf", order_id=ULID_A)
     assert report.ticks_read >= 6_000
@@ -807,8 +741,8 @@ def test_replay_is_fast_enough(synthetic_day: SyntheticDay, tmp_path: Path) -> N
 def test_paper_bridge_keeps_the_day_fast_and_the_loop_free(
     synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The PaperRuntime bridge in front of a real PaperBroker, driven by the golden day,
-    stays inside the (i) wall-clock bound and never holds the loop for a second (f).
+    """The PaperRuntime bridge in front of a real PaperBroker, driven by the golden day, stays inside
+    the wall-clock bound and never holds the loop for a second.
 
     The slice is cut to ~3 stream minutes so session prep, which completes on a loop turn, ends
     inside the 5-minute gap tolerance; at the shipped slice every prep spans hours of stream."""
@@ -870,15 +804,8 @@ def test_paper_bridge_keeps_the_day_fast_and_the_loop_free(
 def test_hot_path_work_is_per_minute_not_per_tick(
     synthetic_day: SyntheticDay, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The two costs the fix round moved off the per-tick path, counted rather than timed.
-
-    Both were measured, not guessed: ``insert_bars_1m`` costs ~14 ms per call on this box, and the
-    harness used to make one per replayed MINUTE (375 on this day) — a cost that scales with minutes,
-    so a 300-symbol day pays exactly the same 375 round trips for 100× the rows. ``advance()`` used
-    to run once per TICK on top of the one ``BarBuilder.on_tick`` already does internally.
-
-    Counting is what makes this a regression pin: the numbers are functions of the fixture, not of
-    how loaded the machine is.
+    """``advance()`` runs once per distinct minute, not per tick, and bar writes are batched rather
+    than one per minute. Counted rather than timed, so the numbers are functions of the fixture.
     """
     from engine.marketdata.bar_builder import BarBuilder
     from engine.marketdata.store import MarketStore
@@ -916,11 +843,10 @@ def test_hot_path_work_is_per_minute_not_per_tick(
 
 # ------------------------------------------------------------------ guardrails
 def test_digest_reflects_bar_content_but_not_auction_open() -> None:
-    """The digest must move when a bar moves — and must NOT move for a field the digest leaves out.
+    """The digest moves when a bar moves, and does NOT move for ``auction_open``.
 
-    ``auction_open`` is deliberately outside the canonical serialisation (the pinned field list is
-    symbol/minute/OHLC/volume/src); the pre-open rule is asserted directly by ``test_pre_open_…`` instead, where a
-    drift is readable. Pinning that decision here stops it from being "fixed" by accident."""
+    ``auction_open`` is deliberately outside the canonical serialisation (symbol/minute/OHLC/volume/src);
+    the pre-open rule is asserted directly in ``test_pre_open_…``."""
     from engine.paper.replay import _digest
 
     minute = datetime.combine(REPLAY_DAY, time(9, 15), tzinfo=IST)
@@ -963,13 +889,10 @@ def test_missing_day_replays_to_an_empty_report(tmp_path: Path) -> None:
 def test_buffered_bar_writes_match_a_direct_write(
     synthetic_day: SyntheticDay, tmp_path: Path
 ) -> None:
-    """The bars go through the REAL BarBuilder into a REAL MarketStore, and the harness's write
-    buffer does not change a byte of what lands there.
+    """The harness's bar-write buffer does not change a byte of what lands in the real MarketStore.
 
-    The reference store is written from the same bar list in batches of 37 — a size chosen to fall
-    on completely different boundaries than the harness's 500 — so what is being asserted is that
-    batch boundaries are irrelevant to the stored result, which is the only thing buffering could
-    have broken.
+    The reference store is written in batches of 37, falling on different boundaries than the
+    harness's 500, so batch boundaries are shown irrelevant to the stored result.
     """
     from engine.marketdata.store import MarketStore
 

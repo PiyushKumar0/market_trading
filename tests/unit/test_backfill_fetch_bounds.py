@@ -1,21 +1,13 @@
-"""2026-08-21: where the warm-up/backfill fetch runs, and what bounds it.
+"""Where the warm-up/backfill fetch runs, and what bounds it.
 
-The working hypothesis was that the 09:56 freeze came from a Kite historical call made while
-holding the market store's serialization, with no timeout on it. The code says otherwise on both
-counts, and these two tests are what pin the shape that was actually found, so a future refactor
-cannot quietly introduce the hypothesised one:
-
-* ``BackfillJob.warmup_gap`` awaits ``kite.historical`` as its own statement
-  (``src/engine/marketdata/backfill.py:294``); the store is touched only by the separate
-  ``acoverage_gaps`` / ``ainsert_bars_1m`` awaits around it (lines 284 and 296). The store's
-  ``threading.RLock`` (``store.py:685``) is therefore never held across the network call -- the
-  first test proves that behaviourally, with a fetch that hangs a worker thread exactly the way a
-  blocked ``requests`` call does while a concurrent store read is issued.
-* The fetch IS bounded: ``KiteClient.historical`` calls ``kc.historical_data`` under
-  ``loop.run_in_executor`` (``kite_client.py:138``), and pykiteconnect passes its own
-  ``_default_timeout`` (7 s) to ``requests`` on every request (``kiteconnect/connect.py:963``).
-  ``SessionManager._connect`` (``session.py:301``) builds ``KiteConnect(api_key=...)`` with no
-  ``timeout`` override, so that default is what the engine runs with. The second test pins it.
+* ``BackfillJob.warmup_gap`` awaits ``kite.historical`` as its own statement; the store is touched
+  only by the separate ``acoverage_gaps`` / ``ainsert_bars_1m`` awaits around it, so the store's
+  ``threading.RLock`` is never held across the network call. The first test proves that with a fetch
+  that hangs a worker thread, as a blocked ``requests`` call does, while a concurrent store read is issued.
+* The fetch IS bounded: ``KiteClient.historical`` runs ``kc.historical_data`` under
+  ``loop.run_in_executor``, and pykiteconnect passes its own ``_default_timeout`` (7 s) to ``requests``
+  on every request. ``SessionManager`` builds ``KiteConnect`` with no ``timeout`` override, so that
+  default is what the engine runs with. The second test pins it.
 """
 
 from __future__ import annotations
@@ -47,11 +39,9 @@ def store(tmp_path, clock):
 
 
 class HangingKite:
-    """A ``KiteClient`` stand-in whose historical fetch blocks a worker thread and stays there.
+    """A ``KiteClient`` stand-in whose historical fetch blocks a worker thread until released.
 
-    Shaped like the real thing on purpose: ``KiteClient._call`` runs the synchronous pykiteconnect
-    method through ``loop.run_in_executor``, so a wedged HTTP call holds an executor thread, not the
-    event loop. That is the failure mode being simulated.
+    Like ``KiteClient._call``, a wedged HTTP call holds an executor thread, not the event loop.
     """
 
     def __init__(self, release: threading.Event, entered: asyncio.Event) -> None:
@@ -67,12 +57,8 @@ class HangingKite:
 
 
 async def test_a_hung_historical_fetch_never_blocks_a_concurrent_store_read(store, clock, conn):
-    """The fetch is OUTSIDE the store's serialized section, and this is what that buys.
-
-    With the warm-up fill parked inside a fetch that will never return, an unrelated store read
-    still answers. Had the fetch been made under the store's lock -- the hypothesis -- this
-    read would have queued behind it and the assertion below would time out, which is exactly the
-    14-minute freeze the incident produced.
+    """The fetch is OUTSIDE the store's serialized section: with the warm-up fill parked in a fetch
+    that never returns, an unrelated store read still answers.
     """
     release = threading.Event()
     entered = asyncio.Event()
@@ -85,11 +71,11 @@ async def test_a_hung_historical_fetch_never_blocks_a_concurrent_store_read(stor
     try:
         await asyncio.wait_for(entered.wait(), 10)
 
-        # The store answers WHILE the fetch is wedged. (An empty store means every minute in the
-        # span is a gap, which is also what got warmup_gap past its own coverage check above.)
+        # An empty store means every minute in the span is a gap, which is what got warmup_gap
+        # past its own coverage check.
         gaps = await asyncio.wait_for(store.acoverage_gaps(SYMBOL, frm, to), 10)
         assert len(gaps) == 45
-        assert not task.done()                       # the fill really is still stuck in the fetch
+        assert not task.done()                       # the fill is still stuck in the fetch
     finally:
         release.set()
 
@@ -115,10 +101,9 @@ class _KeyOnlySecrets:
 
 
 def test_every_kite_historical_request_carries_an_explicit_timeout(monkeypatch, clock):
-    """A hung fetch has to end by itself, and it does: pykiteconnect hands ``requests`` a timeout on
-    every call. Pinned end-to-end through the ENGINE's own client — ``SessionManager.kite_connect()``,
-    the instance the composition root hands ``KiteClient`` — and ``historical_data``, so an engine-side
-    timeout override, or pykiteconnect dropping the pass-through, fails here."""
+    """pykiteconnect hands ``requests`` a timeout on every call. Pinned through the ENGINE's own
+    client (``SessionManager.kite_connect()``) so an engine-side override, or pykiteconnect dropping
+    the pass-through, fails here."""
     kc = SessionManager(_KeyOnlySecrets(), clock).kite_connect()
     kc.set_access_token("t")
     seen: dict = {}

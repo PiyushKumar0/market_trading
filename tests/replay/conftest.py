@@ -1,9 +1,7 @@
-"""Fixtures for the replay tier (2026-09-10).
+"""Fixtures for the replay tier.
 
-The synthetic day is written ONCE per test session (``tmp_path_factory`` at session scope): it is
-~6.8 k rows through a DuckDB ``COPY`` and every test in the module replays the SAME bytes — which is
-also what makes the "two runs, one digest" assertion meaningful (both runs read one identical corpus,
-so any difference is the harness's, never the fixture's).
+The synthetic day is written ONCE per session: every test replays the SAME bytes, so any
+difference between two runs is the harness's, never the fixture's.
 """
 
 from __future__ import annotations
@@ -17,12 +15,11 @@ from engine.core.clock import Clock
 from engine.marketdata.store import MarketStore
 from tests.replay.fixtures.synthetic_day import SyntheticDay, write_synthetic_day, write_tie_day
 
-#: The replayed day. A real 2026 trading day (Wed 2026-06-17, the same one ``tests/conftest.py``
-#: freezes on) so nothing here depends on a holiday-calendar quirk — though the harness itself never
-#: consults the calendar: the tick stream IS the day.
+#: The replayed day: a real trading day (Wed 2026-06-17, the one ``tests/conftest.py`` freezes on).
+#: The harness never consults the calendar: the tick stream IS the day.
 REPLAY_DAY = date(2026, 6, 17)
 
-#: The second day of the multi-day fixture (Thu 2026-06-18 — the next session).
+#: The second day of the multi-day fixture (the next session).
 REPLAY_DAY_2 = date(2026, 6, 18)
 
 
@@ -34,11 +31,10 @@ def synthetic_day(tmp_path_factory: pytest.TempPathFactory) -> SyntheticDay:
 
 @pytest.fixture(scope="session")
 def two_day_archive(tmp_path_factory: pytest.TempPathFactory) -> tuple[SyntheticDay, SyntheticDay]:
-    """ONE archive root holding two consecutive synthetic days (multi-day replay coverage).
+    """ONE archive root holding two consecutive synthetic days.
 
-    Its own root rather than a second day added to :func:`synthetic_day`: the single-day tests assert
-    ``ticks_read`` against the whole partition set, and a stray extra date under the same root would
-    make those assertions depend on which fixture ran first.
+    Its own root: single-day tests assert ``ticks_read`` against the whole partition set, so an extra
+    date under their root would make them order-dependent.
     """
     root: Path = tmp_path_factory.mktemp("replay_archive_2d")
     return write_synthetic_day(root, REPLAY_DAY), write_synthetic_day(root, REPLAY_DAY_2)
@@ -54,14 +50,8 @@ def tie_day(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, date]:
 
 @pytest.fixture(scope="session", autouse=True)
 def _warm_duckdb(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Pay DuckDB's one-off per-process costs BEFORE any test times anything.
-
-    The first ``duckdb.connect`` in a process loads the extension/catalog machinery, and the first
-    ``MarketStore.open`` runs the whole schema DDL — measured at seconds on this box, entirely
-    once. Folding that into a perf assertion would make the bound a statement about interpreter
-    start-up rather than about the replay loop, so it is burned here instead and the smoke test
-    asserts the WARM number.
-    """
+    """Pay DuckDB's one-off per-process costs (catalog load, schema DDL) before any test times
+    anything, so the perf smoke measures the replay loop and not interpreter start-up."""
     warm = MarketStore(
         tmp_path_factory.mktemp("replay_warm") / "market.duckdb",
         tmp_path_factory.mktemp("replay_warm_pq"),

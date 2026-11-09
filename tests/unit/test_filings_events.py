@@ -1,10 +1,9 @@
-"""``FilingsEventBuilder.insider_net_buy`` — PURE event derivation over synthetic
-``insider_trades``-shaped rows. Covers: the trailing-window crossing (delegated verbatim to the
-stage-2-validated ``event_study.insider_cluster_events``) + emitted metadata (trailing_value /
-contributing count / dominant person-category / point-in-time broadcast_dt); the open-market predicate
-excluding ESOP; the below-threshold empty case; equal trades of different people all counting (the
-store pairs cross-exchange duplicates); and ``row_source`` id-prefix inference. No store, no network —
-every input is a hand-built dict.
+"""``FilingsEventBuilder.insider_net_buy`` — PURE event derivation over hand-built
+``insider_trades``-shaped rows (no store, no network). Covers the trailing-window crossing and its
+metadata (trailing_value / contributing count / dominant person-category / point-in-time
+broadcast_dt), the open-market predicate excluding ESOP, the below-threshold empty case, equal trades
+of different people all counting (the store pairs cross-exchange duplicates), and ``row_source``
+id-prefix inference.
 """
 
 from __future__ import annotations
@@ -90,8 +89,7 @@ def test_row_source_from_id_prefix_and_explicit():
 
 
 def test_equal_trades_of_different_people_all_count():
-    """Two promoters buying the same qty on the same day are two trades. The old (symbol, txn_from,
-    qty) cross-source rule could drop one of them; duplicates are now paired in the store."""
+    """Two promoters buying the same qty on the same day are two trades; duplicates are paired in the store."""
     a, b = _buy(2, 600_000), _buy(2, 600_000)
     a["person_name"] = "Promoter One"                    # BSE row
     b.update(id="b" * 64, person_name="Promoter Two")    # NSE row, same symbol/date/qty

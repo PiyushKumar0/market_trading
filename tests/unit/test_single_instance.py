@@ -1,15 +1,13 @@
 """OS-level single-instance lock (PRIMARY guard) — in-process semantics + subprocess proof.
 
-Closes the 2026-07-21 double-run follow-up. The ``engine_lifecycle`` DB guard in ``lifecycle.startup``
-is a TOCTOU check-then-act an instance can slip past by wedging before the RUNNING commit;
-:class:`~engine.ops.single_instance.InstanceLock` is the real mutual exclusion — an exclusive OS file
-lock. These tests assert the in-process semantics (idempotent acquire/release, cross-handle refusal,
-pid diagnostics) AND the actual cross-PROCESS guarantee via a spawned ``sys.executable`` that
-constructs the SAME lock — including that the KERNEL releases it on process death (no stale lock, the
-whole reason a file lock beats a pidfile).
+The ``engine_lifecycle`` DB guard in ``lifecycle.startup`` is a TOCTOU check-then-act;
+:class:`~engine.ops.single_instance.InstanceLock` (an exclusive OS file lock) is the real mutual
+exclusion. Asserts in-process semantics (idempotent acquire/release, cross-handle refusal, pid
+diagnostics) AND the cross-PROCESS guarantee via a spawned ``sys.executable``, including that the
+KERNEL releases the lock on process death (no stale lock, the reason a file lock beats a pidfile).
 
-Windows is the deployment platform and the ``msvcrt`` byte-range path is the POINT of this guard, so
-these tests deliberately DO NOT skip on Windows and avoid POSIX-only APIs in the test body.
+Windows is the deployment platform and the ``msvcrt`` byte-range path is the point, so these tests do
+NOT skip on Windows and avoid POSIX-only APIs.
 """
 
 from __future__ import annotations
@@ -22,10 +20,9 @@ from pathlib import Path
 import engine
 from engine.ops.single_instance import InstanceLock
 
-# A tiny program a child interpreter runs: construct InstanceLock on argv[1], try to acquire, print the
-# verdict, and EXIT WITHOUT releasing — so a subsequent parent re-acquire proves the KERNEL released
-# the lock on process death. PYTHONPATH puts THIS process's ``src`` first, so the child imports exactly
-# the code under test (not whichever tree the interpreter's editable install points at).
+# Child program: try to acquire argv[1], print the verdict, and EXIT WITHOUT releasing, so a parent
+# re-acquire proves the KERNEL released the lock. PYTHONPATH puts THIS process's ``src`` first, so the
+# child imports the code under test, not the editable install's tree.
 _CHILD = (
     "import sys\n"
     "from engine.ops.single_instance import InstanceLock\n"
@@ -61,12 +58,10 @@ def test_second_object_same_path_is_refused(tmp_path) -> None:
     second = InstanceLock(lock_path)
     try:
         assert first.acquire() is True
-        # A second handle on the SAME path conflicts — Windows byte-range lock and POSIX
-        # flock-on-a-new-open-file-description both refuse across handles, even in one process.
+        # Windows byte-range lock and POSIX flock both refuse across handles, even in one process.
         assert second.acquire() is False
-        # Diagnostics survive the refusal: the recorded holder pid is still readable (offset 1).
+        # The recorded holder pid survives the refusal (offset 1).
         assert second.holder_pid() == os.getpid()
-        # The refusal left the real holder untouched, and re-acquire on it is idempotent.
         assert first.holder_pid() == os.getpid()
         assert first.acquire() is True
     finally:
@@ -104,14 +99,12 @@ def test_subprocess_is_refused_while_held_then_kernel_releases(tmp_path) -> None
     parent = InstanceLock(lock_path)
     try:
         assert parent.acquire() is True
-        # A genuinely separate PROCESS is refused while the parent holds the lock (the real guarantee).
         assert "RESULT=REFUSED" in _spawn(lock_path)
 
         parent.release()
-        # Freed: the next process acquires it. It exits WITHOUT calling release()...
+        # The next process acquires it and exits WITHOUT release(); the KERNEL frees the lock on
+        # process death, so the parent re-acquires with no stale lock to reap.
         assert "RESULT=ACQUIRED" in _spawn(lock_path)
-        # ...and because the KERNEL releases the lock on process death, the parent can re-acquire —
-        # no stale lock to reap (the pidfile failure mode this design exists to avoid).
         assert parent.acquire() is True
     finally:
         parent.release()
