@@ -1,143 +1,96 @@
 #!/usr/bin/env python
 """hi52 PRE-REGISTERED backtest harness (`hi52` pre-registration, 2026-09-01).
 
-This is the owner promotion-gate input for the ``hi52`` SHADOW rule. It is an **event study**, not a
-portfolio simulator (see "Sizing" below), run over the full-market ``bars_1d`` bhavcopy history with
-the engine idle.
+Event study (not a portfolio simulator) of the ``hi52`` SHADOW rule over the full-market ``bars_1d``
+history, with the engine idle.
 
 ===============================================================================================
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE — READ FIRST
 ===============================================================================================
-**NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** Exactly ONE parameter
-set is evaluated — :data:`PRE_REGISTERED_PARAMS`, byte-identical to the live rule's frozen
-``hi52.V1_PARAMS`` (``proximity_min`` 0.95, ``lookback_sessions`` 252, ``min_sessions`` 126,
-``vol_mult`` 1.0, ``ex_skip_days`` 10, ``stop_pct`` 6.0 — ``DEFAULT_PARAMS`` with the v2 filters
-neutralized, which is what those defaults WERE until the 2026-09-12 promotion made them gating;
-see that constant). There is no grid, no ``--proximity-min``
-flag, no optimizer and no "best of" selection anywhere in this module: the trial count cited to the
-deflation machinery is therefore **N = 1** (:data:`TRIAL_COUNT_N`), which is the honest count,
-and ``fold_pass_min(1) = 60%``. Adding a knob that changes the signal definition would silently
-convert N=1 into N=k and invalidate every deflated number this script prints — if the rule is to be
-re-parameterised, that is a NEW pre-registration, not a flag on this one.
+No parameter sweep is run here or was run before it. Exactly ONE parameter set is evaluated:
+:data:`PRE_REGISTERED_PARAMS`, equal to the live rule's frozen ``hi52.V1_PARAMS`` (``DEFAULT_PARAMS``
+with the v2 filters neutralized; see that constant). No grid, no ``--proximity-min`` flag, no
+optimizer, no "best of": the trial count for the deflation machinery is **N = 1**
+(:data:`TRIAL_COUNT_N`), ``fold_pass_min(1) = 60%``. A knob that changes the signal definition would
+silently turn N=1 into N=k and invalidate every deflated number; a re-parameterised rule is a NEW
+pre-registration.
 
-**v2 IS THAT NEW PRE-REGISTRATION (2026-09-09) — A SECOND REGISTRATION, NOT A KNOB ON v1.**
-``--registration v2`` selects a SEPARATELY pre-registered rule: v1's parameters unchanged, PLUS
-three signal-time filters whose thresholds were FIXED on 2026-09-09, from the 2026-09-03
-full-sample medians, and written into this file (:data:`V2_SMOOTH_UP_FRAC_MIN` 0.55,
-:data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` 0.07, :data:`V2_GAP_MAX` 0.05) BEFORE the run that measures
-them — smooth approach AND no gap day AND index members only (decided 2026-09-09). Nothing here selects between v1 and v2, nothing pools them and
-nothing max-picks them: they are reported side by side. But v2 IS a second trial of the same
-family, so the honest count becomes **N = 2** (:func:`trial_count_for`) and a v2 run cites
-``fold_pass_min(2)`` to the research-validation machinery. The v1 path is untouched: under ``--registration v1``
-(the default) not one v2 constant is read, and the measured population, every split cell and every
-CPCV number are exactly what they were before this flag existed — the only v1 output difference is
-that the meta/header now names the registration. The RANK construct is NOT part of v2: it stays
-the v1 construct under both registrations and is labelled so in the notes.
+**v2 IS A SECOND REGISTRATION, NOT A KNOB ON v1.** ``--registration v2`` is v1's parameters PLUS
+three signal-time filters whose thresholds are fixed LITERALS (:data:`V2_SMOOTH_UP_FRAC_MIN` 0.55,
+:data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` 0.07, :data:`V2_GAP_MAX` 0.05, from full-sample medians): smooth
+approach AND no gap day AND index members only. v1 and v2 are reported side by side, never pooled or
+max-picked. v2 is a second trial of the same family, so a v2 run uses **N = 2**
+(:func:`trial_count_for`) and ``fold_pass_min(2)``. Under ``--registration v1`` (the default) no v2
+constant is read. The RANK construct is NOT part of v2: it stays the v1 construct under both.
 
-The two reported constructs are NOT two trials of one hypothesis: they are the two DIFFERENT
-constructs the pre-registration names (the platform's discrete trigger, and the George & Hwang academic
-continuous rank), each reported separately and never pooled or max-picked.
+The two reported constructs (the platform's discrete trigger, and the George & Hwang continuous
+rank) are two DIFFERENT constructs, each reported separately and never pooled or max-picked.
 
 ===============================================================================================
-CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to state)
+CONVENTIONS
 ===============================================================================================
-* **Signal (a) — discrete fresh cross.** ``engine.strategy.scanners.hi52.scan_daily`` is IMPORTED
-  and called; the crossing arithmetic is never re-implemented here (the "live code MUST
-  consume the same crossing function" discipline, inherited from the ``ins`` leg). Rows are
-  :class:`engine.strategy.scanners.brk20.DailyRow`, exactly as the live sweep builds them.
-  For tractability over ~2000 symbols x ~1650 sessions the script first computes a VECTORIZED
-  rolling-max proximity index and only calls ``scan_daily`` on the days that index says could be a
-  fresh cross. That index is an *exact* restatement of ``hi52._proximity``'s window
-  (``close[i] / max(high[i-251..i])``, short window at the series head, and the previous session's
-  own window is the same array at ``i-1``) — it decides only WHICH days are offered to
-  ``scan_daily``, never whether a signal exists, what its levels are, or whether volume/ex-date
-  confirm. ``--verify-prefilter K`` brute-forces every eligible day for the first K symbols and
-  aborts on any disagreement; the unit test asserts the same equality on synthetic data.
-* **Signal (b) — continuous rank.** At each MONTHLY rebalance (the last trading session of each
-  calendar month in the window) every symbol with >= ``min_sessions`` history is scored with the
-  SAME ``hi52._proximity`` function, ranked cross-sectionally, and the TOP DECILE is taken long.
-  The bottom decile and the top-minus-bottom spread are also printed as the academic reference
-  number — the short leg is NOT executable in NSE cash (CNC cannot short overnight) and is labelled
-  as such wherever it appears.
-* **Entry.** The NEXT session's OPEN after the signal session. No same-bar fill anywhere: every
-  input to a signal is strictly before the decision timestamp, and the first price the study can
-  book is the first price an order placed after that close could actually reach.
-* **Exit.** The CLOSE of the horizon session — ``return = close(T+k) / open(T+1) - 1``. This is the
-  convention of record in this repo: ``scripts/event_study.py`` (``next_open`` default, the
-  ``ins``/filings study that produced the promoted +0.73%/+1.58% T+10/T+20 numbers) measures exactly
-  ``close_(T+k) / open_(T+1)``. Horizons are TRADING SESSIONS: T+5, T+10, T+20.
-* **Event admission.** A signal is measured only if all of ``T+1 .. T+20`` exist in that symbol's
-  own bar series; a signal short of the LONGEST horizon is dropped entirely rather than measured at
-  the short horizons only, so T+5 / T+10 / T+20 are always quoted on the SAME event set and are
-  therefore comparable (``event_study.measure_directional`` drops on the same rule).
-* **Costs.** ONE full round trip per trade, both legs, from the repo's single source of truth:
-  ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread
-  charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
-  size). CNC/delivery, never MIS: hi52 is a 5-20 session swing rule and cash equities cannot be held
-  overnight under MIS. ``breakeven_pct`` (not ``fee_breakeven_pct``) is deliberate — the fees-only
-  view is the contract-note anchor, not a viability number, and spread is not modelled separately
-  anywhere here so there is nothing to double-count.
-* **Sizing.** Per-trade EQUAL NOTIONAL, returns reported in PERCENT. No compounding, no portfolio
-  construction, no position interaction, no capital constraint, no per-day cap on concurrent
-  signals. This is an event study measuring the drift after a signal; it is NOT a claim that the
-  full population is simultaneously tradeable at the owner's capital.
-* **Splits (all mandatory, all reported per cell — the pooled number is never the only number):**
-  - *smooth vs jumpy* (Frog-in-the-Pan). From ``hi52.diagnostics_for`` on the signal-day window.
-    EXACT CUT: **smooth iff ``up_day_frac >= median(up_day_frac)`` AND
-    ``max_day_move <= median(max_day_move)``**, both medians taken over THAT CONSTRUCT's own
-    measured signal population; everything else is *jumpy*. The cut is a two-sided AND, so "smooth"
-    is a minority cell (~25% under independence) and "jumpy" is its complement, not a mirror image.
-    Honest caveat: the medians are full-sample statistics, so the split is DESCRIPTIVE — a live rule
-    could not have known them at signal time. It is not a tradeable filter and is not reported as
-    one.
-  - *index members vs extended names*. Index membership as of the SIGNAL DATE is not stored
-    anywhere in this platform, so this split uses the **CURRENT** membership list (the runtime cache
-    ``<data>/universe/index_cached.csv``, falling back to the committed
-    ``config/universe/nifty500_seed.csv``) applied backwards over the whole window. That is a
-    **SURVIVORSHIP-TAINTED PROXY**: a name that entered the index after a big run appears as an
-    "index member" throughout its climb, and a name that was dropped is mislabelled the other way.
-    Every rendering of this split carries the label; the JSON carries
-    ``index_split_is_survivorship_tainted_proxy: true``.
-  - *news-gap-day A/B*. A gap proxy for discrete-information days (Frog-in-the-Pan): a signal whose
-    TRIGGER day moved ``|close/prev_close - 1| > 5%`` is a gap day. Cell A = every signal; cell B =
-    gap days EXCLUDED; the gap-only cell is printed too so the excluded cohort is visible rather
-    than merely subtracted.
-* **Validation.** CPCV through the repo's own machinery — ``engine.learning.validate.cpcv_splits``
-  (skfolio ``CombinatorialPurgedCV``, 6 folds / 2 test folds) — over a per-signal-day series of
-  cost-adjusted returns: day *t*'s observation is the mean NET %-return of the trades signalled on
-  *t*, divided by the horizon in sessions, i.e. a per-session net return directly comparable with
-  the margin floor. Purge and embargo are raised from the default 5 to **the horizon
-  itself** (5/10/20 observations) because an event study at horizon N has N sessions of overlap
-  between neighbouring signals; leaving them at 5 would leak a T+20 trade across the fold boundary.
-  Deflation/promotion is the repo's ``promotion_decision`` with ``n=1`` and the margin floor,
-  with ``margin_floor_days`` set to the horizon (the floor's own derivation: "a position must, over
-  the horizon it is ACTUALLY held, earn at least the one round trip it costs to hold it"). If
-  skfolio is unavailable or the split is degenerate the script falls back to a self-implemented
-  purged K-fold with embargo and says so in both the text report and the JSON (``cv_method``).
-* **The ORB-lesson arithmetic check runs FIRST.** Before any signal-quality statistic is printed,
-  the report states the median per-trade GROSS drift at each horizon against the round-trip cost
-  floor and emits a hard ``GEOMETRY: viable/dead at T+N`` verdict line. ORB was killed twice by cost
-  geometry, not by signal quality; the geometry line exists so nobody reads a hit rate before
-  reading whether the trade can pay for itself.
+* **Signal (a) — discrete fresh cross.** ``hi52.scan_daily`` is IMPORTED and called; the crossing
+  arithmetic is never re-implemented. Rows are ``brk20.DailyRow`` as the live sweep builds them. For
+  tractability a VECTORIZED rolling-max proximity index first selects the days that could be a fresh
+  cross; it is an *exact* restatement of ``hi52._proximity``'s window (``close[i] / max(high[i-251..i])``,
+  short window at the series head, previous session's window = same array at ``i-1``) and decides
+  only WHICH days are offered to ``scan_daily``, never whether a signal exists or confirms.
+  ``--verify-prefilter K`` brute-forces every eligible day for the first K symbols and aborts on any
+  disagreement; the unit test asserts the same.
+* **Signal (b) — continuous rank.** At each MONTHLY rebalance (last trading session of each calendar
+  month) every symbol with >= ``min_sessions`` history is scored with ``hi52._proximity``, ranked
+  cross-sectionally, and the TOP DECILE is taken long. The bottom decile and the top-minus-bottom
+  spread are printed as the academic reference — the short leg is NOT executable in NSE cash (CNC
+  cannot short overnight) and is labelled so.
+* **Entry.** The NEXT session's OPEN after the signal session; no same-bar fill anywhere.
+* **Exit.** ``return = close(T+k) / open(T+1) - 1`` for k = 5, 10, 20 TRADING SESSIONS, the
+  convention of ``scripts/event_study.py`` (``next_open`` default).
+* **Event admission.** A signal is measured only if all of ``T+1 .. T+20`` exist in the symbol's own
+  bars; one short of the LONGEST horizon is dropped whole, so T+5 / T+10 / T+20 are quoted on the
+  SAME event set (``event_study.measure_directional`` drops on the same rule).
+* **Costs.** ONE full round trip per trade: ``CostModel.breakeven_pct(notional, "CNC")`` (statutory
+  fees PLUS measured spread) at the ``--notional`` reference size (default Rs 20,000). CNC, never
+  MIS: hi52 is a 5-20 session swing rule. ``breakeven_pct`` rather than ``fee_breakeven_pct`` is
+  deliberate; spread is not modelled separately, so nothing double-counts.
+* **Sizing.** Per-trade EQUAL NOTIONAL, returns in PERCENT. No compounding, portfolio construction,
+  position interaction, capital constraint or per-day cap on concurrent signals — not a claim that
+  the population is simultaneously tradeable at the owner's capital.
+* **Splits (all mandatory, reported per cell — the pooled number is never the only number):**
+  - *smooth vs jumpy* (Frog-in-the-Pan), from ``hi52.diagnostics_for`` on the signal-day window.
+    **smooth iff ``up_day_frac >= median(up_day_frac)`` AND ``max_day_move <= median(max_day_move)``**,
+    medians over THAT CONSTRUCT's own signal population; everything else is *jumpy*. The two-sided
+    AND makes "smooth" a minority cell and "jumpy" its complement. The medians are full-sample
+    statistics, so the split is DESCRIPTIVE — not a tradeable filter.
+  - *index members vs extended names*. Index membership as of the signal date is not stored, so this
+    uses the CURRENT list (see :func:`load_index_members`) applied backwards: a
+    **SURVIVORSHIP-TAINTED PROXY** (a name that entered the index after a big run reads as a member
+    throughout; a dropped name is mislabelled the other way). Every rendering carries the label; the
+    JSON carries ``index_split_is_survivorship_tainted_proxy: true``.
+  - *news-gap-day A/B*. A signal whose TRIGGER day moved ``|close/prev_close - 1| > 5%`` is a gap
+    day. Cell A = every signal; cell B = gap days EXCLUDED; the gap-only cell is printed too.
+* **Validation.** CPCV via ``engine.learning.validate.cpcv_splits`` (6 folds / 2 test folds) over a
+  per-signal-day series: day *t* = mean NET %-return of trades signalled on *t*, divided by the
+  horizon in sessions, a per-session net return comparable with the margin floor. Purge and embargo
+  are the horizon itself (5/10/20 observations), not the default 5, which would leak a T+20 trade
+  across the fold boundary. Promotion is ``promotion_decision`` at the registration's N with
+  ``margin_floor_days`` = the horizon. If skfolio is unavailable or the split is degenerate it falls
+  back to a purged K-fold with embargo and says so (``cv_method``).
+* **ORB-lesson arithmetic check runs FIRST.** Before any signal-quality statistic, the report states
+  the median per-trade GROSS drift at each horizon against the round-trip cost floor and emits
+  ``GEOMETRY: viable/dead at T+N``. ORB was killed by cost geometry, not signal quality.
 
 ===============================================================================================
 DATA ACCESS
 ===============================================================================================
-Read-only, always. ``MarketStore.open()`` runs its schema DDL and is therefore a WRITER, so this
-script does what ``scripts/entity_resolution_sample.py`` does: attaches DuckDB directly with
-``read_only=True`` and issues its own SELECTs against ``bars_1d`` / ``corp_actions``. DuckDB still
-takes a file lock, so the engine service must be idle/stopped; if the file is missing, locked or
-otherwise unopenable the script REFUSES with an explicit message and exit code 2 rather than
-degrading. Nothing in this module ever writes to the store.
+Read-only, always. ``MarketStore.open()`` runs schema DDL and is a WRITER, so this script, like
+``scripts/entity_resolution_sample.py``, attaches DuckDB directly with ``read_only=True`` and SELECTs
+from ``bars_1d`` / ``corp_actions``. DuckDB still takes a file lock, so the engine service must be
+idle. A missing/locked file REFUSES with exit code 2.
 
-Universe = the full market: ``bars_1d`` carries ``src='bhavcopy'`` rows for every NSE EQ symbol and
-``src='kite_official'`` rows for the ~200 index names; the primary key is (symbol, d), so one row
-per symbol-session regardless of provenance and no de-duplication is needed.
-
-A full-market run holds every symbol's history in memory (float arrays plus the ``DailyRow`` view
-``scan_daily`` consumes) — order 0.5-1 GB for ~2000 symbols x ~6 years. ``--max-symbols`` and
-``--symbols`` are the escape hatches for a constrained box or a smoke run; neither changes any
-convention, only the population.
+Universe = the full market: ``bars_1d`` holds bhavcopy rows for every NSE EQ symbol and
+``kite_official`` rows for the index names; the (symbol, d) primary key means no de-duplication.
+A full-market run holds every symbol's history in memory (order 1 GB); ``--max-symbols`` and
+``--symbols`` shrink the population, not any convention.
 
 Exit codes: 0 = ran; 2 = DB unopenable / no bars in window.
 """
@@ -197,69 +150,49 @@ from engine.strategy.scanners.hi52 import (  # noqa: E402
 from engine.universe.builder import parse_index_constituents_csv  # noqa: E402
 
 # =============================================================================== pinned constants
-#: The ONE pre-registered parameter set — the v1 REGISTRATION's parameters, which both registrations
-#: scan with (v2 is v1 plus the three filters :func:`v2_admits` applies on top, never a re-scan).
-#:
-#: ``hi52.V1_PARAMS``, not ``DEFAULT_PARAMS``, since the 2026-09-12 promotion: the live rule's
-#: defaults now carry the v2 filter thresholds as GATING values, so scanning with them would make
-#: ``--registration v1`` silently measure v2 and the N=1 registration unreproducible. ``V1_PARAMS``
-#: is exactly ``DEFAULT_PARAMS`` with those three neutralized; every v1 parameter still tracks the
-#: live rule, so the drift guard this constant exists for is unchanged.
+#: The ONE pre-registered parameter set, scanned with by both registrations (v2 is v1 plus the
+#: filters :func:`v2_admits` applies on top, never a re-scan). ``hi52.V1_PARAMS`` rather than
+#: ``DEFAULT_PARAMS``: the live defaults carry the v2 thresholds as GATING values, so they would make
+#: ``--registration v1`` silently measure v2.
 PRE_REGISTERED_PARAMS: dict[str, float] = dict(hi52.V1_PARAMS)
 
-#: Trial count cited to the deflation machinery. ONE parameter set, no sweep (see the module
-#: docstring). Not a knob.
+#: Trial count for the deflation machinery: one parameter set, no sweep. Not a knob.
 TRIAL_COUNT_N = 1
 
-#: v1's news-gap threshold, in PERCENT — v1's native unit (the A/B split, the JSON meta field and the
-#: gap_day cell all read it this way). Defined ABOVE the v2 block below so :data:`V2_GAP_MAX` can be
-#: DERIVED from it instead of duplicated as a second literal — see that constant's own comment.
+#: v1's news-gap threshold, in PERCENT. Defined above the v2 block so :data:`V2_GAP_MAX` is DERIVED
+#: from it rather than a second literal.
 GAP_DAY_PCT = 5.0                                 # |close/prev_close - 1| > 5% on the trigger day
 
-# --------------------------------------------------------------------- v2 registration (2026-09-09)
+# --------------------------------------------------------------------- v2 registration
 REGISTRATION_V1 = "v1"
 REGISTRATION_V2 = "v2"
 REGISTRATIONS: tuple[str, ...] = (REGISTRATION_V1, REGISTRATION_V2)
 
-#: v2's three signal-time thresholds. FIXED 2026-09-09 from the 2026-09-03 full-sample medians and
-#: written here BEFORE the run that measures them — they are knowable at signal
-#: time going forward, which is exactly what the DESCRIPTIVE median-based smooth/jumpy cut is not.
-#: Kept as LITERALS, never derived from ``hi52.DEFAULT_PARAMS``: this is the historical registration
-#: record, and a future retune of the live rule must break the coupling test rather than silently
-#: rewrite what was registered on 09-09. Since 2026-09-12 the live rule gates on the same three
-#: numbers (``DEFAULT_PARAMS["smooth_up_day_frac_min"]``/``["smooth_max_day_move"]``/
-#: ``["gap_day_max"]``), so v2 runs measure the rule the engine now trades.
+#: v2's three signal-time thresholds, fixed from full-sample medians. LITERALS, never derived from
+#: ``hi52.DEFAULT_PARAMS``: this is the registration record, and a live retune must break the
+#: coupling test rather than silently rewrite it. The live rule gates on the same three numbers
+#: (``DEFAULT_PARAMS["smooth_up_day_frac_min"]``/``["smooth_max_day_move"]``/``["gap_day_max"]``).
 V2_SMOOTH_UP_FRAC_MIN = 0.55        # up_day_frac over the 20 completed sessions ending at y
 V2_SMOOTH_MAX_DAY_MOVE_MAX = 0.07   # max |close/prev - 1| over the same 20 sessions
-#: |close(y)/close(y-1) - 1| on the trigger session itself, as a FRACTION. DERIVED from
-#: :data:`GAP_DAY_PCT` (v1's own threshold, in percent) rather than a second "0.05" literal: the
-#: "gap_days_only is empty by construction under v2" report note (two screens down) is true only
-#: because a v2-admitted signal's gap_move can never clear v1's gap_day bar, which requires this
-#: exact equality — see ``test_v2_gap_max_is_coupled_to_the_v1_gap_day_threshold``.
+#: |close(y)/close(y-1) - 1| on the trigger session, as a FRACTION, DERIVED from :data:`GAP_DAY_PCT`:
+#: the "gap_days_only is empty by construction under v2" note holds only while the two are equal — see
+#: ``test_v2_gap_max_is_coupled_to_the_v1_gap_day_threshold``.
 V2_GAP_MAX = GAP_DAY_PCT / 100.0
 
 #: v2 reject reasons. A signal failing several is counted ONCE, against the FIRST reason in this
-#: order (the order the filters were registered in), so the three counts partition the rejects and
-#: ``total`` is the number of v1 signals v2 dropped — never a sum of overlapping tallies.
+#: order, so the three counts partition the rejects.
 V2_VETO_SMOOTH = "smooth"
 V2_VETO_GAP = "gap"
 V2_VETO_NOT_INDEX = "not_index"
 V2_VETO_REASONS: tuple[str, ...] = (V2_VETO_SMOOTH, V2_VETO_GAP, V2_VETO_NOT_INDEX)
 
-# VETO-COUNT CONTAINMENT (2026-09-09). ``max_day_move`` is taken over the 20 completed sessions
-# ENDING AT the trigger day, so it INCLUDES the trigger move itself, and :func:`signal_diag` rounds
-# ``gap_move`` to the SAME 4 dp :func:`hi52.diagnostics_for` rounds ``max_day_move`` to
-# (src/engine/strategy/scanners/hi52.py:198) — the two diagnostics read the trigger day's own move
-# bit-for-bit identically, so the band below is EXACT, not approximate. A trigger move larger than
-# :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` is therefore already a smooth failure, and first-match ordering
-# books it as ``smooth``; :data:`V2_VETO_GAP` can only ever count trigger moves in the EXACT half-open
-# band (:data:`V2_GAP_MAX`, :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX`]. A gap_move that could not be computed
-# at all (``nan`` — no prior close) is NOT in that band but still books as ``gap``: it fails the
-# ``gap_move <= V2_GAP_MAX`` check exactly like an out-of-band move does. Read the ``gap`` tally as
-# "gaps in that band, plus any non-computable gap", NEVER as "every gap-day reject" — the big gaps are
-# in the ``smooth`` tally.
-# This is a REPORTING artefact of the counting order only: the ADMISSION decision is unaffected,
-# because the three filters are ANDed and a signal failing any of them is rejected either way.
+# Veto-count containment: ``max_day_move`` covers the 20 sessions ENDING AT the trigger day, so it
+# includes the trigger move, and :func:`signal_diag` rounds ``gap_move`` to the same 4 dp
+# :func:`hi52.diagnostics_for` rounds ``max_day_move`` to — so they read the trigger move identically.
+# A trigger move above :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX` is therefore booked as ``smooth`` (first
+# match); ``gap`` counts moves in the half-open band (:data:`V2_GAP_MAX`, :data:`V2_SMOOTH_MAX_DAY_MOVE_MAX`]
+# plus any non-computable gap (``nan``, no prior close). Never read ``gap`` as "every gap-day reject".
+# Reporting artefact only: admission is unaffected, the filters are ANDed.
 
 #: The pre-registration stamp every v2 report carries, verbatim.
 V2_PREREGISTRATION_NOTE = (
@@ -269,12 +202,10 @@ V2_PREREGISTRATION_NOTE = (
 
 
 def trial_count_for(registration: str) -> int:
-    """Honest trial count for ``registration``: v1 = 1, v2 = 2 (v1 + v2 of the same family).
+    """Trial count for ``registration``: v1 = 1, v2 = 2 (v2 ADDS to v1's count).
 
-    v2 does not replace v1's count — it ADDS to it, so a v2 run is deflated at ``fold_pass_min(2)``
-    while a v1 run keeps citing :data:`TRIAL_COUNT_N`. Unknown names raise rather than defaulting:
-    silently citing N=1 for an unregistered variant is the exact failure this discipline exists to
-    prevent.
+    Unknown names raise: silently citing N=1 for an unregistered variant is the failure this
+    discipline exists to prevent.
     """
     counts = {REGISTRATION_V1: TRIAL_COUNT_N, REGISTRATION_V2: TRIAL_COUNT_N + 1}
     try:
@@ -289,8 +220,8 @@ REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 RANK_TOP_DECILE = 0.10
 
-#: Trailing CALENDAR-day window of the unadjusted-history veto. Source of truth is the live sweep's
-#: own history window, ``hi52_start = today - timedelta(days=400)`` (engine/ops/main.py window_open).
+#: Trailing CALENDAR-day window of the unadjusted-history veto: the live sweep's own history window
+#: (``hi52_start = today - timedelta(days=400)``, engine/ops/main.py).
 UNADJUSTED_LOOKBACK_DAYS = 400
 
 CONSTRUCT_DISCRETE = "discrete_fresh_cross"
@@ -357,8 +288,8 @@ def load_series(
 ) -> dict[str, Series]:
     """Every symbol's ascending ``bars_1d`` history in ``[start, end]``.
 
-    Full market by construction: bhavcopy rows exist for every NSE EQ symbol and the (symbol, d)
-    primary key means one row per symbol-session, so no src filter and no de-duplication.
+    Full market: the (symbol, d) primary key gives one row per symbol-session, so no src filter or
+    de-duplication.
     """
     sql = (
         'SELECT symbol, d, "open", high, low, "close", volume FROM bars_1d '
@@ -406,8 +337,7 @@ def load_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
 def load_structural_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
     """``symbol -> sorted ex-dates`` for the RESCALING kinds alone (``hi52.UNADJUSTED_KINDS``).
 
-    The kind test is the live one (``hi52.unadjusted_history``): exact membership on the stored
-    ``kind``, never case-folded or fuzzy, so this study vetoes the same rows the sweep vetoes.
+    The kind test is the live one (``hi52.unadjusted_history``): exact membership, never case-folded.
     """
     try:
         rows = conn.execute("SELECT symbol, ex_date, kind FROM corp_actions").fetchall()
@@ -424,9 +354,8 @@ def load_structural_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[
 def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     """``{rows, ex_date_min, ex_date_max, structural_rows, structural_ex_date_min, ..._max}``.
 
-    The veto reaches exactly as far as the STRUCTURAL rows do — the table is dividend-dominated, so
-    an all-kinds count says only whether it was backfilled at all — and an empty or short structural
-    span silently disables it, so both are reported next to the counts rather than assumed.
+    The veto reaches only as far as the STRUCTURAL rows (the table is dividend-dominated); an empty
+    or short structural span silently disables it, so the span is reported.
     """
     empty = {"rows": 0, "ex_date_min": None, "ex_date_max": None,
              "structural_rows": 0, "structural_ex_date_min": None, "structural_ex_date_max": None}
@@ -453,14 +382,11 @@ def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set[str], str]:
     """CURRENT index membership + its provenance string (a survivorship-tainted proxy, see above).
 
-    Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the CORE-index runtime cache
-    beside the DB (``<data>/universe/core_index_cached.csv``) -> the committed NIFTY 500 seed. Both
-    file names, and the seed's index, changed with owner decision 2026-09-04 when the eligible index became
-    config (NIFTY 500). Owner decision 2026-10-08 widened the eligible index to NIFTY Total Market, so
-    ``index_cached.csv`` no longer holds the population hi52's edge was measured on; this reads the
-    CORE list instead (``universe.core_index_*``, NIFTY 500), and a run against an older DB tree
-    simply falls through to the committed seed. Parsing reuses the universe builder's own
-    ``parse_index_constituents_csv`` (one CSV definition, never a copy).
+    Ladder: explicit ``--index-csv`` (alias ``--nifty200-csv``) -> the CORE-index runtime cache beside
+    the DB (``<data>/universe/core_index_cached.csv``) -> the committed NIFTY 500 seed. The CORE list
+    (``universe.core_index_*``, NIFTY 500) is read, not ``index_cached.csv``, because the eligible
+    index is wider and no longer the population hi52's edge was measured on. Parsing reuses
+    ``parse_index_constituents_csv``.
     """
     candidates: list[tuple[Path, str]] = []
     if override is not None:
@@ -483,17 +409,15 @@ def load_index_members(db_path: Path, override: Path | None = None) -> tuple[set
 
 # =============================================================================== signal generation
 def _rolling_max(vals: np.ndarray, window: int) -> np.ndarray:
-    """Trailing max over ``min(window, i+1)`` values ending at each ``i`` — the exact window
-    ``hi52._proximity`` takes its high from (``rows[-min(lookback, len(rows)):]``)."""
+    """Trailing max over ``min(window, i+1)`` values ending at each ``i``, ``hi52._proximity``'s window."""
     return pd.Series(vals).rolling(window=window, min_periods=1).max().to_numpy()
 
 
 def prefilter_cross_indices(series: Series, params: dict[str, float]) -> list[int]:
-    """Indices that COULD be a fresh cross — the vectorized narrowing described in the docstring.
+    """Indices that COULD be a fresh cross — the vectorized narrowing of the module docstring.
 
-    Exactly restates ``_proximity``'s window arithmetic: ``prox[i] = close[i] / rolling_max(high)[i]``
-    and the previous session's own-window proximity is that same array at ``i-1``. It never decides a
-    signal; ``scan_daily`` does, on every index returned here.
+    Restates ``_proximity``'s window: ``prox[i] = close[i] / rolling_max(high)[i]``, previous session's
+    proximity = the same array at ``i-1``. ``scan_daily`` decides every index returned here.
     """
     n = len(series)
     min_sessions = int(params["min_sessions"])
@@ -515,11 +439,10 @@ def prefilter_cross_indices(series: Series, params: dict[str, float]) -> list[in
 def _window(series: Series, i: int, lookback: int) -> list[DailyRow]:
     """The trailing ``min(lookback, i+1)`` rows ending at ``i``.
 
-    Passing this instead of ``rows[:i+1]`` is an EXACT equivalence for both ``scan_daily`` and
-    ``_proximity``, not an approximation: both take ``rows[-min(lookback, len(rows)):]`` for the
-    high window, ``rows[:-1][-20:]`` for the volume window and ``rows[:-1]`` (again windowed) for
-    the fresh-cross check, and ``min_sessions`` (126) <= ``lookback`` (252) so the length gate lands
-    identically. It exists purely so a 1600-row history is not re-sliced 1600 times.
+    An EXACT equivalent of ``rows[:i+1]`` for ``scan_daily`` and ``_proximity``: both take
+    ``rows[-min(lookback, len(rows)):]`` for the high window, ``rows[:-1][-20:]`` for volume and a
+    windowed ``rows[:-1]`` for the fresh-cross check, and ``min_sessions`` <= ``lookback`` so the
+    length gate lands identically. It only avoids re-slicing long histories.
     """
     return series.rows[max(0, i + 1 - lookback) : i + 1]
 
@@ -527,9 +450,8 @@ def _window(series: Series, i: int, lookback: int) -> list[DailyRow]:
 def _unadjusted_at(structural: Sequence[date], today: date) -> bool:
     """Whether a rescaling ex-date falls in ``[today - UNADJUSTED_LOOKBACK_DAYS, today - 1]``.
 
-    ``structural`` must be ascending (:func:`load_structural_ex_dates` sorts). ``today`` itself is
-    OUT of range: on the ex-date every bar the window holds is still pre-ex, in one unit — that day
-    is the upcoming-ex skip's case, not this one.
+    ``structural`` must be ascending. ``today`` itself is OUT of range: on the ex-date every bar in
+    the window is still pre-ex, in one unit (the upcoming-ex skip's case).
     """
     if not structural:
         return False
@@ -548,12 +470,11 @@ def discrete_signals(
 ) -> list[tuple[int, float]]:
     """``(signal index, score)`` for every hi52 fresh cross in this symbol's history.
 
-    ``exhaustive`` bypasses the prefilter and offers EVERY eligible day to ``scan_daily`` — the
-    ``--verify-prefilter`` path (and the unit test's equality assertion).
+    ``exhaustive`` bypasses the prefilter and offers EVERY eligible day to ``scan_daily`` (the
+    ``--verify-prefilter`` path and the unit test's equality assertion).
 
     ``structural_ex_dates`` applies the live sweep's unadjusted-history veto (:func:`_unadjusted_at`)
-    to the decision day, so the measured population is the one the shadow can actually originate.
-    Counted on ``veto_counts`` when one is supplied; ``None`` keeps this function pure.
+    to the decision day, counted on ``veto_counts`` when supplied; ``None`` keeps this pure.
     """
     n = len(series)
     min_sessions = int(params["min_sessions"])
@@ -561,9 +482,8 @@ def discrete_signals(
     idxs = range(min_sessions - 1, n) if exhaustive else prefilter_cross_indices(series, params)
     out: list[tuple[int, float]] = []
     for i in idxs:
-        # `today` = the session on which the sweep would run and the order would be placed, i.e. the
-        # entry session. The last bar in the window is `y`, the last COMPLETED session, as the live
-        # rule requires.
+        # `today` = the entry session (when the sweep runs); the window's last bar `y` is the last
+        # COMPLETED session, as the live rule requires.
         today = series.dates[i + 1] if i + 1 < n else series.dates[i]
         cand = scan_daily(
             series.symbol,
@@ -591,14 +511,12 @@ def month_end_indices(dates: Sequence[date]) -> list[int]:
 # =============================================================================== measurement
 @dataclass(frozen=True)
 class SignalDiag:
-    """The per-signal path diagnostics, computed ONCE per signal.
+    """The per-signal path diagnostics, computed ONCE so v2's filters are identical to the fields the
+    smooth/jumpy cut and the gap A/B split read.
 
-    This exists so v2's signal-time filters are DEFINITIONALLY IDENTICAL to the fields the
-    descriptive smooth/jumpy cut and the gap A/B split read: both consume this object, neither
-    re-derives the arithmetic. ``up_day_frac``/``max_day_move`` come straight from the live rule's
-    own ``hi52.diagnostics_for`` (rounding included); ``gap_move`` is the trigger session's
-    ``|close(y)/close(y-1) - 1|`` as a FRACTION, rounded to the SAME 4 dp ``max_day_move`` is (the A/B
-    split reads it in percent). Any of them is ``nan`` when the underlying read is impossible.
+    ``up_day_frac``/``max_day_move`` come from ``hi52.diagnostics_for`` (rounding included);
+    ``gap_move`` is the trigger session's ``|close(y)/close(y-1) - 1|`` as a FRACTION, rounded to the
+    same 4 dp (the A/B split reads it in percent). Any is ``nan`` when the read is impossible.
     """
 
     up_day_frac: float
@@ -607,14 +525,12 @@ class SignalDiag:
 
 
 def signal_diag(series: Series, i: int, params: dict[str, float]) -> SignalDiag:
-    """:class:`SignalDiag` for the signal at index ``i`` (see that class for why it is factored)."""
+    """:class:`SignalDiag` for the signal at index ``i``."""
     diag = diagnostics_for(_window(series, i, int(params["lookback_sessions"])), params=params)
     prev_close = float(series.close[i - 1]) if i >= 1 else float("nan")
     cur_close = float(series.close[i])
-    # Rounded to the SAME 4 dp hi52.diagnostics_for rounds max_day_move to
-    # (src/engine/strategy/scanners/hi52.py:198): when the trigger day is the window's own biggest
-    # mover, gap_move and max_day_move are the SAME physical number and must read identically, or the
-    # VETO-COUNT CONTAINMENT band above documents two diagnostics that quietly disagree.
+    # Same 4 dp as hi52.diagnostics_for's max_day_move: when the trigger day is the window's biggest
+    # mover the two must read identically (see the veto-count containment note above).
     gap_move = (
         round(abs(cur_close / prev_close - 1.0), 4)
         if math.isfinite(prev_close) and prev_close > 0.0
@@ -635,12 +551,11 @@ def v2_admits(
     index_members: set[str],
     veto_counts: dict[str, int] | None = None,
 ) -> bool:
-    """Whether the v2 registration admits the v1 signal at ``i`` (2026-09-09 pre-registration).
+    """Whether the v2 registration admits the v1 signal at ``i``.
 
-    Three fixed signal-time filters, evaluated in the pre-registered order and counted FIRST-MATCH so
-    the reasons partition the rejects (see :data:`V2_VETO_REASONS`). A diagnostic that could not be
-    computed (``nan``) is a REJECT, never a pass: v2's claim is that the filters were satisfied at
-    signal time, and an unknowable value did not satisfy them.
+    Three fixed filters in registered order, counted FIRST-MATCH so the reasons partition the rejects
+    (:data:`V2_VETO_REASONS`). A ``nan`` diagnostic is a REJECT: an unknowable value did not satisfy
+    the filter.
     """
     d = signal_diag(series, i, params)
     if not (
@@ -777,9 +692,8 @@ def split_cells(trades: Sequence[Trade]) -> dict[str, list[Trade]]:
 def geometry(trades: Sequence[Trade], cost_pct: float, horizons: Sequence[int] = HORIZONS) -> dict[str, Any]:
     """Median per-trade GROSS drift vs the round-trip cost floor, per horizon, with a hard verdict.
 
-    ``viable`` iff the MEDIAN gross drift exceeds one full round trip. Median, not mean: ORB's mean
-    was repeatedly dragged around by a handful of tails while the typical trade never covered its
-    costs, and the question this line answers is whether the TYPICAL trade can pay the toll.
+    ``viable`` iff the MEDIAN gross drift exceeds one full round trip. Median, not mean: tails can
+    hide a typical trade that never covers its costs.
     """
     out: dict[str, Any] = {"cost_floor_pct": round(cost_pct, 6), "horizons": {}}
     for k in horizons:
@@ -799,9 +713,8 @@ def geometry(trades: Sequence[Trade], cost_pct: float, horizons: Sequence[int] =
 def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date], np.ndarray]:
     """Per-SIGNAL-DAY cost-adjusted return series for one horizon.
 
-    Day *t* = mean NET %-return of the trades signalled on *t*, divided by ``horizon`` sessions, so
-    the value is a per-session net return in percent — the same units the margin floor
-    (%/day) and ``ValidationPipeline``'s cost-adjusted daily series are quoted in.
+    Day *t* = mean NET %-return of the trades signalled on *t*, divided by ``horizon`` sessions: a
+    per-session net return in percent, the units of the margin floor and ``ValidationPipeline``.
     """
     by_day: dict[date, list[float]] = defaultdict(list)
     for t in trades:
@@ -817,13 +730,9 @@ def cpcv_report(
 ) -> dict[str, Any]:
     """CPCV + the deflated promotion decision for one construct at one horizon.
 
-    Purge and embargo are the HORIZON, not the default 5: at horizon N a signal's trade overlaps
-    the next N sessions of signals, so a 5-observation purge leaks a T+20 trade straight across the
-    fold boundary.
-
-    ``trial_count`` is :func:`trial_count_for` the run's registration (2026-09-09): it is the N the
-    deflation machinery is told about, so a v2 run reports every construct against
-    ``fold_pass_min(2)``.
+    Purge and embargo are the HORIZON, not the default 5: a 5-observation purge leaks a T+20 trade
+    across the fold boundary. ``trial_count`` is :func:`trial_count_for` the run's registration, so a
+    v2 run reports every construct against ``fold_pass_min(2)``.
     """
     days, vals = daily_net_series(trades, horizon)
     n_obs = int(vals.size)
@@ -897,15 +806,13 @@ def run_study(
 ) -> tuple[dict[str, Any], dict[str, list[Trade]]]:
     """Run both constructs end to end.
 
-    Returns ``(document, trades_by_construct)`` — the document is the JSON payload and the text
-    report's input; the per-trade lists are deliberately NOT embedded in it (a full-market run books
-    tens of thousands of trades) but are returned so callers and tests can assert on individual
-    fills without re-deriving them.
+    Returns ``(document, trades_by_construct)``: the document is the JSON payload and report input;
+    per-trade lists are not embedded in it (tens of thousands of trades) but returned for callers
+    and tests.
 
-    ``registration`` selects which PRE-REGISTERED rule is measured (see the module docstring).
-    ``v1`` is the original and takes no v2 code path whatsoever; ``v2`` additionally applies
-    :func:`v2_admits` to every discrete signal and cites N=2. The rank constructs are the v1
-    construct under both.
+    ``registration`` selects the PRE-REGISTERED rule (module docstring). ``v1`` takes no v2 code
+    path; ``v2`` additionally applies :func:`v2_admits` to every discrete signal and cites N=2.
+    The rank constructs are the v1 construct under both.
     """
     trial_count = trial_count_for(registration)   # also the registration-name validation
     p = dict(params or PRE_REGISTERED_PARAMS)
@@ -948,9 +855,8 @@ def run_study(
             verify_checked += 1
         n_signals_discrete += len(sigs)
         if registration == REGISTRATION_V2:
-            # AFTER the fired count and AFTER --verify-prefilter (which checks the v1 signal set):
-            # `n_discrete_signals_fired` stays the RAW fresh-cross count under both registrations,
-            # and the v2 vetoes below are what explains the difference from it.
+            # After the fired count and --verify-prefilter (which checks the v1 signal set):
+            # `n_discrete_signals_fired` stays the RAW fresh-cross count under both registrations.
             sigs = [
                 (i, score)
                 for i, score in sigs
@@ -984,8 +890,8 @@ def run_study(
             i = pos[sym].get(d)
             if i is None or i + 1 < min_sessions:
                 continue
-            # The rank window ENDS at d (the discrete window ends at y = d - 1), so an ex-date ON d
-            # already puts a post-ex close under a pre-ex high: the taint range here is [d-400, d].
+            # The rank window ENDS at d (the discrete one at y = d - 1), so an ex-date ON d already
+            # puts a post-ex close under a pre-ex high: the taint range is [d-400, d].
             if _unadjusted_at(structural.get(sym, []), d + timedelta(days=1)):
                 _bump(rank_vetoes, VETO_UNADJUSTED_HISTORY)
                 continue
@@ -1036,10 +942,7 @@ def run_study(
         "equities cannot be shorted overnight (CNC), so the short leg is NOT executable here and no "
         "borrow cost is modelled for it."
     )
-    # WHY registration-aware (2026-09-09): hard-coding "N=1" here contradicted the v2 note three
-    # lines below, which cites N=2 — one report asserting both counts. The f-string reads the SAME
-    # trial_count the CPCV blocks are deflated at, so the note cannot drift from the machinery. At
-    # trial_count = 1 it renders byte-for-byte the string this note has always been.
+    # Reads the same trial_count the CPCV blocks are deflated at, so the note cannot drift from it.
     notes.append(
         f"NO PARAMETER SWEEP was run: one pre-registered parameter set, trial count N={trial_count} "
         f"(fold_pass_min = {fold_pass_min(trial_count):.0%})."
@@ -1067,13 +970,8 @@ def run_study(
             "the restriction is applied with CURRENT membership, so v2's measured population is not "
             "the population a live v2 could have originated on historical dates."
         )
-        # WHY (2026-09-09): the split cells are printed under the SAME names in a v1 and a v2 report,
-        # which invites the one comparison v2 cannot support — v2's filters are the split criteria,
-        # so two cells are defined away and a third is drawn over a pre-filtered population. Naming
-        # that in the report is cheaper than a reader silently reading n=0 as an absent edge. SCOPED
-        # to the discrete construct: v2_admits filters CONSTRUCT_DISCRETE signals only (see the
-        # for-loop above that applies it) — the rank blocks below never call it, so their same-named
-        # cells stay v1's cells, unchanged.
+        # Split cells carry the same names in v1 and v2 reports, but v2's filters ARE the split
+        # criteria; scoped to the discrete construct because the rank blocks never call v2_admits.
         notes.append(
             f"TWO SPLIT CELLS ARE EMPTY BY CONSTRUCTION UNDER v2, FOR {CONSTRUCT_DISCRETE} ONLY: "
             f"{CELL_EXTENDED} and {CELL_GAP_ONLY} are defined away, inside that construct, by v2's "
@@ -1119,10 +1017,8 @@ def run_study(
             "n_symbols": len(series_by_symbol),
             "n_sessions": len(all_dates),
             "params": p,
-            # "live" = the v1 registration's own reference set (hi52.V1_PARAMS). Since the
-            # 2026-09-12 promotion DEFAULT_PARAMS also carries the v2 filter thresholds as gating
-            # values, which no run of this script scans with — comparing against them would report
-            # False for every honest run and say nothing about drift in the v1 parameters.
+            # "live" = the v1 reference set (hi52.V1_PARAMS); DEFAULT_PARAMS also carries the v2 gating
+            # thresholds, so comparing against it would read False for every honest run.
             "params_match_live_defaults": p == dict(hi52.V1_PARAMS),
             "live_v2_filter_params": {k: DEFAULT_PARAMS[k] for k in sorted(hi52.V2_FILTER_PARAMS)},
             "registration": registration,
@@ -1155,8 +1051,7 @@ def run_study(
         "notes": notes,
     }
     if registration == REGISTRATION_V2:
-        # v2-only keys: a v1 document is exactly the document it was before this flag existed,
-        # except for the two meta fields that name its registration.
+        # v2-only keys; a v1 document carries none of them.
         doc["v2_filters"] = {
             "smooth_up_day_frac_min": V2_SMOOTH_UP_FRAC_MIN,
             "smooth_max_day_move_max": V2_SMOOTH_MAX_DAY_MOVE_MAX,
@@ -1204,11 +1099,8 @@ def run_study(
 
 
 # =============================================================================== rendering
-#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the
-#: ``promotion_decision`` reasons use em dashes, the cost model quotes rupees). The JSON artifact
-#: keeps the original text verbatim; only the CONSOLE rendering is folded to ASCII, because a
-#: Windows console at cp1252 cannot print a rupee sign or an arrow and would kill the run on the
-#: last line of a multi-hour study.
+#: Transliterations for non-ASCII characters on borrowed strings (em dashes, rupee sign). Only the
+#: CONSOLE rendering is folded; a cp1252 console cannot print them. The JSON keeps the original.
 _ASCII_MAP = str.maketrans({
     "—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"',
     "→": "->", "≥": ">=", "≤": "<=", "×": "x", "₹": "Rs ", " ": " ",
@@ -1241,8 +1133,6 @@ def render_text(doc: dict[str, Any]) -> str:
     add(f"params          : {json.dumps(m['params'], sort_keys=True)}")
     add(f"params == live  : {m['params_match_live_defaults']}   "
         f"(sweep run: {m['parameter_sweep_run']}, trial count N={m['trial_count_n']})")
-    # The registration line is printed for BOTH registrations - a report that does not say which
-    # pre-registration produced it is the ambiguity this block exists to remove.
     add(f"registration    : {m['registration']}   "
         f"(trial_count_n = {m['trial_count_n']}, fold_pass_min = {m['fold_pass_min']:.0%})")
     filters = doc.get("v2_filters")
@@ -1257,8 +1147,7 @@ def render_text(doc: dict[str, Any]) -> str:
             f"not_index {v2v['not_index']}   (total {v2v['total']} of "
             f"{m['n_discrete_signals_fired']} v1 fresh crosses; first-match, so the reasons "
             "partition the rejects)")
-        # The containment the V2_VETO_* constants document, restated where the counts are READ. The
-        # band is EXACT (not merely typical) because signal_diag rounds gap_move to hi52's own 4 dp.
+        # The containment documented at V2_VETO_*, restated where the counts are read.
         add(f"                  containment: max_day_move includes the trigger day, so any trigger "
             f"move > {filters['smooth_max_day_move_max']} books as smooth and gap counts only "
             f"trigger moves in ({filters['gap_max_abs_close_change']}, "
@@ -1392,14 +1281,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="reference per-trade notional the round-trip cost is quoted at")
     ap.add_argument("--symbols", default=None, help="comma-separated symbol subset (smoke runs)")
     ap.add_argument("--max-symbols", type=int, default=None, help="cap the symbol count (smoke runs)")
-    # ``--index-csv`` is the reading name since owner decision 2026-09-04 (index became config); the original
-    # ``--nifty200-csv`` stays as an alias onto the SAME dest so recorded run commands, COMMANDS.md
-    # entries and the harness tests keep working verbatim. dest is pinned because argparse would
-    # otherwise derive it from the first option string and silently orphan ``args.nifty200_csv``.
+    # ``--nifty200-csv`` is a legacy alias (recorded run commands, tests); dest is pinned because
+    # argparse would otherwise derive it from the first option string and orphan ``args.nifty200_csv``.
     ap.add_argument("--index-csv", "--nifty200-csv", type=Path, default=None, dest="nifty200_csv",
                     help="override the CURRENT index-membership CSV used by the index/extended split")
-    # NOT a parameter knob (which would turn N=1 into N=k silently): it SELECTS which of the two
-    # separately pre-registered rules is measured, and the trial count moves with it.
+    # Not a parameter knob: it SELECTS one of two separately pre-registered rules; N moves with it.
     ap.add_argument("--registration", choices=list(REGISTRATIONS), default=REGISTRATION_V1,
                     help="which PRE-REGISTERED rule to measure: v1 (the 2026-09-01 registration, "
                          "default) or v2 (2026-09-09: v1 plus the fixed smooth/no-gap/index-only "

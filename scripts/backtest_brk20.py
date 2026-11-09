@@ -1,162 +1,106 @@
 #!/usr/bin/env python
 """``brk20`` ENTRY-MECHANISM backtest (pre-registered 2026-09-12).
 
-``brk20`` has never been backtested. Its LIMIT-AT-LEVEL entry (``entry = H20``, the broken level) was
-a 2026-08-13 fix for a sizing/render defect, not an evidence-based choice of entry
-MECHANISM, and it costs live proposals: of 15 ``brk20`` proposals, 6 died on the risk gate's
-``entry_sanity_band`` (level >2% below LTP) — the sole reject cause for 3, which are the top-3
-``brk20`` scores. An external reviewer proposes entering AT MARKET on confirmation. This is the
-event study that decides between them; it is NOT a portfolio simulator and it WIRES NOTHING.
+Event study comparing the shipped limit-at-level entry (``entry = H20``) with entering at market on
+confirmation. NOT a portfolio simulator; it wires nothing.
 
 ===============================================================================================
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE — READ FIRST
 ===============================================================================================
-**NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** The signal is the live
-rule at its frozen defaults — :data:`PRE_REGISTERED_PARAMS` is byte-identical to
-``brk20.DEFAULT_PARAMS`` (``lookback_days`` 20, ``vol_mult`` 1.2, ``rr_target`` 2.0,
-``ex_skip_days`` 10) and :data:`PRE_REGISTERED_FLOOR_PARAMS` to ``brk20.FLOOR_PARAMS`` (the stop-geometry
-owner-only floor knobs, never learnable); the assertions in the unit test make a silent drift between
-this study and the live rule impossible. What IS registered is exactly THREE ENTRY VARIANTS
-(:data:`VARIANTS`), fixed before this file ran:
+No parameter sweep is run here or was run before it. The signal is the live rule at its frozen
+defaults: :data:`PRE_REGISTERED_PARAMS` equals ``brk20.DEFAULT_PARAMS`` and
+:data:`PRE_REGISTERED_FLOOR_PARAMS` equals ``brk20.FLOOR_PARAMS`` (the owner-only stop-geometry floor
+knobs); the unit test asserts it. Exactly THREE ENTRY VARIANTS are registered (:data:`VARIANTS`):
 
 * ``next_open``       — the next session's OPEN after the fresh cross (market-on-confirmation).
 * ``limit_3_sessions`` — the SHIPPED mechanism: a resting limit at the candidate's own
   ``raw_levels.entry``, filled within 3 sessions.
 * ``limit_5_sessions`` — the same at 5 sessions.
 
-The honest trial count cited to the research-validation deflation machinery is therefore **N = 3**
-(:data:`TRIAL_COUNT_N`), ``fold_pass_min(3) = 60%``. There is no ``--vol-mult``, no ``--lookback``,
-no ``--fill-window`` and no "best of" selection anywhere in this module: adding a knob that changes
-the signal definition or the fill rule would silently convert N=3 into N=k and invalidate every
-deflated number printed here. A re-parameterised rule is a NEW pre-registration, not a flag on this
-one.
+Trial count for the deflation machinery is **N = 3** (:data:`TRIAL_COUNT_N`), ``fold_pass_min(3) =
+60%``. Adding a knob that changes the signal or the fill rule (``--vol-mult``, ``--fill-window``,
+"best of") would silently turn N=3 into N=k and invalidate every deflated number; a re-parameterised
+rule is a NEW pre-registration.
 
-**THE DECISION RULE WAS FIXED BEFORE THE RUN** (:data:`DECISION_RULE`, evaluated by
-:func:`decision_outcome`): prefer the variant with the higher median NET return at T+10, PROVIDED it
-is CPCV-promotable at T+10; if no variant is CPCV-promotable at T+10 the outcome is ``neither`` and
-the shipped mechanism stands unchanged. Nothing here max-picks across horizons, and a variant winning
-the comparison is evidence about the MECHANISM only — ``brk20`` still carries no expectancy
-presumption and any wiring is a separate owner promotion decision.
+DECISION RULE (:data:`DECISION_RULE`, :func:`decision_outcome`): prefer the variant with the higher
+median NET return at T+10, PROVIDED it is CPCV-promotable at T+10; if none is, the outcome is
+``neither`` and the shipped mechanism stands. Nothing max-picks across horizons. A winner is evidence
+about the MECHANISM only — ``brk20`` carries no expectancy presumption and wiring is a separate owner
+decision.
 
 ===============================================================================================
-CONVENTIONS (pinned; every one of them is a choice this docstring is obliged to state)
+CONVENTIONS
 ===============================================================================================
-* **Signal.** ``engine.strategy.scanners.brk20.scan_daily`` is IMPORTED and called on every eligible
-  session; the H20 arithmetic, the fresh-cross test, the volume confirmation, the ex-date skip
-  and the stop-geometry floor are never re-implemented here. Rows are ``brk20.DailyRow``,
-  exactly as the live sweep builds them. The only thing this module decides about a signal is WHICH
-  trailing window it hands ``scan_daily`` (:func:`_scan_window_rows` — an exact equivalence, not an
-  approximation; see that function) and the 35-day unadjusted-history veto the live sweep applies
-  around it.
-* **Population.** The ELIGIBLE universe: the CURRENT (latest ``universe_daily`` day) ``included``
-  rows plus ``exclusion_reasons == ['watchlist_cap']`` rows — the same predicate
-  ``MarketStore.get_universe_eligible_symbols`` hands the live sweep — applied BACKWARDS over the
-  whole window. SURVIVORSHIP-TAINTED PROXY, in the same sense the ``hi52`` report's index split is:
-  membership as of each signal date is stored nowhere in this platform, so a name that entered the
-  index after a big run reads as eligible throughout that run and a dropped name is mislabelled the
-  other way. Every rendering carries the label; the JSON carries
+* **Signal.** ``brk20.scan_daily`` is IMPORTED and called on every eligible session; nothing of the
+  rule is re-implemented. Rows are ``brk20.DailyRow`` as the live sweep builds them. This module only
+  chooses the trailing window handed to ``scan_daily`` (:func:`_scan_window_rows`, an exact
+  equivalence) and applies the live sweep's 35-day unadjusted-history veto around it.
+* **Population.** The CURRENT (latest ``universe_daily`` day) eligible universe — ``included`` rows
+  plus ``exclusion_reasons == ['watchlist_cap']`` rows, the predicate of
+  ``MarketStore.get_universe_eligible_symbols`` — applied BACKWARDS over the whole window.
+  SURVIVORSHIP-TAINTED PROXY: membership as of each signal date is stored nowhere, so a name that
+  joined the index after a big run reads as eligible throughout it and a dropped name is mislabelled
+  the other way. Every rendering carries the label; the JSON carries
   ``population_is_survivorship_tainted_proxy: true``.
-* **Entry.** Per variant, see :func:`fill_for`. Next-open fills at ``open(y+1)`` — no same-bar fill
-  anywhere: every input to the signal is strictly before the decision timestamp, and the first price
-  the study can book is the first price an order placed after that close could reach. A limit variant rests a
-  limit at the candidate's OWN ``raw_levels.entry`` (``round_to_tick(H20)`` — the price the live
-  mechanism actually rests, not the raw float) and fills on the FIRST session in ``y+1 .. y+N`` whose
-  ``low <= level``, at ``min(open, level)``: a session that gaps through fills at its open, never at
-  a price the tape did not print. Unfilled at N ⇒ NO TRADE, and the FILL RATE is reported as a
-  first-class number — an unfilled breakout is the mechanism's real cost.
-  TWO DELIBERATE DIVERGENCES FROM ``engine.paper.broker``'s tick fill model, both stated because
-  they bias the limit numbers UPWARD and a reader must be able to discount them: (i) that model
-  requires a strict TRADE-THROUGH and this one counts a daily ``low == level`` touch as a fill, so
-  the limit fill rates here are an UPPER bound; (ii) that model never fills better than the limit,
-  while ``min(open, level)`` books the opening print when a session opens below the level — which is
-  what a marketable-on-open limit actually gets, and is the only defensible read of a daily bar.
-* **Exit.** The CLOSE of the horizon session, measured FROM THE FILL: ``close(fill + k) / fill_px -
-  1``, horizons k = 5 / 10 / 20 TRADING SESSIONS. This is a deliberate divergence from the
-  ``hi52``/``scripts/event_study.py`` signal-anchored convention (``close(T+k) / open(T+1)``), and
-  the reason is the question being asked: the variants fill on DIFFERENT sessions, so a signal
-  anchor would charge the limit variants for the days it spent waiting and would compare two different holding
-  periods. The fill anchor measures the mechanism.
-* **Event admission — ONE SIGNAL population; THREE DIFFERENT TRADE SETS.** A signal is admitted only
-  when a full ``y + MAX_FILL_WINDOW + max(HORIZONS)`` of forward bars exists AND every one of those
-  bars is usable (finite, positive OHLC). So the latest possible 5-session-limit fill still has a complete T+20
-  and the fill rate has an honest denominator. A signal short of that is dropped whole, never
-  measured at the short horizons only.
-  **What is shared is the SIGNAL population, never the TRADE set** (2026-09-12 correction — the
-  earlier "one shared population … same event set" phrasing was wrong and is struck): a limit
-  fills only when price RETURNS to the broken level, i.e. conditional on the breakout not running
-  away, so the limit variants' trades are a pullback-SELECTED subset of the admitted signals (next-open 8,292 / 3-session-limit 4,230
-  / 5-session-limit 4,898 on the registered run) and any next-open vs limit number quoted pooled is a per-FILLED-TRADE comparison
-  across two different event sets. That is why :func:`matched_cohort_decomposition` exists and is
-  reported next to every pooled cell: it re-quotes next-open on exactly the signals each limit variant filled
-  (the entry PRICE-and-timing effect) and on exactly the ones it never filled (the SELECTION effect).
-* **Costs.** ONE full round trip per trade, both legs, from the repo's single source of truth:
-  ``CostModel.breakeven_pct(notional, "CNC")`` — statutory fees PLUS the measured bid-ask spread —
-  charged at the ``--notional`` reference size (default Rs 20,000, the repo's calibration
-  size) = **0.3192%** on the shipped surface. CNC/delivery, never MIS: ``brk20`` is a swing rule and
-  cash equities cannot be held overnight under MIS. ``breakeven_pct`` (not ``fee_breakeven_pct``) is
-  deliberate — the fees-only view is the contract-note anchor, not a viability number.
-* **Sizing.** Per-trade EQUAL NOTIONAL, returns in PERCENT. No compounding, no portfolio
-  construction, no position interaction, no capital constraint, no cap on concurrent signals. An
-  event study measuring the drift after a signal, NOT a claim that the population is simultaneously
-  tradeable at the owner's capital.
-* **Mandatory split — BREAKOUT-MARGIN TERCILE** (``close(y)/H20 - 1``), because the live band
-  rejections concentrate in the top tercile: a wide margin is exactly what puts the rested level far
-  below LTP, so the tercile split is where the two mechanisms must differ if they differ at all.
-  The tercile cuts are full-sample statistics of the measured population, so the split is
-  DESCRIPTIVE — a live rule could not have known them at signal time. It is not a tradeable filter
-  and is not reported as one (the ``hi52`` smooth/jumpy caveat, verbatim in force). Terciles are
+* **Entry** (:func:`fill_for`). Next-open fills at ``open(y+1)``; no same-bar fill anywhere. A limit
+  rests at the candidate's OWN ``raw_levels.entry`` (``round_to_tick(H20)``) and fills on the FIRST
+  session in ``y+1 .. y+N`` whose ``low <= level``, at ``min(open, level)`` (a gap through the level
+  fills at the open). Unfilled at N ⇒ NO TRADE; the FILL RATE is reported as a first-class number.
+  TWO DIVERGENCES FROM ``engine.paper.broker``'s tick fill model, both biasing the limit numbers
+  UPWARD: (i) that model requires a strict trade-through, this one counts a daily ``low == level``
+  touch, so limit fill rates are an UPPER bound; (ii) that model never fills better than the limit,
+  while ``min(open, level)`` books the opening print when a session opens below the level.
+* **Exit.** ``close(fill + k) / fill_px - 1`` for k = 5 / 10 / 20 TRADING SESSIONS, anchored on the
+  FILL, unlike the signal-anchored ``hi52``/``scripts/event_study.py`` convention
+  (``close(T+k) / open(T+1)``): the variants fill on different sessions, so a signal anchor would
+  charge the limit variants for waiting days.
+* **Admission — ONE SIGNAL population; THREE DIFFERENT TRADE SETS.** A signal is admitted only when
+  ``MAX_FILL_WINDOW + max(HORIZONS)`` forward bars exist and are all usable (finite, positive OHLC),
+  so the latest possible limit fill still has a complete T+20 and the fill rate has an honest
+  denominator. A short signal is dropped whole. A limit fills only when price RETURNS to the level,
+  so the limit variants' trades are a pullback-SELECTED subset; any pooled next-open vs limit number
+  is a per-FILLED-TRADE comparison across two event sets. Hence
+  :func:`matched_cohort_decomposition`, reported next to every pooled cell.
+* **Costs.** ONE full round trip per trade: ``CostModel.breakeven_pct(notional, "CNC")`` (statutory
+  fees PLUS measured spread) at the ``--notional`` reference size (default Rs 20,000). CNC, never
+  MIS: ``brk20`` is a swing rule. ``breakeven_pct`` rather than ``fee_breakeven_pct`` is deliberate —
+  fees-only is the contract-note anchor, not a viability number.
+* **Sizing.** Per-trade EQUAL NOTIONAL, returns in PERCENT. No compounding, portfolio construction,
+  position interaction, capital constraint or cap on concurrent signals — not a claim that the
+  population is simultaneously tradeable at the owner's capital.
+* **Mandatory split — BREAKOUT-MARGIN TERCILE** (``close(y)/H20 - 1``): wide margins put the rested
+  level far below LTP, so this is where the mechanisms must differ if they differ at all. The cuts
+  are full-sample statistics, so the split is DESCRIPTIVE, not a tradeable filter. Terciles are
   stamped on the SIGNAL, so a signal sits in the same cell under every variant.
-* **Validation.** CPCV through the repo's own machinery — ``engine.learning.validate.cpcv_splits``
-  (skfolio ``CombinatorialPurgedCV``, 6 folds / 2 test folds) — over a per-FILL-DAY series of
-  cost-adjusted returns: day *t*'s observation is the mean NET %-return of the trades FILLED on *t*,
-  divided by the horizon in sessions, i.e. a per-session net return directly comparable with the
-  margin floor. Keyed on the FILL day, not the signal day, because the holding window starts at
-  the fill: two trades overlap iff their fill days are within one horizon, so purge = embargo = the
-  horizon covers the overlap exactly. (``hi52`` keys on the signal day because its fill is always
-  signal+1 — a constant shift; here it is not.) Deflation/promotion is the repo's
-  ``promotion_decision`` at ``n = TRIAL_COUNT_N`` with the margin floor, ``margin_floor_days``
-  set to the horizon. If skfolio is unavailable or the split is degenerate the script falls back to a
-  self-implemented purged K-fold with embargo and says so in the report and the JSON (``cv_method``).
-* **The ORB-lesson arithmetic check runs FIRST.** Before any signal-quality statistic is printed, the
-  report states the median per-trade GROSS drift at each horizon against the round-trip cost floor
-  and emits a hard ``GEOMETRY: viable/dead at T+N`` verdict line. ORB was killed twice by cost
-  geometry, not by signal quality.
-* **Matched-cohort decomposition (2026-09-12, manager-directed).** Because the trade sets are not
-  shared, the pooled next-open vs limit gap mixes two different things, and the report separates them in
-  labelled cells (:func:`matched_cohort_decomposition`, STEP 3B): the **PRICE effect** = limit minus next-open
-  on exactly the signals the limit variant FILLED (same events; the limit pays the level instead of open(y+1), AND for
-  fills at delay ≥ 2 sessions its holding window also starts later by the fill delay because exits
-  are anchored on the fill — so the cell is an entry price-and-timing effect, not a pure price
-  effect; the delay histogram beside it says how much of the cohort that caveat covers), and the
-  **SELECTION effect** = next-open on the filled cohort minus next-open on the UNFILLED cohort (same entry
-  mechanism, the only difference is which signals came back to the level). Each cell reports n,
-  median/mean gross and net and hit rate at every horizon, and the block NAMES which of the two
-  effects carries the limit's advantage. This is a DESCRIPTIVE decomposition of the registered result, not a
-  fourth trial: it introduces no new variant, no new parameter and no new selection, and the
-  registered decision rule is still evaluated on the pooled cells exactly as registered.
-* **Reporting rule (2026-09-12 amendment; a TIGHTENING of how a result is REPORTED, not a new
-  selection).** A variant × horizon is reported PROMOTABLE only if the CPCV/deflation rule passes AND
-  the geometry is viable at that horizon (median NET > 0 — the typical trade clears one full round
-  trip). The two gates are built on different statistics and could disagree silently: the CPCV fold
-  series is a per-fill-day MEAN (house convention, ``scripts/backtest_hi52.py``) while every geometry
-  and decision statistic is a MEDIAN, so a tail-driven variant can read "promotable" while its
-  typical trade cannot pay the toll (next-open at T+10 on the registered run: CPCV 60.0% pass, median net −0.3192%
-  → reported NOT viable). The amendment can only WITHHOLD a promotable label, never grant one, so it
-  cannot promote anything the original rule refused; the original rule's outcome is re-stated
-  verbatim beside the tightened one and the report says whether the tightening changes it.
+* **Validation.** CPCV via ``engine.learning.validate.cpcv_splits`` (6 folds / 2 test folds) over a
+  per-FILL-DAY series: day *t* = mean NET %-return of trades FILLED on *t*, divided by the horizon, a
+  per-session net return comparable with the margin floor. Keyed on the fill day (``hi52`` keys on the
+  signal day because its fill is always signal+1), so purge = embargo = the horizon covers trade
+  overlap exactly. Promotion is ``promotion_decision`` at ``n = TRIAL_COUNT_N`` with
+  ``margin_floor_days`` = the horizon. If skfolio is unavailable or the split is degenerate it falls
+  back to a purged K-fold with embargo and says so (``cv_method``).
+* **ORB-lesson arithmetic check runs FIRST.** Before any signal-quality statistic, the report states
+  the median per-trade GROSS drift at each horizon against the round-trip cost floor and emits
+  ``GEOMETRY: viable/dead at T+N``. ORB was killed by cost geometry, not signal quality.
+* **Matched-cohort decomposition** (STEP 3B), DESCRIPTIVE, not a fourth trial: **PRICE effect** =
+  limit minus next-open on the signals the limit FILLED (for fills at delay ≥ 2 the holding window
+  also shifts by the fill delay, so it is an entry price-and-timing effect); **SELECTION effect** =
+  next-open on the filled cohort minus next-open on the UNFILLED cohort. The registered decision rule
+  is still evaluated on the pooled cells.
+* **Reporting rule** (tightening of how a result is REPORTED, not a new selection). A variant ×
+  horizon is reported PROMOTABLE only if CPCV/deflation passes AND the geometry is viable (median NET
+  > 0). The CPCV series is a per-fill-day MEAN while geometry and decision statistics are MEDIANS, so
+  a tail-driven variant can pass CPCV while its typical trade cannot pay the toll. The rule can only
+  WITHHOLD a promotable label; the registered outcome is re-stated beside the tightened one.
 
 ===============================================================================================
 DATA ACCESS
 ===============================================================================================
-Read-only, always. ``MarketStore.open()`` runs its schema DDL and is therefore a WRITER, so this
-script does what ``scripts/backtest_hi52.py`` and ``scripts/entity_resolution_sample.py`` do: attaches DuckDB
-directly with ``read_only=True`` and issues its own SELECTs against ``bars_1d`` / ``corp_actions`` /
-``universe_daily``. DuckDB still takes a file lock, so the engine service must be idle/stopped; if the
-file is missing, locked or otherwise unopenable the script REFUSES with an explicit message and exit
-code 2 rather than degrading. Nothing in this module ever writes to the store.
-
-An empty ``universe_daily`` is also a refusal, not a degradation: the eligible universe IS the
-population here, and a study over an empty population is not a negative result.
+Read-only, always. ``MarketStore.open()`` runs schema DDL and is a WRITER, so this script, like
+``scripts/backtest_hi52.py`` and ``scripts/entity_resolution_sample.py``, attaches DuckDB directly
+with ``read_only=True`` and SELECTs from ``bars_1d`` / ``corp_actions`` / ``universe_daily``. DuckDB
+still takes a file lock, so the engine service must be idle. A missing/locked file REFUSES with exit
+code 2. An empty ``universe_daily`` is also a refusal: the eligible universe IS the population.
 
 Exit codes: 0 = ran; 2 = DB unopenable / no bars in window / no eligible universe.
 """
@@ -215,21 +159,18 @@ from engine.strategy.scanners.hi52 import UNADJUSTED_KINDS  # noqa: E402
 from engine.strategy.types import round_to_tick  # noqa: E402
 
 # =============================================================================== pinned constants
-#: The ONE pre-registered parameter set. Frozen copies of the live rule's own mappings; the unit
-#: test's equality assertions make a silent drift between this study and the live rule impossible.
+#: The ONE pre-registered parameter set: frozen copies of the live rule's own mappings.
 PRE_REGISTERED_PARAMS: dict[str, float] = dict(DEFAULT_PARAMS)
 PRE_REGISTERED_FLOOR_PARAMS: dict[str, float] = dict(FLOOR_PARAMS)
 
-#: Trial count cited to the research-validation deflation machinery: THREE entry variants of one family, no sweep
-#: (see the module docstring). Not a knob.
+#: Trial count for the deflation machinery: three entry variants, no sweep. Not a knob.
 TRIAL_COUNT_N = 3
 
 HORIZONS: tuple[int, ...] = (5, 10, 20)           # trading sessions, counted FROM THE FILL
 REFERENCE_NOTIONAL = Decimal("20000")             # repo cost-calibration size
 PRODUCT = "CNC"                                   # delivery/swing — NEVER MIS (overnight holds)
 
-#: The horizon the pre-registered decision rule reads. One horizon, fixed before the run: reading
-#: "the best of T+5/T+10/T+20" would be three more trials wearing one name.
+#: The one horizon the decision rule reads; "best of T+5/T+10/T+20" would be three more trials.
 DECISION_HORIZON = 10
 
 VARIANT_NEXT_OPEN = "next_open"
@@ -240,18 +181,15 @@ VARIANTS: tuple[str, ...] = (VARIANT_NEXT_OPEN, VARIANT_LIMIT_3, VARIANT_LIMIT_5
 #: Sessions a limit rests for, per variant. ``None`` = next-open, which is not a resting limit at all.
 FILL_WINDOW: dict[str, int | None] = {VARIANT_NEXT_OPEN: None, VARIANT_LIMIT_3: 3, VARIANT_LIMIT_5: 5}
 
-#: The widest fill window any variant uses. The shared admission rule reserves this many sessions
-#: AHEAD of the longest horizon, so the latest possible fill still has a complete T+20 and all three
-#: variants are measured on one population.
+#: The widest fill window; admission reserves this many sessions ahead of the longest horizon.
 MAX_FILL_WINDOW = max(w for w in FILL_WINDOW.values() if w is not None)
 
-#: Trailing CALENDAR-day window of the unadjusted-history veto. Source of truth is the live sweep's
-#: own brk20 window, ``store.get_corp_actions(ex_from=today - timedelta(days=35), ex_to=yesterday)``
-#: (engine/ops/main.py, the brk20 daily leg) — NOT hi52's 400, which spans its 252-session lookback.
+#: Trailing CALENDAR-day window of the unadjusted-history veto, the live sweep's own brk20 window
+#: (``ex_from=today - 35d, ex_to=yesterday``), not hi52's 400.
 UNADJUSTED_LOOKBACK_DAYS = 35
 
-#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (it cleared every universe
-#: rule and lost only the top-N focus cut). Mirrors ``MarketStore.get_universe_eligible_symbols``.
+#: ``universe_daily`` exclusion reason that still leaves a symbol ELIGIBLE (lost only the top-N
+#: focus cut). Mirrors ``MarketStore.get_universe_eligible_symbols``.
 EXCL_WATCHLIST_CAP = "watchlist_cap"
 
 CELL_ALL = "all"
@@ -263,8 +201,7 @@ MARGIN_CELLS: tuple[str, ...] = (CELL_MARGIN_LOW, CELL_MARGIN_MID, CELL_MARGIN_H
 _CV_SKFOLIO = "cpcv_skfolio_CombinatorialPurgedCV"
 _CV_FALLBACK = "purged_kfold_with_embargo_fallback"
 
-#: The decision rule, verbatim, as registered on 2026-09-12. Carried into every report
-#: and JSON so the outcome can never be read without the rule that produced it.
+#: The decision rule as registered; carried into every report and JSON beside the outcome.
 DECISION_RULE = (
     "Prefer the variant with the higher median NET return at T+10, PROVIDED that variant is "
     "CPCV-promotable at T+10; if no variant is CPCV-promotable at T+10 the outcome is 'neither' and "
@@ -273,9 +210,8 @@ DECISION_RULE = (
 DECISION_NEITHER = "neither"
 DECISION_TIE = "neither (exact tie on the decision metric)"
 
-#: The 2026-09-12 REPORTING amendment, carried into the registration paragraph, the JSON and both renderings.
-#: A tightening of how a cell is LABELLED — it can only withhold a "promotable", never grant one — so
-#: it changes no registered selection and adds no trial.
+#: The REPORTING amendment, carried into the JSON and both renderings. It can only withhold a
+#: "promotable" label, so it changes no registered selection and adds no trial.
 REPORTING_RULE_AMENDMENT = (
     "REPORTING RULE (2026-09-12 amendment to the registration; a TIGHTENING of how a result is "
     "reported, NOT a new selection and NOT a new trial): a variant x horizon is reported PROMOTABLE "
@@ -287,8 +223,7 @@ REPORTING_RULE_AMENDMENT = (
     "refused can be promoted by it; both outcomes are reported side by side."
 )
 
-#: Label stems for the matched-cohort cells. ``filled`` = the signals that limit variant DID fill (the
-#: matched cohort — same events as the limit variant's own trades); ``unfilled`` = the ones its limit never caught.
+#: Matched-cohort cell stems: ``filled`` = signals the limit variant DID fill, ``unfilled`` = the rest.
 COHORT_FILLED = "filled"
 COHORT_UNFILLED = "unfilled"
 
@@ -319,10 +254,9 @@ class Series:
 class Signal:
     """One admitted ``brk20`` fresh cross, shared by every entry variant.
 
-    ``level`` is the candidate's OWN ``raw_levels.entry`` (``round_to_tick(H20)``) — the price the
-    live mechanism rests — as a float, because it is compared against float bar arrays. ``h20`` is
-    the raw (un-rounded) broken level and is the MARGIN denominator only; :func:`signals_for`
-    tripwires on the two disagreeing after tick rounding.
+    ``level`` is the candidate's OWN ``raw_levels.entry`` (``round_to_tick(H20)``) as a float.
+    ``h20`` is the raw broken level, the MARGIN denominator only; :func:`signals_for` tripwires on
+    the two disagreeing after tick rounding.
     """
 
     symbol: str
@@ -356,10 +290,9 @@ class Trade:
 def load_eligible_universe(conn: duckdb.DuckDBPyConnection) -> tuple[set[str], str, date | None]:
     """``(symbols, provenance, as_of_day)`` — the CURRENT eligible universe, applied backwards.
 
-    The predicate is ``MarketStore.get_universe_eligible_symbols``'s, restated over the latest
-    ``universe_daily`` day: ``included`` OR ``exclusion_reasons == ['watchlist_cap']`` exactly (the
-    strict single-reason equality — a row excluded for the cap AND anything else is NOT eligible).
-    Empty set when the table is absent or holds no rows; the caller refuses on that.
+    Predicate of ``MarketStore.get_universe_eligible_symbols`` over the latest ``universe_daily`` day:
+    ``included`` OR ``exclusion_reasons == ['watchlist_cap']`` exactly (cap plus any other reason is
+    NOT eligible). Empty set when the table is absent or empty; the caller refuses on that.
     """
     try:
         as_of = conn.execute("SELECT max(d) FROM universe_daily").fetchone()[0]
@@ -389,10 +322,9 @@ def load_series(
 ) -> dict[str, Series]:
     """Every requested symbol's ascending ``bars_1d`` history in ``[start, end]``.
 
-    ``symbols`` is the eligible universe (never optional in a real run — the caller resolves it); the
-    (symbol, d) primary key means one row per symbol-session whatever the provenance, so no src
-    filter and no de-duplication. The symbol filter is pushed into SQL because the eligible set is
-    ~480 of ~3,200 names and the full frame is 2M+ rows.
+    ``symbols`` is the eligible universe (never optional in a real run). The (symbol, d) primary key
+    gives one row per symbol-session, so no src filter or de-duplication. The symbol filter is pushed
+    into SQL because the full frame is millions of rows.
     """
     wanted = sorted({s.strip().upper() for s in symbols}) if symbols is not None else None
     sql = (
@@ -444,8 +376,7 @@ def load_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
 def load_structural_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[date]]:
     """``symbol -> sorted ex-dates`` for the RESCALING kinds alone (``hi52.UNADJUSTED_KINDS``).
 
-    The kind test is the live one (``hi52.unadjusted_history``): exact membership on the stored
-    ``kind``, never case-folded or fuzzy, so this study vetoes the same rows the sweep vetoes.
+    The kind test is the live one (``hi52.unadjusted_history``): exact membership, never case-folded.
     """
     try:
         rows = conn.execute("SELECT symbol, ex_date, kind FROM corp_actions").fetchall()
@@ -462,9 +393,8 @@ def load_structural_ex_dates(conn: duckdb.DuckDBPyConnection) -> dict[str, list[
 def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     """``{rows, ex_date_min, ex_date_max, structural_rows, structural_ex_date_min, ..._max}``.
 
-    The veto reaches exactly as far as the STRUCTURAL rows do — the table is dividend-dominated, so
-    an all-kinds count says only whether it was backfilled at all — and an empty or short structural
-    span silently disables it, so both are reported next to the counts rather than assumed.
+    The veto reaches only as far as the STRUCTURAL rows (the table is dividend-dominated); an empty
+    or short structural span silently disables it, so the span is reported.
     """
     empty = {"rows": 0, "ex_date_min": None, "ex_date_max": None,
              "structural_rows": 0, "structural_ex_date_min": None, "structural_ex_date_max": None}
@@ -492,15 +422,11 @@ def corp_actions_coverage(conn: duckdb.DuckDBPyConnection) -> dict[str, Any]:
 def _scan_window_rows(params: dict[str, float], floor_params: dict[str, float]) -> int:
     """How many trailing rows :func:`scan_daily` must be handed for an EXACT read.
 
-    ``scan_daily`` slices only from the END of ``rows`` — ``rows[-(lookback+1):-1]`` for H20,
-    ``rows[-(lookback+2):-2]`` for the fresh-cross band, ``rows[-2]``/``rows[-1]`` for the prior and
-    trigger sessions — and ``_gap_floor_frac`` takes ``min(gap_lookback, len(rows)-1)`` pairs ending
-    at ``rows[-1]``. So any suffix of at least ``max(lookback + 2, gap_lookback + 1)`` rows produces
-    BIT-IDENTICAL output to the full prefix, and a longer suffix changes nothing: the length gate
-    (``len(rows) < lookback + 2``) lands the same way and the gap window saturates at
-    ``gap_lookback`` pairs. Handing a bounded window instead of ``rows[:i+1]`` exists purely so a
-    1,000-row history is not re-sliced 1,000 times; ``test_windowed_scan_matches_the_full_prefix``
-    asserts the equality on synthetic bars.
+    ``scan_daily`` slices only from the END of ``rows`` (H20, the fresh-cross band, the prior and
+    trigger sessions), and ``_gap_floor_frac`` takes ``min(gap_lookback, len(rows)-1)`` pairs ending
+    at ``rows[-1]``. So any suffix of at least ``max(lookback + 2, gap_lookback + 1)`` rows gives
+    BIT-IDENTICAL output to the full prefix; the bounded window only avoids re-slicing long
+    histories. ``test_windowed_scan_matches_the_full_prefix`` asserts the equality.
     """
     return max(int(params["lookback_days"]) + 2, int(floor_params["gap_lookback_sessions"]) + 1)
 
@@ -513,10 +439,9 @@ def _window(series: Series, i: int, width: int) -> list[DailyRow]:
 def _unadjusted_at(structural: Sequence[date], today: date) -> bool:
     """Whether a rescaling ex-date falls in ``[today - UNADJUSTED_LOOKBACK_DAYS, today - 1]``.
 
-    ``structural`` must be ascending (:func:`load_structural_ex_dates` sorts). ``today`` itself is
-    OUT of range: on the ex-date every bar the window holds is still pre-ex, in one unit — that day
-    is the upcoming-ex skip's case, not this one. Mirrors the live sweep's
-    ``ex_from=today - 35d, ex_to=yesterday`` inclusive window.
+    ``structural`` must be ascending. ``today`` itself is OUT of range: on the ex-date every bar in
+    the window is still pre-ex, in one unit (the upcoming-ex skip's case). Mirrors the live sweep's
+    ``ex_from=today - 35d, ex_to=yesterday`` window.
     """
     if not structural:
         return False
@@ -526,9 +451,7 @@ def _unadjusted_at(structural: Sequence[date], today: date) -> bool:
 
 def _h20_of(window: Sequence[DailyRow], lookback: int) -> float:
     """The broken level ``scan_daily`` tested: max high of the ``lookback`` sessions STRICTLY before
-    the window's last row. Read back only as the breakout-margin denominator — the LEVEL a variant
-    rests is always the candidate's own ``raw_levels.entry``, and :func:`signals_for` tripwires when
-    tick-rounding this disagrees with it."""
+    the window's last row. Margin denominator only; the level a variant rests is ``raw_levels.entry``."""
     return max(r.high for r in window[-(lookback + 1) : -1])
 
 
@@ -544,14 +467,12 @@ def signals_for(
 ) -> list[Signal]:
     """Every ``brk20`` fresh cross in this symbol's history, as :class:`Signal` rows.
 
-    ``scan_daily`` decides; this function only chooses the window (:func:`_scan_window_rows`) and
-    applies the live sweep's unadjusted-history veto to the DECISION day. ``full_prefix`` hands
-    ``rows[:i+1]`` instead of the bounded window — the equality-check path for the unit test and
-    ``--verify-window``.
+    ``scan_daily`` decides; this chooses the window and applies the unadjusted-history veto to the
+    DECISION day. ``full_prefix`` hands ``rows[:i+1]`` instead of the bounded window (the equality
+    check for the unit test and ``--verify-window``).
 
-    ``veto_counts``, when supplied, accumulates the live rule's own stop-geometry-floor classes (``gap_floor`` /
-    ``floor_unavailable``, threaded straight into ``scan_daily``) plus ``unadjusted_history``;
-    ``None`` keeps this function pure.
+    ``veto_counts``, when supplied, accumulates ``gap_floor`` / ``floor_unavailable`` (from
+    ``scan_daily``) plus ``unadjusted_history``; ``None`` keeps this function pure.
     """
     fp = dict(floor_params or PRE_REGISTERED_FLOOR_PARAMS)
     lookback = int(params["lookback_days"])
@@ -559,10 +480,9 @@ def signals_for(
     n = len(series)
     out: list[Signal] = []
     for i in range(lookback + 1, n):
-        # `today` = the session the sweep runs on and the order is placed on, i.e. the session AFTER
-        # y. The last bar of the window is y, the last COMPLETED session, as the live rule requires.
-        # At the very last bar there is no next session; such a signal can never be admitted (no
-        # forward bars) but is still scanned so the fired count means "fresh crosses in the window".
+        # `today` = the session AFTER y (when the sweep runs and the order is placed); y is the last
+        # COMPLETED session. At the last bar there is no next session: that signal can never be
+        # admitted but is still scanned so the fired count means "fresh crosses in the window".
         today = series.dates[i + 1] if i + 1 < n else series.dates[i]
         window = series.rows[: i + 1] if full_prefix else _window(series, i, width)
         cand = scan_daily(
@@ -576,9 +496,8 @@ def signals_for(
             continue
         h20 = _h20_of(window, lookback)
         if round_to_tick(h20) != cand.raw_levels.entry:
-            # TRIPWIRE, never a silent fallback: the margin denominator read back here and the level
-            # the rule shipped are the SAME physical number, and a disagreement means the window
-            # slicing stopped matching scan_daily's — which would corrupt every margin tercile.
+            # Tripwire, not a fallback: a disagreement means the window slicing stopped matching
+            # scan_daily's, which would corrupt every margin tercile.
             raise AssertionError(
                 f"H20 read-back disagrees with the shipped level on {series.symbol} "
                 f"{series.dates[i]}: round_to_tick({h20}) != {cand.raw_levels.entry}"
@@ -599,9 +518,8 @@ def signals_for(
 def bars_usable(series: Series, i: int, span: int) -> bool:
     """Whether sessions ``i+1 .. i+span`` all exist with finite, positive OHLC.
 
-    The admission gate for the SHARED population: a signal whose forward window holds an unusable bar
-    is dropped whole rather than measured under whichever variant happens to miss the bad bar, which
-    would silently give the three variants different denominators.
+    A signal whose forward window holds an unusable bar is dropped whole, so the variants never get
+    different denominators.
     """
     if i + span >= len(series):
         return False
@@ -616,10 +534,9 @@ def bars_usable(series: Series, i: int, span: int) -> bool:
 def fill_for(series: Series, sig: Signal, variant: str) -> tuple[int, float] | None:
     """``(fill index, fill price)`` for ``sig`` under ``variant``, or ``None`` when it never fills.
 
-    Next-open is unconditional at ``open(y+1)``. A limit variant rests the candidate's own level and fills on the FIRST
-    session in ``y+1 .. y+N`` whose ``low <= level``, at ``min(open, level)`` — the open when the
-    session gapped through the level, the level otherwise. See the module docstring for the two
-    deliberate divergences from ``engine.paper.broker``'s tick fill model and which way each biases.
+    Next-open is unconditional at ``open(y+1)``. A limit fills on the FIRST session in ``y+1 .. y+N``
+    whose ``low <= level``, at ``min(open, level)``. See the module docstring for the two
+    divergences from ``engine.paper.broker``'s tick fill model and their bias.
     """
     window = FILL_WINDOW[variant]
     if window is None:
@@ -641,9 +558,7 @@ def measure(
 ) -> Trade:
     """Measure one filled signal: exits at ``close(fill + k)``, minus ONE round trip at every horizon.
 
-    Never returns ``None``: the shared admission rule (:func:`bars_usable` over
-    ``MAX_FILL_WINDOW + max(horizons)``) has already guaranteed every exit bar exists and is usable,
-    so a missing bar here is a bug, not a data condition.
+    Admission (:func:`bars_usable`) guarantees every exit bar exists, so a missing bar here is a bug.
     """
     fill_idx, fill_px = fill
     trade = Trade(
@@ -698,9 +613,8 @@ def cell_stats(trades: Sequence[Trade], horizons: Sequence[int] = HORIZONS) -> d
 def margin_tercile_cuts(signals: Sequence[Signal]) -> tuple[float, float] | None:
     """The two cuts of the breakout-margin tercile split, or ``None`` when it is not computable.
 
-    Taken over the ADMITTED SIGNAL population — once, so a signal sits in the same cell under every
-    variant and the cells compare mechanisms rather than populations. Full-sample statistics, so the
-    split is DESCRIPTIVE and is labelled so wherever it appears.
+    Taken once over the ADMITTED SIGNAL population, so a signal sits in the same cell under every
+    variant. Full-sample statistics, so the split is DESCRIPTIVE.
     """
     margins = sorted(s.margin for s in signals if math.isfinite(s.margin))
     if len(margins) < 3:
@@ -733,8 +647,8 @@ def split_cells(trades: Sequence[Trade]) -> dict[str, list[Trade]]:
 def signal_counts_by_cell(signals: Sequence[Signal]) -> dict[str, int]:
     """``cell -> number of admitted SIGNALS in it`` — the honest denominator of a per-cell fill rate.
 
-    A variant's per-cell trade count divided by its own total is NOT a fill rate; the denominator is
-    the signals in that cell, and it is what makes a tercile row comparable across variants.
+    A variant's per-cell trade count over its own total is NOT a fill rate; the cell's signals are the
+    denominator that makes a tercile row comparable across variants.
     """
     counts = {CELL_ALL: len(signals)}
     for name in MARGIN_CELLS:
@@ -768,23 +682,18 @@ def matched_cohort_decomposition(
 ) -> dict[str, Any]:
     """Separate the entry-PRICE effect from the SELECTION effect, per limit variant, in labelled cells.
 
-    The three variants share a SIGNAL population but NOT a trade set: a limit fills only when
-    price returns to the broken level, so its trades are the pullback-SELECTED subset. The pooled
-    next-open vs limit gap therefore mixes two things this function pulls apart at every horizon:
+    The variants share a SIGNAL population but NOT a trade set, so the pooled next-open vs limit gap
+    mixes two things, pulled apart at every horizon:
 
-    * **PRICE effect** = ``median_net(limit) - median_net(next-open restricted to the cohort the limit variant FILLED)``. Same
-      events; the limit paid the level instead of open(y+1) AND, for fills at delay >= 2 sessions, held a
-      window shifted later by the fill delay (exits anchor on the fill) — an entry price-and-timing
-      effect, not a pure price effect. Roughly half the matched cohort fills at delay 1, where the
-      two coincide; the delay histogram in the report bounds the rest.
-    * **SELECTION effect** = ``median_net(next-open on the FILLED cohort) - median_net(next-open on the UNFILLED
-      cohort)``. Same entry mechanism throughout; the only difference is which signals came back to
-      the level — i.e. what the resting limit forfeits by never booking the runaways.
+    * **PRICE effect** = ``median_net(limit) - median_net(next-open on the cohort the limit FILLED)``.
+      Same events; the limit paid the level instead of open(y+1) AND, for fills at delay >= 2, held a
+      window shifted by the fill delay (exits anchor on the fill) — price-and-timing, not pure price.
+    * **SELECTION effect** = ``median_net(next-open on the FILLED cohort) - median_net(next-open on
+      the UNFILLED cohort)``. Same entry mechanism; only which signals came back to the level differs.
 
-    DESCRIPTIVE, post-hoc and explicitly NOT a fourth trial: no new variant, no new parameter, no new
-    selection rule, and the registered decision rule is still evaluated on the pooled cells. next-open fills
-    100% of admitted signals by construction, so the filled and unfilled cohorts partition next-open's trades
-    exactly; ``every_limit_fill_has_a_next_open_leg`` reports that reconciliation rather than assuming it.
+    DESCRIPTIVE and post-hoc, NOT a fourth trial; the registered decision rule still reads the pooled
+    cells. Next-open fills every admitted signal, so the filled and unfilled cohorts partition its
+    trades; ``every_limit_fill_has_a_next_open_leg`` reports that reconciliation.
     """
     next_open_trades = list(trades_by_variant[VARIANT_NEXT_OPEN])
     next_open_all = cell_stats(next_open_trades, horizons)
@@ -871,11 +780,11 @@ def matched_cohort_decomposition(
 
 
 def _carried_by(price: float | None, selection: float | None) -> str:
-    """Which effect carries the limit's advantage at one horizon — stated plainly, never left to the reader.
+    """Which effect carries the limit's advantage at one horizon.
 
-    Signs, all on median NET: ``price > 0`` means the level really is the better PRICE on the same
-    events; ``selection < 0`` means the cohort the limit never catches is the BETTER one under next-open,
-    i.e. the selection works AGAINST the limit and the pooled gap understates what it forfeits.
+    Signs, on median NET: ``price > 0`` means the level is the better PRICE on the same events;
+    ``selection < 0`` means the cohort the limit never catches is the better one under next-open, so
+    selection works AGAINST the limit.
     """
     if price is None or selection is None:
         return "unknown (an n=0 cohort cell at this horizon)"
@@ -906,9 +815,8 @@ def geometry(
 ) -> dict[str, Any]:
     """Median per-trade GROSS drift vs the round-trip cost floor, per horizon, with a hard verdict.
 
-    ``viable`` iff the MEDIAN gross drift exceeds one full round trip. Median, not mean: ORB's mean
-    was repeatedly dragged around by a handful of tails while the typical trade never covered its
-    costs, and the question this line answers is whether the TYPICAL trade can pay the toll.
+    ``viable`` iff the MEDIAN gross drift exceeds one full round trip. Median, not mean: tails can
+    hide a typical trade that never covers its costs.
     """
     out: dict[str, Any] = {"cost_floor_pct": round(cost_pct, 6), "horizons": {}}
     for k in horizons:
@@ -927,15 +835,12 @@ def geometry(
 def apply_reporting_rule(
     cpcv: dict[str, Any], geo_horizon: dict[str, Any], median_net: float | None
 ) -> dict[str, Any]:
-    """Stamp the 2026-09-12 tightened REPORTING rule onto one variant × horizon CPCV block.
+    """Stamp the tightened REPORTING rule onto one variant × horizon CPCV block.
 
     ``reported_promotable`` = the CPCV/deflation gate passed AND the geometry is viable at this
-    horizon (median NET > 0). Both gates are kept visible and the statistic each is built on is
-    named, because they disagree exactly where it matters: the CPCV series is a per-fill-day MEAN and
-    the geometry verdict is a MEDIAN, so a tail-driven cell can pass CPCV while its typical trade
-    pays the round trip for nothing (``gates_disagree``). The rule can only WITHHOLD a promotable
-    label — ``reported_promotable`` is never True where ``promotable`` is False — so it promotes
-    nothing the registered rule refused. Mutates and returns ``cpcv``.
+    horizon (median NET > 0). The CPCV series is a per-fill-day MEAN and the geometry verdict a
+    MEDIAN, so they can disagree (``gates_disagree``). It only WITHHOLDS a label:
+    ``reported_promotable`` is never True where ``promotable`` is False. Mutates and returns ``cpcv``.
     """
     verdict = geo_horizon.get("verdict", "unknown")
     viable = median_net is not None and median_net > 0.0
@@ -967,10 +872,9 @@ def apply_reporting_rule(
 def daily_net_series(trades: Sequence[Trade], horizon: int) -> tuple[list[date], np.ndarray]:
     """Per-FILL-DAY cost-adjusted return series for one horizon.
 
-    Day *t* = mean NET %-return of the trades FILLED on *t*, divided by ``horizon`` sessions, so the
-    value is a per-session net return in percent — the units the margin floor is quoted in. The
-    FILL day, not the signal day: the holding window starts at the fill, so purge/embargo at the
-    horizon covers the overlap between neighbouring trades exactly (module docstring).
+    Day *t* = mean NET %-return of the trades FILLED on *t*, divided by ``horizon`` sessions: a
+    per-session net return in percent, the margin floor's units. Keyed on the fill day (module
+    docstring).
     """
     by_day: dict[date, list[float]] = defaultdict(list)
     for t in trades:
@@ -986,9 +890,8 @@ def cpcv_report(
 ) -> dict[str, Any]:
     """CPCV + the deflated promotion decision for one variant at one horizon.
 
-    Purge and embargo are the HORIZON, not the default 5: at horizon N a trade overlaps the next
-    N sessions of fills, so a 5-observation purge would leak a T+20 trade across the fold boundary.
-    ``trial_count`` is the registration's honest N=3 — three entry variants of one family.
+    Purge and embargo are the HORIZON, not the default 5: a 5-observation purge would leak a T+20
+    trade across the fold boundary. ``trial_count`` is the registered N=3.
     """
     days, vals = daily_net_series(trades, horizon)
     n_obs = int(vals.size)
@@ -1050,16 +953,12 @@ def decision_outcome(
 ) -> dict[str, Any]:
     """Evaluate :data:`DECISION_RULE` against a finished document. Pure; reads, never chooses.
 
-    Ranks only the variants that are BOTH promotable at ``horizon`` under ``gate_key`` and have a
-    median net there; ``neither`` when that set is empty. An exact tie on the decision metric between
-    the top two is ``neither`` too: the rule says "the higher median net", and two equal medians do
-    not name one.
+    Ranks only variants that are promotable at ``horizon`` under ``gate_key`` and have a median net
+    there; ``neither`` when none. An exact tie between the top two is ``neither`` too.
 
-    ``gate_key`` selects WHICH promotability gate the proviso reads, and nothing else about the rule
-    moves: ``"promotable"`` is the registered rule, verbatim; ``"reported_promotable"`` is the
-    2026-09-12 tightening (:data:`REPORTING_RULE_AMENDMENT`), which additionally requires the
-    geometry to be viable. Both are evaluated on every run and reported side by side, because a
-    tightening that silently replaced the registered outcome would be a post-hoc rule change.
+    ``gate_key`` selects the promotability gate: ``"promotable"`` is the registered rule;
+    ``"reported_promotable"`` is the tightening (:data:`REPORTING_RULE_AMENDMENT`). Both are always
+    reported side by side so the tightening never silently replaces the registered outcome.
     """
     ranked: list[tuple[float, str]] = []
     for name in VARIANTS:
@@ -1110,19 +1009,14 @@ def run_study(
 ) -> tuple[dict[str, Any], dict[str, list[Trade]]]:
     """Run all three entry variants end to end over ONE shared SIGNAL population.
 
-    The signal population is shared; the TRADE sets are not, and nothing here pretends otherwise — a
-    limit fills only when price returns to the broken level, so each limit variant trades a
-    pullback-selected subset and :func:`matched_cohort_decomposition` re-quotes next-open on exactly those
-    cohorts so the entry-PRICE effect and the SELECTION effect can be read apart.
+    The signal population is shared; the TRADE sets are not (see :func:`matched_cohort_decomposition`).
 
-    Returns ``(document, trades_by_variant)`` — the document is the JSON payload and the reports'
-    input; the per-trade lists are deliberately NOT embedded in it but are returned so callers and
-    tests can assert on individual fills without re-deriving them.
+    Returns ``(document, trades_by_variant)``: the document is the JSON payload and report input;
+    per-trade lists are not embedded in it but returned for callers and tests.
 
-    ``symbols`` overrides the eligible universe (smoke runs only — it changes the POPULATION, which
-    is a pre-registered element, so a run with it set is not the registered study and the document
-    says so). ``verify_window`` re-scans the first K symbols with the full prefix and aborts on any
-    disagreement with the bounded window.
+    ``symbols`` overrides the eligible universe (smoke runs only; the document says it is not the
+    registered study). ``verify_window`` re-scans the first K symbols with the full prefix and aborts
+    on any disagreement with the bounded window.
     """
     p = dict(params or PRE_REGISTERED_PARAMS)
     fp = dict(floor_params or PRE_REGISTERED_FLOOR_PARAMS)
@@ -1179,9 +1073,7 @@ def run_study(
     cuts = margin_tercile_cuts([sig for _s, sig in fired])
     for _s, sig in fired:
         sig.tercile = tercile_of(sig.margin, cuts)
-    # Signals per cell: the honest DENOMINATOR of every per-cell fill rate. A variant's per-cell
-    # trade count over its own total is not a fill rate, and without this the tercile rows of two
-    # variants are not comparable at all (the 2026-09-12 audit's "every margin tercile" defect).
+    # Signals per cell: the denominator of every per-cell fill rate.
     signals_by_cell = signal_counts_by_cell([sig for _s, sig in fired])
 
     # ---------------------------------------------------------------- fills + measurement per variant
@@ -1301,10 +1193,7 @@ def run_study(
             "population_is_survivorship_tainted_proxy": True,
             "unadjusted_lookback_calendar_days": UNADJUSTED_LOOKBACK_DAYS,
             "window_verified_symbols": verify_checked,
-            # POST-veto by construction: scan_daily counts its own stop-geometry-floor refusals internally and
-            # returns nothing for them, and the unadjusted-history veto is applied before a Signal
-            # exists. Naming it "fired" would invite reading it as the raw fresh-cross count, which
-            # it is not — the raw count is this plus every entry in `vetoes` below.
+            # POST-veto: the raw fresh-cross count is this plus every entry in `vetoes` below.
             "n_signals_after_vetoes": n_fired,
             "n_signals_admitted": len(fired),
         },
@@ -1333,8 +1222,7 @@ def run_study(
         cells: dict[str, Any] = {}
         for name, cell in split_cells(trades).items():
             stats = cell_stats(cell)
-            # Per-CELL fill rate, on the cell's own SIGNAL denominator: without it the tercile rows of
-            # two variants describe different cohorts and read as if they described the same trades.
+            # Per-cell fill rate on the cell's own SIGNAL denominator.
             n_sig = signals_by_cell.get(name, 0)
             stats["n_signals_in_cell"] = n_sig
             stats["n_unfilled_in_cell"] = n_sig - stats["n_trades"]
@@ -1360,8 +1248,7 @@ def run_study(
             "cpcv": cpcv,
         }
     doc["matched_cohorts"] = matched_cohort_decomposition(trades_by_variant, signals_by_cell)
-    # BOTH outcomes, always, side by side: the registered rule verbatim and the 2026-09-12 tightening.
-    # A tightening that silently replaced the registered outcome would be a post-hoc rule change.
+    # Both outcomes side by side: a tightening must never silently replace the registered outcome.
     doc["decision"] = decision_outcome(doc)
     tightened = decision_outcome(doc, gate_key="reported_promotable")
     tightened["amendment"] = REPORTING_RULE_AMENDMENT
@@ -1374,10 +1261,8 @@ def run_study(
 
 
 # =============================================================================== rendering
-#: Transliterations for the few non-ASCII characters that arrive on borrowed strings (the
-#: ``promotion_decision`` reasons use em dashes, the cost model quotes rupees). The JSON artifact
-#: keeps the original text verbatim; only the CONSOLE rendering is folded to ASCII, because a Windows
-#: console at cp1252 cannot print a rupee sign or an arrow and would kill the run on the last line.
+#: Transliterations for non-ASCII characters on borrowed strings (em dashes, rupee sign). Only the
+#: CONSOLE rendering is folded; a cp1252 console cannot print them. The JSON keeps the original.
 _ASCII_MAP = str.maketrans({
     "—": "-", "–": "-", "‘": "'", "’": "'", "“": '"', "”": '"',
     "→": "->", "≥": ">=", "≤": "<=", "×": "x", "₹": "Rs ", " ": " ",
@@ -1397,19 +1282,17 @@ def _f(v: Any, width: int = 9, prec: int = 4) -> str:
 
 
 def _md_pct(v: float | None) -> str:
-    """A [0, 1] fraction as a cell; em-dash for an honest ``None`` — never 0.0%, which reads as a
-    measured zero (the console rendering folds the dash to ASCII)."""
+    """A [0, 1] fraction as a cell; em-dash for ``None`` — never 0.0%, which reads as a measured zero."""
     return "—" if v is None else f"{v * 100:.1f}%"
 
 
 def _md_ret(v: float | None) -> str:
-    """A percent return as a cell, signed; em-dash on ``None`` for the same reason."""
+    """A signed percent return as a cell; em-dash on ``None``."""
     return "—" if v is None else f"{v:+.4f}%"
 
 
 def render_text(doc: dict[str, Any]) -> str:
-    """Plain-text report, folded to ASCII (see :data:`_ASCII_MAP`). GEOMETRY is printed FIRST and the
-    DECISION last, so nobody reads the verdict before the arithmetic that constrains it."""
+    """Plain-text report, folded to ASCII. GEOMETRY prints FIRST and the DECISION last."""
     m = doc["meta"]
     out: list[str] = []
     add = out.append
@@ -1670,11 +1553,7 @@ def _md_pp(v: float | None) -> str:
 
 
 def _matched_cohort_markdown(doc: dict[str, Any]) -> str:
-    """The STEP 3B decomposition as labelled MD cells: PRICE effect vs SELECTION effect.
-
-    Separate, explicitly labelled cells rather than a re-cut of the pooled tables, because the point
-    of the decomposition is that these cohorts are DIFFERENT event sets from the pooled ones.
-    """
+    """The STEP 3B decomposition as labelled MD cells (the cohorts differ from the pooled event sets)."""
     mc = doc.get("matched_cohorts")
     if not mc:
         return ""
@@ -1734,8 +1613,7 @@ def _matched_cohort_markdown(doc: dict[str, Any]) -> str:
 
 
 def render_markdown(doc: dict[str, Any]) -> str:
-    """The ``.md`` artifact: the headline table and the decision outcome up top, the full text report
-    verbatim below it. Same numbers, one file a reader can open without a JSON viewer."""
+    """The ``.md`` artifact: headline table and decision outcome up top, the full text report below."""
     m = doc["meta"]
     d = doc["decision"]
     out: list[str] = []
@@ -1834,8 +1712,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="JSON results path (the .md report is written beside it, same stem)")
     ap.add_argument("--notional", type=Decimal, default=REFERENCE_NOTIONAL,
                     help="reference per-trade notional the round-trip cost is quoted at")
-    # NOT a population knob for the registered study: it OVERRIDES the pre-registered eligible
-    # universe, and any run using it is stamped as a smoke run in the document's own notes.
+    # Overrides the pre-registered population; a run using it is stamped as a smoke run.
     ap.add_argument("--symbols", default=None,
                     help="comma-separated symbol subset (SMOKE RUNS ONLY - overrides the "
                          "pre-registered eligible-universe population)")

@@ -1,27 +1,22 @@
 #!/usr/bin/env python
 """``tdc`` PRE-REGISTERED backtest harness (pre-registered 2026-09-04).
 
-Trend-day continuation, intraday. This is the owner-promotion-gate input for the hypothesis (``trend_day``):
-
-    on a session where a NIFTY200 stock shows ACCEPTANCE above its opening range with sustained
-    PARTICIPATION and RELATIVE STRENGTH by late morning, the move continues into the close net of
-    MIS costs.
+Trend-day continuation, intraday. Hypothesis (``trend_day``): on a session where a NIFTY200 stock
+shows ACCEPTANCE above its opening range with sustained PARTICIPATION and RELATIVE STRENGTH by late
+morning, the move continues into the close net of MIS costs.
 
 ===============================================================================================
 PRE-REGISTRATION / MULTIPLICITY DISCIPLINE - READ FIRST
 ===============================================================================================
-**NO PARAMETER SWEEP IS RUN BY THIS SCRIPT, AND NONE WAS RUN BEFORE IT.** There is exactly one
-:data:`PARAMS` dict and one :data:`VARIANTS` dict, both fixed at import time and both transcribed
-from the pre-registration. Every variant in :data:`VARIANTS` is REPORTED; none is SELECTED, ranked,
-or promoted over another. The pre-registered robustness list (``T`` in {10:30, 12:00}; ``rvol_min`` in
-{1.2, 2.0}; ``stop`` in {0.5%}) exists precisely so the reader can see whether the hypothesis's number is a
-knife edge - it is not a menu. The CLI exposes no flag that changes a signal parameter; adding one
-would silently convert this study from "one pre-registered rule plus its stated robustness checks"
-into a grid search, and would invalidate every number printed here.
+No parameter sweep is run here or was run before it. Exactly one :data:`PARAMS` dict and one
+:data:`VARIANTS` dict, fixed at import time. Every variant is REPORTED; none is SELECTED, ranked or
+promoted over another. The robustness list (``T`` in {10:30, 12:00}; ``rvol_min`` in {1.2, 2.0};
+``stop`` 0.5%) shows whether the number is a knife edge — it is not a menu. The CLI exposes no flag
+that changes a signal parameter; one would turn this into a grid search and invalidate every number.
 
-``promotable`` is the pre-registration's own boolean and nothing more: ``mean net % > 0`` AND ``t > 2`` AND
-``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a refutation, and this
-script says so in exactly those terms; no other language about deployment appears anywhere in it.
+``promotable`` is the pre-registration's own boolean: ``mean net % > 0`` AND ``t > 2`` AND
+``n >= 200`` AND ``CPCV positive-split share >= 0.60``. Anything less is a refutation, reported in
+exactly those terms; no other deployment language appears in the report.
 
 ===============================================================================================
 THE RULE (transcribed from the pre-registration; every clause is evaluated at the T bar CLOSE)
@@ -36,14 +31,10 @@ For each eligible symbol on each session, at the decision bar ``T`` (default the
   - ``OR high`` is ``max(high)`` over the bars ``09:15..09:29`` - the first fifteen 1m bars, i.e.
     the 09:15-09:30 opening range. ``ts_minute`` is the bar's minute START (``engine.core.types.Bar``),
     so the 09:29 bar is the last bar of that range and the 09:30 bar is not in it.
-  - PINNED INTERPRETATION (the pre-registration's phrase "the last 15 one-minute closes all > VWAP" does not say
-    *which* VWAP): each of those 15 closes is compared with the RUNNING session VWAP AT ITS OWN
-    MINUTE, ``close(m) > VWAP(m)``, not with the single value ``VWAP(T)``. That is the causal reading
-    (every comparison uses only bars at or before its own minute), and it is what "acceptance" means
-    as a market statement - price HELD above the volume-weighted average through the stretch. The
-    alternative reading (all 15 closes vs the scalar ``VWAP(T)``) was NOT computed, so no selection
-    between the two has taken place. This choice is a documented resolution of an ambiguity in the
-    pre-registration text, not a tuned parameter.
+  - PINNED INTERPRETATION (the pre-registration does not say *which* VWAP the last 15 closes must
+    exceed): each is compared with the RUNNING session VWAP AT ITS OWN MINUTE, ``close(m) > VWAP(m)``,
+    not the scalar ``VWAP(T)`` — the causal reading, and what "acceptance" means (price HELD above
+    the average). The alternative was NOT computed, so no selection between the two took place.
 
 * **(ii) Participation.** ``rel_volume_tod >= rvol_min`` where ``rel_volume_tod`` is the cumulative
   volume 09:15..T divided by the MEDIAN, over the 20 sessions immediately preceding this one, of that
@@ -63,73 +54,63 @@ immediately after T (the 11:01 bar when T = 11:00). Exit is the first 1m CLOSE b
 15:15 bar's close (or the last bar at or before 15:15). No target. The ``no_stop`` variant removes the stop.
 
 ===============================================================================================
-LOOK-AHEAD DISCIPLINE (the one class of error that would make every number here a fiction)
+LOOK-AHEAD DISCIPLINE
 ===============================================================================================
-* Every input to conditions (i)-(iii) is computed from bars with ``ts_minute <= T`` ONLY. The
-  feature SQL filters ``time <= T`` before the cumulative window functions run, so a bar after T is
-  not merely unused - it is not in the relation.
-* The ``rel_volume_tod`` denominator uses STRICTLY PRIOR sessions (the 20 sessions before this one
-  in the global session list). Today's own volume never enters its own median.
-* Entry is the OPEN of the bar AFTER T. The decision bar's own close is never a fill price.
-* The VWAP-loss exit triggers on a bar CLOSE and fills at the NEXT bar's OPEN - the first price an
-  order placed on that close could actually reach. It is never filled at the triggering close.
+* Every input to conditions (i)-(iii) comes from bars with ``ts_minute <= T`` ONLY: the feature SQL
+  filters ``time <= T`` before the cumulative window functions run, so later bars are not in the
+  relation.
+* The ``rel_volume_tod`` denominator uses STRICTLY PRIOR sessions; today's volume never enters its
+  own median.
+* Entry is the OPEN of the bar AFTER T; the decision bar's close is never a fill price.
+* The VWAP-loss exit triggers on a bar CLOSE and fills at the NEXT bar's OPEN, never at the
+  triggering close.
 * The 15:15 exit uses the 15:15 bar's close (or the last bar at or before 15:15).
-* The breadth split is computed from the same ``T``-bar snapshot as the signal, not from the day's
-  outcome.
+* The breadth split comes from the same ``T``-bar snapshot as the signal, not the day's outcome.
 
 ===============================================================================================
 COSTS
 ===============================================================================================
-``CostModel.breakeven_pct(notional, "MIS")`` - ONE full round trip, statutory fees PLUS the measured
-bid-ask spread, at :data:`PARAMS`\\ ``["reference_notional_inr"]`` - plus ONE TICK of slippage
-on EACH side, charged as ``2 * tick / entry_px * 100`` percent, so the slippage term is larger for a
-cheap stock exactly as it is in life. MIS, never CNC: this is an intraday leg squared off the same
-session. ``breakeven_pct`` (not ``fee_breakeven_pct``) is deliberate - the fees-only view is the
-contract-note anchor, not a viability number - and spread is not modelled twice: the tick slippage is
-the *queue* cost of crossing, the spread inside ``breakeven_pct`` is the quoted half-spread on each
-leg, and both are real.
+``CostModel.breakeven_pct(notional, "MIS")`` — ONE full round trip, statutory fees PLUS measured
+spread, at :data:`PARAMS`\\ ``["reference_notional_inr"]`` — plus ONE TICK of slippage on EACH side,
+``2 * tick / entry_px * 100`` percent (larger for a cheap stock). MIS, never CNC: an intraday leg
+squared off the same session. ``breakeven_pct`` rather than ``fee_breakeven_pct`` is deliberate
+(fees-only is not a viability number); spread is not counted twice: tick slippage is the queue cost of
+crossing, the spread in ``breakeven_pct`` is the quoted half-spread per leg.
 
 ===============================================================================================
-INDEX PROXY (owner/manager-directed 2026-09-04, recorded as a deviation from the pre-registered text)
+INDEX PROXY (owner/manager-directed deviation from the pre-registered text)
 ===============================================================================================
-The pre-registration says "NIFTY 50 1m for RS". ``bars_1m`` carries "NIFTY 50" only from 2026-07-22, while stock
-1m history begins 2023-07-17. For sessions before the index series starts, condition (iii)'s index
-return is the EQUAL-WEIGHT MEAN of ``ret_from_open(T)`` across that session's own eligible universe.
-That is a proxy, not the index: it is equal- rather than free-float-weighted, and its constituent set
-is this study's eligible set rather than the NIFTY 50's fifty names. Because a stock is measured
-against the mean of its own cohort, condition (iii) becomes a strictly cross-sectional statement on
-proxy days. Every cell is therefore ALSO reported for the ``real_nifty50_index_only`` split, which is
-the subset of sessions where the true index series was used - the proxy's effect is visible by
-comparing the two, and no number in this report depends on the reader trusting the proxy.
+The pre-registration says "NIFTY 50 1m for RS", but ``bars_1m`` carries "NIFTY 50" only from
+2026-07-22 while stock 1m history begins 2023-07-17. For earlier sessions condition (iii)'s index
+return is the EQUAL-WEIGHT MEAN of ``ret_from_open(T)`` across that session's own eligible universe:
+a proxy, not free-float-weighted, over this study's eligible set rather than the NIFTY 50's names, and
+on proxy days condition (iii) becomes a purely cross-sectional statement. Every cell is therefore ALSO
+reported for the ``real_nifty50_index_only`` split (sessions with the true index series), so no
+number depends on trusting the proxy.
 
 ===============================================================================================
-ATR% TERCILE SPLIT (pre-registered 2026-09-12 - REPORTING ONLY, selects nothing, wires nothing)
+ATR% TERCILE SPLIT (REPORTING ONLY, selects nothing, wires nothing)
 ===============================================================================================
-The 2026-09-11 rebuttal argued that intraday alpha lives in high-beta / high-ATR names and that
-every refuted intraday family was measured on the POOLED NIFTY 200/500 universe. That claim is
-answered here as a SPLIT of the SAME registered result, never as a new rule: no parameter moved, no
-variant was added, no trade was added or removed, and no cell is selected.
+A SPLIT of the SAME registered result (tests whether alpha lives in high-ATR names), never a new rule:
+no parameter moved, no variant or trade added or removed, no cell selected.
 
 * **The statistic.** Wilder ATR(:data:`PARAMS`\\ ``["atr_lookback_sessions"]`` = 14) of DAILY bars
   over the 14 completed sessions STRICTLY BEFORE the signal day, divided by the close of the last of
-  those sessions, in percent. ``bars_1d`` is read for this and for nothing else in the study.
-* **The cut.** Terciles of the full measured population, taken ONCE over the DISTINCT measured
-  ``(symbol, signal day)`` pairs so a symbol-day sits in the same cell under every variant and the
-  cells compare populations rather than cuts (``scripts/backtest_brk20.py``'s margin-tercile posture,
-  verbatim in force).
-* **DESCRIPTIVE, NOT TRADEABLE.** The cuts are full-sample statistics of the measured population and
-  were unknowable at signal time - exactly the caveat ``hi52`` carries for its smooth/jumpy cut. A
+  those sessions, in percent. ``bars_1d`` is read for this and nothing else.
+* **The cut.** Terciles taken ONCE over the DISTINCT measured ``(symbol, signal day)`` pairs, so a
+  symbol-day sits in the same cell under every variant (``scripts/backtest_brk20.py``'s margin-tercile
+  posture).
+* **DESCRIPTIVE, NOT TRADEABLE.** The cuts are full-sample statistics, unknowable at signal time. A
   symbol-day with fewer than 14 prior daily sessions is labelled ``atr_pct_unclassified`` and kept,
-  never dropped, so the four ATR cells sum to the measured population exactly.
+  so the four ATR cells sum to the measured population.
 
 ===============================================================================================
 DATA ACCESS
 ===============================================================================================
-Read-only, always (``duckdb.connect(..., read_only=True)``): ``MarketStore.open()`` runs schema DDL
-and is a WRITER, so it is deliberately not used, exactly as ``scripts/backtest_hi52.py`` and
-``scripts/entity_resolution_sample.py`` do it. DuckDB takes a file lock even for a read-only attach, so the
-engine service must be stopped; if the file is missing or locked this script REFUSES with exit code 2
-rather than degrading. Nothing here ever writes to the store.
+Read-only (``duckdb.connect(..., read_only=True)``): ``MarketStore.open()`` runs schema DDL and is a
+WRITER, so, as in ``scripts/backtest_hi52.py`` and ``scripts/entity_resolution_sample.py``, it is not
+used. DuckDB locks the file even for a read-only attach, so the engine service must be stopped. A
+missing/locked file REFUSES with exit code 2.
 
 Exit codes: 0 = ran; 2 = DB unopenable / no bars in window.
 """
@@ -176,9 +157,7 @@ from engine.strategy.cost_model import CostModel  # noqa: E402
 from engine.strategy.indicators import wilder_atr  # noqa: E402
 
 # ================================================================================================
-# THE ONE PRE-REGISTERED PARAMETER SET. Transcribed from the `tdc`
-# pre-registration. Not a knob, not a grid, not
-# reachable from the CLI.
+# THE ONE PRE-REGISTERED PARAMETER SET. Not a knob, not a grid, not reachable from the CLI.
 # ================================================================================================
 PARAMS: dict[str, Any] = {
     # --- (i) acceptance
@@ -218,9 +197,8 @@ PARAMS: dict[str, Any] = {
 
 # ================================================================================================
 # EVERY VARIANT IS REPORTED. NONE IS SELECTED. Each value is an override applied on top of PARAMS.
-# trend_day is the hypothesis; no_stop is the owner's observed pattern; the rest are the pre-registration's
-# stated robustness checks; sector_confirm is the manager-added sector-confirmation leg (computable because
-# `sector_map` exists).
+# trend_day is the hypothesis; no_stop the owner's observed pattern; sector_confirm adds a
+# same-sector confirmation leg (needs `sector_map`); the rest are robustness checks.
 # ================================================================================================
 VARIANTS: dict[str, dict[str, Any]] = {
     "trend_day":     {},                                   # the pre-registered hypothesis
@@ -233,9 +211,8 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "sector_confirm": {"sector_confirm": True},            # trend_day + >=2 OTHER same-sector passers at T
 }
 
-#: Trial count cited to the reader. ONE pre-registered rule (trend_day); every other entry in
-#: :data:`VARIANTS` is a reported robustness cell or a separately-stated construct, never a
-#: competitor the hypothesis is picked from.
+#: The ONE pre-registered rule; every other :data:`VARIANTS` entry is a reported robustness cell,
+#: never a competitor it is picked from.
 PRE_REGISTERED_HYPOTHESIS = "trend_day"
 
 SPLIT_ALL = "all"
@@ -252,9 +229,9 @@ SPLIT_ATR_MID = "atr_pct_tercile_mid"
 SPLIT_ATR_LOW = "atr_pct_tercile_low"
 SPLIT_ATR_UNCLASSIFIED = "atr_pct_unclassified"
 
-#: The three ATR% tercile cells, high first (the rebuttal's claim is about the TOP tercile).
+#: The three ATR% tercile cells, high first.
 ATR_TERCILE_CELLS: tuple[str, str, str] = (SPLIT_ATR_HIGH, SPLIT_ATR_MID, SPLIT_ATR_LOW)
-#: Those three plus the residue, which is what makes the four cells a partition of the population.
+#: Those three plus the residue, making the four cells a partition of the population.
 ATR_REPORT_CELLS: tuple[str, ...] = (*ATR_TERCILE_CELLS, SPLIT_ATR_UNCLASSIFIED)
 
 ATR_SPLIT_DEFINITION = (
@@ -263,13 +240,12 @@ ATR_SPLIT_DEFINITION = (
     "measured population (DESCRIPTIVE, full-sample statistics - unknowable at signal time)"
 )
 
-#: Calendar days of daily-bar warm-up pulled before the first measured signal day. 14 SESSIONS span
-#: at most ~25 calendar days even across a holiday cluster, so this is a wide margin that still keeps
-#: the bars_1d pull to the measured symbols.
+#: Calendar days of daily-bar warm-up before the first measured signal day (14 sessions span at most
+#: ~25 calendar days even across a holiday cluster).
 ATR_DAILY_WARMUP_DAYS = 120
 
-#: The pre-registration's stated 1m floor. The store actually holds 1m bars from 2023-07-17; this date is
-#: kept only so the pre-registration's literal window is reported as its own split cell.
+#: The pre-registration's stated 1m floor (the store holds 1m bars from 2023-07-17); kept only so
+#: that literal window is reported as its own split cell.
 PLAN_STATED_1M_FLOOR = date(2025, 7, 10)
 
 _CV_SKFOLIO = "cpcv_skfolio_CombinatorialPurgedCV"
@@ -300,8 +276,7 @@ class Trade:
     catalyst_at_T: bool
     catalyst_split_covered: bool
     sector: str | None = None
-    #: ATR% tercile split, stamped AFTER the trade exists (see :func:`stamp_atr_terciles`) - the daily ATR% of
-    #: the sessions before the signal day, and the tercile cell it falls in (None = unclassified).
+    #: ATR% tercile split, stamped AFTER the trade exists (:func:`stamp_atr_terciles`); None = unclassified.
     atr_pct: float | None = None
     atr_cell: str | None = None
 
@@ -343,8 +318,8 @@ def _shift(s: str, minutes: int) -> str:
 def acceptance_window(decision_time: str, n_bars: int) -> tuple[str, str]:
     """The ``[start, end]`` inclusive minute range of the ``n_bars`` closes immediately BEFORE T.
 
-    For T = 11:00 and 15 bars this is ``("10:45", "10:59")`` - the pre-registered window. It is derived
-    from T rather than hard-coded so the T=10:30 / T=12:00 robustness cells shift with it.
+    For T = 11:00 and 15 bars this is ``("10:45", "10:59")``; derived from T so the T=10:30 / T=12:00
+    cells shift with it.
     """
     return _shift(decision_time, -n_bars), _shift(decision_time, -1)
 
@@ -360,9 +335,8 @@ def load_features(
     """Per ``(symbol, d)`` T-bar snapshot, computed from bars with ``ts_minute <= T`` ONLY.
 
     Returns columns ``symbol, d, open_0915, or_high, close_t, vwap_t, cumvol_t, n_acc, n_acc_ok``.
-    The ``time <= T`` filter is applied BEFORE the cumulative window functions, so no bar after the
-    decision minute is in the relation the VWAP/cumulative-volume sums are taken over - look-ahead is
-    structurally impossible here, not merely avoided.
+    The ``time <= T`` filter runs BEFORE the cumulative window functions, so look-ahead is
+    structurally impossible here.
     """
     p = dict(params or PARAMS)
     t_lit = _validate_hhmm(decision_time)
@@ -414,8 +388,7 @@ def load_exit_bars(
 ) -> dict[tuple[str, date], tuple[list[str], list[float], list[float]]]:
     """``(symbol, d) -> (times, opens, closes)`` for the bars in ``(T, squareoff]``, ascending.
 
-    Only the selected symbol-days are fetched (a few thousand), so the exit scan never materializes
-    the full post-T tape.
+    Only the selected symbol-days are fetched, never the full post-T tape.
     """
     if pairs.empty:
         return {}
@@ -467,9 +440,8 @@ def load_universe_daily(conn: duckdb.DuckDBPyConnection) -> dict[date, set[str]]
 def load_sector_map(conn: duckdb.DuckDBPyConnection) -> tuple[dict[str, list[tuple[date, str]]], str]:
     """``symbol -> [(as_of, sector), ...]`` ascending, plus a provenance string.
 
-    ``sector_map`` is snapshotted weekly and its earliest snapshot is recent, so for any session
-    before the first snapshot the earliest snapshot is applied BACKWARDS. That is a point-in-time
-    proxy, labelled as such everywhere it appears.
+    Sessions before the first snapshot get the earliest snapshot applied BACKWARDS: a point-in-time
+    proxy, labelled as such.
     """
     try:
         rows = conn.execute("SELECT as_of, symbol, sector FROM sector_map ORDER BY symbol, as_of").fetchall()
@@ -501,9 +473,8 @@ def load_catalyst_context(
 ) -> tuple[set[tuple[date, str]], dict[str, list[datetime]], dict[str, Any]]:
     """``({(d, symbol) on the watchlist}, {symbol -> sorted news first_seen}, coverage)``.
 
-    Both sources are recent additions, so ``coverage`` carries the date range over which the
-    catalyst split is meaningful; outside it the flag would only be measuring the absence of the
-    feed, and the split cells are therefore restricted to that range.
+    ``coverage`` carries the date range over which the catalyst split is meaningful; outside it the
+    flag would only measure the feed's absence, so the split cells are restricted to that range.
     """
     watch: set[tuple[date, str]] = set()
     cov: dict[str, Any] = {
@@ -551,8 +522,7 @@ def load_catalyst_context(
 def coverage_by_year(conn: duckdb.DuckDBPyConnection, index_symbol: str) -> list[dict[str, Any]]:
     """Per-calendar-year ``bars_1m`` shape: sessions, symbols, and how many carry a FULL session.
 
-    "Full session" = >= 330 of the 375 one-minute bars, i.e. a symbol that traded essentially all day
-    rather than one with a sparse or truncated tape.
+    "Full session" = >= 330 of the 375 one-minute bars.
     """
     sql = """
     WITH b AS (
@@ -587,10 +557,8 @@ def load_daily_ohlc(
 ) -> dict[str, tuple[list[date], list[float], list[float], list[float]]]:
     """``symbol -> (sessions ascending, high, low, close)`` from ``bars_1d`` over ``[lo, hi]``.
 
-    A separate DAILY relation, loaded only to LABEL each measured symbol-day with the volatility of
-    the sessions before it: no signal, no fill and no cost in this study reads it. Only the measured
-    symbols are fetched. A missing or empty ``bars_1d`` yields an empty map, which sends every trade
-    to the unclassified cell rather than sinking an offline study.
+    Only LABELS each measured symbol-day with prior volatility; no signal, fill or cost reads it. A
+    missing or empty ``bars_1d`` yields an empty map (every trade unclassified).
     """
     if not symbols:
         return {}
@@ -630,14 +598,12 @@ def atr_pct_at(
     """Wilder ATR(``lookback``) over the daily sessions STRICTLY BEFORE ``d``, as a percent of the
     close of the last of them - or ``None`` when the symbol has fewer than ``lookback`` prior ones.
 
-    LOOK-AHEAD: ``bisect_left`` on the ascending session list lands ON ``d`` when the symbol traded
-    that day, so the window ends at the session before it and the signal day's own range and close
-    are never in the number. Because the window is EXACTLY ``lookback`` sessions the repo's
-    :func:`wilder_atr` is still at its SMA seed, so the value is the mean of those sessions' true
-    ranges. PINNED READING: the earliest bar in the window has no prior close INSIDE it, so its true
-    range is the plain high-low of ``engine.strategy.indicators._true_range``; reaching one session
-    further back to give that bar a gap-aware TR was not computed, so no selection between the two
-    readings took place.
+    LOOK-AHEAD: ``bisect_left`` lands ON ``d`` when the symbol traded that day, so the window ends at
+    the prior session and the signal day's own range and close never enter. The window is EXACTLY
+    ``lookback`` sessions, so :func:`wilder_atr` is still at its SMA seed: the mean true range.
+    PINNED READING: the earliest bar has no prior close inside the window, so its true range is the
+    plain high-low (``engine.strategy.indicators._true_range``); a gap-aware TR was not computed, so
+    no selection between the readings took place.
     """
     if daily is None:
         return None
@@ -665,8 +631,7 @@ def atr_tercile_cuts(values: Iterable[float | None]) -> tuple[float, float] | No
 
 
 def atr_tercile_of(atr_pct: float | None, cuts: tuple[float, float] | None) -> str | None:
-    """Which tercile cell ``atr_pct`` falls in. ``<= c1`` low, ``<= c2`` mid, else high - a partition
-    by construction, so the three cells plus the unclassified residue sum to the population."""
+    """Which tercile cell ``atr_pct`` falls in: ``<= c1`` low, ``<= c2`` mid, else high."""
     if cuts is None or atr_pct is None or not math.isfinite(atr_pct):
         return None
     c1, c2 = cuts
@@ -683,10 +648,8 @@ def stamp_atr_terciles(
 ) -> dict[str, Any]:
     """Stamp every trade with its symbol-day ATR% and tercile cell; return the split's provenance.
 
-    The cuts are taken ONCE over the DISTINCT measured ``(symbol, signal day)`` pairs, so a
-    symbol-day sits in the same cell under every variant and the cells compare populations rather
-    than cuts. They are full-sample statistics of the measured population, so the split is
-    DESCRIPTIVE - a live rule could not have known them at signal time.
+    The cuts are taken ONCE over the DISTINCT measured ``(symbol, signal day)`` pairs, so a symbol-day
+    sits in the same cell under every variant. Full-sample statistics: DESCRIPTIVE.
     """
     batches = [list(g) for g in groups]
     pairs = sorted({(t.symbol, t.d) for g in batches for t in g})
@@ -726,10 +689,9 @@ def rvol_medians(
 ) -> tuple[dict[str, dict[date, float]], int]:
     """``symbol -> d -> median prior cumulative volume to T``; plus the count of SKIPPED symbol-days.
 
-    The window is the ``lookback`` sessions immediately preceding ``d`` in the GLOBAL session list -
-    strictly prior, so today's own volume can never enter its own denominator. A symbol-day whose
-    window holds fewer than ``min_valid`` usable priors gets NO entry here and is counted as a skip:
-    the pre-registration says skip, not "use a thinner median".
+    The window is the ``lookback`` sessions immediately preceding ``d`` in the GLOBAL session list
+    (strictly prior). A symbol-day with fewer than ``min_valid`` usable priors gets NO entry and is
+    counted as a skip, not admitted on a thinner median.
     """
     pos = {d: i for i, d in enumerate(sessions)}
     out: dict[str, dict[date, float]] = {}
@@ -765,9 +727,7 @@ def select_day(
     """The session's ranked top-N passers of conditions (i)-(iii), ranked by relative strength.
 
     ``sectors`` non-None turns on variant C's confirmation: a passer is kept only when at least
-    ``sector_confirm_min_others`` OTHER symbols in the SAME sector also passed (i)-(iii) at T. The
-    confirmation is computed over the passer set, so it is a statement about the sector's behaviour
-    at T, never about the day's outcome.
+    ``sector_confirm_min_others`` OTHER symbols in the SAME sector also passed (i)-(iii) at T.
     """
     rvol_min = float(params["rvol_min"])
     ret_min = float(params["ret_from_open_min_pct"])
@@ -813,14 +773,12 @@ def simulate_exit(
 ) -> tuple[float, float, str] | None:
     """``(entry_px, exit_px, reason)`` for one trade, or ``None`` when the entry bar is missing.
 
-    Entry is the OPEN of the ``entry_time`` bar - the bar AFTER T - and the bar must be present at
-    exactly that minute; a data gap there is a skipped trade, never a fill at some other price.
+    Entry is the OPEN of the ``entry_time`` bar (the bar AFTER T), which must exist at exactly that
+    minute; a gap there is a skipped trade, never a fill at another price.
 
-    Exit: scanning from the entry bar forward, the FIRST bar whose CLOSE is below
-    ``vwap_t * (1 - stop_pct/100)`` fills at the NEXT bar's OPEN. The trigger is a close and the fill
-    is the following open - a trade is never filled at the price that triggered it. If no bar
-    triggers (or ``stop_pct`` is None, variant B), the exit is the squareoff bar's CLOSE, where the
-    squareoff bar is the last bar at or before ``squareoff_time``.
+    Exit: the FIRST bar from the entry bar forward whose CLOSE is below ``vwap_t * (1 - stop_pct/100)``
+    fills at the NEXT bar's OPEN, never at the triggering price. If none triggers (or ``stop_pct`` is
+    None, variant B), the exit is the CLOSE of the last bar at or before ``squareoff_time``.
     """
     try:
         i0 = list(times).index(entry_time)
@@ -845,8 +803,7 @@ def simulate_exit(
 def trade_cost_pct(cost_model: CostModel, params: dict[str, Any], entry_px: float) -> float:
     """One MIS round trip at the reference notional PLUS one tick of slippage on EACH side.
 
-    The slippage term is price-relative on purpose: one tick is a bigger percentage of a Rs 90 stock
-    than of a Rs 4,000 one, and the study should feel that.
+    The slippage term is price-relative: one tick costs more percent on a cheap stock.
     """
     rt = float(cost_model.breakeven_pct(Decimal(params["reference_notional_inr"]), params["product"]))
     tick = float(Decimal(params["tick_size_inr"]))
@@ -868,11 +825,8 @@ def daily_net_series(trades: Sequence[Trade]) -> tuple[list[date], np.ndarray]:
 def cpcv_positive_share(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
     """CPCV over the per-session net series; the reported share is (splits with test mean > 0) / all.
 
-    Purge and embargo are the ``engine.learning.validate`` defaults (5 observations each), which
-    is what ``hi52`` inherited. ``hi52`` raised them to its holding horizon because a 20-session swing
-    overlaps its neighbours; a ``tdc`` trade is opened and closed inside ONE session, so consecutive
-    observations do not overlap at all and the default is already strictly more conservative than the
-    leakage it guards against.
+    Purge and embargo are the ``engine.learning.validate`` defaults (5 each): a ``tdc`` trade opens
+    and closes inside ONE session, so observations do not overlap and the default is conservative.
     """
     days, vals = daily_net_series(trades)
     n_obs = int(vals.size)
@@ -912,9 +866,9 @@ def cpcv_positive_share(trades: Sequence[Trade], params: dict[str, Any]) -> dict
 def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
     """``n``, mean/median net %, win rate, t-stat, CPCV positive share, and the pre-registration's boolean.
 
-    ``t = mean / (sd / sqrt(n))`` with the SAMPLE standard deviation (ddof=1), over TRADES. The
-    honest caveat is stated in the report rather than hidden: the day's five picks are correlated, so
-    this t-stat overstates the effective sample size; the CPCV share is the check that does not.
+    ``t = mean / (sd / sqrt(n))`` with the SAMPLE standard deviation (ddof=1), over TRADES. The day's
+    five picks are correlated, so this t-stat overstates the effective sample size; the CPCV share
+    does not.
     """
     net = [t.net_pct for t in trades]
     n = len(net)
@@ -947,8 +901,8 @@ def metrics(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, Any]:
 def split_cells(trades: Sequence[Trade], params: dict[str, Any]) -> dict[str, list[Trade]]:
     """Every mandatory split, as named cells. The pooled number is never the only number.
 
-    The four ATR% cells (2026-09-12) are a PARTITION of the same trades: the three terciles plus
-    the symbol-days whose ATR% is not computable, so their counts sum to ``SPLIT_ALL`` exactly.
+    The four ATR% cells partition the trades (three terciles plus the not-computable residue), so
+    their counts sum to ``SPLIT_ALL``.
     """
     b = float(params["breadth_trend_day_min"])
     cat = [t for t in trades if t.catalyst_split_covered]
@@ -983,9 +937,8 @@ def run_study(
     """Run every variant end to end. Returns ``(json document, trades by variant)``."""
     base = dict(params or PARAMS)
     var_defs = dict(variants if variants is not None else VARIANTS)
-    # The post-T tape is fetched once per decision time up to ONE squareoff cutoff, so a variant that
-    # moved the squareoff would silently have its tape truncated. No pre-registered variant does;
-    # this makes that fact enforced rather than assumed.
+    # The post-T tape is fetched once per decision time up to ONE squareoff cutoff; a variant moving
+    # the squareoff would have its tape silently truncated.
     if any(
         str(v.get("squareoff_time", base["squareoff_time"])) != str(base["squareoff_time"])
         for v in var_defs.values()
@@ -1003,7 +956,7 @@ def run_study(
     if cat_cov["split_covered_from"]:
         cat_from = date.fromisoformat(str(cat_cov["split_covered_from"])[:10])
 
-    # One feature pull per DISTINCT decision time (three, for T = 10:30 / 11:00 / 12:00).
+    # One feature pull per DISTINCT decision time.
     times_needed = sorted({str(v.get("decision_time", base["decision_time"])) for v in var_defs.values()})
     feature_cache: dict[str, pd.DataFrame] = {
         t: load_features(conn, start, end, decision_time=t, params=base) for t in times_needed
@@ -1133,9 +1086,8 @@ def run_study(
                     picks_by_day[d] = picks
             picks_by_variant[name] = picks_by_day
 
-        # The post-T tape is fetched ONCE per decision time, for the UNION of every variant's picks:
-        # the variants at a given T differ only in which symbol-days they select, and re-scanning
-        # bars_1m per variant would repeat the most expensive query in the study eight times.
+        # The post-T tape is fetched ONCE per decision time for the UNION of every variant's picks
+        # (re-scanning bars_1m per variant is the study's most expensive query).
         union_pairs = sorted(
             {(s, d) for pbd in picks_by_variant.values() for d, syms in pbd.items() for s in syms}
         )
@@ -1197,9 +1149,7 @@ def run_study(
             }
 
     # ---------------------------------------------------------------- the ATR% tercile split
-    # Runs AFTER every variant's trades exist and changes none of them: it only labels each trade
-    # with the daily volatility of the sessions BEFORE its signal day. bars_1d is read here and
-    # nowhere else in this study.
+    # Runs AFTER every variant's trades exist and only labels them; bars_1d is read here and nowhere else.
     atr_lookback = int(base["atr_lookback_sessions"])
     measured_pairs = sorted({(t.symbol, t.d) for v in trades_by_variant.values() for t in v})
     daily_ohlc = (
@@ -1371,11 +1321,9 @@ def _catalyst_at(
 ) -> bool:
     """True when the symbol carried a catalyst KNOWN BY T on ``d``.
 
-    Two sources, per the manager's split definition: (1) a ``catalyst_watchlist`` row for that
-    ``(d, symbol)``; (2) a ``news_clusters`` row naming the symbol whose ``first_seen`` falls between
-    the PRIOR session's 15:00 IST and T on ``d``. The lower bound is the prior session's 15:00 so the
-    window catches the overnight and pre-open flow without reaching back into an older session's
-    news; the upper bound is T, so nothing the decision could not have seen is counted.
+    Two sources: (1) a ``catalyst_watchlist`` row for ``(d, symbol)``; (2) a ``news_clusters`` row
+    naming the symbol whose ``first_seen`` falls between the PRIOR session's 15:00 IST (catching
+    overnight and pre-open flow, no older news) and T on ``d`` (nothing the decision could not see).
     """
     if (d, symbol) in watchlist:
         return True
