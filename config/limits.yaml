@@ -18,7 +18,7 @@
 
 schema_version: 1
 
-# --- O1: the immutable capital anchor. Changeable ONLY via owner-confirmed protected-config flow. ---
+# --- The immutable capital anchor. Changeable ONLY via owner-confirmed protected-config flow. ---
 capital_base_inr: 120000          # ₹40,000 hard cap (20,000 → 40,000 owner-directed 2026-09-07); FLOOR anchor for all percentage halts · owner via dashboard 2026-10-19: 40000 → 70000 · owner via dashboard 2026-11-05: 70000 → 120000
 
 limits:
