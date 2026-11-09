@@ -1,16 +1,15 @@
-"""``scripts/calibrate_fill_model.py`` - the fill-model calibration (2026-09-10).
+"""``scripts/calibrate_fill_model.py`` - the fill-model calibration.
 
 Every fixture is engineered so each assertion has an arithmetic answer rather than a regression
 blob. The corpus is written as REAL Parquet partitions in the production layout
 (``ticks/date=<d>/symbol=<S>/*.parquet``, the 12 ``_TICK_COLUMNS``) via DuckDB ``COPY``, so the test
-exercises the same globbing/scan path the script uses over the live archive - not an injected frame.
+exercises the same globbing/scan path the script uses over the live archive.
 
 The cast on the one synthetic session:
 
 * ``CONSTSPREAD`` - constant ltp, constant L1 (999.50 / 1000.50). Its half-spread pct is a single
   value, so the per-symbol median is exact to the paisa. `median_half_spread_pct` is a PERCENT of
-  mid (2026-09-10 round-3 fix: the consumer ``engine.paper.fill_model`` divides the field by 100,
-  so the producer must emit a percent - the name carries the unit), i.e. 0.50 / 1000.00 * 100 =
+  mid (the consumer ``engine.paper.fill_model`` divides it by 100), i.e. 0.50 / 1000.00 * 100 =
   0.05. Constant ltp also means sigma_1m == 0, so it contributes ZERO normalised slippage samples -
   the divide-by-sigma guard is what this symbol pins.
 * ``KTWO`` (open bucket) and ``MIDFULL`` (mid bucket) - the k ~ 2 streams. Construction: ticks every
@@ -29,12 +28,11 @@ The cast on the one synthetic session:
   counted in the reported tick/sample counts and still producing slippage samples off the
   deterministic fallback half-spread.
 
-The 2026-09-10 round-3 k-floor policy (manager decision) is pinned by four tests
-below: a calibration may only TIGHTEN the model, so the shipped k is
-``max(fitted p75, the consumer default for that bucket)`` - open 1.0 / mid 0.5 / close 1.0 - and a
-degenerate (p50 <= 0) or thin (n < 500) bucket ships the default outright. ``basis`` names which
-rule applied, and p50/p75/p90/n ride along in the YAML as the evidence for the first live-ramp gate's
-live-vs-paper recalibration.
+The k-floor policy is pinned by four tests below: a calibration may only TIGHTEN the model, so the
+shipped k is ``max(fitted p75, the consumer default for that bucket)`` - open 1.0 / mid 0.5 /
+close 1.0 - and a degenerate (p50 <= 0) or thin (n < 500) bucket ships the default outright.
+``basis`` names which rule applied, and p50/p75/p90/n ride along in the YAML as the evidence for the
+first live-ramp gate's live-vs-paper recalibration.
 """
 
 from __future__ import annotations
@@ -78,8 +76,7 @@ def _stream(symbol: str, token: int, start: datetime, n: int, *, l1: bool = True
             delta: float = DELTA) -> pd.DataFrame:
     """The engineered tape described in the module docstring, as a production-shaped tick frame.
 
-    `delta` is the gap between a decision tick's mid and the fill 700 ms later; `delta == 0` makes
-    every residual exactly 0 while keeping sigma_1m > 0 - the degenerate-estimator case.
+    `delta == 0` makes every residual exactly 0 while keeping sigma_1m > 0 - the degenerate-estimator case.
     """
     ts = [start + timedelta(milliseconds=SPACING_MS * i) for i in range(n)]
     # Minute index relative to the stream start; B_m alternates by EPS so sigma_1m is well-defined.
@@ -120,9 +117,8 @@ def _write_partition(root: Path, day: date, frame: pd.DataFrame, *,
                      filename: str = "part.parquet") -> None:
     """Write one symbol-day partition with DuckDB COPY, in the production directory layout.
 
-    `filename` names the fragment: the archive's compaction job leaves exactly one
-    ``compact-ticks.parquet`` per symbol-day, while an un-compacted day holds many arbitrarily
-    named fragments - the distinction the coverage/`compacted_only` tests below turn on.
+    Compaction leaves one ``compact-ticks.parquet`` per symbol-day, an un-compacted day holds many
+    arbitrarily named fragments - the distinction the coverage/`compacted_only` tests turn on.
     """
     symbol = str(frame["tradingsymbol"].iloc[0])
     part = root / "ticks" / f"date={day.isoformat()}" / f"symbol={symbol}"
@@ -159,8 +155,7 @@ def result(corpus):
 
 
 def _expected_k() -> float:
-    """The normalised sample the KTWO/MIDFULL construction must reproduce, computed from the
-    designed minute-close series rather than asserted as a magic number."""
+    """The normalised sample the KTWO/MIDFULL construction must reproduce, from the designed minute-close series."""
     closes = np.array([BASE + (EPS if (m % 2) else 0.0) + DELTA for m in range(40)])
     sigma_ret = float(np.std(closes[1:] / closes[:-1] - 1.0, ddof=1))
     return (DELTA - HALF) / (sigma_ret * BASE)
@@ -201,13 +196,10 @@ def test_thin_bucket_falls_back_to_conservative_default(result):
 
 
 def test_degenerate_fit_takes_the_conservative_default_not_zero(tmp_path):
-    """A FAT bucket whose fitted quantiles are 0 must not ship k = 0.
+    """A FAT bucket whose fitted quantiles are 0 must not ship k = 0 (that deletes the sigma term).
 
-    This is the 2026-09-10 finding from the real archive: the residual is floored at 0 and over
-    700 ms a liquid name usually has not left its own quote, so the p50/p75 of a large sample is
-    exactly 0. Shipping that deletes the sigma term. It takes the same conservative default as a
-    thin bucket, and the report must name WHY - so the owner can re-pin the estimator rather than
-    discover a silently spread-only fill model in the paper ledger.
+    The residual is floored at 0 and over 700 ms a liquid name usually has not left its own quote. It
+    takes the conservative default as a thin bucket does, and the report must name WHY.
     """
     root = tmp_path / "parquet"
     _write_partition(root, DAY, _stream("FLATFILL", 201, _at(9, 15), 900, delta=0.0))
@@ -229,13 +221,9 @@ FLOOR_DELTA = 0.7
 
 
 def test_a_small_but_nonzero_fit_is_floored_to_the_consumer_default(tmp_path):
-    """A calibration may only TIGHTEN the model (manager decision, 2026-09-10 round 3).
-
-    A fitted p75 BELOW the consumer's default for that bucket would have the paper broker charge
-    LESS slippage than it charges with no calibration at all - and the evidence for that discount is
-    a zero-inflated residual over a window-biased, survivorship-tainted corpus. So the shipped k is
-    max(fit, default) and the bucket is stamped `floored_to_default`, with the fitted quantiles kept
-    verbatim beside it for the first live-ramp gate's live-vs-paper recalibration.
+    """A calibration may only TIGHTEN the model: a fitted p75 below the consumer default would charge
+    less slippage than no calibration, on a zero-inflated, window-biased, survivorship-tainted corpus.
+    The shipped k is max(fit, default), stamped `floored_to_default`, fitted quantiles kept beside it.
     """
     root = tmp_path / "parquet"
     _write_partition(root, DAY, _stream("SLOWDRIFT", 202, _at(10, 0), 900, delta=FLOOR_DELTA))
@@ -248,24 +236,17 @@ def test_a_small_but_nonzero_fit_is_floored_to_the_consumer_default(tmp_path):
     assert 0.0 < cell["p75"] < cfm.CONSUMER_DEFAULT_K["mid"]
     assert bucket.k == cfm.CONSUMER_DEFAULT_K["mid"] == 0.5   # the DEFAULT ships, not the fit
     assert bucket.basis == "floored_to_default"
-    # The fit is not discarded - it is the first live-ramp gate's recalibration evidence, carried in the YAML itself.
+    # The fit is kept as recalibration evidence in the YAML itself.
     assert bucket.p50 == cell["p50"] and bucket.p75 == cell["p75"] and bucket.p90 == cell["p90"]
     assert any("only tighten" in c.lower() for c in out.report["caveats"])
 
 
 def test_basis_is_classified_on_the_unrounded_quantiles(tmp_path):
-    """`basis` must be decided on the RAW quantiles; rounding is a publication step only.
+    """`basis` is decided on the RAW quantiles; rounding is a publication step only. A true p50 of
+    3e-5 that rounds to 0.0 must be labelled `floored_to_default`, not `degenerate` (the label the
+    report escalates to the owner, so a rounding artefact must not manufacture it).
 
-    2026-09-10 round-4 defect: the quantiles were rounded to 4 dp BEFORE the classifier read them,
-    so a small-but-real fit - a true p50 of 3e-5 - was rounded to 0.0 and then stamped
-    `degenerate`, i.e. "the estimator collapsed onto the zero-inflated mass, the owner should
-    re-pin it". It had not collapsed; it had been rounded. The shipped k is the same either way
-    (both branches take the consumer default), but the label is the finding the report escalates to
-    the owner, so a rounding artefact must not manufacture one. `floored_to_default` is the honest
-    label: a real fit that came out below the default.
-
-    `_finalise` is driven directly here because a Parquet corpus cannot be engineered to land a
-    p50 on an exact 3e-5.
+    `_finalise` is driven directly because a Parquet corpus cannot land a p50 on an exact 3e-5.
     """
     acc = cfm._Accumulator()
     acc.bucket_z["mid"] = [np.full(600, 3e-5, dtype="float64")]
@@ -323,8 +304,7 @@ def test_yaml_round_trips_through_the_strict_model(result, tmp_path):
     text = out.read_text(encoding="utf-8")
     loaded = yaml.safe_load(text)
 
-    # The header carries the unit of median_half_spread_pct and the k-floor policy, next to the
-    # numbers - a reader of the config alone must not have to find the report to learn either.
+    # The header carries the unit of median_half_spread_pct and the k-floor policy beside the numbers.
     assert "percent" in text.lower() and "live-ramp gate" in text and "only tighten" in text.lower()
     assert loaded["version"] == 1
     assert loaded["latency_ms"] == 700
@@ -333,8 +313,7 @@ def test_yaml_round_trips_through_the_strict_model(result, tmp_path):
         "half_spread_fallback_ticks", "symbols",
     }
     assert set(loaded["buckets"]) == {"open", "mid", "close"}
-    # The fitted quantiles ride ALONG with k: the YAML is the first live-ramp gate's recalibration evidence, so a
-    # reader can see what the fit said and why the shipped k differs from it.
+    # The fitted quantiles ride along with k, so a reader sees why the shipped k differs from the fit.
     assert set(loaded["buckets"]["open"]) == {
         "start", "end", "k", "basis", "n", "p50", "p75", "p90",
     }
@@ -364,24 +343,19 @@ def test_report_carries_the_honest_caveats(result):
     assert report["hour_histogram"]                       # which hours dominate the corpus
 
 
-# --- (f) bounded runs (2026-09-10): the archive is too big to scan whole beside a live session ----
+# --- (f) bounded runs: the archive is too big to scan whole beside a live session ----
 #
-# WHY these exist: the real corpus is 27 sessions x ~300 symbols, and an UN-compacted session holds
-# thousands of tiny fragments per symbol (a single symbol-day of 2026-09-09 measured 17-33 s to
-# read). A calibration that can only run over the whole corpus cannot be run at all on a trading
-# day, so the design pins three bounding controls - `--days`, `--symbols-per-day` and a
-# compaction filter - and requires the report to state honestly what was actually covered.
+# An un-compacted session holds thousands of tiny fragments per symbol, so the calibration pins three
+# bounding controls - `--days`, `--symbols-per-day` and a compaction filter - and the report must
+# state honestly what was actually covered.
 
 
 @pytest.mark.parametrize(("m", "n"), [(5, 2), (5, 4), (7, 5), (9, 6), (10, 3), (11, 4), (200, 60)])
 def test_select_symbols_lands_exactly_n(m: int, n: int):
     """`--symbols-per-day N` must deliver exactly N symbols, spanning the whole sorted list.
 
-    2026-09-10 round-3 defect: the old `symbols[::ceil(M/N)][:N]` UNDER-delivers whenever
-    ceil(M/N) overshoots - M=5,N=4 gave 3 symbols; M=9,N=6 gave 5. The bound then silently reads
-    less tape than the operator asked for, and the coverage table reports the shortfall as if it
-    were the request. An index-rounding stride (`round(i*(M-1)/(N-1))`) lands exactly N, keeps both
-    endpoints, and stays deterministic.
+    A plain `symbols[::ceil(M/N)][:N]` under-delivers (M=5,N=4 gives 3); the index-rounding stride
+    `round(i*(M-1)/(N-1))` lands exactly N, keeps both endpoints, and stays deterministic.
     """
     names = [f"SYM{i:03d}" for i in range(m)]
     picked = cfm.select_symbols(names, n)
@@ -394,12 +368,8 @@ def test_select_symbols_lands_exactly_n(m: int, n: int):
 
 
 def test_symbols_per_day_takes_a_deterministic_spanning_slice(corpus):
-    """`--symbols-per-day` must be a stride over the SORTED symbol list, not a head slice.
-
-    A head slice ("the first N symbols") would calibrate the alphabet, not the tape. With M = 5 and
-    N = 2 the index-rounding stride takes index 0 and index 4 - CONSTSPREAD and THINCLOSE, the two
-    ends of the sorted universe. Deterministic, so two runs of the same bounded command agree.
-    """
+    """`--symbols-per-day` is a deterministic stride over the SORTED symbol list, not a head slice:
+    with M = 5, N = 2 it takes index 0 and 4 - CONSTSPREAD and THINCLOSE."""
     out = cfm.calibrate(corpus, max_samples=1_000_000, symbols_per_day=2)
 
     day = out.report["coverage"][0]
@@ -416,13 +386,11 @@ def test_symbols_per_day_takes_a_deterministic_spanning_slice(corpus):
 
 
 def test_every_symbol_is_represented_when_the_sample_budget_forces_a_stride(corpus):
-    """A thin symbol must still contribute samples once `--max-samples` forces a large stride.
+    """A thin symbol still contributes samples once `--max-samples` forces a large stride.
 
-    The stride is a per-symbol every-Nth. Anchoring it at row N (`rn % stride = 0`) silently drops
-    EVERY symbol with fewer than N ticks - on the real corpus, that is the illiquid tail, exactly
-    the names whose slippage matters most. Anchoring at row 1 (`(rn - 1) % stride = 0`) keeps every
-    symbol in the sample. THINCLOSE is the probe: it owns the close bucket outright, so a zero there
-    is proof its 200 ticks were dropped whole.
+    The per-symbol every-Nth stride is anchored at row 1 (`(rn - 1) % stride = 0`); anchoring at row N
+    would drop every symbol with fewer than N ticks (the illiquid tail). THINCLOSE owns the close
+    bucket outright, so a zero there proves its 200 ticks were dropped whole.
     """
     out = cfm.calibrate(corpus, max_samples=5)
     assert out.report["buckets"]["close"]["n"] >= 1
@@ -456,7 +424,7 @@ def test_coverage_block_reports_compaction_per_day(tmp_path):
 
 
 def test_compacted_only_skips_the_fragmented_day(tmp_path):
-    """`--compacted-only` is the I/O-modesty switch: it must SKIP, and say so, not read anyway."""
+    """`--compacted-only` must SKIP fragmented days, and say so."""
     root = tmp_path / "parquet"
     compacted, fragmented = _two_day_corpus(root)
 
@@ -469,8 +437,7 @@ def test_compacted_only_skips_the_fragmented_day(tmp_path):
 
 
 def _three_day_corpus(root: Path) -> list[date]:
-    """Three compacted single-symbol sessions, each with a distinct tick count so the report says
-    unambiguously WHICH sessions were read."""
+    """Three compacted single-symbol sessions, each with a distinct tick count to identify which were read."""
     days = [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
     for index, day in enumerate(days):
         _write_partition(root, day, _stream("KTWO", 102, _at(9, 15, day=day), 600 + index * 100),
@@ -491,12 +458,8 @@ def test_days_keeps_only_the_most_recent_sessions(tmp_path):
 
 
 def test_exclude_is_applied_before_the_days_cut(tmp_path):
-    """`exclude` drops named sessions BEFORE `--days` counts, so excluding today still yields N.
-
-    The caller excludes an in-progress session (a half-recorded day is a pure open-bucket sample).
-    If the exclusion were applied AFTER the most-recent-N cut, asking for 2 days while excluding the
-    latest would silently return 1 - the bound would quietly under-deliver exactly when it matters.
-    """
+    """`exclude` drops named sessions BEFORE `--days` counts, so excluding the in-progress day still
+    yields N (applied after the cut, 2 days minus the latest would silently return 1)."""
     root = tmp_path / "parquet"
     d1, d2, d3 = _three_day_corpus(root)
 
@@ -533,13 +496,8 @@ def _fragmented_corpus(root: Path) -> list[date]:
 
 
 def test_a_run_that_reads_no_session_writes_nothing_and_exits_nonzero(tmp_path, capsys):
-    """Zero sessions read must NOT overwrite the shipped model with an all-defaults one.
-
-    2026-09-10 round-3 defect: with every session skipped the run still exited 0 and wrote a YAML
-    whose buckets were the untouched defaults and whose `symbols` table was EMPTY - i.e. it silently
-    deleted the per-symbol half-spread fallbacks that the previous good calibration had established,
-    and reported success. A run with no evidence writes nothing and says why.
-    """
+    """Zero sessions read must NOT overwrite the shipped model with an all-defaults one (empty
+    `symbols` table): a run with no evidence writes nothing, exits nonzero and says why."""
     root = tmp_path / "parquet"
     days = _fragmented_corpus(root)
     out_yaml = tmp_path / "fill_model.yaml"
@@ -562,10 +520,8 @@ def test_a_run_that_reads_no_session_writes_nothing_and_exits_nonzero(tmp_path, 
 def test_a_truncated_fragment_lands_in_days_skipped_not_an_abort(tmp_path, monkeypatch):
     """A fragment truncated by concurrent compaction must skip its DAY, never abort the run.
 
-    The live engine compacts this archive underneath the scan, so a fragment can be half-written
-    when DuckDB opens it. That surfaces as an InvalidInputException ("No magic bytes found"), not
-    the IOException the retry originally caught - so one truncated file aborted the whole
-    calibration and the good sessions were lost with it. The retry now covers `duckdb.Error`.
+    The live engine compacts the archive under the scan; a half-written fragment surfaces as an
+    InvalidInputException ("No magic bytes found"), so the retry covers `duckdb.Error`.
     """
     monkeypatch.setattr(cfm, "_RETRY_SLEEP_S", 0.0)     # don't pay the real backoff in a unit test
     root = tmp_path / "parquet"
@@ -587,13 +543,8 @@ def test_a_truncated_fragment_lands_in_days_skipped_not_an_abort(tmp_path, monke
 
 
 def test_days_skipped_caveat_names_each_session_in_prose_not_a_python_repr(tmp_path):
-    """The caveat block is read by the owner, so the skip list must be prose, not `repr(list)`.
-
-    2026-09-10 round-4 fix: it interpolated the raw list of dicts, so the caveat ended
-    ``sessions skipped: [{'day': '2026-06-02', 'reason': 'not_compacted'}]`` - a Python literal
-    inside an English sentence in a report whose whole job is to be read before the numbers are
-    trusted. The format is now ``day (reason); day (reason)``.
-    """
+    """The caveat block is read by the owner: the skip list is prose ``day (reason); day (reason)``,
+    not a Python `repr(list)`."""
     root = tmp_path / "parquet"
     compacted, fragmented = _two_day_corpus(root)
 
@@ -604,13 +555,12 @@ def test_days_skipped_caveat_names_each_session_in_prose_not_a_python_repr(tmp_p
     assert "[{" not in caveat and "'reason'" not in caveat
 
 
-# --- (h) round 4: a loud warning when a run is too thin to be trusted as a replacement ------------
+# --- (h) a loud warning when a run is too thin to be trusted as a replacement ------------
 #
-# WHY these are warnings and not a hard stop: a deliberately bounded run (--days / --compacted-only)
-# is a legitimate, useful calibration, and the operator asked for it. What is NOT acceptable is that
-# a run which read a small slice of the corpus, or which is about to publish a symbols table smaller
-# than the one it overwrites, does so silently - the previous file's per-symbol half-spreads are the
-# non-L1 fallbacks the paper broker charges, and losing them is a silent loosening of the model.
+# Warnings, not a hard stop: a deliberately bounded run is legitimate. But a run that read a small
+# slice, or that publishes a smaller symbols table than the one it overwrites, must not do so
+# silently - the old per-symbol half-spreads are the non-L1 fallbacks the paper broker charges, and
+# losing them silently loosens the model.
 
 
 def test_a_run_that_read_under_half_the_candidate_sessions_warns_loudly(tmp_path, capsys):
@@ -636,9 +586,8 @@ def test_a_run_that_read_under_half_the_candidate_sessions_warns_loudly(tmp_path
 
 
 def test_a_shrinking_symbols_table_warns_before_it_replaces_the_file(tmp_path, capsys):
-    """Publishing FEWER per-symbol half-spreads than the file being replaced is the silent-loosening
-    shape: every dropped symbol falls back to `half_spread_fallback_ticks x tick_size` from the next
-    paper session on, with nothing in the run's own output saying so."""
+    """Publishing FEWER per-symbol half-spreads than the file being replaced warns: every dropped symbol
+    falls back to `half_spread_fallback_ticks x tick_size`."""
     out_yaml = tmp_path / "fill_model.yaml"
     out_yaml.write_text(
         "version: 1\nsymbols:\n"
@@ -662,23 +611,16 @@ def test_a_shrinking_symbols_table_warns_before_it_replaces_the_file(tmp_path, c
 
 def _fixed_book(symbol: str, token: int, start: datetime, n: int, *,
                 price: float, half: float) -> pd.DataFrame:
-    """A constant price with a constant, symmetric L1 book - an exact half-spread median at an
-    exact price level, which is what the fallback-comparison count is read off."""
+    """A constant price with a constant, symmetric L1 book - an exact half-spread median at an exact price."""
     ts = [start + timedelta(milliseconds=SPACING_MS * i) for i in range(n)]
     return _frame(symbol, token, ts, [price] * n, [price - half] * n, [price + half] * n)
 
 
 def test_report_counts_shipped_half_spreads_against_the_tick_fallback(tmp_path):
-    """The report must state, from the data, how many shipped symbols resolve BELOW the 2-tick
-    fallback - at a common reference price AND at each symbol's own price.
-
-    WHY it is in the report at all (round 4): the fallback multiple is the model's ignorance
-    default, and the question "is it a reasonable default?" is answered by the count of measured
-    symbols that come in under it. On the shipped corpus that is a large minority at the reference
-    price and a clear majority at real prices - which is the evidence behind the consumer's floor
-    being HALF A TICK rather than the fallback. Two symbols pin both columns: NARROW is under the
-    fallback either way, while CHEAP is over it at the Rs 1,000 reference and under it at its own
-    Rs 100 price - so a single-column count cannot produce these numbers by accident.
+    """The report states how many shipped symbols resolve BELOW the 2-tick fallback, at a common
+    reference price AND at each symbol's own price. NARROW is under the fallback either way; CHEAP is
+    over it at the Rs 1,000 reference and under it at its own Rs 100 price, so a single-column count
+    cannot produce these numbers by accident.
     """
     root = tmp_path / "parquet"
     _write_partition(root, DAY, _fixed_book("CHEAP", 401, _at(10, 0), 300, price=100.0, half=0.05))
@@ -731,15 +673,11 @@ def test_cli_wires_the_bounding_flags(corpus, tmp_path):
     assert "## Coverage" in stem.with_suffix(".md").read_text(encoding="utf-8")
 
 
-# --- (g) determinism over tied timestamps (2026-09-10 run finding) --------------------------------
+# --- (g) determinism over tied timestamps --------------------------------
 #
-# WHY: two back-to-back runs of the SAME command over the SAME 22 compacted sessions returned
-# different numbers (open p75 0.0659 then 0.0656, p90 0.3071 then 0.3070) on an identical sample
-# count. The tape carries several prints at one `exchange_ts`, and neither the sampling row_number
-# nor the ASOF fill lookup ordered them totally - so "the tick at t" and "the first tick at/after
-# t + 700 ms" were whichever row the scan happened to hand over. A calibration whose output moves
-# between runs cannot be reviewed, diffed, or reproduced from `source.days`; this is the same total-
-# ordering discipline the replay stream also pins.
+# The tape carries several prints at one `exchange_ts`, so both the sampling row_number and the ASOF
+# fill lookup must order them totally; otherwise "the tick at t" and "the first tick at/after
+# t + 700 ms" depend on scan order and the output moves between runs.
 
 TIE_HI = 10.0             # the second print at each instant sits this far above the first
 
@@ -747,9 +685,8 @@ TIE_HI = 10.0             # the second print at each instant sits this far above
 def _tied_stream(symbol: str, token: int, start: datetime, n_ts: int) -> pd.DataFrame:
     """Two prints at EVERY timestamp: `lo` and `lo + TIE_HI`, no L1.
 
-    With no L1 the half-spread is 0, so the residual is exactly |fill - mid| and the tie-break is
-    directly readable off the numbers: sampling `lo` and filling at the next instant's `hi` gives
-    TIE_HI, while any other pairing gives ~0.
+    With no L1 the half-spread is 0, so sampling `lo` and filling at the next instant's `hi` gives
+    residual TIE_HI, while any other pairing gives ~0.
     """
     ts, ltp = [], []
     for i in range(n_ts):
@@ -764,13 +701,11 @@ def _tied_stream(symbol: str, token: int, start: datetime, n_ts: int) -> pd.Data
 
 
 def test_tied_timestamps_resolve_to_a_deterministic_sample_and_fill(tmp_path):
-    """A stride over tied prints must take the FIRST in a total order, and fill at the last print.
+    """A stride over tied prints takes the FIRST in a total order, and fills at the last print.
 
-    200 instants x 2 prints = 400 rows; `max_samples=200` forces stride 2, which under a total
-    ordering (exchange_ts, ltp, bid, ask) selects exactly the 200 `lo` rows. Each is filled at the
-    next instant's representative print, pinned to the highest at that instant - so every residual
-    is TIE_HI and the median normalised sample is TIE_HI / (sigma_1m). Sampling `hi`, or filling at
-    the next `lo`, collapses the residual to ~0 instead.
+    `max_samples=200` over 400 rows forces stride 2, which under the total ordering
+    (exchange_ts, ltp, bid, ask) selects exactly the 200 `lo` rows, each filled at the next instant's
+    highest print - so the median normalised sample is TIE_HI / sigma_1m.
     """
     root = tmp_path / "parquet"
     _write_partition(root, DAY, _tied_stream("TIEBREAK", 301, _at(10, 0), 200))

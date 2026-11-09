@@ -199,10 +199,9 @@ def test_daily_market_context(engine, store, seeded):
 
 
 def test_daily_advance_decline_reflects_asymmetric_breadth(engine, store):
-    """Advance-decline must carry the correct SIGN and MAGNITUDE on an asymmetric day. The
-    symmetric AAA/BBB fixture yields 0.0 — a value a sign-inverted ``(dec − adv)/N`` or a hardcoded
-    ``0.0`` stub both reproduce. Three advancers + one decliner pins it to +0.5, so an inverted sign
-    (−0.5) or a constant zero fails here."""
+    """Advance-decline carries the correct SIGN and MAGNITUDE on an asymmetric day: the symmetric
+    AAA/BBB fixture yields 0.0, which a sign-inverted or stubbed implementation also reproduces; three
+    advancers + one decliner pins +0.5."""
     days = _weekdays_back(D, 5)
     advancers = ("UP1", "UP2", "UP3")
     decliners = ("DN1",)
@@ -226,10 +225,8 @@ def test_daily_advance_decline_reflects_asymmetric_breadth(engine, store):
 
 
 def test_trend_state_branches_up_down_flat_and_warmup():
-    """``nifty_trend_state`` — the market-context fixture only ever exercises the rising (+1)
-    branch, so a constant-1 stub or a broken bear/flat branch would slip through. Assert all three
-    branches directly plus the 200-session warm-up: +1 close > SMA50 > SMA200, −1 the mirror, 0
-    otherwise, None until 200 closes exist."""
+    """``nifty_trend_state`` branches (the market-context fixture only exercises +1): +1 close > SMA50
+    > SMA200, −1 the mirror, 0 otherwise, None until 200 closes exist."""
     assert _trend_state([100.0 + i for i in range(200)]) == 1        # monotone rising structure
     assert _trend_state([300.0 - i for i in range(200)]) == -1       # monotone falling structure
     assert _trend_state([100.0] * 200) == 0                          # flat: neither strict ordering
@@ -237,8 +234,8 @@ def test_trend_state_branches_up_down_flat_and_warmup():
 
 
 def test_prox_high_hand_computed_window_shorter_and_longer_than_data():
-    """2026-09-01 origination review: 52wk/20d-high proximity. Unlike ``_dist_sma`` this degrades
-    gracefully to whatever window is available rather than requiring a FULL ``n``-session lookback."""
+    """52wk/20d-high proximity degrades to whatever window is available, unlike ``_dist_sma`` which
+    needs a FULL ``n``-session lookback."""
     highs = [100.0, 150.0, 90.0, 130.0, 95.0]
     closes = [95.0, 140.0, 85.0, 125.0, 90.0]
     # n=3 (shorter than the 5-bar history): last 3 highs = [90, 130, 95] -> peak 130.
@@ -264,9 +261,9 @@ def test_daily_per_symbol_context_flags(engine, store, seeded):
 
 
 def test_absent_news_defaults_are_pinned_and_in_distribution(engine, store, seeded):
-    """Pinned: sentiment* = 0, on_watchlist = false, materiality = 0, sentiment_available =
-    false — present on EVERY row when no digest has ever run, never None/NaN (chaos case 20). The
-    catalyst DESCRIPTIVE fields (not pinned scalars) fall back to None like any warm-up feature."""
+    """Pinned: sentiment* = 0, on_watchlist = false, materiality = 0, sentiment_available = false on
+    EVERY row when no digest has ever run, never None/NaN. The catalyst DESCRIPTIVE fields fall back
+    to None like any warm-up feature."""
     engine.daily_snapshot(D)
     for feats in _rows_by_symbol(store).values():
         for key, pinned in ABSENT_NEWS_DEFAULTS.items():
@@ -309,16 +306,15 @@ def test_daily_symbol_without_day_d_bar_gets_none_price_features(engine, store, 
     assert feats["prox_52wk_high"] is None and feats["prox_20d_high"] is None
 
 
-# ------------------------------------------- 2026-09-01 origination review: 52wk/20d-high proximity
+# ------------------------------------------- 52wk/20d-high proximity
 def test_prox_high_keys_registered_in_daily_feature_vocabulary():
     assert "prox_52wk_high" in DAILY_FEATURE_KEYS
     assert "prox_20d_high" in DAILY_FEATURE_KEYS
 
 
 def test_daily_prox_high_features_respect_window_caps(engine, store):
-    """Exact-value check on a constructed 260-session history: an ancient spike outside BOTH
-    windows must never leak in, and the 252-session and 20-session windows must resolve against
-    DIFFERENT peaks so the test cannot pass on a single shared (unwindowed) max."""
+    """A constructed 260-session history: an ancient spike outside BOTH windows never leaks in, and the
+    252- and 20-session windows resolve against DIFFERENT peaks (no single shared unwindowed max)."""
     days = _weekdays_back(D, 260)                                  # index 0 oldest .. 259 == D
     highs = [100.0] * 260
     highs[5] = 999.0     # ancient spike: outside the 252-session window (260-252=8) => excluded
@@ -341,9 +337,8 @@ def test_daily_prox_high_features_respect_window_caps(engine, store):
 
 
 def test_daily_prox_high_features_use_partial_window_when_history_is_short(engine, store):
-    """Unlike ``dist_sma20`` (None below a full 20-session window), prox_*_high degrades
-    gracefully: 5 sessions is far short of even the 20-session window, but the feature still
-    resolves against whatever history exists rather than returning None."""
+    """Unlike ``dist_sma20`` (None below a full window), prox_*_high resolves against whatever history
+    exists: 5 sessions is short of even the 20-session window."""
     days = _weekdays_back(D, 5)
     highs = [100.0, 100.0, 120.0, 100.0, 110.0]
     bars = []
@@ -364,10 +359,9 @@ def test_daily_prox_high_features_use_partial_window_when_history_is_short(engin
 
 
 def test_daily_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
-    """v2: real decay-weighted sentiment_agg values + today's catalyst_watchlist row land on
-    the row — the pinned absent-news defaults are a per-field FALLBACK, not the only path. AAA and
-    BBB (same IT sector) diverge on every sentiment/catalyst axis, proving the lookups are keyed
-    correctly (not just echoing the pinned defaults)."""
+    """Real decay-weighted sentiment_agg values + today's catalyst_watchlist row land on the row (the
+    pinned defaults are a per-field FALLBACK). AAA and BBB (same IT sector) diverge on every axis,
+    proving the lookups are keyed correctly."""
     _seed_sentiment_layer(store, clock)
     engine.daily_snapshot(D)
     by_symbol = _rows_by_symbol(store)
@@ -481,8 +475,7 @@ def test_intraday_snapshot_no_bars_is_warmup_not_error(engine, store):
 
 # ------------------------------------------- time-of-day-normalized relative volume
 #: Stamped on the 10:05 bar of every seeded historical session. 10:05 is exactly the cutoff and the
-#: cutoff is EXCLUSIVE, so this volume must never reach a denominator — if it does, every ratio
-#: collapses by ~6 orders of magnitude and the assertions below say so loudly.
+#: cutoff is EXCLUSIVE, so this volume must never reach a denominator (every ratio would collapse).
 _CUTOFF_SENTINEL_VOLUME = 10 ** 9
 
 
@@ -511,9 +504,9 @@ def _seed_hist_intraday(store, clock, symbol: str, vol_by_day: dict[date, int]) 
 
 
 def test_rel_volume_tod_is_the_median_pace_at_the_same_elapsed_minute(engine, store, clock, seeded):
-    """Today's cumulative volume ÷ the MEDIAN cumulative volume of the same 20 sessions
-    through the SAME 50 elapsed minutes. 1.0 = a typical pace for this time of day — the number a
-    reader means by "relative volume", which ``rel_volume``'s full-day denominator never was."""
+    """Today's cumulative volume ÷ the MEDIAN cumulative volume of the same 20 sessions through the
+    SAME 50 elapsed minutes; 1.0 = a typical pace for this time of day (``rel_volume``'s full-day
+    denominator is not that)."""
     _seed_intraday(store, clock, "AAA")                           # today: 50 bars x 1000 = 50_000
     days = _hist_sessions(seeded["AAA"])
     per_bar = {dd: 100 * (i + 1) for i, dd in enumerate(days)}     # 100..2000 per bar, per session
@@ -531,9 +524,8 @@ def test_rel_volume_tod_is_the_median_pace_at_the_same_elapsed_minute(engine, st
 
 
 def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, calendar, seeded):
-    """Fewer than 10 usable sessions ⇒ None, never a guess: a "median pace" over a handful of
-    sessions is noise. Only the intraday tick watchlist carries 1m history, so a thin symbol is
-    ordinary — and ``rel_volume``, which needs only daily bars, must keep computing."""
+    """Fewer than 10 usable sessions ⇒ None, never a guess (only the intraday tick watchlist carries
+    1m history, so a thin symbol is ordinary); ``rel_volume``, which needs only daily bars, keeps computing."""
     _seed_intraday(store, clock, "AAA")
     days = _hist_sessions(seeded["AAA"])
     _seed_hist_intraday(store, clock, "AAA", {dd: 500 for dd in days[-9:]})
@@ -543,17 +535,16 @@ def test_rel_volume_tod_needs_ten_valid_sessions(engine, store, clock, calendar,
     assert f9["rel_volume"] is not None                           # independent denominators
 
     _seed_hist_intraday(store, clock, "AAA", {days[-10]: 500})     # the tenth session flips it on
-    # The 20-session baseline is day-cached, so an engine that already built it does not see
-    # a mid-session reseed — which is the point (those sessions are completed and cannot change in
-    # production). A fresh engine is the honest stand-in for "the tenth session existed all along".
+    # The 20-session baseline is day-cached (completed sessions cannot change in production), so a
+    # fresh engine stands in for "the tenth session existed all along".
     f10 = FeatureEngine(store, clock, calendar).intraday_snapshot("AAA").features
     assert f10["rel_volume_tod"] == pytest.approx(50_000 / (50 * 500))
     assert f10["rel_volume"] == pytest.approx(f9["rel_volume"])    # nothing else moved
 
 
 def test_rel_volume_tod_excludes_zero_volume_sessions(engine, store, clock, seeded):
-    """A session with bars but no traded volume (halt, suspension, a gap-filled shell) is not a
-    zero-pace day to average in — it is absent evidence and leaves the median entirely."""
+    """A session with bars but no traded volume (halt, suspension, a gap-filled shell) is absent
+    evidence, not a zero-pace day: it leaves the median entirely."""
     _seed_intraday(store, clock, "AAA")
     a_days = _hist_sessions(seeded["AAA"])
     _seed_hist_intraday(store, clock, "AAA", {
@@ -574,8 +565,8 @@ def test_rel_volume_tod_excludes_zero_volume_sessions(engine, store, clock, seed
 def test_rel_volume_tod_skips_the_ranged_read_without_todays_bars(
     engine, store, clock, seeded, monkeypatch
 ):
-    """No tape today ⇒ no numerator ⇒ None, and the ranged 1m history read never happens: the new
-    feature rides the gate that already guards ``rel_volume`` (only today's own bars are read)."""
+    """No tape today ⇒ no numerator ⇒ None, and the ranged 1m history read never happens (only
+    today's own bars are read)."""
     _seed_hist_intraday(store, clock, "AAA", {dd: 400 for dd in _hist_sessions(seeded["AAA"])})
     reads: list[tuple] = []
     original = store.get_bars_1m
@@ -590,8 +581,8 @@ def test_rel_volume_tod_skips_the_ranged_read_without_todays_bars(
 
 
 def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, seeded):
-    """v2: the same sentiment_agg + catalyst_watchlist block lands on the intraday
-    microstructure snapshot as on the daily row (shared context helper)."""
+    """The same sentiment_agg + catalyst_watchlist block lands on the intraday snapshot as on the daily
+    row (shared context helper)."""
     _seed_intraday(store, clock, "AAA")
     _seed_sentiment_layer(store, clock)
     vec = engine.intraday_snapshot("AAA")
@@ -609,23 +600,17 @@ def test_intraday_sentiment_catalyst_populated_from_store(engine, store, clock, 
     assert f["catalyst_event_age_h"] == pytest.approx(5.5)
 
 
-# ---------------------------------------- the scan-path read budget (2026-08-26 open stall)
+# ---------------------------------------- the scan-path read budget
 class _StatementSpy:
     """Census of every DuckDB statement the store issues while the spy is installed.
 
     Wraps ``MarketStore._execute_locked`` — the single funnel ``_execute``, ``_fetchall``,
     ``_fetch_dicts`` and the simple writes all pass through — rather than individual read methods, so
-    a read introduced by some future helper cannot slip past these assertions the way a per-method spy
-    would let it. It was ``_execute`` until 2026-09-09, when the slow-statement telemetry moved
-    the read helpers onto the silent ``_execute_locked`` (one ``_lock`` hold must log exactly one
-    note, and nesting the logging ``_execute`` inside a hold logged two).
+    a read added by some future helper cannot slip past these assertions.
 
-    Census effect of that move: the READ census is unchanged — every read that reached ``_execute``
-    reaches ``_execute_locked``, one level down the same funnel. The WRITE census is WIDER: the
-    telemetry also routed ``_bulk_write``'s ``INSERT … SELECT`` and ``_flush_locked``'s per-partition
-    ``COPY`` through ``_execute_locked``, and both used to call ``con.execute`` directly and so were
-    invisible to the old ``_execute`` spy. The assertions below are read-budget assertions, so
-    they are unaffected; a future write-count assertion must expect bulk writes and tick flushes too.
+    The WRITE census is wide: ``_bulk_write``'s ``INSERT … SELECT`` and ``_flush_locked``'s
+    per-partition ``COPY`` also go through ``_execute_locked``. The assertions below are read-budget
+    assertions; a future write-count assertion must expect bulk writes and tick flushes too.
     """
 
     def __init__(self, store, monkeypatch) -> None:      # noqa: ANN001 - test helper
@@ -673,8 +658,8 @@ class _FakeMonotonic:
 
 @pytest.fixture
 def hot_path(engine, store, clock, seeded) -> list[Bar]:
-    """A warmed-up engine plus today's 1m series, in the shape the SCAN path calls it: the provider
-    hands over the series it already holds (``bars=``), so nothing on the path needs the store."""
+    """A warmed-up engine plus today's 1m series, as the SCAN path calls it: the provider hands over
+    the series it already holds (``bars=``), so nothing on the path needs the store."""
     _seed_sentiment_layer(store, clock)
     _seed_hist_intraday(store, clock, "AAA", {dd: 400 for dd in _hist_sessions(seeded["AAA"])})
     bars = _seed_intraday(store, clock, "AAA")
@@ -683,11 +668,9 @@ def hot_path(engine, store, clock, seeded) -> list[Bar]:
 
 
 def test_steady_state_scan_snapshot_issues_zero_reads(engine, store, monkeypatch, hot_path):
-    """The scan-path read-budget result contract. ``intraday_snapshot`` runs inside ``SignalPreScreen._scan``'s lock,
-    so every store read there is held across the pre-screen lock AND the store's connection lock — at
-    the 2026-08-26 09:36 open ~20 executor threads were queued behind one ``get_catalyst_watchlist``
-    from this path. After warm-up a snapshot must read NOTHING; the only statement left is the
-    audit-chain INSERT that IS the snapshot."""
+    """``intraday_snapshot`` runs inside ``SignalPreScreen._scan``'s lock, so any store read there is
+    held across the pre-screen lock AND the store's connection lock. After warm-up a snapshot reads
+    NOTHING; the only statement left is the audit-chain INSERT that IS the snapshot."""
     spy = _StatementSpy(store, monkeypatch)
 
     vectors = [engine.intraday_snapshot("AAA", bars=hot_path) for _ in range(5)]
@@ -704,8 +687,7 @@ def test_steady_state_scan_snapshot_issues_zero_reads(engine, store, monkeypatch
 
 def test_batch_path_snapshot_still_reads_only_todays_tape(engine, store, monkeypatch, hot_path):
     """A caller with no series of its own (the brk20/ins/cat sweep in ``engine.ops.main``) keeps the
-    one read it genuinely needs — today's tape is the snapshot's payload and can never be cached —
-    and pays for nothing else. That path is per-candidate, not per-bar."""
+    one read it needs — today's tape, never cacheable — and pays for nothing else."""
     spy = _StatementSpy(store, monkeypatch)
 
     engine.intraday_snapshot("AAA")
@@ -715,17 +697,16 @@ def test_batch_path_snapshot_still_reads_only_todays_tape(engine, store, monkeyp
 
 
 def test_caller_supplied_bars_reproduce_the_store_read_exactly(engine, store, hot_path):
-    """The ``bars=`` shortcut must be an optimization, never a semantic change: the provider's
-    in-memory series and the store read it replaces describe the same session (``BarBuilder``
-    persists before publishing ``bar.1m``), so the features are identical."""
+    """The ``bars=`` shortcut is an optimization, never a semantic change: the provider's series and
+    the store read describe the same session (``BarBuilder`` persists before publishing ``bar.1m``)."""
     passed = engine.intraday_snapshot("AAA", bars=hot_path).features
     read = engine.intraday_snapshot("AAA").features
     assert passed == read
 
 
 def test_day_context_refreshes_at_most_once_per_ttl(engine, store, monkeypatch, hot_path):
-    """Bounded refresh: snapshot VOLUME buys no reads at all, and one elapsed TTL buys exactly one
-    combined read — not one per snapshot, and not one per store table."""
+    """Snapshot volume buys no reads, and one elapsed TTL buys exactly one combined read (not one per
+    snapshot or per store table)."""
     mono = _FakeMonotonic()
     monkeypatch.setattr("engine.features.engine.monotonic", mono)
     engine.intraday_snapshot("AAA", bars=hot_path)      # re-anchor the cache on the fake clock
@@ -749,10 +730,9 @@ def test_day_context_refreshes_at_most_once_per_ttl(engine, store, monkeypatch, 
 def test_digest_rerun_reaches_the_feature_block_within_one_ttl(
     engine, store, clock, monkeypatch, hot_path
 ):
-    """The as-of stamp is refreshed BY the TTL'd read, never probed per bar — so a mid-session digest
-    re-run is invisible for at most one TTL and then lands whole. 60 s of staleness is immaterial
-    here: the digest updates a few times a day, and the precision consumer of catalyst context is the
-    analyst path, which reads the store directly."""
+    """The as-of stamp is refreshed BY the TTL'd read, never probed per bar: a mid-session digest re-run
+    is invisible for at most one TTL and then lands whole (the digest updates a few times a day, and
+    the precision consumer of catalyst context, the analyst path, reads the store directly)."""
     mono = _FakeMonotonic()
     monkeypatch.setattr("engine.features.engine.monotonic", mono)
     before = engine.intraday_snapshot("AAA", bars=hot_path).features
@@ -773,8 +753,7 @@ def test_digest_rerun_reaches_the_feature_block_within_one_ttl(
 
 
 def test_day_context_refreshes_on_day_change(engine, store, monkeypatch, hot_path):
-    """A day-keyed cache may never outlive its day: ``catalyst_watchlist`` is day-keyed and so is the
-    ``sector_map`` as-of, so a session rollover can never be served yesterday's watchlist."""
+    """A day-keyed cache never outlives its day: a session rollover is never served yesterday's watchlist."""
     spy = _StatementSpy(store, monkeypatch)
 
     engine._day_context(D)
@@ -790,9 +769,8 @@ def test_day_context_refreshes_on_day_change(engine, store, monkeypatch, hot_pat
 def test_concurrent_snapshots_collapse_into_one_day_context_read(
     store, clock, calendar, monkeypatch, seeded
 ):
-    """Thread-safety (the scan path runs on the shared executor's threads, and the batch sweep calls
-    the same engine off that path): two threads arriving across a cold cache must produce ONE store
-    read, not two, and neither may see an exception."""
+    """Thread-safety (the scan path and the batch sweep share the engine): two threads across a cold
+    cache produce ONE store read, and neither sees an exception."""
     _seed_sentiment_layer(store, clock)
     bars = _seed_intraday(store, clock, "AAA")
     engine = FeatureEngine(store, clock, calendar)       # cold caches: both threads race everything

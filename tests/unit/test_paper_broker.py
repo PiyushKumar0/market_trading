@@ -1,30 +1,28 @@
-"""PaperBroker v1 fill rules + postback contract (2026-09-10).
+"""PaperBroker fill rules + postback contract.
 
-Every rule asserted here is a CONSERVATISM rule -- the paper tier exists to produce a number the
-live tier can only beat, never a number it has to live up to. The load-bearing cases:
+Every rule asserted here is a CONSERVATISM rule -- the paper tier produces a number the live tier
+can only beat. The load-bearing cases:
 
 * market orders wait out the 700 ms simulated latency and then pay half-spread + k*sigma;
 * limit orders need a TRADE-THROUGH, never a touch; one through on its first eligible tick is
-  marketable and fills at market capped at its limit, any other rests and fills at its limit
-  (the conservatism case);
+  marketable and fills at market capped at its limit, any other rests and fills at its limit;
 * SL-M is gap-aware: a session-open print through a stop fills at the PRINT, not at the stop
-  (the "results-day gap through a stop" case -- the loss is allowed to exceed per-trade risk);
+  (the loss may exceed per-trade risk);
 * partials are budgeted at 10% of the MINUTE's volume -- per (order, minute), not per tick -- and
   ``filled_quantity`` is monotone to COMPLETE;
 * a cumulative-volume reset yields ZERO available volume, never an uncapped fill -- and a
   counter that re-baselines and never climbs back blacks the symbol out for the REST of the session;
 * resting DAY orders lapse at the session roll (Kite cancels them at the close) while GTTs persist;
 * injected rejections come from a SEEDED rng so a replay reproduces them exactly;
-* the order guard (the order-surface predicate) runs BEFORE any book mutation;
+* the order guard runs BEFORE any book mutation;
 * every state change emits exactly one ``OrderUpdateFrame`` carrying the Kite field names the OMS
   parser reads -- live and paper share ONE parser;
-* nothing raises out of ``on_tick``: it is the market-data hot path. That holds for all
-  THREE loops in it -- the session-lapse sweep, the match loop and the GTT loop -- and for the
-  publish inside each: a postback that raises is logged and dropped, never allowed to unwind the
-  book change it was reporting.
+* nothing raises out of ``on_tick`` (the market-data hot path): not the session-lapse sweep, the
+  match loop or the GTT loop, nor the publish inside each -- a postback that raises is logged and
+  dropped, never allowed to unwind the book change it was reporting.
 
-Time is driven by a mutable ``Clock`` time source (the house idiom, tests/conftest.py); ticks carry
-their own ``exchange_ts`` so latency/trigger logic is asserted against exchange time, not wall time.
+Time is driven by a mutable ``Clock`` time source (tests/conftest.py); ticks carry their own
+``exchange_ts`` so latency/trigger logic is asserted against exchange time, not wall time.
 """
 
 from __future__ import annotations
@@ -55,8 +53,8 @@ D2 = dt.date(2026, 6, 18)         # the NEXT trading session (Thu) -- the sessio
 TICK_SIZE = Decimal("0.05")
 SYM = "TCS"
 
-#: The Kite postback field names the OMS parser reads (plan 3.5.1). Pinned so a rename here is a
-#: test failure, not a silent live/paper parser divergence.
+#: The Kite postback field names the OMS parser reads. Pinned so a rename is a test failure, not a
+#: silent live/paper parser divergence.
 PINNED_KEYS = {
     "order_id",
     "status",
@@ -267,7 +265,7 @@ async def test_limit_respects_the_latency_too(broker: PaperBroker, bus: _Bus, no
 async def test_slm_sell_gap_through_the_stop_fills_at_the_open_print_not_the_stop(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The 9.3 results-day case: a swing stop at 95 and the session opens at 88."""
+    """A swing stop at 95 and the session opens at 88 (a results-day gap)."""
     now.set(at(9, 14, 0))
     oid = await broker.place_order(
         order(order_type="SL-M", transaction_type="SELL", trigger_price=Decimal("95.00"))
@@ -307,8 +305,7 @@ async def test_slm_sell_triggers_at_or_below_the_stop_without_a_gap(
 async def test_slm_sell_triggers_on_a_touch_of_the_stop(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The SELL half of "a stop triggers on touch" (the BUY half is the next test): a print exactly AT a
-    long's protective stop fires it — with ``<`` for ``<=`` the stop would not protect at its own price."""
+    """A print exactly AT a long's protective stop fires it (``<=``, not ``<``)."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(
         order(order_type="SL-M", transaction_type="SELL", trigger_price=Decimal("95.00"))
@@ -390,10 +387,8 @@ async def test_partials_capped_by_participation_then_complete(
 async def test_participation_is_budgeted_per_minute_not_per_tick(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The cap is a share of the MINUTE's tape, so it must be spent from a per-(order, minute)
-    budget. Applied per TICK it is unbounded per minute: the fix-round probe measured a single
-    order taking 101-130% of a minute's traded volume just by seeing more ticks (plan 3.2.9).
-    """
+    """The cap is a share of the MINUTE's tape, spent from a per-(order, minute) budget; applied per
+    tick it would be unbounded per minute."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(quantity=300))
     bus.clear()
@@ -415,10 +410,8 @@ async def test_participation_is_budgeted_per_minute_not_per_tick(
 async def test_a_cumulative_volume_reset_fills_nothing(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """``volume_traded`` is CUMULATIVE, and the feed occasionally restates it downward (a
-    resubscribe re-baselines it to 0). That must not empty the cap -- before the fix the reset tick
-    read as "this feed has no volume at all" and the order filled in full, uncapped.
-    """
+    """``volume_traded`` is CUMULATIVE and the feed can restate it downward (a resubscribe re-baselines
+    it to 0): the reset must not read as "no volume at all" and fill uncapped."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(quantity=100))
     bus.clear()
@@ -430,14 +423,13 @@ async def test_a_cumulative_volume_reset_fills_nothing(
     broker.on_tick(tick(at(10, 1, 2), "100.00", cum=0))             # the glitch: volume goes BACK
     assert bus.for_order(oid)[-1]["filled_quantity"] == 30          # zero available volume
 
-    # HIGH-WATER rule (the BarBuilder's, bar_builder.py _volume_delta): the water mark is 1300 and
-    # the restated ticks stay below it, so nothing is credited to the participation base -- the
-    # traded volume they imply already paid for a fill once.
+    # HIGH-WATER rule (as bar_builder.py _volume_delta): the mark is 1300 and the restated ticks stay
+    # below it, so nothing is credited to the participation base.
     broker.on_tick(tick(at(10, 2, 0), "100.00", cum=200))
     broker.on_tick(tick(at(10, 2, 1), "100.00", cum=700))
     assert bus.for_order(oid)[-1]["filled_quantity"] == 30
 
-    # Only a print back ABOVE the water mark trades again, and it trades the TRUE delta over it
+    # Only a print back ABOVE the mark trades again, and it trades the TRUE delta over it
     # (1500 - 1300 = 200 -> 20), never the apparent 800 over the restated baseline.
     broker.on_tick(tick(at(10, 2, 2), "100.00", cum=1500))
     assert bus.for_order(oid)[-1]["filled_quantity"] == 50
@@ -446,14 +438,9 @@ async def test_a_cumulative_volume_reset_fills_nothing(
 async def test_a_restatement_on_a_minute_boundary_cannot_inflate_the_participation_base(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The half-fix this round closes: a restatement landing on the FIRST tick of a minute took
-    the minute-roll branch instead of the reset branch, so it re-baselined the minute at the restated
-    (tiny) cumulative and was never flagged. The correction back UP then read as a delta of the whole
-    day's volume -- 100x the minute's real tape -- and the participation cap sized a fill off it.
-
-    The baseline is therefore the per-symbol cumulative HIGH-WATER kept ACROSS minutes, and the reset
-    test runs BEFORE the minute roll (bar_builder.py _volume_delta, the same rule).
-    """
+    """A restatement on the FIRST tick of a minute must not re-baseline the minute at the tiny restated
+    cumulative: the baseline is the per-symbol HIGH-WATER kept ACROSS minutes, and the reset test runs
+    BEFORE the minute roll (as bar_builder.py _volume_delta)."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(quantity=50_000))
     bus.clear()
@@ -476,16 +463,11 @@ async def test_a_restatement_on_a_minute_boundary_cannot_inflate_the_participati
 async def test_a_rebaselined_counter_that_never_recovers_blacks_the_symbol_out_for_the_session(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The documented consequence of the high-water rule, pinned so nobody "fixes" it later.
-
-    ``volume_traded`` is compared against the per-symbol HIGH-WATER cumulative, so a feed that
-    re-baselines low and never climbs back over the mark (a resubscribe on a thin name late in the
-    day) offers zero available volume on EVERY remaining tick of the session -- not just the reset
-    tick -- and not even a closed bar can back the cap while the flag is set. That is the intended
-    conservative outcome, and it is the same one ``engine.marketdata.bar_builder`` produces from the
-    same rule: a broker that under-fills costs the gate nothing, while one that sizes fills off
-    a phantom delta lies to it. The blackout is SESSION-scoped: the roll clears the baseline.
-    """
+    """The intended consequence of the high-water rule, pinned so nobody "fixes" it: a feed that
+    re-baselines low and never climbs back over the mark offers zero available volume on EVERY remaining
+    tick of the session, and not even a closed bar backs the cap. Under-filling costs the gate nothing;
+    sizing fills off a phantom delta lies to it (``engine.marketdata.bar_builder`` does the same). The
+    blackout is SESSION-scoped: the roll clears the baseline."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(quantity=100))
     bus.clear()
@@ -627,12 +609,8 @@ async def test_cancel_of_an_unknown_order_raises(broker: PaperBroker) -> None:
 async def test_cancel_of_a_triggered_slm_raises_like_kite(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """Kite refuses to cancel an SL-M whose trigger has crossed: the order has left the trigger book
-    and is on its way to becoming a market order. That refusal is a SIGNAL, and 3.2.8's square-off
-    coordination is built on it -- "the cancel was refused, the protective order is going to fill,
-    do NOT also send the market exit". A paper broker that accepted the cancel would hide the
-    double-exit hazard until the first live session met it.
-    """
+    """Kite refuses to cancel an SL-M whose trigger has crossed (it is on its way to a market order).
+    Square-off coordination relies on that refusal to avoid a double exit, so paper must refuse too."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(
         order(
@@ -658,12 +636,8 @@ async def test_cancel_of_a_triggered_slm_raises_like_kite(
 async def test_an_exception_in_the_match_path_rejects_only_that_order_and_never_escapes(
     now: _Now, bus: _Bus
 ) -> None:
-    """"Nothing escapes ``on_tick``" has to hold for the ORDINARY matching loop too, not only for
-    the GTT fire path: ``on_tick`` runs on the market-data hot path (plan 3.2) and an exception
-    escaping it takes the feed down for every symbol. Anything the per-order body can raise
-    (here an ``InstrumentStore`` lookup that blows up mid-session) is logged once, terminates THAT
-    order with a REJECTED postback the OMS can act on, and lets the loop continue.
-    """
+    """Anything the per-order match body raises (here an ``InstrumentStore`` lookup) is logged once,
+    terminates THAT order with a REJECTED postback, and lets the loop continue."""
     def tick_size(symbol: str) -> Decimal:
         if symbol == "BOOM":
             raise RuntimeError("instrument store unavailable")
@@ -689,8 +663,7 @@ async def test_an_exception_in_the_match_path_rejects_only_that_order_and_never_
         assert len(frames) == 1                                # published once, not per tick
         assert frames[0]["status"] == "REJECTED"               # nothing filled: a clean reject
         assert frames[0]["status_message"] == "paper: internal error"
-        # No quantity may evaporate on a terminal transition (3.5.1): every share is accounted for
-        # as filled or cancelled, or the OMS's position arithmetic silently loses the difference.
+        # No quantity may evaporate on a terminal transition: filled + cancelled == quantity.
         assert frames[0]["filled_quantity"] + frames[0]["cancelled_quantity"] == frames[0][
             "quantity"
         ]
@@ -706,13 +679,9 @@ async def test_an_exception_in_the_match_path_rejects_only_that_order_and_never_
 async def test_an_internal_error_after_a_partial_fill_cancels_the_residual_and_keeps_the_fill(
     now: _Now, bus: _Bus
 ) -> None:
-    """A partially filled order that then hits an internal error is CANCELLED, not REJECTED.
-
-    REJECTED means "no part of this order ever traded", and the OMS reads it that way (3.5.1) -- on
-    a row with 30 shares already filled and protected it would strand a live position the platform
-    believes it does not hold. The 3.5.1 shape that DOES exist for this is the partial-cancel:
-    ``filled_quantity`` preserved, the residual in ``cancelled_quantity``, nothing pending.
-    """
+    """A partially filled order that then hits an internal error is CANCELLED, not REJECTED: REJECTED
+    means nothing ever traded, and the OMS would strand the filled shares. Shape: ``filled_quantity``
+    preserved, residual in ``cancelled_quantity``, nothing pending."""
     boom = {"on": False}
 
     def tick_size(symbol: str) -> Decimal:
@@ -788,11 +757,8 @@ async def test_modify_cannot_take_quantity_below_filled(
 async def test_modify_down_to_the_filled_quantity_completes_the_order(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """Shrinking a partially filled order to exactly what has filled is the ordinary "take what I
-    got, drop the rest" amendment. It leaves NOTHING to fill, so the order is COMPLETE and off the
-    book -- left OPEN it would be a resting order with pending_quantity 0 that the OMS can never
-    retire (3.5.1 terminal states absorb).
-    """
+    """Shrinking a partially filled order to exactly what has filled leaves nothing to fill: it is
+    COMPLETE and off the book (left OPEN it would rest with pending_quantity 0, never retired)."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(quantity=100))
     broker.on_bar(
@@ -828,10 +794,8 @@ async def test_modify_to_a_non_positive_quantity_is_rejected(
 async def test_a_resting_day_order_lapses_at_the_session_roll(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """Kite cancels every unfilled DAY order at the close. Without that, a paper limit left resting
-    overnight fills on the next session's open print -- a fill that could never have happened, and
-    the most flattering kind of lie the 8.5 gate could be told.
-    """
+    """Kite cancels every unfilled DAY order at the close; a paper limit left resting overnight would
+    fill on the next open print, a fill that could never have happened."""
     now.set(at(10, 0, 0))
     oid = await broker.place_order(order(order_type="LIMIT", price=Decimal("100.00"), quantity=40))
     broker.on_tick(tick(at(10, 0, 1), "100.50"))              # no trade-through: still resting
@@ -852,10 +816,8 @@ async def test_a_resting_day_order_lapses_at_the_session_roll(
 async def test_an_order_placed_today_survives_todays_first_tick(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The roll is detected on the new session's FIRST TICK, which is long after the OMS may have
-    placed today's orders (pre-open staging; a symbol whose first print is late). Lapsing by "was
-    resting when the roll was noticed" would cancel today's own orders -- the scope is ``placed_at``.
-    """
+    """The roll is noticed on the new session's FIRST TICK, after the OMS may have placed today's
+    orders (pre-open staging): the lapse scope is ``placed_at``, not "resting when the roll was noticed"."""
     now.set(at(10, 0, 0))
     broker.on_tick(tick(at(10, 0, 1), "100.00"))                 # establishes session D
     now.set(at(9, 10, 0, day=D2))                                # pre-open on the NEXT session
@@ -871,11 +833,8 @@ async def test_an_order_placed_today_survives_todays_first_tick(
 async def test_the_session_lapse_sweeps_every_symbol_not_only_the_one_that_ticked(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """The lapse is a BROKER-WIDE event: Kite cancels every unfilled DAY order at the close, not
-    just the ones on symbols that happen to print again the next morning. Scoped to the ticking
-    symbol, an order on a name that never prints again (delisted, halted, simply dropped from the
-    subscription) rests forever and stays "live protection" to 3.2.8's square-off coordination.
-    """
+    """The lapse is BROKER-WIDE: an order on a name that never prints again (delisted, halted, dropped
+    from the subscription) must not rest forever and stay "live protection"."""
     now.set(at(10, 0, 0))
     quiet = await broker.place_order(
         order(tradingsymbol="INFY", order_type="LIMIT", price=Decimal("100.00"), quantity=40)
@@ -895,17 +854,9 @@ async def test_the_session_lapse_sweeps_every_symbol_not_only_the_one_that_ticke
 
 
 async def test_a_raising_publish_in_the_lapse_sweep_never_escapes_on_tick(now: _Now) -> None:
-    """The lapse sweep is the THIRD loop inside ``on_tick``, and the last one left unguarded.
-
-    It is also the worst place for an escape: it runs on the FIRST tick of a session, broker-wide,
-    so one raising publish there kills the market-data feed for every symbol before the day has
-    started -- and it takes the rest of the sweep with it, leaving the untouched symbols' orders
-    resting forever, still read as live protection.
-
-    The book change is applied BEFORE the postback is attempted, so a publish that raises loses the
-    NOTIFICATION and nothing else: the order really is CANCELLED, the sweep carries on, and the
-    reconciler's orderbook re-read is what closes the gap.
-    """
+    """A raising publish in the lapse sweep (broker-wide, first tick of the session) must not escape
+    ``on_tick`` or abort the sweep. The book change is applied BEFORE the postback, so only the
+    notification is lost; the reconciler's orderbook re-read closes the gap."""
     published: list[dict] = []
 
     def publish(topic: str, frame: BaseModel) -> None:
@@ -956,9 +907,7 @@ async def test_a_raising_publish_in_the_lapse_sweep_never_escapes_on_tick(now: _
 async def test_gtts_survive_the_session_roll_that_lapses_resting_orders(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """A Kite GTT is good-till-triggered (a year), NOT good-for-the-day -- the asymmetry with
-    resting orders is the whole reason 3.2.8 parks protection in a GTT overnight.
-    """
+    """A Kite GTT is good-till-triggered (a year), not good-for-the-day, unlike resting orders."""
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(_oco("95.00", "110.00"))
     resting = await broker.place_order(order(order_type="LIMIT", price=Decimal("1.00")))
@@ -1060,10 +1009,7 @@ async def test_positions_day_is_the_current_session_while_net_is_lifetime(
 async def test_orders_reports_each_row_last_update_not_the_read_time(
     broker: PaperBroker, now: _Now
 ) -> None:
-    """The reconciler reads the orderbook and compares broker timestamps against platform
-    rows. Restamping every row with ``now`` on each read makes every order look freshly updated and
-    destroys exactly the signal the reconciler needs.
-    """
+    """Restamping rows with ``now`` on each read would destroy the timestamp comparison the reconciler needs."""
     now.set(at(10, 0, 0))
     first = await broker.place_order(order(order_type="LIMIT", price=Decimal("1.00")))
     now.set(at(10, 5, 0))
@@ -1200,10 +1146,8 @@ async def test_modify_gtt_moves_the_trigger(broker: PaperBroker, bus: _Bus, now:
 async def test_place_gtt_validates_every_leg_at_placement(
     broker: PaperBroker, bad_leg: dict, match: str
 ) -> None:
-    """A leg is only ever validated by the fill engine at FIRE time, which is inside ``on_tick`` --
-    a malformed leg accepted at placement therefore detonates on the market-data hot path, days
-    later, with the GTT already marked triggered. Validate it where the caller can still be told.
-    """
+    """A malformed leg is rejected at placement: the fill engine would otherwise first see it at FIRE
+    time inside ``on_tick``, with the GTT already marked triggered."""
     req = {
         "trigger_type": "single",
         "tradingsymbol": SYM,
@@ -1233,15 +1177,9 @@ async def test_modify_gtt_validates_every_leg_and_leaves_the_original_intact(
 async def test_a_broken_gtt_leg_never_raises_out_of_on_tick_and_latches_to_failed(
     broker: PaperBroker, bus: _Bus, now: _Now
 ) -> None:
-    """``on_tick`` is the market-data hot path (plan 3.2): an exception escaping it takes down the
-    feed for EVERY symbol. A leg corrupted after placement (or by a future leg-shape change) must be
-    logged ONCE and the GTT LATCHED to a distinct terminal status.
-
-    Left "active" the trigger is re-evaluated on every subsequent tick through it -- a per-tick
-    exception+log storm on the hot path for the rest of the session -- and it reads to the paper
-    ProtectionManager as protection that is still armed. "failed" is neither: it stops the retry and it is
-    the status the ProtectionManager turns into a PROTECTION_FAILED reason.
-    """
+    """A leg corrupted after placement is logged ONCE and the GTT LATCHED to the terminal "failed"
+    status: left "active" it would re-raise on every tick and read as armed protection, while "failed"
+    is what the paper ProtectionManager turns into a PROTECTION_FAILED reason."""
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(_oco("95.00", "110.00"))
     broker._gtt_book[gid].orders[0]["quantity"] = 0      # corrupted after validation
@@ -1266,18 +1204,10 @@ async def test_a_broken_gtt_leg_never_raises_out_of_on_tick_and_latches_to_faile
 async def test_a_raising_publish_never_leaves_a_resting_leg_with_a_gtt_that_did_not_fire(
     now: _Now,
 ) -> None:
-    """BOOKED == FIRED, and a raising publish is not allowed to break that tie either.
-
-    The fire path registers and RESTS the leg, marks the GTT ``triggered``, and only then attempts
-    the postback -- so a bus that throws loses the notification and nothing else. The forbidden
-    combination is a leg resting on the book with a GTT that is NOT ``triggered``: left ``active``
-    the same trigger re-fires the leg on the next tick through it and puts a SECOND exit on a
-    position that already has one (the 3.2.8 double-exit hazard), and latched ``failed`` it tells
-    the paper ProtectionManager that protection failed while that protection is in fact resting.
-
-    (A leg that cannot be REGISTERED -- a corrupt leg, the case above -- still latches ``failed``:
-    there, nothing is resting.)
-    """
+    """BOOKED == FIRED even when the publish raises: the fire path rests the leg and marks the GTT
+    ``triggered`` before the postback, so a throwing bus loses only the notification. A resting leg with
+    a non-``triggered`` GTT is forbidden: ``active`` would re-fire a SECOND exit, ``failed`` would
+    misreport protection. (A leg that cannot be REGISTERED still latches ``failed``: nothing rests.)"""
     published: list[dict] = []
 
     def publish(topic: str, frame: BaseModel) -> None:
@@ -1327,7 +1257,7 @@ def _stop_target(stop_limit: str = "94.00") -> dict:
 
 
 def _gtt_row(gtt_id: int, req: dict, state: str = "ACTIVE") -> dict:
-    """``req`` as the 0016 ``gtts`` columns store it (TEXT prices)."""
+    """``req`` as the ``gtts`` table columns store it (TEXT prices)."""
     triggers, legs = req["trigger_values"], req["orders"]
     two = len(triggers) == 2
     return {
@@ -1397,7 +1327,7 @@ async def test_restore_books_nothing_when_any_row_is_invalid(broker: PaperBroker
 async def test_a_fired_leg_is_tagged_and_fills_near_the_market(
     broker: PaperBroker, bus: _Bus, now: _Now, leg: int, fire: str, fill: str
 ) -> None:
-    """Before the marketable-limit rule the stop leg booked its 94.00 limit, ~1% worse than live and than exit_sim."""
+    """A fired leg is a marketable limit: it fills near the market, not at its far-away limit (94.00)."""
     now.set(at(10, 0, 0))
     gid = await broker.place_gtt(_stop_target())
     bus.clear()
@@ -1566,9 +1496,7 @@ async def test_ltp_returns_decimals_for_seen_tokens(broker: PaperBroker) -> None
 
 # =========================================================================== sigma estimator
 def test_sigma_uses_the_sample_stdev_once_enough_bars_have_closed() -> None:
-    """The real estimation path (>= SIGMA_MIN_BARS returns), checked against ``statistics.stdev``
-    -- an independent implementation of the same sample (n-1) stdev.
-    """
+    """The estimation path (>= SIGMA_MIN_BARS returns) matches ``statistics.stdev`` (sample, n-1)."""
     est = SigmaEstimator()
     closes = [Decimal(c) for c in ("100", "101", "99", "102", "100", "103")]   # 6 closes -> 5 rets
     for close in closes:

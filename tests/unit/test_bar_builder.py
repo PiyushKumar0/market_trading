@@ -6,15 +6,14 @@ finalization, late-tick corrections incl. the official-bar-untouchable guard, th
 cumulative-decrease restatement guard (never negative volume), day rollover, and the mid-session
 first-tick rule. Time is controlled through an injected mutable Clock time source.
 
-Late-tick cost tests: an in-range late tick must touch NO store method at all (the
-2026-08-24 death spiral), an out-of-range one must still amend through the CAS path, the log
-must be deduped per (symbol, minute) behind a per-wall-minute aggregate, and the processing-lag
-watchdog must fire once per episode and recover.
+Late-tick cost tests: an in-range late tick must touch NO store method at all, an out-of-range one
+must still amend through the CAS path, the log must be deduped per (symbol, minute) behind a
+per-wall-minute aggregate, and the processing-lag watchdog must fire once per episode and recover.
 
-The 2026-09-03 15:40:02 follow-up adds the reconnect grace: a feed-health transition into
-WARMING/HEALTHY must silence the lag watchdog for LAG_RECONNECT_GRACE_S so Kite's connect-time
-snapshot (one last-trade-stamped tick per subscribed instrument) cannot flap the single global
-episode — without disarming the watchdog for a genuine lag once the grace lapses.
+Reconnect grace: a feed-health transition into WARMING/HEALTHY silences the lag watchdog for
+LAG_RECONNECT_GRACE_S so Kite's connect-time snapshot (one last-trade-stamped tick per subscribed
+instrument) cannot flap the single global episode — without disarming the watchdog for a genuine
+lag once the grace lapses.
 """
 
 from __future__ import annotations
@@ -202,8 +201,8 @@ def test_late_tick_goes_to_corrections_and_amends_range(store, mclock, now):
     assert stored.close == Decimal("100.50")     # close never restated post-finalize
     assert stored.volume == 700                  # volume never restated post-finalize
 
-    # A late print INSIDE the (now amended) range: bar untouched AND no correction row — the late-tick fix makes
-    # the in-range case free, and "nothing to widen" was never worth a DuckDB INSERT.
+    # A late print INSIDE the (now amended) range: bar untouched AND no correction row ("nothing to
+    # widen" is free, not worth a DuckDB INSERT).
     now.set(at(9, 16, 12))
     bb.on_tick(tick("R", at(9, 15, 45), "100.80", 721))
     again = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
@@ -235,8 +234,8 @@ def _finalize_915_self_bar(bb: BarBuilder, now: _Now) -> None:
 
 @pytest.mark.parametrize("src", ["kite_official", "gap_backfilled"])
 def test_late_tick_never_amends_a_non_self_bar(store, mclock, now, src):
-    """A reconciled/backfilled row is CANONICAL and reconcile never revisits a
-    checkpointed day — a stray late tick must leave it byte-intact and say so in corrections_log."""
+    """A reconciled/backfilled row is CANONICAL (reconcile never revisits a checkpointed day): a late
+    tick leaves it byte-intact and says so in corrections_log."""
     bb = BarBuilder(store, mclock)
     _finalize_915_self_bar(bb, now)
 
@@ -262,9 +261,8 @@ def test_late_tick_never_amends_a_non_self_bar(store, mclock, now, src):
 
 
 def test_late_tick_queued_behind_a_reconcile_write_decides_on_the_current_row(store, mclock, now):
-    """TOCTOU pin: the amendment's read-decide-write happens in ONE store-lock hold, so a
-    reconcile write that lands while the tick thread is queued is seen by the decision — the late
-    tick can never act on (or write back) the pre-reconcile snapshot it might have read first."""
+    """TOCTOU pin: the amendment's read-decide-write is ONE store-lock hold, so a reconcile write that
+    lands while the tick thread is queued is seen by the decision, never the pre-reconcile snapshot."""
     bb = BarBuilder(store, mclock)
     _finalize_915_self_bar(bb, now)
     self_bar = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
@@ -391,17 +389,16 @@ def test_raw_ticks_buffered_including_preopen(store, mclock, now):
 
 
 # ==================================================================== the late-tick cost
-# 2026-08-24: once processing slipped past the finalize grace EVERY tick took the late path
-# (amend CAS + corrections INSERT + one INFO line), throughput fell below real time and the lag grew
-# without bound — 215,823 late_tick_past_grace lines by lunchtime, 201,537 of them 'in_range', i.e.
-# paying two store round-trips each to discover there was nothing to do.
+# Once processing slips past the finalize grace EVERY tick takes the late path; if each paid store
+# round-trips (amend CAS + corrections INSERT + an INFO line) to discover there was nothing to do,
+# throughput would fall below real time and the lag would grow without bound.
 
 
 class _SpyStore:
     """Delegating :class:`MarketStore` proxy that records which store methods a path actually calls.
 
-    A spy rather than a stub on purpose: the store still does the real DuckDB work, so a test can
-    assert BOTH the call ledger (the cost) and the persisted outcome (the correctness) at once.
+    A spy, not a stub: the store still does the real DuckDB work, so a test asserts BOTH the call
+    ledger (the cost) and the persisted outcome (the correctness).
     """
 
     def __init__(self, inner: MarketStore) -> None:
@@ -425,8 +422,8 @@ def late_events(caplog, event: str) -> list:
 
 
 def test_in_range_late_tick_touches_no_store_method_at_all(store, mclock, now):
-    """The 212k case: a late print already inside the finalized bar's range has nothing to widen and
-    nothing to correct, so it must issue ZERO store calls — no CAS read, no corrections INSERT."""
+    """A late print already inside the finalized bar's range has nothing to widen or correct: ZERO
+    store calls — no CAS read, no corrections INSERT."""
     spy = _SpyStore(store)
     bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
     _finalize_915_self_bar(bb, now)              # 09:15 src='self', high 101.00 / low 100.50
@@ -436,7 +433,7 @@ def test_in_range_late_tick_touches_no_store_method_at_all(store, mclock, now):
     for i, px in enumerate(("100.50", "100.75", "101.00", "100.60")):   # incl. both range endpoints
         bb.on_tick(tick("R", at(9, 15, 40 + i), px, 700 + i))
 
-    assert spy.calls == []                       # <- the whole fix in one assertion
+    assert spy.calls == []
     assert store.get_corrections(D) == []
     stored = store.get_bars_1m("R", at(9, 15), at(9, 16))[0]
     assert (stored.high, stored.low) == (Decimal("101.00"), Decimal("100.50"))
@@ -445,9 +442,8 @@ def test_in_range_late_tick_touches_no_store_method_at_all(store, mclock, now):
 
 
 def test_out_of_range_late_tick_still_amends_through_the_cas_path(store, mclock, now):
-    """The genuinely-amending case is unchanged: one ``amend_bar_1m_extremes`` (the single-lock
-    read-decide-write CAS) plus its ``corrections_log`` row. Only after it lands does the print
-    become free — the amendment widens the REMEMBERED range in the same step."""
+    """An amending late tick costs one ``amend_bar_1m_extremes`` (the single-lock CAS) plus its
+    ``corrections_log`` row; after it lands the print is free (the REMEMBERED range widens in the same step)."""
     spy = _SpyStore(store)
     bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
     _finalize_915_self_bar(bb, now)
@@ -471,8 +467,7 @@ def test_out_of_range_late_tick_still_amends_through_the_cas_path(store, mclock,
 
 
 def test_recent_bar_window_is_bounded_so_an_old_minute_falls_back_to_the_store(store, mclock, now):
-    """The in-memory window is deliberately small (N=5). A minute that has aged out of it is NOT
-    assumed in-range — it goes back to the store, exactly as before."""
+    """The in-memory window is small (N=5); a minute aged out of it is NOT assumed in-range but goes to the store."""
     spy = _SpyStore(store)
     bb = BarBuilder(spy, mclock, persist_raw_ticks=False)
     minutes = range(15, 15 + RECENT_BARS_PER_SYMBOL + 2)
@@ -494,8 +489,8 @@ def test_recent_bar_window_is_bounded_so_an_old_minute_falls_back_to_the_store(s
 
 
 def test_late_tick_logs_at_most_one_line_per_symbol_minute(store, mclock, now, caplog):
-    """The 215k-line storm is itself part of the spiral's cost: structlog render + a synchronous file
-    write per tick. One line per (symbol, minute) — volume moves to the aggregate."""
+    """A per-tick line costs a structlog render + a synchronous file write: one line per (symbol,
+    minute), with volume carried by the aggregate."""
     bb = BarBuilder(store, mclock, persist_raw_ticks=False)
     _finalize_915_self_bar(bb, now)
     with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
@@ -519,8 +514,8 @@ def test_late_tick_logs_at_most_one_line_per_symbol_minute(store, mclock, now, c
 
 
 def test_late_ticks_summary_aggregates_the_wall_minute(store, mclock, now, caplog):
-    """The per-minute aggregate carries what the per-tick lines used to: how many, how many symbols,
-    how far behind, and how much of it actually reached DuckDB."""
+    """The per-minute aggregate carries how many late ticks, how many symbols, how far behind, and how
+    much reached DuckDB."""
     bb = BarBuilder(store, mclock, persist_raw_ticks=False)
     _finalize_915_self_bar(bb, now)
     with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
@@ -542,10 +537,9 @@ def test_late_ticks_summary_aggregates_the_wall_minute(store, mclock, now, caplo
 
 # ------------------------------------------------------------- processing-lag watchdog
 async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, now, caplog):
-    """2026-08-26 23:21 false page: an after-hours ticker reconnect replayed snapshot frames stamped
-    ~17:35 and 'now − ts' read as a 5.8 h backlog on a stream with none. Guard (i): a previous-day
-    stamp is a snapshot echo, never lag. Guard (ii): outside session hours the alarm neither fires
-    nor keeps an episode alive."""
+    """An after-hours reconnect replays snapshot frames with old stamps, so 'now − ts' reads as a
+    backlog on a stream with none. Guard (i): a previous-day stamp is a snapshot echo, never lag.
+    Guard (ii): outside session hours the alarm neither fires nor keeps an episode alive."""
     sent = []
 
     async def notify(msg) -> None:
@@ -554,7 +548,7 @@ async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, 
     bb = BarBuilder(store, mclock, persist_raw_ticks=False, notify=notify)
 
     with caplog.at_level(logging.INFO, logger="engine.marketdata.bar_builder"):
-        # (i) previous-day stamp at 23:21 — the live incident's exact shape.
+        # (i) previous-day stamp at 23:21.
         wall = at(23, 21, 0)
         now.set(wall)
         await bb.on_tick_event(tick("R", wall - dt.timedelta(hours=5, minutes=46), "100.00", 1000))
@@ -583,11 +577,9 @@ async def test_stale_snapshot_echoes_never_page_the_lag_watchdog(store, mclock, 
 
 
 async def test_lag_watchdog_window_follows_overridden_session_times(store, mclock, now, caplog):
-    """A shortened/muhurat session parameterizes session_open/session_close in the constructor
-    (~:306/313/415/444) exactly like the ordinary hours do — the lag watch window must follow suit
-    rather than staying pinned to the regular-session 09:15-15:45 constants. Otherwise a muhurat
-    session run entirely in the evening (as real muhurat sessions are) would never be watched at
-    all, and a session ending well before 15:45 would stay "watched" long past its own close."""
+    """The lag watch window follows the constructor's session_open/session_close rather than the
+    regular 09:15-15:45 constants: an evening muhurat session must be watched, and a session ending
+    well before 15:45 must not stay "watched" past its own close."""
     sent = []
 
     async def notify(msg) -> None:
@@ -674,30 +666,25 @@ async def test_lag_watchdog_without_a_notify_sink_is_log_only(store, mclock, now
     assert len(late_events(caplog, "tick_processing_lagging")) == 1
 
 
-# =================================================== 2026-09-03 15:40:02: reconnect-snapshot grace
-# A post-close boot spawned the ticker child; on kws.connect Kite delivered ONE snapshot tick per
-# subscribed instrument (202 tokens) carrying that instrument's LAST-TRADE exchange_timestamp
-# (~15:31), interleaved with near-fresh ticks (lag ~26 s). The watchdog keeps ONE global episode, so
-# each stale tick re-opened it and the next fresh tick closed it: 14 ERROR/recovered pairs in 83 ms
-# and 6 owner pages. Both 2026-08-26 guards were inert by construction (same day; 15:30-15:45 is
-# deliberately watched via _LAG_WATCH_END_BUFFER), and there is no snapshot marker on the wire — so
-# the grace is driven by the supervisor's feed.health transitions instead.
+# =================================================== reconnect-snapshot grace
+# On kws.connect Kite delivers ONE snapshot tick per subscribed instrument carrying that instrument's
+# LAST-TRADE exchange_timestamp, interleaved with near-fresh ticks. The watchdog keeps ONE global
+# episode, so each stale tick would re-open it and the next fresh tick close it (ERROR/recovered
+# pairs and owner pages). The out-of-session guards cannot catch it (same day; 15:30-15:45 is
+# deliberately watched via _LAG_WATCH_END_BUFFER) and the wire has no snapshot marker, so the grace
+# is driven by the supervisor's feed.health transitions instead.
 
 
 def _health(state: str) -> FeedHealth:
-    """The EXACT payload the supervisor publishes on ``feed.health``.
-
-    ``TickerSupervisor._publish_health`` publishes ``TickerSupervisor.health()`` — a
-    :class:`FeedHealth` whose ``state`` field is the transition the handler reads. Cited by method
-    name, not by line number (2026-09-09: the old ``:1184-1189`` pointer had already drifted ~30
-    lines and pointed at unrelated code). Constructed from the real model here rather than a stub so
-    a field rename breaks this test."""
+    """The payload ``TickerSupervisor._publish_health`` publishes on ``feed.health``: a real
+    :class:`FeedHealth` (not a stub, so a field rename breaks this test) whose ``state`` is the
+    transition the handler reads."""
     return FeedHealth(last_tick_age_s=0.4, heartbeat_age_s=0.9, last_frame_age_s=0.4, state=state)
 
 
 async def test_reconnect_snapshot_storm_never_pages_during_the_grace(store, mclock, now, caplog):
-    """The 09-03 shape end to end: grace armed by the HEALTHY transition at 15:40:02, then the
-    14 interleaved snapshot/fresh frames — zero ERROR lines, zero recoveries, zero pages."""
+    """Grace armed by the HEALTHY transition at 15:40:02, then 14 interleaved snapshot/fresh frames:
+    zero ERROR lines, zero recoveries, zero pages."""
     sent = []
 
     async def notify(msg) -> None:
@@ -713,7 +700,7 @@ async def test_reconnect_snapshot_storm_never_pages_during_the_grace(store, mclo
         assert len(armed) == 1 and armed[0].state == "HEALTHY"
 
         # 14 frames inside 83 ms, alternating snapshot echo (last trade ~15:31) and near-fresh (26 s),
-        # each for a different instrument — exactly the interleave the tape shows.
+        # each for a different instrument.
         for i in range(14):
             wall = boot + dt.timedelta(milliseconds=6 * i)
             now.set(wall)
@@ -815,9 +802,8 @@ async def test_arming_closes_an_open_episode_quietly(store, mclock, now, caplog)
 
 @pytest.mark.parametrize("state", ["STOPPED", "DEGRADED", "STALE"])
 async def test_a_non_arming_feed_state_leaves_the_watchdog_live(store, mclock, now, caplog, state):
-    """Only WARMING/HEALTHY arm. The other three states the supervisor publishes
-    (ticker_supervisor.py:260 — the closed ``FeedHealth.state`` set) are ignored, so a DEGRADED or
-    STALE feed cannot silence the lag alarm."""
+    """Only WARMING/HEALTHY arm; the other states of the closed ``FeedHealth.state`` set are ignored,
+    so a DEGRADED or STALE feed cannot silence the lag alarm."""
     sent = []
 
     async def notify(msg) -> None:
@@ -841,16 +827,10 @@ async def test_a_non_arming_feed_state_leaves_the_watchdog_live(store, mclock, n
 
 
 async def test_an_in_child_reconnect_edge_arms_the_grace_mid_session(store, mclock, now, caplog):
-    """The 2026-09-09 review case: KiteTicker reconnects INSIDE the child (reconnect=True) while
-    the child keeps heartbeating, so the supervisor's state never transitions — nothing was published
-    and this grace never armed for the commonest reconnect there is.
-
-    The supervisor now publishes on the heartbeat's ``ws_connected`` False->True edge
-    (ticker_supervisor.py `_handle_frame`, heartbeat branch), and the payload is the SAME
-    ``FeedHealth`` this handler already takes — HEALTHY, because an in-child reconnect leaves the
-    state machine in HEALTHY throughout. This is the end-to-end assertion at the BarBuilder end: a
-    mid-session (11:47) HEALTHY event arms the grace, and the interleaved snapshot/fresh burst that
-    follows pages nothing."""
+    """KiteTicker reconnects INSIDE the child while it keeps heartbeating, so the supervisor's state
+    never transitions; it publishes a HEALTHY ``FeedHealth`` on the reconnect edge
+    (ticker_supervisor.py `_handle_frame`, heartbeat branch). At the BarBuilder end a mid-session
+    HEALTHY event arms the grace and the snapshot/fresh burst that follows pages nothing."""
     sent = []
 
     async def notify(msg) -> None:
@@ -880,9 +860,8 @@ async def test_an_in_child_reconnect_edge_arms_the_grace_mid_session(store, mclo
 
 
 def test_a_stale_minute_placeholder_never_evicts_a_real_cached_bar(store, mclock, now):
-    """2026-09-02 review (CONFIRMED): ranged=False placeholders shared the 5-entry LRU with real
-    finalized bars, so a reconnect replaying 5+ distinct stale minutes wiped the whole late-tick cache
-    and put every current-minute tick back on the store path. A placeholder is only remembered when
+    """ranged=False placeholders share the 5-entry LRU with real finalized bars: a reconnect replaying
+    5+ distinct stale minutes must not wipe the late-tick cache. A placeholder is remembered only when
     it does not displace a real range."""
     spy = _SpyStore(store)
     bb = BarBuilder(spy, mclock, persist_raw_ticks=False)

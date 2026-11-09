@@ -1,10 +1,6 @@
-"""TickerSupervisor respawn lifecycle: a respawn must cancel the old read loop
-before installing a fresh child, or the parked read task leaks (it runs forever).
-
-Also covers the 2026-07-22 cold-start defect family: the tick frame → bus → BarBuilder → store path
-end-to-end (proof the pipeline is sound, so a tickless session is a CHILD/feed problem, not this path),
-the child-stderr drain (the discarded-diagnostics root cause), the in-session tick-silence DEGRADED
-guard (a tickless-but-heartbeating feed must never present HEALTHY through a session), and feed_stats.
+"""TickerSupervisor lifecycle: respawn (the old read loop is cancelled before a fresh child), the tick
+frame → bus → BarBuilder → store path, child-stderr drain, tick-silence DEGRADED guard and respawn,
+feed_stats, the heartbeat/STALE watchdog and in-child reconnect publishing.
 """
 
 from __future__ import annotations
@@ -131,8 +127,7 @@ def _collect(sink: list):
 
 @pytest.mark.asyncio
 async def test_start_refuses_without_api_key(clock, monkeypatch):
-    # 2026-07-23 root cause: api_key defaulted to "" and the child dialed the WS with it forever
-    # (400-BadRequest reject loop, HEALTHY-by-heartbeat, zero ticks ever). start() must fail LOUD.
+    # An empty api_key makes the child dial the WS forever with a 400 reject: start() must fail loud.
     sup = TickerSupervisor(_FakeSettings(), clock, bus=None)          # api_key omitted -> ""
     spawned = []
     monkeypatch.setattr(sup, "_spawn_child", lambda: spawned.append(1))
@@ -203,11 +198,7 @@ async def test_respawn_without_token_stops(clock, monkeypatch):
 # ---------------------------------------------------------------- root-cause regression: full pipeline
 @pytest.mark.asyncio
 async def test_tick_frame_end_to_end_supervisor_to_store(tmp_path):
-    """A wire tick frame → supervisor parse → bus → BarBuilder → tmp-store 1m bar (src='self').
-
-    Discriminating proof: this whole chain WORKS. The 2026-07-22 zero-bars outage therefore lies
-    UPSTREAM of it (the child produced no ticks), not in socket/parse/bus/builder/store — every one
-    of which this test exercises for real."""
+    """A wire tick frame → supervisor parse → bus → BarBuilder → tmp-store 1m bar (src='self')."""
     now = _Now(_at(9, 15, 10))
     clock = Clock(time_source=now)
     store = MarketStore(tmp_path / "market.duckdb", tmp_path / "pq", clock)
@@ -239,9 +230,8 @@ async def test_tick_frame_end_to_end_supervisor_to_store(tmp_path):
 # ---------------------------------------------------------------- root-cause fix: child stderr drained
 @pytest.mark.asyncio
 async def test_child_stderr_is_drained_to_engine_log(clock, monkeypatch):
-    """The child's stderr (its ONLY diagnostic channel) must reach the engine log — un-drained, the
-    2026-07-22 session had zero explanation for the tickless feed AND risked wedging the child on a
-    full pipe. Drain reads every line until EOF and logs it."""
+    """The child's stderr (its only diagnostic channel) is read to EOF and logged; un-drained it could
+    also wedge the child on a full pipe."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -264,7 +254,7 @@ def _healthy_sup(clock, *, calendar, notify=None, silence_ref: dt.datetime | Non
                            calendar=calendar, notify=notify)
     sup._state = "HEALTHY"
     sup._healthy_since = silence_ref
-    sup._last_tick_at = None                 # NEVER saw a tick — the exact outage shape
+    sup._last_tick_at = None                 # never saw a tick
     return sup
 
 
@@ -286,7 +276,7 @@ async def test_tick_silence_degrades_in_session(clock):
 
 @pytest.mark.asyncio
 async def test_tick_silence_not_degraded_off_hours():
-    """Off-hours (night), the SAME tick silence must NOT alarm — heartbeat-only semantics at night."""
+    """Off-hours, the same tick silence does not alarm (heartbeat-only semantics at night)."""
     night = _Now(dt.datetime(2026, 6, 17, 22, 30, tzinfo=IST))
     clock = Clock(time_source=night)
     cal = _FakeCalendar(_FakeSession(_at(9, 15), _at(15, 30)))   # session exists, but now is 22:30
@@ -350,14 +340,11 @@ async def test_feed_stats_snapshot_counts_and_resets(clock):
     assert sup.stats_snapshot() == {"ticks_received": 0, "frames_dropped": {}}  # reset-on-read
 
 
-# ------------------------------------------------- epoch-0 exchange_timestamp guard (2026-08-20)
-# A tick whose wire ``exchange_timestamp`` is Unix epoch 0 (a zeroed broker field — kiteconnect
-# returns ``datetime.fromtimestamp(0)``) sailed through every layer: the child ISO-serializes it,
-# ``_wire_timestamp`` IST-localizes it, and the Tick validator only checks tz-awareness — so it
-# landed in a ``date=1970-01-01`` tick partition (103 rows before they were quarantined by hand).
-# It is dropped: one WARNING, stream untouched. The 2026-08-21 change split it onto its OWN drop
-# path/counter (``implausible_timestamp``, no ERROR traceback) — distinct from a genuinely missing
-# timestamp, which still logs+counts as ``parse_error`` via the generic exception handler.
+# ------------------------------------------------- epoch-0 exchange_timestamp guard
+# A tick whose wire ``exchange_timestamp`` is Unix epoch 0 (a zeroed broker field) passes every other
+# layer and would land in a ``date=1970-01-01`` partition. It is dropped with one WARNING on its OWN
+# counter (``implausible_timestamp``, no ERROR traceback); a genuinely missing timestamp still
+# logs+counts as ``parse_error`` via the generic exception handler.
 
 #: What ``datetime.fromtimestamp(0)`` produces on an IST box, as the child would serialize it.
 _EPOCH_IST = dt.datetime(1970, 1, 1, 5, 30, 0)
@@ -385,7 +372,7 @@ async def test_epoch_timestamp_tick_is_dropped_with_a_warning(clock, monkeypatch
     assert warns[0]["symbol"] == "R"
     assert warns[0]["parsed"].startswith("1970-01-01")
     assert all(lvl == "warning" for (lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible")
-    # No ERROR-level traceback for this working-as-designed drop — the WARNING is the ONLY log line.
+    # No ERROR-level traceback: the WARNING is the only log line.
     assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "ticker_tick_parse_error"] == []
     assert len(rec.calls) == 1
 
@@ -426,8 +413,6 @@ async def test_the_epoch_tick_never_stops_the_stream(clock):
         await asyncio.sleep(0)
 
     assert len(published) == 1 and published[0].ltp == Decimal("102.50")
-    # Both frames were consumed off the wire (the drop is per-TICK, never a read-loop abort) and
-    # exactly one of them was dropped, on its own counter.
     snap = sup.stats_snapshot()
     assert snap["ticks_received"] == 2
     assert snap["frames_dropped"] == {"implausible_timestamp": 1}
@@ -435,9 +420,8 @@ async def test_the_epoch_tick_never_stops_the_stream(clock):
 
 @pytest.mark.asyncio
 async def test_missing_timestamp_tick_still_takes_the_generic_parse_error_path(clock, monkeypatch):
-    """A genuinely ABSENT ``exchange_timestamp`` is a different defect than epoch-0 (a later change split
-    them): it still raises the plain ``ValueError`` from :func:`parse_tick_frame`, still logs
-    ``ticker_tick_parse_error`` with a traceback, and still counts as ``parse_error`` — unchanged."""
+    """An absent ``exchange_timestamp`` is not the epoch-0 case: it logs ``ticker_tick_parse_error``
+    with a traceback and counts as ``parse_error``."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -460,7 +444,7 @@ async def test_missing_timestamp_tick_still_takes_the_generic_parse_error_path(c
     assert [ev for (_lvl, ev, _kw) in rec.calls if ev == "tick_timestamp_implausible"] == []
 
 
-# --------------------------------------------------------- sleep/resume WARMING-wedge (2026-07-23 13:41)
+# --------------------------------------------------------- sleep/resume WARMING-wedge
 def _warming_sup(clock, *, notify=None):
     """A supervisor parked in WARMING with a fresh spawn instant — the wedge shape after resume."""
     sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), notify=notify)
@@ -563,14 +547,10 @@ async def test_warming_backoff_caps_and_escalates_once(monkeypatch):
 
 
 # ================================================================== the false-STALE wedge
-# Three occurrences (2026-08-20 pm, 08-24 10:01, 08-25 11:28) of the same shape: HEALTHY→STALE while
-# the feed was perfect — ~46,000 ticks per 5 min and 1,010 bars written per interval kept flowing all
-# through a "STALE" that lasted 40 min / 2 h 14 min. Two independent defects produced it:
-#   1. Liveness was stamped ONLY on the dedicated heartbeat frame, so a stall on the shared event
-#      loop (the reader and the watchdog live on it together) read as a dead child.
-#   2. STALE was a one-way door AND the advertised kill+respawn self-deadlocked (_respawn cancelled
-#      the read loop first, whose `server.wait_closed()` — CPython ≥3.12 — waits for the live child
-#      link to drop, which only `_terminate_child()` two lines later could cause).
+# HEALTHY→STALE must not happen while frames flow. Liveness is stamped on every frame (a tick is a
+# heartbeat), a stall of the shared event loop is discounted rather than blamed on the child, STALE
+# recovers on the next frame, and _respawn must terminate the child before cancelling the read loop
+# (`server.wait_closed()` on CPython ≥3.12 waits for the live child link to drop).
 
 
 class _FakeProc:
@@ -625,12 +605,7 @@ async def _run_monitor(sup, monkeypatch, cycle, cycles):
 # ------------------------------------------------------------------ 1. a tick IS a heartbeat
 @pytest.mark.asyncio
 async def test_ticks_keep_the_feed_healthy_without_any_heartbeat_frame(monkeypatch):
-    """Ticks flowing but ZERO heartbeat frames must stay HEALTHY — no STALE, no respawn.
-
-    The heartbeat frame is a supplement for a quiet tape, not the sole evidence of life: a tick
-    proves the child is alive and the link is carrying bytes just as well. Under the old rule the
-    heartbeat age was the only input, so this exact situation (data perfect, heartbeat stamp stale)
-    is what declared a healthy feed dead."""
+    """Ticks flowing but zero heartbeat frames stay HEALTHY — a tick is as good a proof of life."""
     now = _Now(_at(10, 0, 0))
     clock = Clock(time_source=now)
     sup = _monitor_sup(clock)
@@ -658,10 +633,7 @@ async def test_ticks_keep_the_feed_healthy_without_any_heartbeat_frame(monkeypat
 # ------------------------------------------------------------------ 2. the kill_after contract is real
 @pytest.mark.asyncio
 async def test_true_silence_past_kill_after_restarts_the_child(monkeypatch):
-    """NO ticks and NO heartbeats past kill_after_s ⇒ the child is actually restarted, logged once.
-
-    This is the contract the module advertises and did not honour: on 08-24/08-25 the supervisor
-    logged `ticker_respawn` and then did nothing at all for hours."""
+    """No ticks and no heartbeats past kill_after_s ⇒ the child is actually restarted, logged once."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -694,10 +666,7 @@ async def test_true_silence_past_kill_after_restarts_the_child(monkeypatch):
 # ------------------------------------------------------------------ 3. STALE recovers on frames
 @pytest.mark.asyncio
 async def test_stale_recovers_to_healthy_when_frames_resume(clock):
-    """A STALE feed must recover on the very next frame — never wait for a reconnect that never comes.
-
-    On 08-24 10:01 STALE held for 40 minutes while ~46,000 ticks per 5 min flowed through
-    `_handle_frame` itself; nothing in the state machine could act on that evidence."""
+    """A STALE feed recovers on the very next frame, without waiting for a reconnect."""
     bus = EventBus()
     events: list = []
 
@@ -718,10 +687,7 @@ async def test_stale_recovers_to_healthy_when_frames_resume(clock):
 
 @pytest.mark.asyncio
 async def test_a_tick_promotes_warming_to_healthy(clock):
-    """WARMING is the other place the heartbeat frame used to be privileged.
-
-    A child whose heartbeat LoopingCall never started but whose ticks flow perfectly would sit in
-    WARMING and be respawned every warming_timeout_s forever — throwing away a working feed."""
+    """A tick promotes WARMING→HEALTHY, so a child with ticks but no heartbeat is not respawned forever."""
     sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), symbol_for_token=lambda t: "R")
     sup._state = "WARMING"
     sup._started_at = clock.now()
@@ -743,24 +709,17 @@ async def test_stale_recovers_on_a_heartbeat_frame_too(clock):
     assert sup.health().state == "HEALTHY"
 
 
-# ------------------------------------------- 3b. in-child KiteTicker reconnect (2026-09-09)
-# KiteTicker reconnects INSIDE the child (`reconnect=True`; ticker/main.py `TickerApp._on_connect`
-# re-subscribes and re-asserts FULL mode, so Kite re-delivers the connect-time snapshot with
-# last-trade stamps) while the child keeps heartbeating. The supervisor therefore sees NO state
-# transition and publishes nothing, so BarBuilder's reconnect grace never arms and the 2026-09-03
-# lag flap recurs.
-#
-# The signal is `connect_seq` (ticker/main.py `TickerApp._send_heartbeat`), a per-child counter bumped
-# at the TOP of `_on_connect` and shipped on a heartbeat emitted THERE, before `ws.subscribe` — so it
-# precedes the snapshot burst in the pipe. A CHANGE of that value (never the first value after a
-# spawn, which is the spawn's own WARMING->HEALTHY publish) is the reconnect, and it must publish
-# feed.health exactly once. The `ws_connected` False->True edge stays as the fallback for a heartbeat
-# that carries no `connect_seq`, and no frame may ever publish twice.
+# ------------------------------------------- 3b. in-child KiteTicker reconnect
+# KiteTicker reconnects inside the child while it keeps heartbeating, so the supervisor sees no state
+# transition and BarBuilder's reconnect grace would never arm (Kite re-delivers a connect-time
+# snapshot with last-trade stamps). The signal is `connect_seq` (ticker/main.py
+# `TickerApp._send_heartbeat`), a per-child counter shipped on a heartbeat emitted before
+# `ws.subscribe`, so it precedes the snapshot burst. A CHANGE of it (never the first value after a
+# spawn, which is the spawn's own WARMING->HEALTHY publish) is the reconnect and publishes feed.health
+# exactly once. The `ws_connected` False->True edge is the fallback for a heartbeat without
+# `connect_seq`; no frame may ever publish twice.
 def _hb(ws_connected: bool | None = None, connect_seq: int | None = None) -> dict:
-    """The child's heartbeat frame (ticker/main.py `TickerApp._send_heartbeat`).
-
-    `connect_seq` is the pinned reconnect field, `ws_connected` the fallback; both are optional on
-    the wire, so omitting them here reproduces the pre-2026-09-09 frame shape verbatim."""
+    """The child's heartbeat frame; `connect_seq` and `ws_connected` are both optional on the wire."""
     frame: dict = {"type": "heartbeat", "seq": 1, "last_tick_age_s": 0.4}
     if ws_connected is not None:
         frame["ws_connected"] = ws_connected
@@ -781,10 +740,7 @@ def _health_sink(bus: EventBus) -> list[str]:
 
 @pytest.mark.asyncio
 async def test_in_child_reconnect_publishes_feed_health_on_the_ws_connected_edge(clock):
-    """True -> False -> True heartbeats: exactly ONE extra publish, on the False->True edge only.
-
-    The state never leaves HEALTHY (no transition exists for an in-child reconnect), so this edge is
-    the only evidence the engine gets that a connect-time snapshot is about to land."""
+    """True -> False -> True heartbeats: exactly ONE extra publish, on the False->True edge only."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -815,10 +771,8 @@ async def test_in_child_reconnect_publishes_feed_health_on_the_ws_connected_edge
 
 @pytest.mark.asyncio
 async def test_the_first_heartbeat_after_spawn_publishes_exactly_once(clock):
-    """A fresh spawn's first heartbeat must keep publishing ONE event (WARMING->HEALTHY), not two.
-
-    `ws_connected` starts unknown (None) and the first frame reports True — that is a spawn, not a
-    reconnect, and the WARMING promotion already publishes the HEALTHY the grace needs."""
+    """A fresh spawn's first heartbeat publishes ONE event (WARMING->HEALTHY), not two: unknown→True is
+    a spawn, not a reconnect."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -835,10 +789,7 @@ async def test_the_first_heartbeat_after_spawn_publishes_exactly_once(clock):
 
 @pytest.mark.asyncio
 async def test_a_heartbeat_without_ws_connected_never_fabricates_an_edge(clock):
-    """An older/degenerate heartbeat frame with no `ws_connected` leaves the tracked value alone.
-
-    Absence is not a disconnect: treating a missing field as False would manufacture a reconnect
-    edge on the next normal heartbeat and arm the grace for nothing."""
+    """A heartbeat with no `ws_connected` leaves the tracked value alone: absence is not a disconnect."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -855,15 +806,9 @@ async def test_a_heartbeat_without_ws_connected_never_fabricates_an_edge(clock):
 
 @pytest.mark.asyncio
 async def test_a_connect_seq_change_publishes_feed_health_exactly_once(clock, monkeypatch):
-    """1, 1, 2 — only the CHANGE is a reconnect (2026-09-09 review, gap (a)).
-
-    The `ws_connected` edge is only observable on the NEXT 1 s heartbeat, but Kite's connect-time
-    snapshot ticks land within ~50 ms of the child's re-subscribe, so the burst flaps BarBuilder's lag
-    episode before the grace can arm. `connect_seq` rides a heartbeat emitted inside `_on_connect`
-    itself, ahead of the subscribe — in-band and ordering-safe. Here: the first value seen is this
-    spawn's baseline, the repeat is steady state, and the bump is the reconnect. Every heartbeat carries
-    ``ws_connected=True``, so this is also gap (b): a sub-second drop (or an ``on_error`` path with no
-    ``on_close``) never produces a ``ws_connected=False`` heartbeat, and the seq bump alone must fire."""
+    """1, 1, 2 — only the CHANGE is a reconnect: the first value is the spawn's baseline, the repeat is
+    steady state. Every heartbeat carries ``ws_connected=True`` (a sub-second drop never yields a False
+    heartbeat), so the seq bump alone must fire; the `ws_connected` edge would arrive too late."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -897,11 +842,8 @@ async def test_a_connect_seq_change_publishes_feed_health_exactly_once(clock, mo
 
 @pytest.mark.asyncio
 async def test_one_frame_that_recovers_stale_and_changes_seq_publishes_once(clock):
-    """A reconnect heartbeat landing on a STALE feed has TWO reasons to publish — `_mark_alive`'s
-    STALE->HEALTHY recovery and the seq edge — and must still emit exactly ONE `feed.health`.
-
-    Two events for one frame would arm BarBuilder's grace twice and make the bus lie about how many
-    transitions happened."""
+    """A reconnect heartbeat on a STALE feed (STALE->HEALTHY recovery plus the seq edge) emits exactly
+    ONE `feed.health`."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -923,8 +865,8 @@ async def test_one_frame_that_recovers_stale_and_changes_seq_publishes_once(cloc
 
 @pytest.mark.asyncio
 async def test_the_first_connect_seq_after_spawn_is_not_a_reconnect(clock):
-    """The child's `_on_connect` heartbeat is the FIRST frame of a fresh spawn, so its `connect_seq`
-    has no predecessor here: the WARMING->HEALTHY promotion is the one publish, not two."""
+    """A fresh spawn's first `connect_seq` has no predecessor: the WARMING->HEALTHY promotion is the one
+    publish, not two."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -941,11 +883,8 @@ async def test_the_first_connect_seq_after_spawn_is_not_a_reconnect(clock):
 
 @pytest.mark.asyncio
 async def test_a_respawned_childs_first_seq_is_not_a_reconnect(clock):
-    """`_spawn_child` resets the tracked seq like every other per-spawn stamp.
-
-    A fresh child restarts its counter at 1, so a supervisor still holding the dead child's last seq
-    (say 6) would read 1 as a "change" and publish a phantom reconnect on top of the respawn's own
-    WARMING->HEALTHY."""
+    """`_spawn_child` resets the tracked seq: a fresh child restarts at 1, which must not read as a
+    "change" from the dead child's last seq."""
     bus = EventBus()
     states = _health_sink(bus)
     sup = TickerSupervisor(_FakeSettings(), clock, bus)
@@ -966,11 +905,8 @@ async def test_a_respawned_childs_first_seq_is_not_a_reconnect(clock):
 # ------------------------------------------------------------------ 4. stamping lives on the frame path
 @pytest.mark.asyncio
 async def test_every_frame_type_stamps_liveness_on_the_frame_path(clock):
-    """Liveness is stamped in `_handle_frame` — the SAME seam every frame goes through.
-
-    That is the point of the fix: liveness cannot be starved separately from the data it guards,
-    because it is refreshed by the data. Any frame counts, including an order postback and a frame
-    `_read_frame` could not decode (reduced to `{}`): bytes off the link ARE proof of life."""
+    """Liveness is stamped in `_handle_frame` for any frame, including an order postback and an
+    undecodable frame (reduced to `{}`): bytes off the link are proof of life."""
     sup = TickerSupervisor(_FakeSettings(), clock, bus=EventBus(), symbol_for_token=lambda t: "R")
 
     for frame in ({"type": "tick", **_tick_frame(token=1)},
@@ -985,12 +921,8 @@ async def test_every_frame_type_stamps_liveness_on_the_frame_path(clock):
 # ------------------------------------------------------------------ 5. don't blame the child for our stall
 @pytest.mark.asyncio
 async def test_silence_measured_across_a_starved_loop_does_not_kill(monkeypatch):
-    """A silence the watchdog only 'observed' because its own loop was frozen must not kill the child.
-
-    This is the 08-24/08-25 mechanism: the feature engine blocked the shared event loop for ~30 s at
-    a stretch (no `ticks_flushed` for 34 s, then 3,124 ticks in one flush; `store_stalled` reporting
-    `seconds_since_last_success=900.154`). Nothing was read during the freeze, so the wall-clock
-    frame age looked fatal — while the child was fine and its frames were queued in TCP."""
+    """A silence the watchdog only saw because its own loop was blocked must not kill the child: frames
+    were queued in TCP, unread during the freeze."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -1046,14 +978,9 @@ async def test_starvation_discount_still_kills_a_genuinely_dead_child(monkeypatc
 # ------------------------------------------------------------------ 6. the respawn deadlock itself
 @pytest.mark.asyncio
 async def test_respawn_terminates_the_child_before_cancelling_the_read_loop(clock, monkeypatch):
-    """Regression for the wedge that made kill_after a lie.
-
-    `_read_loop`'s cleanup awaits `server.wait_closed()`, which under CPython ≥3.12 blocks until
-    every accepted connection has dropped — the child link included. Cancelling the read loop BEFORE
-    killing the child therefore waited on an event only the not-yet-run `_terminate_child()` could
-    produce, behind the same lock: the supervisor logged `ticker_respawn` and froze for 40 min
-    (08-24 10:01), 2 h 14 min (08-25 11:28) and 4 h 53 min (08-25 03:37), each ending only when an
-    unrelated `ticker_link_closed` released the wait. Order is the fix."""
+    """`_read_loop`'s cleanup awaits `server.wait_closed()`, which under CPython ≥3.12 blocks until the
+    child link drops; cancelling the read loop before killing the child would deadlock behind the
+    same lock. Order: terminate, cancel read, spawn."""
     sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
     sup._read_task = asyncio.create_task(asyncio.Event().wait())
     sup._access_token = "tok"
@@ -1102,11 +1029,8 @@ async def test_stop_kills_the_child_between_the_two_cancels(clock, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stop_cancels_the_real_read_task(clock, monkeypatch):
-    """`_cancel_monitor_task` must touch only the monitor task. Two leftover lines from the
-    earlier combined `_cancel_supervision` (`self._read_task = None` plus a redundant
-    `self._monitor_task = None`) cleared `_read_task` before step 3 ever ran, so `stop()`'s own
-    `_cancel_read_task()` found nothing to cancel and the real read-loop task leaked on every
-    normal stop — the opposite of what `stop()`'s docstring promises."""
+    """`_cancel_monitor_task` touches only the monitor task, so `stop()`'s own `_cancel_read_task()`
+    still finds the real read-loop task and cancels it (as `stop()`'s docstring promises)."""
     sup = TickerSupervisor(_FakeSettings(), clock, bus=None)
     old_read = asyncio.create_task(asyncio.Event().wait())
     sup._read_task = old_read
@@ -1125,10 +1049,8 @@ async def test_stop_cancels_the_real_read_task(clock, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_read_loop_cleanup_cannot_hang_on_a_child_that_will_not_let_go(clock, monkeypatch):
-    """Belt-and-braces: even with the child link still open, cancelling the read loop must COMPLETE.
-
-    `server.wait_closed()` is bounded and the timeout is logged, so a child that survives both
-    SIGTERM and SIGKILL can no longer freeze supervision the way it did for hours."""
+    """Even with the child link still open, cancelling the read loop completes: `server.wait_closed()`
+    is bounded and the timeout is logged."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -1156,10 +1078,10 @@ async def test_read_loop_cleanup_cannot_hang_on_a_child_that_will_not_let_go(clo
     assert [ev for (_l, ev, _k) in rec.calls if ev == "ticker_server_close_timeout"]
 
 
-# --------------------------------------------------------------------------- a spawn that raises (2026-10-12)
+# --------------------------------------------------------------------------- a spawn that raises
 def _failing_spawn_sup(clock, monkeypatch, *, fail_first: int, bus: EventBus | None = None):
-    """A HEALTHY supervisor whose next ``fail_first`` spawns raise CreateProcess's WinError 5 (Modern
-    Standby, 2026-10-12 20:12); records spawn attempts and retry sleeps, and never touches a real process."""
+    """A HEALTHY supervisor whose next ``fail_first`` spawns raise CreateProcess's WinError 5 (as in
+    Modern Standby); records spawn attempts and retry sleeps, and never touches a real process."""
     import engine.broker.ticker_supervisor as mod
 
     sup = TickerSupervisor(_FakeSettings(), clock, bus=bus, api_key="k")
@@ -1231,9 +1153,9 @@ async def test_a_long_failure_streak_backs_off_at_the_cap_without_overflow(clock
 
 @pytest.mark.asyncio
 async def test_the_incident_through_the_real_monitor_terminate_and_spawn_paths(monkeypatch):
-    """10-12 end to end: heartbeat silence in the REAL monitor loop -> the old child's TerminateProcess is
-    denied -> the REAL _spawn_child binds its listener, then CreateProcess is denied. Supervision survives
-    as a retry, STALE is published and the half-made spawn's listener is cancelled."""
+    """Heartbeat silence in the REAL monitor loop -> the old child's TerminateProcess is denied -> the REAL
+    _spawn_child binds its listener, then CreateProcess is denied. Supervision survives as a retry, STALE
+    is published and the half-made spawn's listener is cancelled."""
     import engine.broker.ticker_supervisor as mod
 
     now = _Now(_at(20, 12, 30))
@@ -1287,9 +1209,8 @@ class _LinkWriter:
 
 @pytest.mark.asyncio
 async def test_read_loop_teardown_closes_the_child_link(clock, monkeypatch):
-    """A child that outlives a denied terminate/kill keeps its authenticated connection, which
-    server.close() does not drop: the read loop's teardown (every stop/respawn cancels it right after
-    _terminate_child) must close it, or its frames keep stamping liveness for the next spawn."""
+    """A child that outlives a denied terminate/kill keeps its connection (server.close() does not drop
+    it): the read loop's teardown must close it, or its frames keep stamping liveness for the next spawn."""
     import engine.broker.ticker_supervisor as mod
 
     class _Server:
@@ -1362,11 +1283,10 @@ async def test_a_long_wedge_streak_backs_off_at_the_cap_without_overflow(clock, 
     assert await sup._check_warming_timeout(60.0, 300.0, 5) is False   # 299 s is inside the 300 s cap
 
 
-# ================================================================== silent connected feed (2026-11-03)
-# Kite held the WebSocket open and answered pings while delivering no ticks (11-03 13:46–15:30, 11-02
-# 14:51–15:22, 10-07, 09-30). The child heartbeats throughout, so only tick silence can see it, and
-# every such silence since 09-15 ended with a fresh connection. DEGRADED past 300 s in session now
-# respawns, at most 3 times per episode, then escalates once.
+# ================================================================== silent connected feed
+# Kite can hold the WebSocket open and answer pings while delivering no ticks; the child heartbeats
+# throughout, so only tick silence sees it, and a fresh connection ends it. DEGRADED past 300 s in
+# session respawns, at most 3 times per episode, then escalates once.
 class _DayCalendar:
     """NSECalendar stand-in with a 09:15–15:30 session on EVERY date (the rollover test needs two)."""
 
@@ -1378,9 +1298,8 @@ class _DayCalendar:
 def _silent_feed_rig(monkeypatch, start: dt.datetime, *, calendar=None, spawn=None, notify=None):
     """A HEALTHY in-session supervisor whose last tick is ``start``; heartbeats keep coming, ticks don't.
 
-    The REAL ``_respawn`` runs; only the OS edges are faked: terminate drops the proc, and spawn does to
-    supervisor state exactly what ``_spawn_child`` does (per-spawn stamps reset, WARMING). ``spawn`` is an
-    optional hook run first, so a test can make the spawn raise."""
+    The REAL ``_respawn`` runs; only the OS edges are faked (spawn resets per-spawn stamps and enters
+    WARMING like ``_spawn_child``). ``spawn`` is an optional hook run first, e.g. to raise."""
     import engine.broker.ticker_supervisor as mod
 
     rec = _LogRec()
@@ -1413,7 +1332,7 @@ def _silent_feed_rig(monkeypatch, start: dt.datetime, *, calendar=None, spawn=No
 
 async def _drive(sup, now: _Now, seconds: int, *, beat: dict | None = None) -> None:
     """``seconds`` one-second monitor cycles of the tick-silence path: a heartbeat lands each second (it
-    promotes a respawned child out of WARMING, as the real first heartbeat does), and no tick ever does."""
+    promotes a respawned child out of WARMING) and no tick ever does."""
     frame = beat or _hb(True, connect_seq=1)
     for _ in range(seconds):
         now.set(now.value + dt.timedelta(seconds=1))
@@ -1501,9 +1420,8 @@ async def test_each_fresh_connection_gets_the_full_budget_from_its_healthy_entry
 
 @pytest.mark.asyncio
 async def test_tick_silence_respawn_times_from_the_later_of_last_tick_and_healthy_entry(monkeypatch):
-    """The respawn clock is the LATER of the last tick and the HEALTHY entry, not
-    ``_effective_tick_silence_s`` (last tick first): a feed that recovered from STALE at 10:04 with a 10:00
-    tick on file has had 120 s of silence at 10:06, not 360 s."""
+    """The respawn clock is the LATER of the last tick and the HEALTHY entry: a feed that recovered from
+    STALE at 10:04 with a 10:00 tick on file has had 120 s of silence at 10:06, not 360 s."""
     sup, now, _notify, _rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
     sup._state = "DEGRADED"
     sup._healthy_since = _at(10, 4, 0)
@@ -1600,8 +1518,7 @@ async def test_a_new_session_date_resets_a_spent_cap(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_tick_silence_respawn_whose_spawn_raises_keeps_supervising_and_counts(monkeypatch):
-    """A spawn that raises takes the existing ``_spawn_failed`` path (STALE + a retry task standing in
-    for the monitor) and still spends an attempt."""
+    """A spawn that raises takes the ``_spawn_failed`` path (STALE + a retry task) and still spends an attempt."""
     import engine.broker.ticker_supervisor as mod
 
     async def denied():
@@ -1626,7 +1543,7 @@ async def test_a_tick_silence_respawn_whose_spawn_raises_keeps_supervising_and_c
 
 @pytest.mark.asyncio
 async def test_a_tick_silence_respawn_without_a_token_stops_and_counts(monkeypatch):
-    """No access token: the existing STOPPED path, no spawn, and the attempt is still spent."""
+    """No access token: STOPPED, no spawn, and the attempt is still spent."""
     sup, now, _notify, rec, spawns = _silent_feed_rig(monkeypatch, _at(10, 0, 0))
     sup._access_token = None
     sup._state = "DEGRADED"

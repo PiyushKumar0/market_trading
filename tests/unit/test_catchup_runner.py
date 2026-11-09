@@ -3,9 +3,10 @@
 Scenario: FIXED_NOW is Wed 2026-06-17 10:05 IST; the engine was last up Fri 2026-06-12 evening.
 Missed trading days in the gap: Mon 15, Tue 16 (13/14 = weekend), plus today's already-due morning
 jobs. Asserts the catch-up classes: safety-critical run-or-verify the run that governs the next
-entries (in dependency order,
-before everything else), run-latest exactly ONCE for the whole gap, date-keyed once per missed
-trading day ascending, watermarks respected on re-run, and the freeze/notify seams on failure.
+entries (in dependency order, before everything else), run-latest exactly ONCE for the whole gap,
+date-keyed once per missed trading day ascending, watermarks respected on re-run, and the
+freeze/notify seams on failure. Also covers give-up and report dedup, scoped boot passes and early
+hydration.
 """
 
 from __future__ import annotations
@@ -142,11 +143,9 @@ async def test_safety_critical_failure_freezes_and_alerts(conn, clock, calendar)
 
 @pytest.mark.asyncio
 async def test_safety_critical_success_clears_the_latched_freshness_cause(conn, clock, calendar):
-    """2026-08-06 live bug: a pre-login catch-up failure latched ``data_freshness:instruments``;
-    the post-login catch-up re-ran instruments SUCCESSFULLY but nothing cleared the cause — the
-    platform stayed FROZEN all day on stale evidence. A success — or an already-verified-fresh
-    watermark on the next boot — must clear the job's own cause (idempotent; a latch clear on an
-    inactive cause is a no-op recompute)."""
+    """A success — or an already-verified-fresh watermark on the next boot — clears the job's own
+    ``data_freshness:<job>`` cause, or the platform stays FROZEN on stale evidence (idempotent; a
+    clear on an inactive cause is a no-op recompute)."""
     calls: list = []
     frozen: list[str] = []
     cleared: list[str] = []
@@ -191,9 +190,7 @@ async def test_safety_critical_failure_never_clears(conn, clock, calendar):
 
 @pytest.mark.asyncio
 async def test_date_keyed_failure_continues_to_later_days(conn, clock, calendar):
-    """2026-08-18 live bug: the old first-failure ``break`` let one NSE-poisoned date
-    (``deals:2026-08-13``, 503 on every retry while adjacent dates fetched fine) block five days of
-    later dates from ever being attempted. A failed day is recorded and the replay CONTINUES."""
+    """A failed day is recorded and the replay CONTINUES: one poisoned date must not block later dates."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30), fail_on=MON))
@@ -209,9 +206,8 @@ async def test_date_keyed_failure_continues_to_later_days(conn, clock, calendar)
 
 @pytest.mark.asyncio
 async def test_date_keyed_failed_day_is_retried_after_a_later_success(conn, clock, calendar):
-    """THE watermark edge the per-day continue creates: TUE's success advances
-    ``last_success_date`` PAST failed MON, so the scan-start shortcut (``last + 1``) alone would
-    silently abandon MON forever. ``first_failed_date`` must pull the scan back to it."""
+    """TUE's success advances ``last_success_date`` PAST failed MON, so the scan-start shortcut
+    (``last + 1``) alone would abandon MON forever: ``first_failed_date`` pulls the scan back to it."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "bhavcopy", JobClass.DATE_KEYED, time(18, 30), fail_on=MON))
@@ -251,10 +247,9 @@ def _spec_recorder_notok(calls: list, job_id: str, at: time, *, notok_on: date, 
 
 @pytest.mark.asyncio
 async def test_date_keyed_notok_return_is_a_failure_and_resumes(conn, clock, calendar):
-    """2026-08-12 live bug: a job that returns ``ok=False`` WITHOUT raising (bhavcopy's degrade-without-raise shape —
-    it degrades + alerts + returns, never raises) must be treated exactly like an exception:
-    recorded failed, listed in jobs_failed, retried next pass. Before the fix this hit
-    ``record_run`` with its default ``status='success'`` and the day was silently skipped."""
+    """A job that returns ``ok=False`` WITHOUT raising (bhavcopy's degrade-without-raise shape) is
+    treated exactly like an exception: recorded failed, listed in jobs_failed, retried next pass,
+    never recorded as ``status='success'``."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder_notok(calls, "bhavcopy", time(18, 30), notok_on=TUE))
@@ -285,9 +280,8 @@ class _Unfinished:
 
 @pytest.mark.asyncio
 async def test_date_keyed_unfinished_run_records_nothing_and_the_next_pass_resumes(conn, clock, calendar):
-    """2026-09-29: an unfinished run did not do the day's work. It records no watermark — the day
-    stays missed — and ends the replay there, so the next pass resumes at that day. Recorded as
-    success, every ``tick_compact`` watermark from 09-22 to 09-28 had no completed run behind it."""
+    """An unfinished run did not do the day's work: it records no watermark (the day stays missed) and
+    ends the replay there, so the next pass resumes at that day."""
     calls: list = []
     unfinished_once = [MON]
 
@@ -321,10 +315,10 @@ def test_registry_select_keeps_registration_order_and_leaves_the_source_whole():
     assert len(reg) == 3
 
 
-# ============================================================ give-up + report dedup (2026-08-18)
+# ============================================================ give-up + report dedup
 def _backdate_first_failed(conn, job_id: str, d: date, first_failed: datetime) -> None:
-    """Manufacture a failing streak (the clock is frozen at FIXED_NOW, so a real streak cannot
-    elapse in-test): the row must already be ``failed`` with its streak clock in the past."""
+    """Manufacture a failing streak (the clock is frozen, so a real one cannot elapse): the row must
+    already be ``failed`` with its streak clock in the past."""
     conn.execute(
         "UPDATE job_runs SET first_failed_at=? WHERE job_id=? AND run_for_date=?",
         (first_failed.isoformat(), job_id, d.isoformat()),
@@ -362,9 +356,8 @@ async def test_date_keyed_gives_up_after_a_failing_streak(conn, clock, calendar)
 
 @pytest.mark.asyncio
 async def test_give_up_boundary_is_exactly_the_constant(conn, clock, calendar):
-    """The grace boundary, driven off the imported constant (mutation-caught 2026-08-18: the old
-    fixtures bracketed it 1 vs 14 days, so any value in 2..13 — and a >/>= flip — passed unseen):
-    a streak of exactly GIVE_UP_AFTER_DAYS stays retryable; one day more is terminal."""
+    """The grace boundary, driven off the imported constant: a streak of exactly GIVE_UP_AFTER_DAYS
+    stays retryable; one day more is terminal (so a >/>= flip is caught)."""
     for streak_days, terminal in ((GIVE_UP_AFTER_DAYS, False), (GIVE_UP_AFTER_DAYS + 1, True)):
         reg = JobRegistry()
         reg.register(_spec_recorder([], f"j{streak_days}", JobClass.DATE_KEYED, time(18, 30),
@@ -383,10 +376,9 @@ async def test_give_up_boundary_is_exactly_the_constant(conn, clock, calendar):
 
 @pytest.mark.asyncio
 async def test_first_attempt_is_never_terminal_even_on_an_old_backlog(conn, clock, calendar):
-    """THE cold-boot protection (review-confirmed by execution before ship): an off-gap replays old
-    dates on their FIRST-ever attempt, and one burst of upstream 503s must record them ``failed``
-    (streak clock starts now) — never ``skipped``. An age-keyed rule abandoned 4 days permanently
-    in the reviewer's reproduction."""
+    """Cold-boot protection: an off-gap replays old dates on their FIRST-ever attempt, and a burst of
+    upstream 503s must record them ``failed`` (streak clock starts now), never ``skipped`` (an
+    age-keyed rule would abandon them permanently)."""
     off_since = datetime(2026, 6, 3, 18, 0, tzinfo=IST)               # 2-week gap to FIXED_NOW
     reg = JobRegistry()
     reg.register(_spec_recorder([], "deals", JobClass.DATE_KEYED, time(18, 30), fail_on="always"))
@@ -437,9 +429,8 @@ async def test_date_keyed_young_failure_is_not_given_up(conn, clock, calendar):
 
 @pytest.mark.asyncio
 async def test_unchanged_failure_report_is_sent_once(conn, clock, calendar):
-    """2026-08-18: a stuck failure re-sent the identical CATCHUP_REPORT on every 30-min sweep
-    (15+/day observed live for ``deals:2026-08-13``). An unchanged pure-failure report says nothing
-    new — suppressed; any progress (caught-up) or a CHANGED failure set sends again."""
+    """An unchanged pure-failure CATCHUP_REPORT is suppressed on later 30-min sweeps; any progress
+    (caught-up) or a CHANGED failure set sends again."""
     sent: list = []
 
     async def notify(msg) -> None:
@@ -469,9 +460,9 @@ async def test_unchanged_failure_report_is_sent_once(conn, clock, calendar):
 
 
 # ===================================================== freeze-notify is once per (job, day)
-# The old behaviour ("fires per attempt"): ``was_run`` keeps a failed safety-critical job
-# retryable, so a persistently failing one re-ran — and re-alerted — on EVERY 30-min sweep. The
-# FREEZE stays unconditional (idempotent state that must always hold); only the notify is one-shot.
+# ``was_run`` keeps a failed safety-critical job retryable, so a persistently failing one re-runs on
+# EVERY 30-min sweep. The FREEZE is unconditional (idempotent state that must always hold); only the
+# notify is one-shot.
 
 
 def _freeze_alerts(sent: list) -> list:
@@ -636,9 +627,8 @@ async def test_two_jobs_failing_for_different_governing_days_alert_once_each(con
 
 @pytest.mark.asyncio
 async def test_missed_eod_safety_run_is_replayed_before_the_next_session(conn, clock, calendar):
-    """2026-09-23 chaos case 16: an EOD safety job (earnings 18:30) feeds the NEXT session, so at a
-    Wed 10:05 boot the governing run is Tue's. Missed ⇒ replayed once, recorded under Tue; today's
-    18:30 is left to the scheduler."""
+    """An EOD safety job (earnings 18:30) feeds the NEXT session, so at a Wed 10:05 boot the governing
+    run is Tue's. Missed ⇒ replayed once, recorded under Tue; today's 18:30 is left to the scheduler."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "earnings_calendar", JobClass.SAFETY_CRITICAL, time(18, 30)))
@@ -722,9 +712,9 @@ def test_report_is_news_decision_table(conn, clock, calendar):
 
 
 def test_a_never_shown_held_failure_is_not_stored_as_alerted(conn, clock, calendar):
-    """2026-10-11 review: a fresh process's boot pass reports a caught-up compaction while the export
-    is held (its key in ``jobs_still_failed``) — that report never shows the held key, so it must not
-    be stored as alerted, or the export's next real failure would be suppressed as 'unchanged'."""
+    """A boot pass that reports a caught-up compaction while the export is held (its key in
+    ``jobs_still_failed``) never shows the held key, so it must not be stored as alerted, or the
+    export's next real failure would be suppressed as 'unchanged'."""
     runner = _build_runner(conn, clock, calendar, JobRegistry())
     mb_wed, tc_wed = "market_backup:2026-06-17", "tick_compact:2026-06-17"
     boot = CatchUpResult(jobs_caught_up=[tc_wed], jobs_still_failed=[mb_wed])
@@ -863,11 +853,10 @@ def test_no_registry_is_pure_watermark_store(conn, clock, calendar):
 
 
 # =========================================================================== deferred boot catch-up: boot ordering
-# The 2026-08-10 wedge: the news chain ran INSIDE lifecycle.startup, ahead of scheduler.start(), and
-# an 8 h hang starved every scheduled job — including the 30-min sweep that exists to self-heal. The
-# machinery half of the fix is here (the firing point itself lives in engine.ops.main): a pass is
-# SCOPED, so boot replays load-bearing steps only, the deferred ids fire as a post-arm one-shot
-# through this same code, and the sweep (ALL) is their retry path. Passes are single-flight.
+# The news chain must not run INSIDE lifecycle.startup, ahead of scheduler.start(): a hang would
+# starve every scheduled job, including the 30-min sweep. A pass is SCOPED: boot replays load-bearing
+# steps only, the deferred ids fire as a post-arm one-shot through this same code (the firing point
+# lives in engine.ops.main), and the sweep (ALL) is their retry path. Passes are single-flight.
 DEFERRED = ("news_chain",)
 
 
@@ -902,9 +891,7 @@ async def test_boot_pass_runs_load_bearing_only_and_the_post_arm_pass_runs_the_d
 
 @pytest.mark.asyncio
 async def test_failed_post_arm_run_is_swept_by_the_all_scope_sweep(conn, clock, calendar):
-    """A post-arm one-shot that fails must still be swept — which is exactly why the periodic sweep
-    asks for ALL rather than the default scope (the catch-up machinery should still track
-    their watermarks so a failed post-arm run is swept)."""
+    """A failed post-arm one-shot is still swept: the periodic sweep asks for ALL, not the default scope."""
     calls: list = []
     reg = JobRegistry()
     reg.register(_spec_recorder(calls, "news_chain", JobClass.RUN_LATEST, time(8, 25), fail_on="always"))
@@ -930,9 +917,8 @@ async def test_failed_post_arm_run_is_swept_by_the_all_scope_sweep(conn, clock, 
 
 @pytest.mark.asyncio
 async def test_sweep_during_an_in_flight_pass_is_a_logged_no_op(conn, clock, calendar, caplog):
-    """Single-flight: the reordering makes sweep-vs-post-arm concurrency reachable
-    (APScheduler's max_instances=1 only serializes sweep-vs-sweep), and watermarks cannot save a
-    CONCURRENT pass — both would see the same un-watermarked job and run it twice."""
+    """Single-flight: sweep-vs-post-arm concurrency is reachable (APScheduler's max_instances=1 only
+    serializes sweep-vs-sweep), and watermarks cannot save a CONCURRENT pass — both would run the job."""
     calls: list = []
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -969,8 +955,8 @@ async def test_sweep_during_an_in_flight_pass_is_a_logged_no_op(conn, clock, cal
 
 @pytest.mark.asyncio
 async def test_no_deferred_set_keeps_the_undeferred_behavior(conn, clock, calendar):
-    """The rollback path (``DEFER_POST_ARM_JOBS = False`` ⇒ ``deferred=()``): every scope is the whole
-    registry again, and the post-arm one-shot has nothing to do."""
+    """With ``deferred=()`` (``DEFER_POST_ARM_JOBS = False``) every scope is the whole registry and the
+    post-arm one-shot has nothing to do."""
     calls: list = []
     runner = CatchUpRunner(conn, clock, calendar, _deferred_registry(calls))     # deferred defaults to ()
 
@@ -982,13 +968,13 @@ async def test_no_deferred_set_keeps_the_undeferred_behavior(conn, clock, calend
     assert calls == [] and post_arm.jobs_caught_up == []
 
 
-# ==================== early hydration (owner-directed 2026-09-09)
-# The owner travels at 08:15 and boots the PC 09:30–10:00, so the pre-open chain (surveillance 08:20,
-# news 08:25, universe 08:30, digest 08:35, planner 08:50) fired AFTER the trade window opened and the
-# digest-before-open criterion fell to 61%. The due-gate in ``_missed_days``/``_run_safety_critical``
-# treats today's jobs as not-yet-due until their fire time, so no catch-up path can serve a 06:30
-# login: ``hydrate_ahead`` is that path — today's named jobs, ahead of their clock, same watermarks,
-# same single-flight pass lock, same ``_job_result_ok`` verdict. The due-gate itself stays untouched.
+# ==================== early hydration
+# The owner may boot the PC after the pre-open chain's fire times (surveillance 08:20, news 08:25,
+# universe 08:30, digest 08:35, planner 08:50) or well before them. The due-gate in
+# ``_missed_days``/``_run_safety_critical`` treats today's jobs as not-yet-due until their fire time,
+# so no catch-up path serves a 06:30 login: ``hydrate_ahead`` is that path — today's named jobs,
+# ahead of their clock, same watermarks, same single-flight pass lock, same ``_job_result_ok``
+# verdict. The due-gate itself stays untouched.
 
 EARLY = datetime(2026, 6, 17, 6, 30, tzinfo=IST)      # Wed 06:30 IST — the owner's early-login shape
 SAT_EARLY = datetime(2026, 6, 20, 6, 30, tzinfo=IST)  # Saturday, same hour — not a trading day
@@ -1018,9 +1004,8 @@ def _preopen_registry(calls: list) -> JobRegistry:
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_runs_todays_named_jobs_before_their_fire_time(conn, calendar, caplog):
-    """06:30 login on a trading day: every named job runs NOW (its 08:20–08:50 fire-time is hours
-    away) and records today's watermark, in the catch_up class/order sequence. Unnamed registry jobs
-    are untouched."""
+    """A 06:30 login on a trading day runs every named job NOW (fire-times are hours away) and records
+    today's watermark, in the catch_up class/order sequence; unnamed registry jobs are untouched."""
     calls: list = []
     runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
 
@@ -1042,8 +1027,7 @@ async def test_hydrate_ahead_runs_todays_named_jobs_before_their_fire_time(conn,
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_skips_a_job_already_run_today(conn, calendar):
-    """The watermark is the whole double-spend guard: a job the boot pass (or an earlier login)
-    already ran today is reported ``already_run`` and never re-run."""
+    """The watermark is the double-run guard: a job already run today is reported ``already_run``."""
     calls: list = []
     runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
     runner.record_run("universe_build", WED)
@@ -1102,7 +1086,7 @@ async def test_hydrate_ahead_does_nothing_on_a_non_trading_day(conn, calendar, c
 @pytest.mark.asyncio
 async def test_hydrate_ahead_rejects_a_date_keyed_job(conn, calendar):
     """DATE_KEYED jobs are per-missed-day replays with their own give-up ladder; naming one here is a
-    DESIGN error (there is no 'ahead of today' day to key), so it raises rather than guessing."""
+    design error (no 'ahead of today' day to key), so it raises."""
     calls: list = []
     runner = CatchUpRunner(conn, _early_clock(), calendar, _preopen_registry(calls))
 
@@ -1115,9 +1099,8 @@ async def test_hydrate_ahead_rejects_a_date_keyed_job(conn, calendar):
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_waits_for_an_in_flight_catch_up_pass(conn, calendar):
-    """Single-flight: watermarks cannot make a CONCURRENT pass safe — both would see the
-    same un-watermarked job. Unlike a sweep (a logged no-op), an early hydration QUEUES on the pass
-    lock, then finds the watermark the pass wrote and reports ``already_run``."""
+    """Unlike a sweep (a logged no-op), an early hydration QUEUES on the pass lock, then finds the
+    watermark the pass wrote and reports ``already_run``."""
     calls: list = []
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -1146,10 +1129,8 @@ async def test_hydrate_ahead_waits_for_an_in_flight_catch_up_pass(conn, calendar
 
 @pytest.mark.asyncio
 async def test_hydrate_ahead_skips_when_the_lock_frees_past_not_after(conn, calendar, caplog):
-    """Live 2026-09-10 09:06 login: the hook passed its open gate, then queued 36 minutes on the pass
-    lock behind the post-arm one-shot draining an overnight news backlog, and ran in-session at 09:44.
-    From the open on the boot pass / sweep own the chain, so the boundary is re-checked once the lock
-    is actually held — a late acquisition is a logged skip, never a run."""
+    """From the open on, the boot pass / sweep own the chain, so ``not_after`` is re-checked once the
+    pass lock is actually held: an acquisition queued past the open is a logged skip, never a run."""
     calls: list = []
     started, release = asyncio.Event(), asyncio.Event()
     holder = [datetime(2026, 6, 17, 9, 6, tzinfo=IST)]
