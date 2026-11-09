@@ -1,25 +1,15 @@
-"""Alert-cadence throttle: one owner alert per EPISODE, not one per occurrence (2026-08-24).
+"""Alert-cadence throttle: one owner alert per EPISODE, not one per occurrence.
 
-The 200-deep Telegram outbox that starved a fresh owner ack was not built by important messages. It
-was built by repeats: 57 identical ``health problems: ['feed_stale']`` alerts in one morning (one per
-60 s health pulse while a single problem persisted), plus one "Intraday analyst unavailable" alert per
-failed agent call while the SDK was down. A condition that lasts an hour is ONE thing the owner needs
-to know, not sixty.
-
-This module holds the generic half of that rule — a per-key first-fire-then-throttle clock, used by
+Repeats of one persistent condition would flood the bounded Telegram outbox and starve fresh owner
+acks. This is a per-key first-fire-then-throttle clock, used by
 :class:`~engine.intelligence.harness.AgentHarness` and the recommendation pipeline for their
 per-``(agent, reason)`` failure alerts. The health monitor's own dedup is *set*-shaped (alert when the
 PROBLEM SET changes, announce recovery once) and lives with the monitor.
 
-Three properties are deliberate:
-
-* **The first occurrence always alerts.** Throttling is about the 2nd..Nth, never the 1st — an
-  alerting layer that can swallow the opening report of an incident is worse than no throttle.
-* **A repeat is still LOGGED.** Callers keep their existing log lines untouched; only the owner-facing
-  cadence changes. The log remains the complete record.
+* **The first occurrence always alerts.** Throttling is about the 2nd..Nth, never the 1st.
+* **A repeat is still LOGGED.** Only the owner-facing cadence changes; the log stays complete.
 * **Recovery closes the episode.** :meth:`AlertEpisodes.reset` is called on success, so the next
-  failure after a good call is a NEW incident and alerts immediately rather than being eaten by a
-  window opened by the previous one.
+  failure after a good call is a NEW incident and alerts immediately.
 
 State is per-process and in-memory on purpose: a restart is itself a change of situation the owner
 should hear about, and nothing here is a safety input (alerting is best-effort by construction).
@@ -29,9 +19,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-#: Default quiet period for a still-unchanged condition. Thirty minutes is the cadence a persistent
-#: problem earns: often enough that a real outage keeps nagging, rare enough that a whole session of
-#: one broken thing is ~13 messages instead of the ~390 a 60 s pulse would produce.
+#: Default quiet period for a still-unchanged condition: a real outage keeps nagging, a whole session
+#: of one broken thing is ~13 messages.
 REPEAT_AFTER = timedelta(minutes=30)
 
 

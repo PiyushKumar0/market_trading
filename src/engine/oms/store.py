@@ -1,15 +1,13 @@
-"""Order persistence over the state.db SQLite connection (2026-09-10).
+"""Order persistence over the state.db SQLite connection.
 
 Follows the repo's state-store idiom (``engine.risk.mode`` / ``engine.risk.kill``): the caller owns
-the connection (opened by :func:`engine.core.db.connect`, WAL, single writer), the SQL is
-hand-written next to its owner, and a state change that must precede a side effect is wrapped in
-:func:`engine.core.db.transaction`.
+the connection (:func:`engine.core.db.connect`, WAL, single writer) and the SQL is hand-written here.
 
 **The defining property: persist BEFORE any side effect.** :meth:`OrderStore.record` writes the new
 ``orders`` row and its ``order_events`` row in ONE transaction and returns only after the COMMIT, so
-a caller that acts (places/modifies/cancels a broker order) strictly after ``record`` returns can
-never act on a state that isn't durable. A crash in the gap leaves a consistent DB and the reconciler
-a complete audit chain — the same before-act ordering the kill switch uses.
+a caller that acts (places/modifies/cancels a broker order) strictly after ``record`` returns never
+acts on a state that isn't durable. A crash in the gap leaves a consistent DB and a complete audit
+chain.
 
 Two write guards, both raising rather than absorbing:
 
@@ -21,8 +19,7 @@ Two write guards, both raising rather than absorbing:
 
 A no-op postback (a replay, an intermediate, a held cancel intent) is audited through
 :meth:`OrderStore.record_noop`, which writes the ``order_events`` row ALONE and is therefore allowed
-on a terminal row — every broker frame is recorded, and "terminal is final" is a
-statement about the ``orders`` row, not about the audit trail (2026-09-10 review).
+on a terminal row — "terminal is final" is about the ``orders`` row, not the audit trail.
 """
 
 from __future__ import annotations
@@ -212,11 +209,9 @@ class OrderStore:
     def record_noop(self, order_id: str, event: OrderEvent) -> None:
         """Audit a postback that changed nothing: writes ONLY the ``order_events`` row.
 
-        Every broker frame is recorded, but :meth:`record` refuses terminal rows —
-        so a replayed postback against a FILLED/CANCELLED order had nowhere to land and the audit
-        chain silently lost it (2026-09-10 review). An unrecorded broker action is an unexplained
-        one, which is exactly what the Reconciler later has to explain. This door is therefore
-        allowed on terminal rows; it never touches the ``orders`` row, so "terminal is final" holds.
+        Every broker frame is recorded, but :meth:`record` refuses terminal rows, so a replayed
+        postback against a FILLED/CANCELLED order lands here. It never touches the ``orders`` row, so
+        "terminal is final" holds.
 
         Raises
         ------
@@ -224,10 +219,9 @@ class OrderStore:
             The order was never :meth:`insert`ed.
         ValueError
             The event is not an annotated no-op: it claims a transition (``from_state != to_state``)
-            OR it is an unannotated self-edge — the PARTIALLY_FILLED accretion is a REAL transition
-            that moves ``filled_qty`` (2026-09-10 round-3 review: routing it here audited a clean
-            event while the fill never reached the row, an under-protected position). Both
-            belong in :meth:`record`, which applies the order-row guards.
+            or is an unannotated self-edge — the PARTIALLY_FILLED accretion is a REAL transition that
+            moves ``filled_qty`` and would be audited here without ever reaching the row. Both belong
+            in :meth:`record`.
         """
         annotated = any(event.payload.get(flag) for flag in NOOP_FLAGS)
         if event.from_state is not event.to_state or not annotated:

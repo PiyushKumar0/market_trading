@@ -1,62 +1,43 @@
 """Order/position state vocabularies + the transition table as a pure function.
 
-Built 2026-09-10 as the foundation of the paper OMS. Pure Tier 3: this module
-imports ``core`` only — no broker, no store, no ``engine.intelligence`` (the three-tier rule, guarded by
-``tests/unit/test_import_graph.py``). Nothing here places an order; it is data + one pure
-function (shared by the paper OMS and the risk gate's terminal-state check).
+Pure Tier 3: imports ``core`` only — no broker, no store, no ``engine.intelligence`` (guarded by
+``tests/unit/test_import_graph.py``). Nothing here places an order; it is data + pure functions
+(shared by the paper OMS and the risk gate's terminal-state check).
 
-**What is pinned here and why**
-
-* The enums mirror the schema column comments EXACTLY: ``OrderState`` is the order diagram's state
-  set, ``PositionState``/``ProtectionState``/``CloseReason`` the position-lifecycle ones, and ``OrderRole`` the
-  ``orders.role`` CHECK list in ``0001_initial.sql`` (a test parses the SQL and asserts they match,
-  so the enum cannot drift from the schema).
-* :data:`DIAGRAM_TRANSITIONS` is the order diagram, edge for edge.
-* :data:`BROKER_REALITY_TRANSITIONS` is the **separately enumerated** set of edges the diagram's
-  happy-path chain elides but a live broker produces. It is kept apart from the diagram set so the
-  additions stay auditable (and so a reviewer can see exactly what was added beyond the diagram), and
-  both are written out LITERALLY rather than derived, because a derived table can only be tested
-  against its own derivation (2026-09-10 review finding). The rule behind it: the diagram describes
-  the edges the PLATFORM issues; the broker, by contrast, can report the order's true book state
-  (ACKED / PARTIALLY_FILLED / FILLED / CANCELLED / REJECTED) from any non-terminal state — it does
-  not know about our local CANCEL_PENDING / MODIFY_PENDING intents, and a fill, cancel or reject can
-  land while one is in flight. Backwards fill-progress edges are excluded (a PARTIALLY_FILLED order
-  never returns to ACKED).
-* **A cancel intent is cleared ONLY by a cancel outcome** (ratified 2026-09-10):
-  CANCEL_PENDING -> ACKED is NOT an edge, so a replayed or stale OPEN/TRIGGER PENDING frame — which
-  is exactly what the Reconciler's 5-minute re-read returns for an in-flight cancel — can never flip
-  the row back to working. Flipping it back would steer the square-off coordination into the
-  double-exit hazard (market exit sent alongside a protective order believed cancelled). The only
-  ways out of CANCEL_PENDING are CANCELLED, REJECTED, a REAL fill (FILLED, or PARTIALLY_FILLED when
-  ``filled_qty`` grows — gated in :func:`engine.oms.updates.apply_update`), and the explicit
-  :func:`cancel_rejected` door, which carries the broker's rejection payload.
-* :data:`MODIFICATION_CAP` = 20 is the modification self-cap (broker allows 25);
-  :data:`MODIFY_REPLACE_THRESHOLD` = 18 is where the protection policy switches to cancel-and-replace. The
-  machine still permits modifications 19 and 20 so an in-flight protection ladder is never bricked
-  mid-way; only the 21st raises.
-* :func:`transition` **absorbs nothing silently** — an edge outside the table raises
-  :class:`IllegalTransition` so the caller alerts (rejection-storm / reconciliation paths).
-  Terminal states (FILLED/CANCELLED/REJECTED/LAPSED) have no outgoing edges at all.
-* **A fill that already happened always lands** (ratified 2026-09-10). A fill quantity that
-  disagrees with the row's ``qty`` — a COMPLETE short of it, or an overfill beyond it — is RECORDED
-  and flagged ``qty_mismatch`` on the event payload for the Reconciler, never refused. Refusing
-  it left the platform believing a closed position was still open, which is the unprotected-position hazard the
-  quantity-modified protective SL-M walks into. Only a fill-count *regression* still raises: that is
-  a platform bug, and nothing is lost by refusing it.
-* :func:`amend` is how a modify carries its new qty/price/trigger onto the row (the frozen-model
-  discipline is preserved — it returns a new instance), and it records the values it REPLACED on its
-  event payload as ``prior_fields``, because a frozen row keeps only the new ones.
-  :func:`modify_rejected` reads them back when the broker refuses the modify (added 2026-09-10,
-  round 3): MODIFY_PENDING has no outgoing modify edge, so a refusal without a door strands the
-  order and breaks the protective SL-M quantity ladder on the next accretion. The modification counter stays spent —
-  the self-cap counts modify CALLS, and refunding on a refusal makes a rejection storm unbounded.
+* The enums mirror the schema column comments exactly; a test parses ``0001_initial.sql`` and asserts
+  ``OrderRole`` matches the ``orders.role`` CHECK list.
+* :data:`DIAGRAM_TRANSITIONS` is the order diagram, edge for edge. :data:`BROKER_REALITY_TRANSITIONS`
+  is the separately enumerated set of edges a live broker produces that the diagram's happy path
+  elides: the diagram is what the PLATFORM issues, but the broker reports the true book state from any
+  non-terminal state (it knows nothing of our CANCEL_PENDING / MODIFY_PENDING intents). Both are
+  written out literally, not derived (a derived table can only be tested against its own derivation).
+  No backwards fill-progress edges (PARTIALLY_FILLED never returns to ACKED).
+* **A cancel intent is cleared ONLY by a cancel outcome.** CANCEL_PENDING -> ACKED is NOT an edge, so a
+  replayed or stale OPEN/TRIGGER PENDING frame (what the Reconciler's re-read returns for an in-flight
+  cancel) can never flip the row back to working — that would steer square-off coordination into the
+  double-exit hazard (market exit alongside a protective order believed cancelled). The ways out are
+  CANCELLED, REJECTED, a REAL fill (FILLED, or PARTIALLY_FILLED when ``filled_qty`` grows — gated in
+  :func:`engine.oms.updates.apply_update`), and the explicit :func:`cancel_rejected` door.
+* :data:`MODIFICATION_CAP` = 20 is the self-cap (broker allows 25); :data:`MODIFY_REPLACE_THRESHOLD` = 18
+  is where the protection policy switches to cancel-and-replace. Modifications 19 and 20 are still
+  permitted so an in-flight protection ladder is never bricked mid-way; only the 21st raises.
+* :func:`transition` absorbs nothing silently: an edge outside the table raises
+  :class:`IllegalTransition` so the caller alerts. Terminal states have no outgoing edges.
+* **A fill that already happened always lands.** A fill quantity that disagrees with the row's ``qty``
+  (a COMPLETE short of it, or an overfill) is RECORDED and flagged ``qty_mismatch`` on the event
+  payload for the Reconciler, never refused — refusing leaves the platform believing a closed position
+  is still open. Only a fill-count *regression* raises (a platform bug).
+* :func:`amend` carries a modify's new qty/price/trigger onto the row (returning a new instance) and
+  records the values it REPLACED as ``prior_fields`` on its event payload. :func:`modify_rejected`
+  reads them back when the broker refuses: MODIFY_PENDING has no outgoing modify edge, so a refusal
+  without a door strands the order and breaks the protective SL-M quantity ladder. The modification
+  counter stays spent — the cap counts modify CALLS, and refunding makes a rejection storm unbounded.
 * :func:`correlate` is the explicit step that binds a broker order id, so
   :func:`engine.oms.updates.apply_update` stays pure. It refuses a TERMINAL order: the store never
-  writes a terminal row again, so binding an id there is a fact that can never be persisted.
-* ``filled_qty`` is preserved by default across every transition, which is what makes
-  PARTIALLY_FILLED -> CANCEL_PENDING -> CANCELLED (and -> LAPSED) conserve the filled portion
-  (quantity conservation): the filled part is a protected Position, the residual a
-  recorded cancel, never an orphan.
+  writes a terminal row again.
+* ``filled_qty`` is preserved by default across every transition, so PARTIALLY_FILLED -> CANCEL_PENDING
+  -> CANCELLED (and -> LAPSED) conserves the filled portion: the filled part is a protected Position,
+  the residual a recorded cancel, never an orphan.
 """
 
 from __future__ import annotations
@@ -135,8 +116,8 @@ class CloseReason(StrEnum):
     GTT_FAILURE_EXIT = "gtt_failure_exit"
     AUCTION_SETTLED = "auction_settled"
     EXTERNAL_UNKNOWN = "external_unknown"
-    RISK_FLATTEN = "risk_flatten"                               # 2026-10-06: paper equity-floor exit-all
-    VOID = "void"                                               # 2026-10-06: unmeasurable paper trade, closed at its mark
+    RISK_FLATTEN = "risk_flatten"                               # paper equity-floor exit-all
+    VOID = "void"                                               # unmeasurable paper trade, closed at its mark
 
 
 class OrderRole(StrEnum):
@@ -168,8 +149,7 @@ class FillQuantityError(ValueError):
     """A fill quantity that cannot be true: a regression, or a "partial fill" of nothing.
 
     A fill that merely DISAGREES with the row (short COMPLETE, overfill) is not an error — it is
-    recorded and flagged ``qty_mismatch`` for the Reconciler, because a fill that already
-    happened must always land (ratified 2026-09-10).
+    recorded and flagged ``qty_mismatch`` for the Reconciler; a fill that happened must always land.
     """
 
 
@@ -227,11 +207,9 @@ class OrderEvent(BaseModel):
     A NO-OP update is an event ANNOTATED with one of :data:`engine.oms.updates.NOOP_FLAGS` in its
     payload — a duplicate/out-of-order postback (``duplicate=True``), a broker ``*PENDING``
     intermediate (``intermediate=True``) or a table refusal recorded rather than raised
-    (``illegal_transition=True``). ``from_state == to_state`` alone is NOT the no-op contract
-    (2026-09-10 round-3 review): the PARTIALLY_FILLED accretion self-edge is a REAL transition that
-    moves ``filled_qty`` and belongs in :meth:`~engine.oms.store.OrderStore.record`, and the
-    ProtectionManager acts on it. No-ops are recorded, never dropped: an unrecorded postback
-    is an unexplained broker action.
+    (``illegal_transition=True``). ``from_state == to_state`` alone is NOT the no-op contract: the
+    PARTIALLY_FILLED accretion self-edge is a REAL transition that moves ``filled_qty`` and belongs in
+    :meth:`~engine.oms.store.OrderStore.record`. No-ops are recorded, never dropped.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -252,8 +230,8 @@ class OrderEvent(BaseModel):
 # ---------------------------------------------------------------- the order transition table as data
 _S = OrderState
 
-#: The order diagram, edge for edge (platform-issued lifecycle). DRAFT/VALIDATED -> REJECTED is the
-#: 2026-10-06 addition: an order abandoned before the broker call.
+#: The order diagram, edge for edge (platform-issued lifecycle). DRAFT/VALIDATED -> REJECTED is an
+#: order abandoned before the broker call.
 DIAGRAM_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
     _S.DRAFT: frozenset({_S.VALIDATED, _S.REJECTED}),
     _S.VALIDATED: frozenset({_S.SUBMITTED, _S.REJECTED}),
@@ -268,22 +246,19 @@ DIAGRAM_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
     _S.LAPSED: frozenset(),
 }
 
-#: Edges beyond the literal diagram, written out edge by edge so every addition is auditable at a
-#: glance (a derived table can only be tested against its own derivation — 2026-09-10 review).
-#: Each entry is a state a LIVE BROKER can report the order to be in that the diagram's happy-path
-#: chain elides. Read with the exclusions, which are the load-bearing part:
+#: Edges beyond the literal diagram: states a LIVE BROKER can report that the happy-path chain
+#: elides. Read with the exclusions, which are the load-bearing part:
 #:
 #: * SUBMITTED -> {PARTIALLY_FILLED, FILLED, CANCELLED}: a dropped socket frame or a reconciliation
 #:   re-read can reveal a book state we never saw the ACK for — recording the fill beats raising.
 #: * ACKED / MODIFY_PENDING -> {FILLED, CANCELLED, REJECTED}: a fill, an exchange cancel or a reject
-#:   can land while a platform-local intent is in flight; the broker knows nothing of our intents.
+#:   can land while a platform-local intent is in flight.
 #: * PARTIALLY_FILLED -> PARTIALLY_FILLED (self-edge) is load-bearing: fills accrete across
 #:   successive postbacks and the protective SL-M is qty-modified upward as they do.
-#: * CANCEL_PENDING -> {PARTIALLY_FILLED, FILLED, REJECTED} and NOT ACKED: the protection policy's race — "the
-#:   cancel is REJECTED because the protective order already triggered/filled in the gap" — is real,
-#:   so a fill still lands; but a mere OPEN/TRIGGER PENDING re-report must NEVER clear the cancel
-#:   intent. The PARTIALLY_FILLED edge is additionally gated on filled_qty GROWTH in
-#:   ``updates.apply_update``: only a real fill, never a re-report, leaves CANCEL_PENDING.
+#: * CANCEL_PENDING -> {PARTIALLY_FILLED, FILLED, REJECTED} and NOT ACKED: the cancel can be REJECTED
+#:   because the protective order already triggered/filled in the gap, so a fill still lands; but a
+#:   mere OPEN/TRIGGER PENDING re-report must NEVER clear the cancel intent. The PARTIALLY_FILLED
+#:   edge is additionally gated on filled_qty GROWTH in ``updates.apply_update``.
 #: * No backwards fill-progress edge anywhere (PARTIALLY_FILLED -> ACKED, FILLED -> anything).
 #: * No self-edge except PARTIALLY_FILLED: a self-report is a duplicate, not a transition.
 BROKER_REALITY_TRANSITIONS: dict[OrderState, frozenset[OrderState]] = {
@@ -356,17 +331,14 @@ def _apply_edge(
     unknown = set(new_fields) - AMENDABLE_FIELDS
     if unknown:
         raise ValueError(f"{order.order_id}: {sorted(unknown)} are not amendable columns")
-    # The row's quantity for THIS transition is whatever the same update also carries: a modify's
-    # ack reports the fill and the new quantity in one frame, and validating the fill against the
-    # pre-modify quantity is exactly the false disagreement the 2026-09-10 fix removes.
+    # A modify's ack reports the fill and the new quantity in one frame: validate the fill against
+    # the quantity the same update carries, not the pre-modify one.
     eff_qty = new_fields.get("qty", order.qty)
 
     new_filled = order.filled_qty if filled_qty is None else int(filled_qty)
-    # The FILLED completion is evaluated BEFORE the regression check (2026-09-10 round-3 review): a
-    # row whose qty sits below what is already filled — the overfill the Reconciler has yet to
-    # resolve, or a quantity amended down — otherwise passed the check on the OLD value and then
-    # completed DOWN to `qty`, silently deleting filled shares. Completion is now a candidate the
-    # regression check judges like any other.
+    # FILLED completion is evaluated BEFORE the regression check: a row whose qty sits below what is
+    # already filled (unresolved overfill, qty amended down) must not complete DOWN to `qty` and
+    # silently delete filled shares.
     if to_state is OrderState.FILLED and filled_qty is None and eff_qty is not None:
         new_filled = eff_qty
     if new_filled < order.filled_qty:
@@ -378,8 +350,7 @@ def _apply_edge(
             f"{order.order_id}: PARTIALLY_FILLED needs a fill, got {new_filled}/{eff_qty}"
         )
 
-    # A quantity DISAGREEMENT is recorded and flagged, never refused: the fill already happened, and
-    # the Reconciler is what resolves who is right (ratified 2026-09-10).
+    # A quantity DISAGREEMENT is recorded and flagged, never refused: the Reconciler resolves it.
     mismatch = eff_qty is not None and (
         new_filled > eff_qty
         or (to_state is OrderState.FILLED and new_filled != eff_qty)
@@ -439,7 +410,7 @@ def transition(
 
     ``annotations`` are platform notes merged onto the EVENT payload only (never the row, never the
     verbatim broker payload) — e.g. ``fields_reported`` for broker parameters a stale frame
-    carried but must not write (2026-09-10 round-3 review).
+    carried but must not write.
 
     Parameters
     ----------
@@ -486,12 +457,11 @@ def cancel_rejected(
 ) -> tuple[PlatformOrder, OrderEvent]:
     """The broker REFUSED our cancel: return the order to its pre-cancel fill state.
 
-    This is the ONLY way a cancel intent is cleared other than a cancel outcome or a real fill — the
-    postback-reachable table has no CANCEL_PENDING -> ACKED edge, precisely so that a replayed or
-    stale OPEN frame cannot do this implicitly (ratified 2026-09-10). ``payload`` is the broker's
-    verbatim rejection (kept on the row as ``raw_broker_payload``) so the protection policy can tell the two
-    rejection reasons apart: "already triggered/filled in the gap" (treat the protective order as the
-    exit, never send the market order) versus an ordinary refusal.
+    The ONLY way a cancel intent is cleared other than a cancel outcome or a real fill — the
+    postback table has no CANCEL_PENDING -> ACKED edge so a stale OPEN frame cannot do it implicitly.
+    ``payload`` is the broker's verbatim rejection (kept as ``raw_broker_payload``) so the protection
+    policy can tell "already triggered/filled in the gap" (the protective order is the exit; never send
+    the market order) from an ordinary refusal.
 
     The destination is the order's pre-cancel FILL state: PARTIALLY_FILLED if anything is filled,
     ACKED otherwise — the cancel request never changed the fill count (conservation).
@@ -524,11 +494,8 @@ def amend(
 ) -> tuple[PlatformOrder, OrderEvent]:
     """Issue a modify that CARRIES its new parameters (MODIFY_PENDING edge, modification counter +1).
 
-    The protective SL-M is qty-modified upward as fills accrete; before this existed the row
-    kept the pre-modify quantity, and the eventual FILLED postback for the enlarged order was
-    refused as a quantity disagreement — a fill that had already happened, rejected (2026-09-10
-    review, major). The new values land on the row at the moment the modify is ISSUED, which is also
-    what the ProtectionManager's retry ladder reads back.
+    The protective SL-M is qty-modified upward as fills accrete. The new values land on the row when
+    the modify is ISSUED, which is also what the ProtectionManager's retry ladder reads back.
 
     Raises
     ------
@@ -558,10 +525,9 @@ def amend(
             f"{order.order_id}: amend needs at least one of qty/price/trigger_price "
             f"(a no-change modify still spends the modification budget)"
         )
-    # The frozen row keeps only the NEW values, so the pre-amend ones are recorded on the amend's own
-    # audit row (2026-09-10 round-3 review). That is where :func:`modify_rejected` reads them back
-    # from when the broker refuses the modify — without them a refusal would leave the row claiming
-    # parameters the broker never accepted, which is exactly the protective SL-M hazard in reverse.
+    # The frozen row keeps only the NEW values; the pre-amend ones go on the amend's audit row, where
+    # modify_rejected reads them back (else a refusal leaves the row claiming parameters the broker
+    # never accepted).
     prior_fields = {name: getattr(order, name) for name in fields}
     return transition(
         order,
@@ -582,24 +548,17 @@ def modify_rejected(
 ) -> tuple[PlatformOrder, OrderEvent]:
     """The broker REFUSED our modify: return the order to its pre-modify state.
 
-    The mirror of :func:`cancel_rejected`, added 2026-09-10 (round-3 review). MODIFY_PENDING has no
-    outgoing modify edge, so an order stranded there breaks the protective SL-M quantity ladder on the very
-    next fill accretion — a refusal needs an explicit door just as much as a cancel's does.
+    The mirror of :func:`cancel_rejected`: MODIFY_PENDING has no outgoing modify edge, so a refusal
+    needs an explicit door. The destination is PARTIALLY_FILLED if anything is filled, ACKED otherwise
+    (a refused modify never changed the fill count).
 
-    The destination is the order's FILL state: PARTIALLY_FILLED if anything is filled, ACKED
-    otherwise (a refused modify never changed the fill count).
-
-    ``prior_fields`` restores the qty/price/trigger the row carried BEFORE the amend — the broker
-    never applied the new ones, so leaving them on the row would have the platform (and the
-    ProtectionManager's retry ladder, which reads the row back) believing in an order that does not
-    exist. :func:`amend` records exactly this dict on its event payload as ``prior_fields``, so the
-    caller reads it from the persisted ``order_events`` row; omit it and the state moves alone,
-    which is the honest outcome when the amend's audit row cannot be found — the platform never
+    ``prior_fields`` restores the qty/price/trigger the row carried BEFORE the amend (the broker never
+    applied the new ones). :func:`amend` records this dict on its event payload; the caller reads it
+    from the persisted ``order_events`` row. Omit it and the state moves alone — the platform never
     invents values it did not hold.
 
-    **The modification counter stays spent.** The modification was issued and the broker processed it; the
-    self-cap of 20 counts platform modify CALLS, not successes, and refunding the budget on
-    a refusal is how a rejection storm turns into an unbounded modify loop.
+    **The modification counter stays spent:** the self-cap counts modify CALLS, not successes, and
+    refunding on a refusal turns a rejection storm into an unbounded modify loop.
     """
     if order.state is not OrderState.MODIFY_PENDING:
         raise IllegalTransition(
@@ -622,8 +581,7 @@ def modify_rejected(
 def correlate(order: PlatformOrder, broker_order_id: str) -> PlatformOrder:
     """Bind the broker's order id to a platform order — the explicit step before any update applies.
 
-    Split out of ``apply_update`` on 2026-09-10 so the state machine is genuinely pure on a no-op:
-    correlation is a persisted fact about the order (the postback-before-response race resolves
+    Correlation is a persisted fact about the order (the postback-before-response race resolves
     here), not a side effect of parsing a postback. Idempotent — re-correlating with the same id
     returns the SAME object, so a retried place-response is free.
 
@@ -634,11 +592,8 @@ def correlate(order: PlatformOrder, broker_order_id: str) -> PlatformOrder:
     if not bid:
         raise ValueError(f"{order.order_id}: refusing to correlate against an empty broker order id")
     if order.state in TERMINAL_ORDER_STATES:
-        # Correlation is persisted by OrderStore.record, which refuses a terminal row — so
-        # binding an id here would produce an in-memory fact that can never be written, and the
-        # caller sequence correlate -> record would fail one step later with the id already bound
-        # (2026-09-10 round-3 review). A broker id arriving for a dead order is a correlation bug;
-        # the frame itself still belongs in record_noop, which IS allowed on a terminal row.
+        # OrderStore.record refuses a terminal row, so binding here would be an in-memory fact that
+        # can never be written. The frame itself still belongs in record_noop, allowed on a terminal row.
         raise IllegalTransition(
             f"{order.order_id}: refusing to correlate broker order {bid} onto a {order.state} order "
             f"— a terminal row is never written again"

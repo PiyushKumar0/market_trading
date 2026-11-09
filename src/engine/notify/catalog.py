@@ -1,19 +1,14 @@
 """Typed owner-message catalog — the single source of every notification the
 ``TelegramBot`` sends and ``HealthMonitor``/risk/oms surfaces raise.
 
-This module defines the *shapes* (a :class:`MessageKind` enum + a single
-:class:`CatalogMessage` Pydantic model) plus tiny pure constructor helpers that stamp the right
-``kind``/``severity`` and assemble a human title/body. It deliberately contains NO transport (no
-python-telegram-bot, no formatting beyond plain f-strings) and NO ``Clock`` access — callers pass
-in already-`Clock`-derived values. ``TelegramBot.send(msg: CatalogMessage)`` consumes
-these; the catalog is: recommendation, fill, limit breach, kill, budget
-warning, daily/weekly summary, startup/recovery report, trade-window changed, login prompt,
-feed-stale, REC_FILL_SUSPECTED.
+Defines the *shapes* (a :class:`MessageKind` enum + a single :class:`CatalogMessage` Pydantic model)
+plus tiny pure constructor helpers that stamp the right ``kind``/``severity`` and assemble a human
+title/body. NO transport and NO ``Clock`` access — callers pass in already-`Clock`-derived values.
+``TelegramBot.send(msg: CatalogMessage)`` consumes these.
 
-Each kind is documented on the :class:`MessageKind` members and on each helper.
-Load-bearing detail captured here (so the bot layer stays dumb): ``buttons`` carry the exact owner
-command each tap runs (an entry card's six ``/veto <rec_id> <reason>`` skips), and ``data`` carries
-the structured fields the bot/audit log persists alongside the rendered text.
+Each kind is documented on the :class:`MessageKind` members and on each helper. ``buttons`` carry the
+exact owner command each tap runs, and ``data`` carries the structured fields the bot/audit log
+persists alongside the rendered text.
 """
 
 from __future__ import annotations
@@ -41,8 +36,8 @@ _SEVERITY_GLYPH: dict[str, str] = {"info": "ℹ️", "warning": "⚠️", "criti
 class MessageKind(StrEnum):
     """Every owner-facing message type in the catalog.
 
-    Each member documents its trigger. The value is the stable
-    machine key persisted in the audit/notification log and never localised.
+    Each member documents its trigger. The value is the stable machine key persisted in the
+    audit/notification log.
     """
 
     RECOMMENDATION = "recommendation"
@@ -264,9 +259,8 @@ class CatalogMessage(BaseModel):
         """Owner-facing plain-text rendering consumed by ``TelegramBot.send``.
 
         Presentation only: a severity-glyphed ``title`` line followed by ``body``. The structured
-        ``data`` / ``buttons`` are transport & audit concerns and are deliberately NOT dumped
-        into the owner's message — leaking the raw model (``kind=… data={…} buttons=None``) is
-        exactly the bug this method exists to prevent (``send`` used to fall back to ``str(model)``).
+        ``data`` / ``buttons`` are transport & audit concerns and are NOT dumped into the owner's
+        message.
         """
         glyph = _SEVERITY_GLYPH.get(self.severity, "")
         head = f"{glyph} {self.title}".strip()
@@ -348,10 +342,10 @@ def startup_report(
     reasons — the full structured report is preserved in ``data`` (and the ``startup_report`` log),
     never dumped as a raw dict into the prose.
 
-    ``warmup_classes_short`` renders its own line because since the 2026-09-13 per-class scoping
-    a short warm-up class no longer implies a ``frozen:`` entry: an INTRADAY
-    shortfall refuses intraday candidates per candidate and sends no ``WARMUP_FROZEN`` page, so this
-    line is the owner's ONLY boot-time notice that the session is running on incomplete coverage."""
+    ``warmup_classes_short`` renders its own line because a short warm-up class does not imply a
+    ``frozen:`` entry: an INTRADAY shortfall refuses intraday candidates per candidate and sends no
+    ``WARMUP_FROZEN`` page, so this line is the owner's ONLY boot-time notice that the session is
+    running on incomplete coverage."""
     lead = f"⚠ crash-recovered (prior state {prior_state}) — " if crash_recovered else ""
     frozen = ", ".join(frozen_reasons) if frozen_reasons else "none"
     deferred = ", ".join(deferred_steps) if deferred_steps else "none"
@@ -359,8 +353,7 @@ def startup_report(
     blockers = list(warmup_blockers or [])
     warm_line = ""
     if classes:
-        # The first few blockers only: a market-wide minute hole renders one line per watch symbol,
-        # and the whole list is in ``data`` + the structured log for anyone who needs it.
+        # First few blockers only (a market-wide hole lists every watch symbol); all are in ``data``.
         shown = ", ".join(blockers[:3])
         more = f", +{len(blockers) - 3} more" if len(blockers) > 3 else ""
         detail = f" ({shown}{more})" if shown else ""
@@ -401,9 +394,9 @@ def feed_stale(age_s: float) -> CatalogMessage:
 def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
     """Live feed silent for ``age_s`` s DURING market hours while heartbeats keep the child HEALTHY.
 
-    Warning (not critical): the ticker child is alive and heartbeating, but its KiteTicker is delivering
-    no ticks, so NO self-built 1-minute bars are being written. Fires once on the HEALTHY→DEGRADED
-    transition (in-session tick-silence guard); the state recovers to HEALTHY when ticks resume.
+    Warning (not critical): the child is alive but its KiteTicker delivers no ticks, so NO self-built
+    1-minute bars are being written. Fires once on the HEALTHY→DEGRADED transition; recovers to HEALTHY
+    when ticks resume.
     """
     return CatalogMessage(
         kind=MessageKind.FEED_DEGRADED,
@@ -421,10 +414,9 @@ def feed_degraded(*, age_s: float, budget_s: float) -> CatalogMessage:
 def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
     """The ticker feed is WEDGED — repeated WARMING-timeout respawns never reached HEALTHY.
 
-    Escalated ONCE after ``ticker.max_wedge_respawns`` consecutive WARMING-timeout respawns (2026-07-23
-    sleep/resume wedge): the supervisor keeps retrying at capped backoff, but the child never delivers a
-    heartbeat, so the feed is structurally down. Warning (not critical): risk-reducing exits are
-    unaffected and the state recovers automatically once a respawn heartbeats.
+    Escalated ONCE after ``ticker.max_wedge_respawns`` consecutive WARMING-timeout respawns: the
+    supervisor keeps retrying at capped backoff, but the child never heartbeats. Warning (not
+    critical): risk-reducing exits are unaffected and the state recovers once a respawn heartbeats.
     """
     return CatalogMessage(
         kind=MessageKind.FEED_WEDGED,
@@ -441,7 +433,7 @@ def feed_wedged(*, respawns: int, age_s: float) -> CatalogMessage:
 
 
 def feed_silent_unrecovered(*, respawns: int, since: datetime, silence_s: float) -> CatalogMessage:
-    """In-session tick silence survived ``respawns`` fresh connections (2026-11-03 silent connected feed).
+    """In-session tick silence survived ``respawns`` fresh connections.
 
     ``since`` is the episode's last tick (or HEALTHY entry when there was none), never earlier than the
     session's open. Escalated ONCE per silence episode; the supervisor then stays DEGRADED without
@@ -597,10 +589,8 @@ def position_not_in_holdings(
 
     The message exists to produce ONE owner action, so the body ends in the literal reply to type:
     ``/closed <entry_rec_id> <price>``. ``entry_rec_id`` is the ENTRY recommendation id from the
-    learning ledger (``/closed`` accepts an exit rec's id too, but the entry is the id the ledger row
-    is keyed on); when the position has no ledger row at all the alert says so and names the
-    ``position_id`` instead — an un-actionable-but-explicit page beats silence, which is the
-    eleven-session limbo this check was built to end.
+    learning ledger (the id the ledger row is keyed on); when the position has no ledger row the
+    alert says so and names the ``position_id`` instead — explicit beats silence.
 
     No ``buttons``: unlike ``REC_FILL_SUSPECTED``, the platform does not know the exit price —
     it is the owner's fact — so a one-tap button would have to invent one.
@@ -725,11 +715,9 @@ def warmup_frozen(*, blockers: list[str], classes: list[str] | None = None) -> C
     strategies/symbols whose feature lookbacks lack contiguous bar coverage. Entries reopen
     automatically once coverage is met; risk-reducing actions were never gated.
 
-    ``classes`` are the coverage classes short (2026-09-13). It LEADS the body
-    and travels in ``data`` beside the blockers rather than inside them: which class froze entries is
-    the first thing the owner needs, an intraday line riding along in the same freeze must not read
-    as the cause, and every element of ``blockers`` stays a rendered "scope: have/need" line for the
-    consumers that parse it."""
+    ``classes`` are the coverage classes short. It LEADS the body and travels in ``data`` beside the
+    blockers, not inside them: which class froze entries is what the owner needs first, and every
+    element of ``blockers`` stays a rendered "scope: have/need" line for the consumers that parse it."""
     lead = f"classes short: {', '.join(classes)} — entries FROZEN\n" if classes else ""
     return CatalogMessage(
         kind=MessageKind.WARMUP_FROZEN,
@@ -791,9 +779,8 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
     """Post-login recovery summary (cold-start RE-TRIGGER).
 
     ``steps`` is the ordered ``(name, status, detail)`` list, ``status`` in {ok, skipped, failed}.
-    Info severity unless any step failed (then warning). The owner SEES this on Telegram so a
-    background recovery (the login HTTP/Telegram path returned immediately) is never silent — it is
-    the visible proof the engine re-armed after a boot BEFORE the daily login."""
+    Info severity unless any step failed (then warning). The owner sees this so a background recovery
+    is never silent."""
     any_failed = any(status == "failed" for _name, status, _detail in steps)
     lines = [
         f"- {name}: {status}" + (f" ({detail})" if detail else "")
@@ -812,13 +799,11 @@ def post_login_recovery(*, steps: list[tuple[str, str, str]]) -> CatalogMessage:
 
 
 def early_hydration(*, at: str, outcomes: list[tuple[str, str]]) -> CatalogMessage:
-    """Early-hydration summary (2026-09-09) — ONE owner line per early login.
+    """Early-hydration summary — ONE owner line per early login.
 
-    ``at`` is the already-``Clock``-derived HH:MM of the login (this module never reads a clock);
-    ``outcomes`` is the ordered ``(job_id, outcome)`` list from ``CatchUpRunner.hydrate_ahead``,
-    outcome in {ran, already_run, failed}. Reads as "Early hydration 06:32: universe_build ran, ...
-    (surveillance already run)" — the owner's proof the day's digest exists before the window opens,
-    and, on a bad morning, which job did not make it. Warning severity iff something failed."""
+    ``at`` is the already-``Clock``-derived HH:MM of the login; ``outcomes`` is the ordered
+    ``(job_id, outcome)`` list from ``CatchUpRunner.hydrate_ahead``, outcome in
+    {ran, already_run, failed}. Warning severity iff something failed."""
     ran = [j for j, o in outcomes if o == "ran"]
     failed = [j for j, o in outcomes if o == "failed"]
     already = [j for j, o in outcomes if o == "already_run"]
@@ -968,9 +953,8 @@ def capital_changed(
 def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> CatalogMessage:
     """The degrade ladder moved a rung (``BUDGET_TIER(DGn)``).
 
-    Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning; a second kind for the
-    same event would fork the audit log. The window is named in the prose: the period is the
-    subscription's Thursday-14:00-IST quota week, so "$103" alone reads as a month figure to the owner."""
+    Reuses :data:`MessageKind.BUDGET_WARNING` — the ladder IS the budget warning. The window is named
+    in the prose: the period is the subscription's Thursday-14:00-IST quota week, not a month."""
     return CatalogMessage(
         kind=MessageKind.BUDGET_WARNING,
         title=f"Budget tier {old} → {new}",
@@ -989,7 +973,7 @@ def budget_tier(old: str, new: str, window_spend: Decimal, window_key: str) -> C
     )
 
 
-#: Owner-facing strategy names (2026-07-29 feedback: "orb/rsi2 are not easy to understand").
+#: Owner-facing strategy names.
 STRATEGY_LABELS: dict[str, str] = {
     "orb": "intraday breakout",
     "rsi2": "swing dip-buy",
@@ -1035,7 +1019,7 @@ def _sweep_trade_line(row: dict[str, Any], *, live: bool) -> list[str]:
 
 
 def _sweep_section(rows: list[dict[str, Any]], *, live: bool) -> list[str]:
-    """Group rows under their style header, intraday first (2026-07-29: separate the trade types)."""
+    """Group rows under their style header, intraday first."""
     out: list[str] = []
     for style in ("intraday", "swing", "position"):
         block = [r for r in rows if r.get("style") == style]
@@ -1054,12 +1038,12 @@ def scan_sweep(
     pending: list[dict[str, Any]],
     suppressed_today: int,
 ) -> CatalogMessage:
-    """Sweep verdict (2026-07-29): the owner always hears SOMETHING when a sweep runs.
+    """Sweep verdict: the owner always hears SOMETHING when a sweep runs.
 
-    Rendering per owner feedback (2026-07-29): trade types grouped intraday/swing, every setup
-    shows its full plan (entry + stop + target or exit rule), friendly strategy names, held
-    positions flagged. ``live`` rows are candidates entering the pipeline now; ``pending`` rows are
-    would-arm levels; ``suppressed_today`` counts day slots already spent.
+    Trade types are grouped intraday/swing; every setup shows its full plan (entry + stop + target or
+    exit rule), friendly strategy names, held positions flagged. ``live`` rows are candidates entering
+    the pipeline now; ``pending`` rows are would-arm levels; ``suppressed_today`` counts day slots
+    already spent.
     """
     if live:
         headline = f"{len(live)} candidate(s) qualify — evaluating now"
@@ -1124,26 +1108,20 @@ THESIS_MAX_CHARS = 300
 MAX_HEADROOM_LINES = 5
 MAX_MESSAGE_CHARS = 4096  # plain text, no parse mode
 
-#: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid.
-#: Everything else in the footer is known at delivery time; a guessed fill price would be a fabricated
-#: number in the owner's own audit trail (the recommendation's entry zone is not a fill).
+#: Placeholder for the one field the platform must NOT prefill: the price the owner actually paid (the
+#: entry zone is not a fill; a guess would be a fabricated number in the owner's audit trail).
 _PRICE_PLACEHOLDER = "<price>"
 
 
 def _capture_footer(rec: Recommendation) -> str:
-    """The copy-ready outcome-capture line that closes every recommendation (2026-08-26).
+    """The copy-ready outcome-capture line that closes every recommendation.
 
-    The message used to end at the checklist, and the only handle it carried for ``/taken`` was a
-    ``rec_id`` printed nowhere — so on the first day the owner actually took a recommendation, the
-    capture command was untypable. The footer now states the command verbatim, with the INSTRUMENT as
-    the handle (which the owner commands resolve) and the recommended qty already filled in.
-    Only the fill price stays a placeholder, because that number is the owner's, not the platform's.
+    States the command verbatim with the INSTRUMENT as the handle and the recommended qty filled in;
+    only the fill price stays a placeholder (the owner's number, not the platform's).
 
-    Three kinds, three honest footers. An ``entry`` is a fill to record or decline. An ``exit`` asks
-    for an order whose result is reported with ``/closed``. An ``adjust`` places NO order at all (its
-    checklist is "move the stop"), so it gets the decline half only — instructing the owner to
-    ``/closed`` a position the platform just asked them to KEEP would be a wrong instruction on a
-    money surface, and "the exit-kind form" is not one an adjust can honestly carry.
+    An ``entry`` is a fill to record or decline. An ``exit`` is reported with ``/closed``. An
+    ``adjust`` places NO order (its checklist is "move the stop"), so it gets the decline half only —
+    telling the owner to ``/closed`` a position they were asked to KEEP would be wrong.
     """
     if rec.kind == "entry":
         from engine.notify.telegram import VETO_REASONS  # telegram imports this module

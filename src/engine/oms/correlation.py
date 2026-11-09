@@ -1,19 +1,14 @@
-"""Pending-correlation buffer for the postback-before-response race (2026-09-10).
+"""Pending-correlation buffer for the postback-before-response race.
 
-The race: *"an order update can arrive on the socket BEFORE the synchronous
-``place_order()`` call returns the broker order_id. The state machine must tolerate this — an update
-for a broker order_id the platform has not yet recorded is held in a pending-correlation buffer and
-applied once the place call returns that id, never dropped and never mistaken for a stray/duplicate
-order that would trigger a defensive cancel."*
+An order update can arrive on the socket BEFORE the synchronous ``place_order()`` returns the broker
+order_id. An update for a broker id the platform has not yet recorded is held here and applied once
+the place call returns that id — never dropped, never mistaken for a stray order that would trigger a
+defensive cancel.
 
-Two failure modes are designed out here:
-
-* **Dropping an update.** Nothing leaves this buffer without being handed to a caller. Eviction and
-  expiry RETURN the entries they remove (the caller logs them, conservation property:
-  ``held == pending + resolved + evicted + expired``) — a silent drop is a lost order.
-* **Unbounded growth.** A broker id that never correlates (a stray from another session, a malformed
-  frame) would otherwise leak forever. The buffer is capped; the OLDEST entry is evicted first and
-  handed back, so the loss is always visible and always the least-recent one.
+* **No silent drop.** Eviction and expiry RETURN the entries they remove (the caller logs them;
+  conservation: ``held == pending + resolved + evicted + expired``).
+* **Bounded.** A broker id that never correlates would leak forever, so the buffer is capped; the
+  OLDEST entry is evicted first and handed back.
 
 Pure Tier 3: stdlib + ``core`` only. No clock is held — the caller passes arrival/`now` times from
 its own :class:`~engine.core.clock.Clock`, which keeps replay deterministic.
@@ -30,8 +25,7 @@ from engine.core.log import get_logger
 
 _log = get_logger("engine.oms.correlation")
 
-#: Default cap. A trading day places tens of orders; hundreds of uncorrelated buffered updates means
-#: something is structurally wrong, and the cap turns that into visible evictions rather than a leak.
+#: Default cap. A trading day places tens of orders; hundreds of uncorrelated updates is structural.
 DEFAULT_MAX_ENTRIES = 512
 
 
@@ -110,14 +104,12 @@ class PendingCorrelation:
     def resolve(self, order_id: str, broker_order_id: str) -> list[BufferedUpdate]:
         """Hand back every buffered update for ``broker_order_id`` in ARRIVAL ORDER, and drain them.
 
-        Called the moment ``place_order()`` returns the id for platform order ``order_id`` (recorded
-        for the audit chain). Applying them out of order would let a stale ACK overwrite a fill.
+        Called the moment ``place_order()`` returns the id for platform order ``order_id``. Applying
+        out of order would let a stale ACK overwrite a fill.
 
-        Returns the ENTRIES, not the bare payloads (2026-09-10 review): each carries the ``at`` the
-        platform received it, which the caller passes into
-        :func:`engine.oms.updates.apply_update` so the ``order_events`` row records when the broker
-        action reached us rather than when the buffer happened to drain. ``seq`` is the arrival
-        sequence, preserved for the same reason.
+        Returns the ENTRIES, not bare payloads: each carries the ``at`` the platform received it, which
+        the caller passes to :func:`engine.oms.updates.apply_update` so ``order_events`` records when
+        the broker action reached us, not when the buffer drained.
         """
         bid = str(broker_order_id)
         keep: list[BufferedUpdate] = []

@@ -1,11 +1,9 @@
-"""The ONE broker-postback parser, shared by live and paper routing (2026-09-10).
+"""The ONE broker-postback parser, shared by live and paper routing.
 
-``data`` here is the **verbatim Kite order postback** — the dict carried by
-:class:`engine.core.contracts.OrderUpdateFrame` ``.data``, which the mt-ticker child forwards
-untouched from ``KiteTicker.on_order_update``. PaperBroker publishes the same
-shape on the same topic, so live and paper share this parser and there is exactly one place where
-broker vocabulary is translated into platform states. Divergence between the two paths is therefore
-structurally impossible, which is what makes the paper soak evidence about the live path.
+``data`` is the **verbatim Kite order postback** — the dict in
+:class:`engine.core.contracts.OrderUpdateFrame` ``.data``, forwarded untouched from
+``KiteTicker.on_order_update``. PaperBroker publishes the same shape on the same topic, so broker
+vocabulary is translated into platform states in exactly one place and live and paper cannot diverge.
 
 **Kite fields read here (pinned; the parser reads NOTHING else):** ``order_id``, ``status``,
 ``filled_quantity``, ``pending_quantity``, ``cancelled_quantity``, ``average_price``,
@@ -16,24 +14,22 @@ structurally impossible, which is what makes the paper soak evidence about the l
 **Status mapping.** ``OPEN``/``TRIGGER PENDING`` -> ACKED; ``COMPLETE`` -> FILLED;
 ``CANCELLED`` -> CANCELLED; ``REJECTED`` -> REJECTED; ``OPEN`` with ``filled_quantity > 0`` and
 either a smaller ``quantity`` or **no usable ``quantity`` at all** -> PARTIALLY_FILLED (a garbled or
-missing quantity must not turn a real fill into a plain ack — 2026-09-10 review). The ``*PENDING``
-validation/modify/cancel intermediates carry NO state change — they are recorded as an event payload
-only. An unrecognised status raises :class:`UnknownBrokerStatus`: the platform never guesses what the
-broker meant.
+missing quantity must not turn a real fill into a plain ack). The ``*PENDING`` intermediates carry NO
+state change — they are recorded as an event payload only. An unrecognised status raises
+:class:`UnknownBrokerStatus`: the platform never guesses what the broker meant.
 
-**Caller sequence (ratified 2026-09-10).** For each update, in this order:
+**Caller sequence.** For each update, in this order:
 
 1. :func:`~engine.oms.state.correlate` the platform order with the broker order id once
-   ``place_order()`` returns it (or once the pending-correlation buffer resolves it). Postbacks
-   that arrive first live in :class:`~engine.oms.correlation.PendingCorrelation` until then, and
+   ``place_order()`` returns it (or the pending-correlation buffer resolves it). Postbacks that
+   arrive first wait in :class:`~engine.oms.correlation.PendingCorrelation`;
    :meth:`~engine.oms.correlation.PendingCorrelation.resolve` hands back the buffered ENTRIES so
-   each one is applied with its own arrival time.
+   each is applied with its own arrival time.
 2. :meth:`~engine.oms.store.OrderStore.record` the correlation as a same-state event
-   (``{"platform_intent": "correlate", "broker_order_id": ...}``) — persist before any side effect
-   , and a correlation the platform cannot explain later is worse than a redundant audit row.
+   (``{"platform_intent": "correlate", "broker_order_id": ...}``) — persist before any side effect.
 3. :func:`apply_update`, then :meth:`~engine.oms.store.OrderStore.record` the resulting transition —
-   or :meth:`~engine.oms.store.OrderStore.record_noop` when the event is an annotated no-op (which
-   is the only way a postback against a TERMINAL row gets audited).
+   or :meth:`~engine.oms.store.OrderStore.record_noop` for an annotated no-op (the only way a
+   postback against a TERMINAL row gets audited).
 
 :func:`apply_update` itself never assigns the broker id and never mutates on a no-op: it REFUSES an
 update whose ``broker_order_id`` is not already the order's (:class:`CorrelationMismatch`).
@@ -105,27 +101,24 @@ _WORKING_TARGETS: frozenset[OrderState] = frozenset(
 
 #: Payload flags that mark an event as a NO-OP: the order is returned UNCHANGED and the event is
 #: audited through :meth:`engine.oms.store.OrderStore.record_noop` (the only door onto a terminal
-#: row). Published as a set so a caller — and the conservation property test — can recognise a no-op without
-#: enumerating flags it does not know about; ``duplicate_reason`` carries the why for ``duplicate`` and
-#: ``illegal_transition``; an ``intermediate`` no-op is explained by its ``broker_status``.
+#: row). Published as a set so callers can recognise a no-op without enumerating flags;
+#: ``duplicate_reason`` carries the why for ``duplicate`` and ``illegal_transition``; an
+#: ``intermediate`` no-op is explained by its ``broker_status``.
 NOOP_FLAGS: frozenset[str] = frozenset({"duplicate", "intermediate", "illegal_transition"})
 
 
 def _postdates_intent(upd: BrokerUpdate, order: PlatformOrder) -> bool:
     """Is this broker frame from AFTER the platform raised its current intent?
 
-    Compared at the BROKER's clock resolution, which is whole seconds: Kite stamps
-    ``order_timestamp``/``exchange_update_timestamp`` to the second (PaperBroker matches it, see
-    ``engine.paper.broker``), while ``updated_at`` is the platform's sub-second clock. A literal
-    ``broker_ts > updated_at`` would therefore reject the ack of a modify the broker applied within
-    the SAME second — which is the normal case, postbacks land in ~100-300 ms — stranding the order
-    in MODIFY_PENDING. That breaks the protective SL-M qty ladder on the very next accretion (MODIFY_PENDING
-    has no outgoing modify edge), i.e. it converts a stale-frame guard into a protection hazard.
-    The rule is therefore "the frame does not PREDATE the second the intent was raised".
+    Compared at the BROKER's whole-second resolution: Kite stamps ``order_timestamp`` /
+    ``exchange_update_timestamp`` to the second (PaperBroker matches it), while ``updated_at`` is the
+    platform's sub-second clock. A literal ``broker_ts > updated_at`` would reject the ack of a modify
+    applied within the SAME second (the normal case) and strand the order in MODIFY_PENDING, breaking
+    the protective SL-M qty ladder. The rule is "the frame does not PREDATE the second the intent was
+    raised".
 
-    A frame with no timestamp at all is treated as stale: Kite always sends one, so its absence marks
-    a malformed frame, and the payload is still recorded either way. (``updated_at`` is None only on
-    an order that has never transitioned, which cannot be in a ``*_PENDING`` state — defensive.)
+    A frame with no timestamp is treated as stale (Kite always sends one); the payload is recorded
+    either way. ``updated_at`` None is defensive only.
     """
     if upd.broker_ts is None or order.updated_at is None:
         return False
@@ -136,11 +129,9 @@ def _broker_fields(order: PlatformOrder, upd: BrokerUpdate) -> dict[str, Any] | 
     """Order parameters the postback reports differently from the row (modify path).
 
     Zero prices are ignored: Kite sends ``price``/``trigger_price`` as ``0`` to mean "not applicable"
-    on MARKET and non-SL orders, and a 0 must never overwrite the limit/trigger the platform actually
-    placed. A **non-positive quantity** is rejected on the same grounds and for the reason
-    :func:`~engine.oms.state.amend` rejects one (2026-09-10 round-3 review): an order for zero shares
-    cannot exist, so a 0/negative ``quantity`` is filler or garble, never the broker confirming an
-    amend — writing it would leave the row claiming an order for nothing while the real one rests.
+    on MARKET and non-SL orders, and a 0 must never overwrite the limit/trigger the platform placed.
+    A non-positive quantity is ignored likewise (as :func:`~engine.oms.state.amend` rejects one): it
+    is filler or garble, never the broker confirming an amend.
     """
     fields: dict[str, Any] = {}
     if upd.qty is not None and upd.qty > 0 and upd.qty != order.qty:
@@ -240,10 +231,9 @@ def parse_postback(data: dict[str, Any]) -> BrokerUpdate:
     elif status in KITE_STATUS_MAP:
         target = KITE_STATUS_MAP[status]
         # A working order that has filled something is PARTIALLY_FILLED, not merely ACKED.
-        # Only OPEN qualifies — a TRIGGER PENDING leg has not entered the book yet. A MISSING or
-        # garbled `quantity` (qty is None) still yields PARTIALLY_FILLED: before the 2026-09-10 fix
-        # such a frame was read as a plain ack and then swallowed as a same-state duplicate, so a
-        # real fill went unseen and the position stayed unprotected.
+        # Only OPEN qualifies — a TRIGGER PENDING leg has not entered the book yet. A missing or
+        # garbled `quantity` still yields PARTIALLY_FILLED, else the fill would be swallowed as a
+        # same-state duplicate and the position left unprotected.
         if status == "OPEN" and filled > 0 and (qty is None or filled < qty):
             target = OrderState.PARTIALLY_FILLED
     else:
@@ -289,53 +279,46 @@ def apply_update(
     Those events are annotated ``duplicate=True`` (with a ``duplicate_reason``); the ``*PENDING``
     intermediates are annotated ``intermediate=True``. Everything else applies the table edge.
 
-    **This function never raises for a broker frame** (2026-09-10 round-3 review). Two mechanisms get
-    it there:
+    **This function never raises for a broker frame** (raising aborts the postback loop and loses
+    every later frame in the batch):
 
     * the target is re-derived from the FILL COUNT before any gate — a working-state frame that
       reports fills is PARTIALLY_FILLED, or FILLED once the fill reaches the quantity — because
-      Kite's status WORD lies about the book on a triggered SL leg ("TRIGGER PENDING" while filling)
-      and on the completing frame ("OPEN" with ``filled_quantity == quantity``), and both words map
-      to ACKED, which has no self-edge;
-    * any residual shape the table still cannot absorb becomes an annotated no-op
-      (``illegal_transition=True``, with ``attempted_to_state`` and the verbatim payload) rather than
-      an exception, because raising here aborts the postback loop and loses every later frame in the
-      batch. The anomaly is recorded for the Reconciler, never swallowed.
-      :func:`~engine.oms.state.transition` itself still raises: the platform's OWN moves are bugs.
+      Kite's status WORD lies on a triggered SL leg ("TRIGGER PENDING" while filling) and on the
+      completing frame ("OPEN" with ``filled_quantity == quantity``), and both map to ACKED, which
+      has no self-edge;
+    * any residual shape the table cannot absorb becomes an annotated no-op
+      (``illegal_transition=True``, with ``attempted_to_state`` and the verbatim payload) for the
+      Reconciler. :func:`~engine.oms.state.transition` itself still raises: the platform's OWN moves
+      are bugs.
 
     Every no-op event also carries ``fields_reported`` when the broker's quantity/price/trigger
     disagree with the row — the row is not rewritten (purity), but the disagreement is evidence.
-    :data:`NOOP_FLAGS` is the set of flags that mark an event as one of these.
+    :data:`NOOP_FLAGS` is the set of flags that mark a no-op.
 
-    Two intent guards make the no-op set larger than "same state" (ratified 2026-09-10):
+    Two intent guards make the no-op set larger than "same state":
 
     * **``cancel_pending_held``** — an OPEN / TRIGGER PENDING frame against a CANCEL_PENDING order is
-      a no-op, whatever its timestamp. The Reconciler's 5-minute re-read returns exactly that for an
-      in-flight cancel; clearing the cancel intent on it would let the protection policy's square-off send a market
-      exit alongside a protective order it believes cancelled (double exit into a short). Only a REAL
-      fill (``filled_quantity`` strictly grown), a cancel outcome, or a reject leaves CANCEL_PENDING.
+      a no-op, whatever its timestamp (the Reconciler's re-read returns exactly that for an in-flight
+      cancel; clearing the intent would let square-off send a market exit alongside a protective order
+      it believes cancelled). Only a REAL fill (``filled_quantity`` strictly grown), a cancel outcome,
+      or a reject leaves CANCEL_PENDING.
     * **``out_of_order`` on a modify ack** — EVERY move out of MODIFY_PENDING into a working state
-      (ACKED **or** PARTIALLY_FILLED) requires a broker frame that does not predate the modify
-      (:func:`_postdates_intent`, compared at the broker's whole-second resolution). A replayed OPEN
-      frame from before the modify would otherwise read as the modify's acknowledgement — and on an
-      order that already has fills it parses as PARTIALLY_FILLED, which an ACKED-only gate let
-      through, reverting the amended fields (2026-09-10 round-3 review). A FILL during a modify is
-      never gated: it already happened.
+      (ACKED **or** PARTIALLY_FILLED) requires a frame that does not predate the modify
+      (:func:`_postdates_intent`). A replayed pre-modify OPEN frame would otherwise read as the
+      modify's ack and revert the amended fields. A FILL during a modify is never gated.
 
-    ``filled_qty`` is passed as ``max(update, current)``: a CANCELLED/REJECTED postback that reports
-    ``filled_quantity`` differently from what we already recorded must never shrink the filled
-    portion of a partially-filled entry (residual-cancel conservation). The postback's own
+    ``filled_qty`` is passed as ``max(update, current)``: a CANCELLED/REJECTED postback must never
+    shrink the filled portion of a partially-filled entry. The postback's own
     ``quantity``/``price``/``trigger_price`` are carried onto the row when they differ (the broker is
-    authoritative about the live order's parameters, and a modify's ack is how an amended quantity is
-    confirmed) — recorded on the event as ``fields_applied``.
+    authoritative about the live order, and a modify's ack confirms an amended quantity), recorded on
+    the event as ``fields_applied``.
 
     Purity: on a no-op the order passed in is returned UNCHANGED (same object). Correlation is not
     done here — see the module docstring's caller sequence.
 
-    The return type is ``OrderEvent | None``; today an event is ALWAYS
-    produced, because every broker payload must be recorded. ``None`` is reserved for a
-    future caller-side filter (e.g. the reconciler suppressing its own re-reads) and callers should
-    handle it rather than assume non-None.
+    The return type is ``OrderEvent | None``; today an event is ALWAYS produced (every broker payload
+    is recorded). ``None`` is reserved for a future caller-side filter; callers should handle it.
     """
     if order.broker_order_id is None or upd.broker_order_id != order.broker_order_id:
         raise CorrelationMismatch(
@@ -349,11 +332,9 @@ def apply_update(
         body: dict[str, Any] = {**payload, **annotations, "broker_status": upd.status}
         reported = _broker_fields(current, upd)
         if reported:
-            # A no-op does NOT rewrite the row — that purity is what makes a replay safe — but the
-            # broker reporting parameters that differ from ours is evidence, and it used to be
-            # dropped on the floor (2026-09-10 round-3 review, minor). A modify the broker applied
-            # while our frame was gated, or a quantity we never sent, surfaces here and nowhere else;
-            # the Reconciler is what resolves the disagreement.
+            # A no-op does NOT rewrite the row (purity makes a replay safe), but parameters that
+            # differ from ours are evidence for the Reconciler (a modify applied while our frame was
+            # gated, a quantity we never sent).
             body["fields_reported"] = reported
         return OrderEvent(from_state=current.state, to_state=current.state, payload=body, at=at)
 
@@ -370,12 +351,8 @@ def apply_update(
 
     grew = upd.filled_qty > current.filled_qty
 
-    # The STATUS WORD is not the whole truth about the book, so the target is re-derived from the
-    # FILL COUNT — the one fact a frame cannot garble (2026-09-10 round-3 review, major). Kite
-    # reports "TRIGGER PENDING" for a triggered SL leg that is already filling, and "OPEN" with
-    # filled_quantity == quantity for the frame that completes an order; both map to ACKED, which has
-    # no self-edge, so such a fill hit a non-existent edge and raised out of the postback loop.
-    # Re-derived BEFORE the intent gates so those gates judge the real move, not the word.
+    # The status WORD is not the whole truth, so the target is re-derived from the FILL COUNT (see the
+    # docstring), BEFORE the intent gates so they judge the real move, not the word.
     if target in _WORKING_TARGETS and upd.filled_qty > 0:
         # The broker's own quantity wins when it reports a usable one (a modify's ack confirms the
         # amended size in the same frame); the row's is the fallback, and neither being known leaves
@@ -394,35 +371,27 @@ def apply_update(
         and target in _WORKING_TARGETS
         and not (grew or _postdates_intent(upd, current))
     ):
-        # EVERY move out of a modify intent into a working state is gated, not just the ACKED one
-        # (2026-09-10 round-3 review, major): a PARTIALLY_FILLED order's stale OPEN re-report parses
-        # as PARTIALLY_FILLED, walked past an ACKED-only gate, cleared the intent AND carried the
-        # pre-amend price/qty back onto the row — the platform then believed a modify had been
-        # acknowledged that the broker never applied. A real fill (`grew`) is never gated: it
-        # already happened.
+        # Gates EVERY move out of a modify intent into a working state: a stale OPEN re-report of a
+        # PARTIALLY_FILLED order parses as PARTIALLY_FILLED and would clear the intent and carry the
+        # pre-amend price/qty back onto the row. A real fill (`grew`) is never gated.
         return _noop("duplicate", "out_of_order")
 
     if target is current.state:
         # The accretion exemption is about the FILL COUNT, not the target state: a frame whose
-        # filled_quantity has grown is a real fill even when the status word repeats (a postback
-        # with a missing `quantity` reports ACKED-shaped frames as fills accrete). The protection policy needs it:
-        # the protective SL-M is qty-modified upward on each accretion.
+        # filled_quantity grew is a real fill even when the status word repeats; the protective SL-M
+        # is qty-modified upward on each accretion.
         if not grew:
             return _noop("duplicate", "same_state")
     else:
         here, there = _PROGRESS_RANK.get(current.state), _PROGRESS_RANK.get(target)
         if here is not None and there is not None and there < here:
-            # Unreachable for a frame that carries a fill (the re-derivation above lifts its target
-            # to at least the row's progress) and for a zero-fill frame against a filled row (the
-            # regression check above returns first) — kept as the table's own statement of the
-            # rank rule, never as a fill filter (2026-09-10 round-3 review).
+            # Unreachable today (the re-derivation and the regression check return first); kept as
+            # the table's own statement of the rank rule, never as a fill filter.
             return _noop("duplicate", "out_of_order")
 
-    # Two decisions, split (2026-09-10 round-3 review, major on both lenses): a frame that carries
-    # a real fill always LANDS it (the state moves even out of MODIFY_PENDING), but a frame that
-    # PREDATES a modify intent never rewrites the amended parameters — that was the
-    # protective-SL revert, arriving through the fill door instead of the ack door. The stale
-    # parameters ride the event as `fields_reported` for the Reconciler instead.
+    # A frame carrying a real fill always LANDS it (the state moves even out of MODIFY_PENDING), but a
+    # frame that PREDATES a modify intent never rewrites the amended parameters; they ride the event
+    # as `fields_reported` for the Reconciler instead.
     fields = _broker_fields(current, upd)
     annotations: dict[str, Any] | None = None
     if fields and current.state is OrderState.MODIFY_PENDING and not _postdates_intent(upd, current):
@@ -439,13 +408,9 @@ def apply_update(
             annotations=annotations,
         )
     except IllegalTransition as exc:
-        # apply_update NEVER raises for a broker frame (2026-09-10 round-3 review, major). A residual
-        # shape the table cannot absorb — a postback correlated onto a row that was never submitted,
-        # say — is a platform/correlation anomaly, and raising it here aborts the postback loop and
-        # loses every LATER frame in the batch, which is a far worse outcome than an unexplained row.
-        # It is recorded instead: annotated, with the verbatim payload, for the Reconciler.
-        # :func:`~engine.oms.state.transition` still raises — the OMS's OWN moves are bugs, not
-        # broker reality, and those are surfaced.
+        # Never raise for a broker frame: a residual shape the table cannot absorb (e.g. a postback
+        # correlated onto a never-submitted row) is recorded, annotated, for the Reconciler rather
+        # than aborting the postback loop.
         return current, _noop_event(
             {
                 "illegal_transition": True,
