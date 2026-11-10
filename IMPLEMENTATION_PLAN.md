@@ -535,8 +535,10 @@ separate and is unaffected.
       shared `cpcv_report` helper;
     - mean net > 0 in both halves, split at the median entry date;
     - mean net > 0 with the 3 best trades removed.
-  - **Refuted** iff at least 30 trades and mean net ≤ 0. **Insufficient** iff fewer than 30 trades or the data gate
-    fails. Otherwise **null**.
+  - **Refuted** iff at least 30 trades and mean net ≤ 0. **Insufficient** iff fewer than 30 trades. Otherwise
+    **null**.
+  - The data gate: a run whose bars end before the sample's last exit session refuses (exit 2) and labels nothing.
+    Sample B also needs `config/calendar/2027.yaml`, which waits on NSE's 2027 holiday circular.
 - **Diagnostics (decide nothing):**
   - Horizons 1, 3, 5, 10 and 20 sessions for every hypothesis.
   - **Supporting data (the owner's second step), for the stock and named-company hypotheses.** Each split is reported
