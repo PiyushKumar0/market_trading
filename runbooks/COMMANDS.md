@@ -666,12 +666,15 @@ cmd /c mklink /J data\run\claude-cli C:\Users\piyush.kumar_atari\projects\person
 Judge the run on `schema_invalid` in the REPLAYED outputs. Old live answers that carry `regime_note` show as
 live-column parser rejections; that is expected.
 
-## cat v2 shadow verdict (clock restarted 2026-08-28) — engine OFF
+## cat v2 shadow verdict (clock restarted 2026-08-28) — engine OFF, or a whole-file copy
 
 ```powershell
 .venv\Scripts\python.exe scripts\cat_shadow_verdict.py                                   # as of today
 .venv\Scripts\python.exe scripts\cat_shadow_verdict.py --as-of 2026-12-15 --json data\reports\cat_shadow_<date>.json
 .venv\Scripts\python.exe scripts\cat_shadow_verdict.py --notional 8000                   # what-if only: prints OVERRIDE
+# engine running: read a whole-file copy of market.duckdb (a research_snapshot.py snapshot lacks the news tables),
+# with --as-of set to the copy's date so state.db is bounded to match
+.venv\Scripts\python.exe scripts\cat_shadow_verdict.py --db data\research\full_market_2026-11-09.duckdb --as-of 2026-11-09
 ```
 Read-only against `state.db` + `market.duckdb` (a running engine holds the DuckDB lock: `UNAVAILABLE`);
 always exits 0; `--as-of` bounds both stores (config files are read as they are today). The rule and every
