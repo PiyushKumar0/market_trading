@@ -408,6 +408,156 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
 - **Promotion:** a supported hypothesis earns nothing automatically. Using it as a recommendation source needs its own
   owner decision, plan and the research registration bar.
 
+**News impact study (proposed 2026-11-10; registered by the commit that adds its six trial rows, after the owner
+signs off the thresholds and the mapper prompt).** The owner's thesis: events hit particular stocks, so
+recommendations should start from news, with supporting data and the following sessions' prices deciding entry and
+exit. Owner, 2026-11-10: "Go ahead with the recommended way to test them", widened in the same message:
+- news about a sector or a type of business reaches the companies in that domain, not only the companies it names
+  ("government's push into EV future could mean good news for companies in the car electric wiring harness work");
+- global events (Fed rate changes, war, oil) reach particular sectors or the whole Indian market.
+
+The market-wide effect of news tone is the macro mood study's forward test, so it is not repeated here. Evidence
+only; nothing is wired into the engine. The `cat` v2 shadow verdict (one gated slice of the stock hypothesis) stays
+separate and is unaffected.
+- **Family:** `edge/news_impact`, six hypotheses, so N = 6: `registration_alpha(6)` = 0.05/6 and `fold_pass_min(6)` =
+  60%. Thresholds are fixed by this entry; changing one is a new registration.
+- **Source:** the engine's live News Analyst scores. For each cluster this is the first successful `news_analyst` call
+  in `state.db` `agent_calls` that scored it: its `at`, the parsed `output_json` and the cluster's headline from that
+  call's `context_gz`. These scores were made at the time, before any outcome existed. `news_clusters` is not used for
+  timing or text, because merges rewrite its `first_seen`, `symbols` and `sectors`. Three scorer models served the
+  window (haiku-4.5, sonnet-5, then sonnet-5.5 from 2026-10-03); they are pooled, with a per-model split as a
+  diagnostic. Calls begin 2026-07-28 21:15.
+- **Definitions:**
+  - t = the first score's `at`. Entry session D = the first regular session with t before 09:15 IST on D.
+  - P0 = the close of the last regular session that closed (15:30 IST) before t.
+  - Material: materiality ≥ 0.6. Positive: sentiment ≥ +0.4. Negative: sentiment ≤ −0.4.
+  - `pump_promo_suspect` stories are never used. `dividend_corp_action` stories are left out of the stock
+    hypotheses, because ex-dividend drops are not in the stored bars.
+  - Liquid universe as of D−1: the macro mood study's rule (median close × volume ≥ ₹10 cr over the 20 sessions to
+    D−1, ETFs out, a corporate-action ex-date on D−1 out).
+  - Sector peers: the liquid members of the stock's `sector_map` sector in the snapshot in force on D−1, the stock
+    itself excluded; at least 5 are required, and `UNCLASSIFIED` has none.
+  - Group members: a sector group's liquid members from that snapshot; a theme's liquid members from the macro mood
+    study's frozen `config/research/macro_mood/theme_lists.yaml`. A basket needs at least 3.
+  - β: the OLS slope of a stock's or an equal-weight basket's daily close-to-close returns on the equal-weight liquid
+    universe's, over the 250 sessions to D−1, with at least 200 pairs.
+  - Returns run from open(entry session) to close(exit session), the exit session being the hold's last, entry
+    session counted as 1. Sector excess = trade return − the peers' equal-weight return over the same window. β-excess
+    = trade return − β × the liquid universe's equal-weight return over it.
+  - Net = excess − one CNC round trip at `research_common.NOTIONAL` (`CostModel.round_trip`, spread included), charged
+    per leg, so an equal-weight basket pays one round trip.
+  - One position per stock (per group, for baskets) at a time within each hypothesis: a signal inside an open hold is
+    skipped. Several stories on one stock or group for the same D make one signal.
+  - A leg with an unadjusted corporate action inside its hold (`hi52.UNADJUSTED_KINDS`, the hi52 verdict's rule), or a
+    missing entry or exit bar, is dropped and counted.
+- **Symbols:**
+  - Stock stories: the engine's `EntityResolver` over the first score's headline, with that score's `entities` as extra
+    texts. The resolver uses the alias table and `sector_map` of the database copy the run reads, and no universe
+    filter (liquidity is applied after). Alias fixes made since are therefore applied backwards, a correction rather than
+    an outcome-driven choice. Every resolved liquid symbol is a candidate.
+  - Mapped companies: their names go through the same resolver as extra texts with an empty headline. An unmatched or
+    ambiguous name is dropped and counted; the resolver never guesses.
+- **Mapper (the owner's domain and global points):** stories whose first score has materiality ≥ 0.6 and one of:
+  - **domain:** scope `sector` or `theme`, or scope `market` with event type `govt_program`, `sector_policy` or
+    `regulatory_policy`;
+  - **global:** scope `market` with event type `global_market`, `macro_data` or `disruption`.
+
+  Mapping rules:
+  - The prompt is `config/research/news_impact/mapper_prompt.md`, used verbatim. It sees only the headline, never a
+    score.
+  - It returns, per story:
+    - the direction for the whole Indian market (−1, 0 or +1);
+    - up to 3 groups from a closed vocabulary (the 23 `sector_map` labels of the 2026-11-08 snapshot plus the seven
+      frozen themes), each with a direction;
+    - up to 5 NSE-listed companies by name, the most directly exposed first, each with a direction. Suppliers whose
+      main business serves the affected industry count, which is the wiring-harness case.
+  - The parser keeps the first 3 in-vocabulary groups and the first 5 companies. Directions outside {−1, +1} (market:
+    {−1, 0, +1}) drop the item.
+  - Model `claude-sonnet-5-5`, pinned. Its training data ends June 2026, before every story in the study.
+  - Batches of 20 stories, through the macro mood study's `StudyLLM` on the shared subscription, never the paid API.
+  - At most 40 calls a night. Calls are refused 09:15–15:30 IST on weekdays, re-checked before every call. The run
+    stops at the first quota or login failure, with no retries.
+  - Each call is stored append-only with its time, model, prompt sha256 and raw output in
+    `data/research/news_impact.sqlite`, never in `agent_calls`.
+  - Expected use: about 80 calls for sample A and about as many for sample B. A look stays "waiting" while any story
+    it needs is unmapped.
+- **Hypotheses:**
+  - **News reading carries information:** across all stock-story observations, the Spearman rank correlation between
+    x and the 10-session sector excess y is above 0.
+    - Observations come from every stock story with a resolved liquid symbol, any materiality or sentiment, one per
+      (D, symbol). x is the mean sentiment × materiality of that (D, symbol)'s stories.
+    - A bootstrap that resamples whole entry sessions (2,000 draws, fixed seed) gives a percentile CI at
+      1 − 0.05/6.
+    - **Supported** iff the CI's lower bound is above 0 with at least 300 observations. **Refuted** iff ρ ≤ 0.
+      **Insufficient** below 300. Otherwise **null**.
+  - **Stock news, next open:** a material positive stock story ⇒ buy the stock at D's open, hold 10 sessions. Judged
+    on sector excess.
+  - **Stock news, pullback entry** (the owner's "watch the next trades to judge entry"): the same signals.
+    - A limit buy at P0 rests over sessions D to D+4. It fills on the first session whose low is at or below P0, at
+      min(that session's open, P0). An unfilled signal makes no trade.
+    - Hold 10 sessions from the fill session, judged on sector excess. The peers are measured from that session's
+      open, an approximation stated in the report.
+    - Fills happen only on pullbacks, so the arm mixes timing and selection, as in the brk20 entry study.
+  - **Domain news, named companies:** each company a domain story maps +1 ⇒ buy at D's open, hold 10, judged on
+    β-excess. A company that another domain story for the same D maps −1 is skipped.
+  - **Domain news, groups:** each group that a domain story for D maps +1, and none maps −1 ⇒ buy the group's liquid
+    members equal-weight at D's open, hold 10, judged on β-excess.
+  - **Global news, sectors:** each group that a global story for D maps +1, and none maps −1 ⇒ buy the group's liquid
+    members equal-weight at D's open, hold 5, judged on β-excess.
+- **Samples:**
+  - **A** (history): entry sessions 2026-07-29 → 2026-10-23, read from `data/research/full_market_2026-11-09.duckdb`
+    and `state.db` bounded at 2026-11-09.
+  - **Excluded:** entries 2026-10-26 → 2026-11-10, the window of the November rally that motivated the owner's news
+    questions. They are reported separately and never counted.
+  - **Seen:** on 2026-11-10 the `cat` v2 interim reading showed 10-session outcomes of 16 `cat` signals, a gated subset
+    of the stock-news population, entered 2026-09-02 → 2026-10-27. They stay in A, disclosed. No other outcome in A
+    has been looked at.
+  - **B** (forward confirmation): entry sessions 2026-11-11 → 2027-02-26, judged once after the last hold ends, on a
+    fresh whole-file database copy. B judges every hypothesis A did not refute. The final label is B's. A hypothesis A
+    refutes stops there.
+- **Verdict per trade hypothesis, on each sample** (the macro mood study's rule at this family's N):
+  - **Supported** iff all of these hold:
+    - at least 30 trades;
+    - mean net > 0 and median net > 0;
+    - `permutation_pvalue` < 0.05/6. The sample's median gross excess is compared with same-size draws from the
+      population: the same construct applied to every eligible liquid stock (baskets: every eligible group) entering on
+      the sample's own entry sessions;
+    - CPCV fold-pass fraction ≥ `fold_pass_min(6)` on the net series, with purge = embargo = the hold, through the
+      shared `cpcv_report` helper;
+    - mean net > 0 in both halves, split at the median entry date;
+    - mean net > 0 with the 3 best trades removed.
+  - **Refuted** iff at least 30 trades and mean net ≤ 0. **Insufficient** iff fewer than 30 trades or the data gate
+    fails. Otherwise **null**.
+- **Diagnostics (decide nothing):**
+  - Horizons 1, 3, 5, 10 and 20 sessions for every hypothesis.
+  - **Supporting data (the owner's second step), for the stock and named-company hypotheses.** Each split is reported
+    with a permutation p against same-size random subsets of that hypothesis's own trades (10,000 draws, fixed seed).
+    A split with p < 0.01 is a candidate for its own forward registration, never a filter. The splits:
+    - volume on the last session before entry ≥ 2× its 20-session median;
+    - close(D−1) above its 50-session average;
+    - the engine's NIFTY regime up at D−1;
+    - an open-gap ≥ +2% on D;
+    - materiality ≥ 0.8;
+    - two or more source domains among the cluster's headlines ingested before t;
+    - scorer model;
+    - event type, for types with at least 10 trades.
+  - **The negative side (exit or avoid value; the study is long-only):** the sector excess after material negative
+    stock stories, and the β-excess of companies and groups mapped −1, each with a session-block CI.
+  - For global stories, the event-type split, and the rank correlation between the mapped market direction and the
+    NIFTY's open(D) → close(D+4).
+  - The pullback arm's fill rate; the excluded window's results; per-hypothesis counts of dropped stories, unresolved
+    names and voided legs.
+- **Tools and records:**
+  - `scripts/news_impact_map.py` runs the mapper over the stories a sample needs.
+  - `scripts/news_impact_study.py` computes a sample's verdicts and diagnostics. It is read-only, exits 0, and writes
+    `data/reports/news_impact_<sample>_<stamp>.{json,md}` through `research_common.write_reports`.
+  - The registering commit adds six `config/research_trials.yaml` rows with result `registered`, and the mapper prompt
+    is frozen from then on. Each row takes A's label when A lands and B's when B lands. Verdicts go to memory, and this
+    entry is deleted once B lands.
+  - Tests pin the timing (t, D, P0), the pullback fill, the non-overlap rule, the benchmarks, the cost application and
+    the mapper parser's vocabulary and caps.
+- **Promotion:** as for the macro mood study, a supported hypothesis earns nothing automatically.
+
 ## Known defects and test gaps
 
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
