@@ -435,8 +435,15 @@ separate and is unaffected.
     hypotheses, because ex-dividend drops are not in the stored bars.
   - Liquid universe as of D−1: the macro mood study's rule (median close × volume ≥ ₹10 cr over the 20 sessions to
     D−1, ETFs out, a corporate-action ex-date on D−1 out).
-  - Sector peers: the liquid members of the stock's `sector_map` sector in the snapshot in force on D−1, the stock
-    itself excluded; at least 5 are required, and `UNCLASSIFIED` has none.
+  - Sector snapshot: the `sector_map` snapshot of 2026-11-08 for every D−1 before that date, and the snapshot in force
+    on D−1 after it.
+    - Earlier snapshots used an 11-label scheme until 2026-09-21 and left most names `UNCLASSIFIED` (641 of 804 on
+      09-06). The 11-08 snapshot uses the 23-label scheme the mapper's vocabulary is drawn from.
+    - A stock's sector is not an outcome, so reading it from a later snapshot adds no hindsight. A name that left the
+      engine's universe before 11-08 has no sector there, so its story makes no stock trade, and it is counted.
+    - Fixed 2026-11-10, before any outcome was computed.
+  - Sector peers: the liquid members of the stock's sector in that snapshot, the stock itself excluded. At least 5
+    are required, and `UNCLASSIFIED` has none.
   - Group members: a sector group's liquid members from that snapshot; a theme's liquid members from the macro mood
     study's frozen `config/research/macro_mood/theme_lists.yaml`. A basket needs at least 3.
   - β: the OLS slope of a stock's or an equal-weight basket's daily close-to-close returns on the equal-weight liquid
@@ -448,8 +455,10 @@ separate and is unaffected.
     per leg, so an equal-weight basket pays one round trip.
   - One position per stock (per group, for baskets) at a time within each hypothesis: a signal inside an open hold is
     skipped. Several stories on one stock or group for the same D make one signal.
-  - A leg with an unadjusted corporate action inside its hold (`hi52.UNADJUSTED_KINDS`, the hi52 verdict's rule), or a
-    missing entry or exit bar, is dropped and counted.
+  - A leg is dropped and counted when it has an unadjusted corporate action (`hi52.UNADJUSTED_KINDS`) with an ex-date
+    from its entry session through its exit, as in the macro mood study's baskets, or a missing entry or exit bar. For
+    the pullback arm the window starts after P0's session, because a split between P0 and the fill would misprice the
+    limit.
 - **Symbols:**
   - Stock stories: the engine's `EntityResolver` over the first score's headline, with that score's `entities` as extra
     texts. The resolver uses the alias table and `sector_map` of the database copy the run reads, and no universe
@@ -471,8 +480,8 @@ separate and is unaffected.
       frozen themes), each with a direction;
     - up to 5 NSE-listed companies by name, the most directly exposed first, each with a direction. Suppliers whose
       main business serves the affected industry count, which is the wiring-harness case.
-  - The parser keeps the first 3 in-vocabulary groups and the first 5 companies. Directions outside {−1, +1} (market:
-    {−1, 0, +1}) drop the item.
+  - The parser keeps the first 3 in-vocabulary groups and the first 5 companies. A group or company direction outside
+    {−1, +1} drops that item; a market value outside {−1, 0, +1} becomes 0. Both are counted.
   - Model `claude-sonnet-5-5`, pinned. Its training data ends June 2026, before every story in the study.
   - Batches of 20 stories, through the macro mood study's `StudyLLM` on the shared subscription, never the paid API.
   - At most 40 calls a night. Calls are refused 09:15–15:30 IST on weekdays, re-checked before every call. The run
