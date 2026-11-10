@@ -59,7 +59,7 @@ defined there. Read the entry before each task. Where this plan and the entry di
   `MATERIAL = 0.6`, `POSITIVE = 0.4`, `NEGATIVE = -0.4`, `HOLD = {"stock_next_open": 10, "stock_pullback": 10,
   "domain_companies": 10, "domain_groups": 10, "global_sectors": 5, "info": 10}`, `PULLBACK_SESSIONS = 5`,
   `MIN_PEERS = 5`, `MIN_BASKET = 3`, `BETA_SESSIONS = 250`, `BETA_MIN_PAIRS = 200`, `BOOT_DRAWS = 2000`,
-  `SPLIT_DRAWS = 10000`, `SEED = 20261110`, `ENTRY_CUTOFF = time(9, 15)`, `CLOSE_TIME = time(15, 30)`,
+  `SPLIT_DRAWS = 10000`, `SEED = 20261110`, `ENTRY_CUTOFF = time(9, 0)`, `CLOSE_TIME = time(15, 30)`,
   `SAMPLES = {"A": (date(2026, 7, 29), date(2026, 10, 23)), "excluded": (date(2026, 10, 26), date(2026, 11, 10)),
   "B": (date(2026, 11, 11), date(2027, 2, 26))}`, `NEVER_TYPES = {"pump_promo_suspect"}`,
   `STOCK_SKIP_TYPES = {"pump_promo_suspect", "dividend_corp_action"}`,

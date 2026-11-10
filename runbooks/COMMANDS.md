@@ -660,10 +660,12 @@ after the owner signs off the registration, and only at night. The study is read
 # Sample A needs about 72 calls and the excluded window about 10, so it takes three nights at the cap.
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample A
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded
+# Sample A needs prices through 2026-11-12, the pullback arm's last possible exit: take a whole-file copy of
+# market.duckdb after that close (engine OFF, as for the macro mood study's copy) and pass it with its date.
 # pipeline check with no outcome shown: story, signal, trade and drop counts only; writes no report
-.venv\Scripts\python.exe scripts\news_impact_study.py --sample A --counts-only
+.venv\Scripts\python.exe scripts\news_impact_study.py --sample A --counts-only --db data\research\full_market_<date>.duckdb --as-of <date>
 # the verdict run (once everything is mapped; prints "waiting" until then). Report: data\reports\news_impact_A_<stamp>.*
-.venv\Scripts\python.exe scripts\news_impact_study.py --sample A
+.venv\Scripts\python.exe scripts\news_impact_study.py --sample A --db data\research\full_market_<date>.duckdb --as-of <date>
 # sample B, after its last exit (about 2027-03-11, ten sessions from 02-26) on a fresh whole-file copy, with
 # config/calendar/2027.yaml in place
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample B

@@ -9,7 +9,8 @@ nothing here is wired into the engine.
 Conventions:
 * Returns are in percent units (1.25 is +1.25%), as in ``research_common``; ``cost()`` is in the same units.
 * Times are IST. t is the ``at`` of a cluster's first successful News Analyst score. The entry session D is the first
-  regular session whose 09:15 open is after t; P0 is the close of the last regular session whose 15:30 close is
+  regular session whose 09:00 cut-off is after t: the open is the pre-open auction's price, whose order entry closes
+  about 09:07, so a later score could not trade it. P0 is the close of the last regular session whose 15:30 close is
   before t. Regular sessions come from the NSE calendar with special sessions treated as closed.
 * The panel's sessions are the NIFTY 50 bar dates that are regular sessions, so holds, D-1, liquidity windows and
   populations never count a special session's bar. D-1 is the panel session before D.
@@ -102,13 +103,16 @@ MIN_BASKET = 3
 BETA_SESSIONS = 250
 BETA_MIN_PAIRS = 200
 BOOT_DRAWS = 2000
+#: Sessions per moving block, the hold: consecutive sessions' 10-session returns overlap.
+BOOT_BLOCK = 10
 SPLIT_DRAWS = 10000
 SEED = 20261110
 #: Every D-1 before this date reads this ``sector_map`` snapshot: earlier ones used an older label scheme and left
 #: most names unclassified. A sector is not an outcome, so a later snapshot adds no hindsight.
 SECTOR_SNAPSHOT_FLOOR = date(2026, 11, 8)
 
-ENTRY_CUTOFF = time(9, 15)
+#: The pre-open auction's order entry closes about 09:07; 09:00 leaves a margin, as the macro mood study's cut-off does.
+ENTRY_CUTOFF = time(9, 0)
 CLOSE_TIME = time(15, 30)
 
 #: Inclusive entry-session windows.
@@ -234,8 +238,8 @@ def _ist(t: datetime) -> datetime:
 
 
 def entry_session(t: datetime, sessions: Sequence[date]) -> date | None:
-    """D: the first of ``sessions`` whose 09:15 IST open is strictly after ``t``. ``sessions`` is ascending regular
-    sessions reaching past t; None when t is after the last one's open."""
+    """D: the first of ``sessions`` whose 09:00 IST cut-off is strictly after ``t``. ``sessions`` is ascending regular
+    sessions reaching past t; None when t is after the last one's cut-off."""
     local = _ist(t)
     first = local.date() if local.time() < ENTRY_CUTOFF else local.date() + timedelta(days=1)
     i = bisect_left(sessions, first)
@@ -529,7 +533,8 @@ class Trade:
     net: float
     legs: int = 1
     fill_price: float | None = None
-    #: A basket's members dropped from the trade: a structural ex-date inside the hold, or a missing bar.
+    #: A basket's members, or a sector benchmark's peers, dropped from the trade: a structural ex-date inside the
+    #: hold, or a missing bar.
     voided_legs: int = 0
     no_bar_legs: int = 0
 
@@ -560,6 +565,16 @@ def _legs(p: Panel, i: int, j: int, d_prev: date) -> dict[str, float | str]:
     return out
 
 
+def _peer_bench(legs: dict[str, float | str], peer_set: frozenset[str]) -> tuple[float, int, int] | None:
+    """The peers' equal-weight return over the window with the counts of peers dropped as voided and as no-bar;
+    None when fewer than ``MIN_PEERS`` peers have a usable leg, since a thinned benchmark is mostly noise."""
+    vals = [legs[s] for s in sorted(peer_set)]
+    usable = [v for v in vals if isinstance(v, float)]
+    if len(usable) < MIN_PEERS:
+        return None
+    return statistics.fmean(usable), sum(v == VOIDED for v in vals), sum(v == NO_BAR for v in vals)
+
+
 def _universe_window(legs: dict[str, float | str]) -> float | None:
     vals = [v for v in legs.values() if isinstance(v, float)]
     return statistics.fmean(vals) if vals else None
@@ -584,7 +599,8 @@ def _check_hold(hold: int) -> None:
 def stock_trade(p: Panel, sym: str, d: date, hold: int, bench: Literal["sector", "beta"]) -> Trade | str:
     """Buy ``sym`` at open(D), sell at the close of the ``hold``-th session, judged against its sector peers' equal-
     weight return over the same window (``sector``) or beta times the liquid universe's (``beta``). Peers and beta
-    are fixed as of D-1; a peer whose leg is voided or has no bar leaves the benchmark."""
+    are fixed as of D-1; a peer whose leg is voided or has no bar leaves the benchmark and is counted, and fewer
+    than ``MIN_PEERS`` peers left is ``few_peers``."""
     _check_hold(hold)
     if bench not in ("sector", "beta"):
         raise ValueError(f"bench must be 'sector' or 'beta', got {bench!r}")
@@ -611,24 +627,27 @@ def stock_trade(p: Panel, sym: str, d: date, hold: int, bench: Literal["sector",
     own = legs[sym]
     if isinstance(own, str):
         return own
+    voided = no_bar = 0
     if bench == "sector":
-        vals = [v for s in sorted(peer_set) if isinstance(v := legs[s], float)]
-        if not vals:
+        pb = _peer_bench(legs, peer_set)
+        if pb is None:
             return FEW_PEERS
-        bench_ret = statistics.fmean(vals)
+        bench_ret, voided, no_bar = pb
     else:
         u = _universe_window(legs)
         if u is None:
             return NO_BAR
         bench_ret = b * u
     excess = own - bench_ret
-    return Trade(sym, d, d, p.sessions[j], own, bench_ret, excess, excess - cost())
+    return Trade(sym, d, d, p.sessions[j], own, bench_ret, excess, excess - cost(), voided_legs=voided,
+                 no_bar_legs=no_bar)
 
 
 def pullback_trade(p: Panel, sym: str, d: date, p0_session: date, hold: int) -> Trade | str:
     """A limit buy at P0 = close(``p0_session``) resting over D and the next ``PULLBACK_SESSIONS`` - 1 sessions. It
     fills on the first session whose low is at or below P0, at min(that session's open, P0), and is held ``hold``
-    sessions from the fill session, judged against the peers (fixed as of D-1) from that session's open.
+    sessions from the fill session, judged against the peers (fixed as of D-1) from that session's open. Peers
+    drop out of the benchmark as in ``stock_trade``, with the same ``MIN_PEERS`` floor on those left.
 
     A structural ex-date after ``p0_session`` voids the signal from the session it reaches: bars after it are in
     other units than P0, so a split's lower prices must not read as a fill. ``open`` while the order rests or the
@@ -673,21 +692,20 @@ def pullback_trade(p: Panel, sym: str, d: date, p0_session: date, hold: int) -> 
     if not (math.isfinite(c) and c > 0):
         return NO_BAR
     gross = (float(c) / fill - 1.0) * 100.0
-    legs = _legs(p, fill_i, j, d_prev)
-    vals = [v for s in sorted(peer_set) if isinstance(v := legs[s], float)]
-    if not vals:
+    pb = _peer_bench(_legs(p, fill_i, j, d_prev), peer_set)
+    if pb is None:
         return FEW_PEERS
-    bench_ret = statistics.fmean(vals)
+    bench_ret, voided, no_bar = pb
     excess = gross - bench_ret
     return Trade(sym, d, p.sessions[fill_i], p.sessions[j], gross, bench_ret, excess, excess - cost(),
-                 fill_price=fill)
+                 fill_price=fill, voided_legs=voided, no_bar_legs=no_bar)
 
 
 def basket_trade(p: Panel, group: str, d: date, hold: int) -> Trade | str:
     """Buy ``group``'s members liquid as of D-1 equal-weight at open(D), sell at the close of the ``hold``-th
     session, judged on beta-excess: the basket's return minus its beta (over the same members) times the liquid
-    universe's return over the window. A member whose leg is voided or has no bar is dropped and counted; the basket
-    pays one round trip."""
+    universe's return over the window. A member whose leg is voided or has no bar is dropped and counted, and fewer
+    than ``MIN_BASKET`` usable legs is ``small_basket``; the basket pays one round trip."""
     _check_hold(hold)
     k = _entry(p, d)
     if isinstance(k, str):
@@ -707,8 +725,8 @@ def basket_trade(p: Panel, group: str, d: date, hold: int) -> Trade | str:
     usable = [v for v in vals if isinstance(v, float)]
     voided = sum(v == VOIDED for v in vals)
     no_bar = sum(v == NO_BAR for v in vals)
-    if not usable:
-        return VOIDED if voided else NO_BAR
+    if len(usable) < MIN_BASKET:
+        return SMALL_BASKET
     u = _universe_window(legs)
     if u is None:
         return NO_BAR

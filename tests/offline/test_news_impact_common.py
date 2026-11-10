@@ -80,9 +80,9 @@ def test_registered_constants_are_the_spec_values():
     assert nic.HOLD == {"stock_next_open": 10, "stock_pullback": 10, "domain_companies": 10, "domain_groups": 10,
                         "global_sectors": 5, "info": 10}
     assert (nic.PULLBACK_SESSIONS, nic.MIN_PEERS, nic.MIN_BASKET) == (5, 5, 3)
-    assert (nic.BETA_SESSIONS, nic.BETA_MIN_PAIRS, nic.BOOT_DRAWS, nic.SPLIT_DRAWS, nic.SEED) == (
-        250, 200, 2000, 10000, 20261110)
-    assert (nic.ENTRY_CUTOFF.isoformat(), nic.CLOSE_TIME.isoformat()) == ("09:15:00", "15:30:00")
+    assert (nic.BETA_SESSIONS, nic.BETA_MIN_PAIRS, nic.BOOT_DRAWS, nic.BOOT_BLOCK, nic.SPLIT_DRAWS, nic.SEED) == (
+        250, 200, 2000, 10, 10000, 20261110)
+    assert (nic.ENTRY_CUTOFF.isoformat(), nic.CLOSE_TIME.isoformat()) == ("09:00:00", "15:30:00")
     assert nic.SAMPLES == {"A": (D(7, 29), D(10, 23)), "excluded": (D(10, 26), D(11, 10)),
                            "B": (D(11, 11), D(2, 26, 2027))}
     assert nic.NEVER_TYPES == {"pump_promo_suspect"}
@@ -95,17 +95,20 @@ def test_registered_constants_are_the_spec_values():
 # --------------------------------------------------------------------------- timing
 def test_entry_session_cutoff(cal):
     s = regular(cal, D(11, 1), D(11, 30))
-    assert nic.entry_session(at(D(11, 9), 9, 14, 59, 999999), s) == D(11, 9)
-    # 09:15:00 is too late for the day's open; 11-10 is a holiday, so the next regular session is 11-11
-    assert nic.entry_session(at(D(11, 9), 9, 15), s) == D(11, 11)
+    assert nic.entry_session(at(D(11, 9), 8, 59, 59), s) == D(11, 9)
+    assert nic.entry_session(at(D(11, 9), 8, 59, 59, 999999), s) == D(11, 9)
+    # 09:00:00 is too late for the day's open, which the pre-open auction (order entry until about 09:07) sets;
+    # 11-10 is a holiday, so the next regular session is 11-11
+    assert nic.entry_session(at(D(11, 9), 9, 0), s) == D(11, 11)
+    assert nic.entry_session(at(D(11, 9), 9, 14, 59), s) == D(11, 11)
     # a Saturday score enters Monday; the Sunday muhurat session is not a regular session
     assert nic.entry_session(at(D(11, 7), 10), s) == D(11, 9)
     assert nic.entry_session(at(D(11, 8), 18, 30), s) == D(11, 9)
     # a Monday evening before the 11-24 holiday enters Wednesday
     assert nic.entry_session(at(D(11, 23), 16), s) == D(11, 25)
-    # the cut-off is IST whatever zone the stamp carries: 03:44:59 UTC is 09:14:59 IST
-    assert nic.entry_session(datetime(2026, 11, 9, 3, 44, 59, tzinfo=UTC), s) == D(11, 9)
-    assert nic.entry_session(datetime(2026, 11, 9, 3, 45, tzinfo=UTC), s) == D(11, 11)
+    # the cut-off is IST whatever zone the stamp carries: 03:29:59 UTC is 08:59:59 IST
+    assert nic.entry_session(datetime(2026, 11, 9, 3, 29, 59, tzinfo=UTC), s) == D(11, 9)
+    assert nic.entry_session(datetime(2026, 11, 9, 3, 30, tzinfo=UTC), s) == D(11, 11)
     # past the last session in the list: unknown, not a guess
     assert nic.entry_session(at(D(11, 30), 10), s) is None
 
@@ -413,13 +416,47 @@ def test_voided_leg(cal):
     assert nic.stock_trade(p, "X", d, 3, "sector") == "voided"
     # a split the day after the exit, and a dividend inside the hold, void nothing
     m2, _ = auto_market(cal)
+    m2.flat("P6")
+    m2.sector(SNAP, "AUTO", "P6")                               # a sixth peer keeps five usable after P1 leaves
     m2.corp += [("X", nth(m2, d, 3), "split"), ("X", nth(m2, d, 1), "dividend"), ("P1", d, "bonus")]
-    for k, sym in enumerate(PEERS, start=1):
+    for k, sym in enumerate((*PEERS, "P6"), start=1):
         m2.bar(sym, exit_d, 100.0, 100.0 + k)
     t = nic.stock_trade(m2.panel(cal), "X", d, 3, "sector")
     assert isinstance(t, nic.Trade), t
     # P1's bonus on the entry session is inside the hold: its leg leaves the benchmark
-    assert t.bench == pytest.approx((2 + 3 + 4 + 5) / 4)
+    assert t.bench == pytest.approx((2 + 3 + 4 + 5 + 6) / 5)
+
+
+def test_sector_benchmark_needs_min_peers_usable_over_the_hold(cal):
+    """Five peers at D-1 are not enough when one of them drops out over the hold: the floor is on usable legs."""
+    m, d = auto_market(cal)
+    m.corp.append(("P1", nth(m, d, 1), "split"))
+    m.bar("W", d, 100.0, 100.0, lo=99.0)                         # fills the pullback on D at P0
+    m.sector(SNAP, "METAL", "W")                                 # W's peers are Y and M1..M4: five, as X's
+    m.corp.append(("M1", nth(m, d, 1), "split"))
+    p = m.panel(cal)
+    assert len(nic.peers(p, "X", nth(m, d, -1))) == nic.MIN_PEERS
+    assert nic.stock_trade(p, "X", d, 3, "sector") == "few_peers"
+    assert nic.pullback_trade(p, "W", d, nth(m, d, -1), 3) == "few_peers"
+    # a sixth peer leaves five usable legs: a trade that counts the dropped one
+    m.flat("P6")
+    m.sector(SNAP, "AUTO", "P6")
+    m.flat("M5")
+    m.sector(SNAP, "METAL", "M5")
+    p = m.panel(cal)
+    t = nic.stock_trade(p, "X", d, 3, "sector")
+    assert isinstance(t, nic.Trade), t
+    assert (t.voided_legs, t.no_bar_legs) == (1, 0)
+    t = nic.pullback_trade(p, "W", d, nth(m, d, -1), 3)
+    assert isinstance(t, nic.Trade), t
+    assert (t.voided_legs, t.no_bar_legs) == (1, 0)
+    # a peer's missing exit bar is counted apart from a voided one
+    del m.bars["P2"][nth(m, d, 2)]
+    m.flat("P7")
+    m.sector(SNAP, "AUTO", "P7")
+    t = nic.stock_trade(m.panel(cal), "X", d, 3, "sector")
+    assert isinstance(t, nic.Trade), t
+    assert (t.voided_legs, t.no_bar_legs) == (1, 1)
 
 
 def test_missing_exit_bar_is_no_bar(cal):
@@ -579,9 +616,25 @@ def test_universe_daily_uses_previous_liquid_names_and_drops_ex_date_legs(cal):
 
 def test_basket_leg_voided_and_counted(cal):
     m, d = beta_market(cal)
+    m.flat("H", price=1000.0, volume=10_000_000)
+    m.sector(SNAP, "AUTO", "H")                                  # a fourth member keeps three usable legs
     m.corp.append(("A", nth(m, d, 1), "split"))
     t = nic.basket_trade(m.panel(cal), "AUTO", d, 5)
-    assert isinstance(t, nic.Trade) and t.legs == 2 and t.voided_legs == 1
+    assert isinstance(t, nic.Trade), t
+    assert (t.legs, t.voided_legs, t.no_bar_legs) == (3, 1, 0)
+
+
+def test_basket_needs_min_basket_usable_legs_over_the_hold(cal):
+    """Three members at D-1 are not enough when one of them has no bar at the exit: the floor is on usable legs."""
+    m, d = beta_market(cal)
+    del m.bars["B"][nth(m, d, 4)]
+    p = m.panel(cal)
+    assert nic.group_members(p, "AUTO", nth(m, d, -1)) == frozenset({"A", "B", "E"})
+    assert nic.basket_trade(p, "AUTO", d, 5) == "small_basket"
+    # every leg voided is a small basket too, not a trade
+    m2, _ = beta_market(cal)
+    m2.corp += [(s, nth(m2, d, 1), "split") for s in ("A", "B", "E")]
+    assert nic.basket_trade(m2.panel(cal), "AUTO", d, 5) == "small_basket"
 
 
 # --------------------------------------------------------------------------- non-overlap

@@ -13,9 +13,10 @@ the mapper's store. Every threshold, hold, window and verdict rule is the regist
   for its key is skipped. A signal that makes no trade (a reason string) keeps nothing and blocks nothing; a pullback
   trade's exit counts from its fill.
 * A trade hypothesis's population is the same construct applied to every eligible key on the sample's own entry
-  sessions; its gross excess values feed the permutation test.
+  sessions, the pullback's with each kept trade's own P0 session; its gross excess values feed the permutation test.
 * While any domain or global story the sample or the excluded window needs is unmapped, the run is waiting and
-  computes no hypothesis, so the stock hypotheses never land ahead of the rest.
+  computes no hypothesis, so the stock hypotheses never land ahead of the rest. A story without a readable headline
+  can never be mapped, so it is counted as unmappable and never holds the run.
 * The excluded window (the rally that prompted the study) runs through the same code and is reported apart, as not
   evidence; it never feeds a verdict.
 * Diagnostics decide nothing.
@@ -375,18 +376,23 @@ def keep_trades(signals: Sequence[Signal], make: Make, hold: int) -> tuple[list[
     return kept, counts
 
 
-def population(p: nic.Panel, construct: str, entry_sessions: Sequence[date],
-               hold: int) -> tuple[list[float], Counter]:
-    """The construct's gross excess for every eligible key on each entry session: every stock liquid as of D-1, or
-    every vocabulary group. The pullback limit sits at close(D-1) for every stock. Reasons are counted."""
+def population(p: nic.Panel, construct: str, kept: Sequence[Signal], hold: int) -> tuple[list[float], Counter]:
+    """The construct's gross excess for every eligible key on the kept signals' entry sessions: every stock liquid
+    as of D-1, or every vocabulary group. For the pullback, each distinct (D, P0 session) pair of the kept signals
+    is one run with every stock's limit at its close(P0 session), so the population's limits sit where the
+    sample's do; the other constructs run once per distinct D. Reasons are counted."""
     vals: list[float] = []
     counts: Counter = Counter()
-    for d in sorted(set(entry_sessions)):
+    if construct == "pullback":
+        runs = sorted({(s.d, s.p0_session) for s in kept if s.p0_session is not None})
+    else:
+        runs = [(d, None) for d in sorted({s.d for s in kept})]
+    for d, p0_session in runs:
         k = p.pos[d]
         d_prev = p.sessions[k - 1]
         keys = list(nic.ncs.VOCAB) if construct == "basket" else sorted(nic.liquid(p, d_prev))
         for key in keys:
-            r = make_trade(p, construct, Signal(key, d, (), d_prev), hold)
+            r = make_trade(p, construct, Signal(key, d, (), p0_session), hold)
             if isinstance(r, str):
                 counts[r] += 1
             else:
@@ -438,20 +444,32 @@ def spearman(x: Sequence[float], y: Sequence[float]) -> float | None:
 
 
 def _session_draws(days: Sequence[date], draws: int, seed: int) -> Iterator[np.ndarray]:
-    """Index arrays of whole entry sessions drawn with replacement, as many sessions as the sample has."""
+    """Index arrays of a circular moving-block bootstrap over the sorted distinct entry sessions.
+
+    Consecutive sessions' holds overlap, so their outcomes are dependent; resampling single sessions would make the
+    interval too narrow. Each draw takes ceil(S / block) block starts uniformly from the S sessions, each block the
+    ``BOOT_BLOCK`` sessions from its start (wrapping past the last session to the first), concatenates them,
+    truncates to S sessions and yields every observation of each chosen session. Fewer than ``BOOT_BLOCK`` sessions
+    use one block of S. No draw for an empty sample."""
     groups: dict[date, list[int]] = defaultdict(list)
     for i, d in enumerate(days):
         groups[d].append(i)
-    blocks = [np.asarray(groups[d], dtype=np.int64) for d in sorted(groups)]
+    sessions = [np.asarray(groups[d], dtype=np.int64) for d in sorted(groups)]
+    n = len(sessions)
+    if not n:
+        return
+    block = min(nic.BOOT_BLOCK, n)
+    offsets = np.arange(block, dtype=np.int64)
     rng = np.random.default_rng(seed)
     for _ in range(draws):
-        pick = rng.integers(0, len(blocks), len(blocks))
-        yield np.concatenate([blocks[i] for i in pick])
+        starts = rng.integers(0, n, math.ceil(n / block))
+        pick = ((starts[:, None] + offsets[None, :]) % n).ravel()[:n]
+        yield np.concatenate([sessions[i] for i in pick])
 
 
 def info_verdict(obs: Sequence[tuple[date, float, float]]) -> dict[str, Any]:
     """Spearman rho of (x, y) over ``(D, x, y)`` observations, with a percentile interval at 1 - ALPHA from
-    ``BOOT_DRAWS`` resamples of whole entry sessions. ``insufficient`` below ``MIN_INFO_OBS``; ``refuted`` when
+    ``BOOT_DRAWS`` moving-block resamples of entry sessions. ``insufficient`` below ``MIN_INFO_OBS``; ``refuted`` when
     rho <= 0; ``supported`` when the interval's lower bound is above 0; else ``null``. A draw whose rho is undefined
     (a constant side) is left out of the interval and counted."""
     n = len(obs)
@@ -481,7 +499,7 @@ def info_verdict(obs: Sequence[tuple[date, float, float]]) -> dict[str, Any]:
 
 
 def mean_ci(days: Sequence[date], vals: Sequence[float], level: float = NEGATIVE_CI) -> list[float] | None:
-    """A percentile interval of the mean from ``BOOT_DRAWS`` resamples of whole entry sessions."""
+    """A percentile interval of the mean from ``BOOT_DRAWS`` moving-block resamples of entry sessions."""
     if not vals:
         return None
     v = np.asarray(vals, dtype="float64")
@@ -608,29 +626,48 @@ def _read_mappings(path: Path) -> dict[str, Any]:
         raise nic.Unavailable(f"{path}: mappings unreadable ({type(exc).__name__}: {exc})") from exc
 
 
-def unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> Counter:
-    """The domain and global stories entering in any of ``windows`` that have no mapping, by kind."""
-    out: Counter = Counter()
+def _mappable(s: Story) -> bool:
+    """The mapper's own rule for a story it can send: a headline that cleans to text."""
+    return nic.ncs._clean(s.headline) is not None
+
+
+def _needed_unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> Iterator[Placed]:
     for p in placed:
         if p.kind in ("domain", "global") and any(_in(p.d, w) for w in windows) \
                 and p.story.cluster_id not in mappings:
-            out[p.kind] += 1
-    return out
+            yield p
+
+
+def unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> Counter:
+    """The domain and global stories entering in any of ``windows`` that have no mapping yet but can get one, by
+    kind. A story without a readable headline is never sent to the mapper, so it is left out here: waiting on it
+    would hold the run for ever."""
+    return Counter(p.kind for p in _needed_unmapped(placed, mappings, windows) if _mappable(p.story))
+
+
+def unmappable(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> int:
+    """The domain and global stories entering in any of ``windows`` that have no mapping and no readable headline."""
+    return sum(not _mappable(p.story) for p in _needed_unmapped(placed, mappings, windows))
+
+
+#: Sessions from the last entry to the longest exit: a pullback filled on the last resting session, then held.
+LAST_EXIT_OFFSET = nic.PULLBACK_SESSIONS - 1 + MAX_HOLD - 1
 
 
 def data_gate(p: nic.Panel, sessions: Sequence[date], sample: str) -> None:
-    """Refuses unless the panel reaches the exit session of the sample's last possible entry at the longest hold."""
+    """Refuses unless the panel reaches the sample's last possible exit: its last entry session plus
+    ``LAST_EXIT_OFFSET`` sessions, a pullback order filled on its last resting session and held the longest hold."""
     lo, hi = nic.SAMPLES[sample]
     days = [d for d in sessions if lo <= d <= hi]
     if not days:
         raise rc.Refusal(f"data gate: no regular session in sample {sample}'s window {lo}..{hi}")
-    i = list(sessions).index(days[-1]) + MAX_HOLD - 1
+    i = list(sessions).index(days[-1]) + LAST_EXIT_OFFSET
     if i >= len(sessions):
-        raise rc.Refusal(f"data gate: the calendar does not reach the exit of sample {sample}'s last entry")
+        raise rc.Refusal(f"data gate: the calendar does not reach the last possible exit of sample {sample}")
     exit_ = sessions[i]
     if p.sessions[-1] < exit_:
-        raise rc.Refusal(f"data gate: the panel ends {p.sessions[-1]}, before {exit_}, the exit session of sample "
-                         f"{sample}'s last entry ({days[-1]}) at a hold of {MAX_HOLD}")
+        raise rc.Refusal(f"data gate: the panel ends {p.sessions[-1]}, before {exit_}, the last possible exit of "
+                         f"sample {sample} ({LAST_EXIT_OFFSET} sessions after its last entry {days[-1]})")
 
 
 def _stock_syms(resolver: Any, placed: Sequence[Placed]) -> dict[str, frozenset[str]]:
@@ -741,7 +778,7 @@ def evaluate_window(ctx: Ctx, window: Window, *, evidence: bool) -> dict[str, An
         merged, n_stories = _drops(drops, sig_counts[name])
         h: dict[str, Any] = {"hold": hold, "stories": n_stories, "signals": len(sig[name])}
         if evidence:
-            vals, pop_drops = population(p, CONSTRUCT[name], [s.d for s, _ in kept], hold)
+            vals, pop_drops = population(p, CONSTRUCT[name], [s for s, _ in kept], hold)
             h["verdict"] = nic.verdict([t for _, t in kept], vals, hold)
             h["population"] = {"sessions": sorted({s.d for s, _ in kept}), "n": len(vals),
                                "drops": _counts(pop_drops)}
@@ -872,9 +909,10 @@ def run(sample: str, state_db: Path, db: Path, mappings_db: Path, as_of: date, *
     """The sample's report document. Waiting (no hypothesis computed) while any needed story is unmapped. Raises
     ``research_common.Refusal`` or ``Unavailable`` on a refusal. ``etfs`` and ``themes`` default to the macro mood
     study's files."""
-    conn, _, load_counts, _, placed, _, waiting, ctx = _open(
+    conn, _, load_counts, _, placed, maps, waiting, ctx = _open(
         sample, state_db, db, as_of, etfs, themes, mappings=mappings_db, check_waiting=True)
     meta = _meta(sample, as_of, Path(state_db), Path(db), Path(mappings_db), load_counts, placed)
+    meta["unmappable"] = unmappable(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]))
     if ctx is None:
         n = sum(waiting.values())
         return {"meta": meta, "status": f"waiting: {n} stories unmapped (domain {waiting['domain']}, "
@@ -915,7 +953,7 @@ def counts_only(sample: str, state_db: Path, db: Path, as_of: date, *, etfs: fro
                 merged, n_stories = _drops(drops, sig_counts[name])
                 w[name] = {"stories": n_stories, "signals": len(sig[name]), "trades": len(kept), "drops": merged}
                 if wname == "sample":
-                    vals, pop_drops = population(ctx.panel, CONSTRUCT[name], [s.d for s, _ in kept], nic.HOLD[name])
+                    vals, pop_drops = population(ctx.panel, CONSTRUCT[name], [s for s, _ in kept], nic.HOLD[name])
                     w[name]["population"] = {"sessions": len({s.d for s, _ in kept}), "size": len(vals),
                                              "drops": _counts(pop_drops)}
             windows[wname] = w
@@ -965,7 +1003,9 @@ def render(doc: dict[str, Any]) -> str:
            f"generated {m['generated_at']}; git {m['git_head'] or 'unknown'}",
            f"first scores: {_kv(m['first_scores'])}",
            f"stories by kind: all ({_kv(m['stories_by_kind']['all'])}); sample window "
-           f"({_kv(m['stories_by_kind']['sample_window'])})"]
+           f"({_kv(m['stories_by_kind']['sample_window'])})",
+           f"unmappable: {m['unmappable']} domain and global stories in the sample and excluded windows without a "
+           f"readable headline (never mapped, never waited on)"]
     if "panel" in m:
         out.append(f"panel: {m['panel']['first_session']}..{m['panel']['last_session']}")
         out += [f"panel note: {n}" for n in m["panel"]["notes"]]
@@ -1012,7 +1052,7 @@ def render(doc: dict[str, Any]) -> str:
                            f"{_f(s['median_net'])} perm p {_f(s['perm_p'], '.4f')}")
             if sp[cat]["small"]:
                 out.append(f"      {cat} below {MIN_CATEGORY} trades: {_kv(sp[cat]['small'])}")
-    out.append("  negative side (gross excess; 95% whole-session bootstrap CI of the mean):")
+    out.append("  negative side (gross excess; 95% moving-block session bootstrap CI of the mean):")
     for name, s in dg["negative_side"].items():
         out.append(f"    {name:<26} hold {s['hold']:>2}: n={s['n']} mean {_f(s['mean_excess'])} CI {_ci(s['ci95'])}; "
                    f"drops {_kv(s['drops'])}")

@@ -41,6 +41,7 @@ mml = nim.mml
 from engine.core.config import config_dir, load_yaml  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
+UTC = ZoneInfo("UTC")
 NIGHT = datetime(2026, 11, 4, 22, 0, tzinfo=IST)      # a Wednesday, outside the session
 MIDDAY = datetime(2026, 11, 4, 10, 0, tzinfo=IST)
 SESSION_LIMIT = "You've hit your session limit · resets 3pm (Asia/Calcutta)"
@@ -211,9 +212,9 @@ def test_stories_to_map_window():
         story("weak", materiality=0.59, at=wed),                                    # below the material bar
         story("pump", event="pump_promo_suspect", at=wed),
         story("early", at=datetime(2026, 7, 28, 22, 0, tzinfo=IST)),                # enters 07-29 = first day
-        story("before", at=datetime(2026, 7, 28, 9, 0, tzinfo=IST)),                # enters 07-28, before A
-        story("last_in", at=datetime(2026, 10, 23, 9, 14, 59, tzinfo=IST)),         # enters 10-23, A's last day
-        story("after", at=datetime(2026, 10, 23, 9, 15, tzinfo=IST)),               # enters 10-26: excluded window
+        story("before", at=datetime(2026, 7, 28, 8, 59, tzinfo=IST)),               # enters 07-28, before A
+        story("last_in", at=datetime(2026, 10, 23, 8, 59, 59, tzinfo=IST)),         # enters 10-23, A's last day
+        story("after", at=datetime(2026, 10, 23, 9, 0, tzinfo=IST)),                # enters 10-26: excluded window
     ]
     got = nim.stories_to_map(stories, sessions, "A")
     assert [s.cluster_id for s in got] == ["early", "dom", "glob", "mkt_domain", "last_in"]   # oldest first
@@ -274,18 +275,44 @@ def test_cap_and_stop(agents_cfg, tmp_path):
     assert fake2.calls == [] and "CallCapReached" in out2["stopped"]
 
 
-def test_budget_counts_ist_date_and_missing_store(tmp_path):
-    assert nim.night_budget(tmp_path / "none.sqlite", NIGHT) == (40, None)
-    db = tmp_path / "map.sqlite"
+def _log_calls(db, *stamps: datetime, error: str | None = None) -> None:
     con = nim.open_store(db)
     with con:
-        # 00:30 IST on 11-04 is 11-03 UTC: counted against the IST date
-        con.execute("INSERT INTO llm_calls (at, model, prompt_sha256, cluster_ids, ok) VALUES (?,?,?,?,1)",
-                    (datetime(2026, 11, 4, 0, 30, tzinfo=IST).isoformat(), "m", "h", "[]"))
-        con.execute("INSERT INTO llm_calls (at, model, prompt_sha256, cluster_ids, ok) VALUES (?,?,?,?,1)",
-                    (datetime(2026, 11, 3, 23, 59, tzinfo=IST).isoformat(), "m", "h", "[]"))
+        for t in stamps:
+            con.execute("INSERT INTO llm_calls (at, model, prompt_sha256, cluster_ids, ok, error) VALUES (?,?,?,?,1,?)",
+                        (t.isoformat(), "m", "h", "[]", error))
     con.close()
+
+
+def test_budget_counts_from_1530_ist_and_missing_store(tmp_path):
+    assert nim.night_budget(tmp_path / "none.sqlite", NIGHT) == (40, None)
+    db = tmp_path / "map.sqlite"
+    # stamped in UTC: 10:01 UTC is 15:31 IST on 11-04, inside the night; 09:59 UTC is 15:29 IST, before it
+    _log_calls(db, datetime(2026, 11, 4, 10, 1, tzinfo=UTC), datetime(2026, 11, 4, 9, 59, tzinfo=UTC))
     assert nim.night_budget(db, NIGHT) == (39, None)
+    with pytest.raises(ValueError):
+        nim.night_budget(db, NIGHT.replace(tzinfo=None))
+
+
+def test_night_crosses_midnight(tmp_path):
+    db = tmp_path / "map.sqlite"
+    _log_calls(db, datetime(2026, 11, 4, 23, 50, tzinfo=IST))
+    _log_calls(db, datetime(2026, 11, 5, 0, 10, tzinfo=IST), error=f"{nim.STOP_PREFIXES[0]} quota")
+    # both calls belong to the night that began at 15:30 on 11-04, before and after midnight
+    assert nim.night_budget(db, datetime(2026, 11, 5, 0, 30, tzinfo=IST)) == (38, f"{nim.STOP_PREFIXES[0]} quota")
+    assert nim.night_budget(db, datetime(2026, 11, 5, 8, 0, tzinfo=IST))[0] == 38
+    assert nim.night_budget(db, datetime(2026, 11, 4, 23, 55, tzinfo=IST)) == (38, f"{nim.STOP_PREFIXES[0]} quota")
+    # the next night starts fresh at 15:30, its stop latch cleared with it
+    assert nim.night_budget(db, datetime(2026, 11, 5, 15, 30, tzinfo=IST)) == (40, None)
+
+
+def test_afternoon_call_belongs_to_the_previous_night(tmp_path):
+    db = tmp_path / "map.sqlite"
+    _log_calls(db, datetime(2026, 11, 7, 15, 0, tzinfo=IST))        # a Saturday afternoon: no market-hours refusal
+    assert nim.night_budget(db, datetime(2026, 11, 7, 16, 0, tzinfo=IST)) == (40, None)
+    assert nim.night_budget(db, datetime(2026, 11, 7, 15, 29, tzinfo=IST)) == (39, None)
+    assert nim.night_start(datetime(2026, 11, 7, 15, 30, tzinfo=IST)) == datetime(2026, 11, 7, 15, 30, tzinfo=IST)
+    assert nim.night_start(datetime(2026, 11, 7, 15, 29, 59, tzinfo=IST)) == datetime(2026, 11, 6, 15, 30, tzinfo=IST)
 
 
 def test_store_append_only(agents_cfg, tmp_path):
@@ -395,7 +422,45 @@ def test_dry_run_reports_without_calling(monkeypatch, tmp_path, capsys):
     assert "domain: mapped 1, unmapped 2 (1 without a headline), batches needed 1" in out
     assert "global: mapped 0, unmapped 1 (0 without a headline), batches needed 1" in out
     assert "calls left tonight: 39" in out
+    assert "beyond_calendar 0" in out
     assert rows(db, "SELECT count(*) FROM llm_calls") == [(1,)]
+
+
+class CalendarWithout:
+    """The pinned calendar with every year from ``year`` on missing, as before NSE publishes its holidays."""
+
+    def __init__(self, real, year: int) -> None:
+        self.real = real
+        self.year = year
+
+    def is_trading_day(self, d: date) -> bool:
+        return d.year < self.year and self.real.is_trading_day(d)
+
+
+def test_sample_b_maps_up_to_the_last_calendar_year(monkeypatch, tmp_path, capsys):
+    """Late in a year whose successor has no calendar yet, sample B's session range reaches into that year: the range
+    stops at 31 December, and a story that would enter past it waits for a later run."""
+    now = datetime(2026, 12, 24, 22, 0, tzinfo=IST)               # +14 days reaches into 2027
+    stories = [story("in_b", at=datetime(2026, 12, 1, 12, 0, tzinfo=IST)),
+               story("last_day", at=datetime(2026, 12, 31, 8, 0, tzinfo=IST)),
+               story("beyond", at=datetime(2026, 12, 31, 18, 0, tzinfo=IST)),
+               story("beyond_glob", scope="market", event="global_market", at=datetime(2026, 12, 31, 20, 0, tzinfo=IST)),
+               story("beyond_stock", scope="stock", event="results", at=datetime(2026, 12, 31, 18, 0, tzinfo=IST))]
+    real = nic.load_calendar()
+    monkeypatch.setattr(nim.nic, "load_first_scores", lambda state_db, limit: (stories, {}))
+    monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2027))
+    monkeypatch.setattr(nim.mml, "StudyLLM", lambda **kw: pytest.fail("a dry run must not build the LLM"))
+    todo, beyond = nim._todo_for("B", tmp_path / "state.db", now)
+    assert [s.cluster_id for s in todo] == ["in_b", "last_day"]
+    assert beyond == 2                                             # the stock story is never mapped anyway
+    assert nim.main(["--sample", "B", "--dry-run", "--db", str(tmp_path / "map.sqlite"), "--state-db",
+                     str(tmp_path / "state.db")], clock=lambda: now) == 0
+    out = capsys.readouterr().out
+    assert "beyond_calendar 2" in out and "domain: mapped 0, unmapped 2" in out
+    # a range that starts in a year without a calendar still refuses
+    monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2026))
+    with pytest.raises(nic.Unavailable):
+        nim._todo_for("B", tmp_path / "state.db", now)
 
 
 def test_main_rejects_max_calls_above_ceiling(capsys):

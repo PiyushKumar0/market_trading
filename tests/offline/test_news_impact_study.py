@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import sys
+import types
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -43,7 +44,9 @@ from engine.intelligence.agents import news_analyst  # noqa: E402
 from engine.intelligence.context import ContextAssembler  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
-AS_OF = date(2026, 11, 9)
+#: The synthetic copy's last session: sample A's last possible exit is 13 sessions after its last entry (10-23),
+#: on 11-12.
+AS_OF = date(2026, 11, 13)
 SECTORS = {"AUTO": ("X", "P1", "P2", "P3", "P4", "P5"), "BANK": ("B1", "B2", "B3", "B4", "B5", "B6"),
            "METAL": ("M1", "M2", "M3", "M4")}
 #: Liquid, but in no sector of the snapshot.
@@ -351,6 +354,7 @@ def test_info_spearman_known(sessions, d1):
     assert v["ci"][0] > 0 and v["label"] == "supported"
     v = nis.info_verdict([(d, x, -y) for d, x, y in obs])
     assert v["rho"] == pytest.approx(-1.0) and v["label"] == "refuted"
+    assert v["ci"][1] < 0
     short = nis.info_verdict(obs[:299])
     assert short["label"] == "insufficient" and short["rho"] == pytest.approx(1.0)
     # the fixed seed gives the same interval every run
@@ -359,6 +363,41 @@ def test_info_spearman_known(sessions, d1):
     # a constant side has no rho: null at any size, never supported
     flat = nis.info_verdict([(d, x, 0.0) for d, x, _ in obs])
     assert flat["rho"] is None and flat["label"] == "null"
+
+
+def _runs(seq: list[int], block: int) -> list[list[int]]:
+    return [seq[i:i + block] for i in range(0, len(seq), block)]
+
+
+@pytest.mark.parametrize("n_sessions", [25, 30, 10, 4, 1])
+def test_session_draws_are_circular_moving_blocks(sessions, d1, n_sessions):
+    """Each draw is S sessions in runs of BOOT_BLOCK consecutive sessions (wrapping from the last to the first),
+    the last run cut short, with every observation of each chosen session; fewer sessions than a block use one
+    block of S."""
+    days_s = sessions[sessions.index(d1):][:n_sessions]
+    rng = np.random.default_rng(1)
+    # two observations on each session, shuffled: a draw takes both
+    days = [days_s[i] for i in rng.permutation(np.repeat(np.arange(n_sessions), 2))]
+    pos = {d: i for i, d in enumerate(days_s)}
+    block = min(10, n_sessions)                                     # the registered block, the hold
+    draws = list(nis._session_draws(days, 300, nic.SEED))
+    assert len(draws) == 300
+    starts = set()
+    for idx in draws:
+        assert len(idx) == 2 * n_sessions
+        picked = [pos[days[i]] for i in idx]
+        seq = picked[::2]
+        assert picked[1::2] == seq                                 # a session's observations come together
+        runs = _runs(seq, block)
+        assert [len(r) for r in runs] == [block] * (n_sessions // block) + (
+            [n_sessions % block] if n_sessions % block else [])
+        for r in runs:
+            assert all((b - a) % n_sessions == 1 % n_sessions for a, b in zip(r, r[1:], strict=False)), r
+            starts.add(r[0])
+    if n_sessions > 1:
+        assert len(starts) > 1                                      # the starts are drawn, not fixed
+    assert [d.tolist() for d in nis._session_draws(days, 5, nic.SEED)] == [d.tolist() for d in draws[:5]]
+    assert list(nis._session_draws([], 5, nic.SEED)) == []
 
 
 # --------------------------------------------------------------------------- end to end
@@ -440,6 +479,74 @@ def test_data_gate_refuses(tmp_path, market_db, d1):
                      "--mappings", str(maps), "--out", str(out)], etfs=frozenset(), themes={}) == 2
     # sample B needs its own fresh copy named explicitly
     assert nis.main(["--sample", "B", "--state-db", str(st.path)], etfs=frozenset(), themes={}) == 2
+
+
+def test_data_gate_covers_the_pullback_longest_exit(sessions):
+    """The last possible exit is a pullback filled on its fifth resting session and held 10: 13 sessions after the
+    sample's last entry."""
+    last = nic.SAMPLES["A"][1]
+    i = sessions.index(last)
+    assert sessions[i + 13] == date(2026, 11, 12)
+    with pytest.raises(nis.rc.Refusal, match="data gate"):
+        nis.data_gate(types.SimpleNamespace(sessions=sessions[:i + 13]), sessions, "A")     # ends 12 after
+    nis.data_gate(types.SimpleNamespace(sessions=sessions[:i + 14]), sessions, "A")         # ends 13 after
+    # a calendar that stops short of that exit refuses too
+    with pytest.raises(nis.rc.Refusal, match="calendar"):
+        nis.data_gate(types.SimpleNamespace(sessions=sessions), sessions[:i + 13], "A")
+    assert nis.LAST_EXIT_OFFSET == nic.PULLBACK_SESSIONS - 1 + max(nic.HOLD.values()) - 1 == 13
+
+
+def test_pullback_population_uses_the_kept_trades_p0_sessions(tmp_path, market_db, sessions, cal, monkeypatch):
+    """A signal scored intraday on D-1 rests its limit at close(D-2); the population's limits sit there too."""
+    conn = nis.rc.open_snapshot(market_db)
+    try:
+        p = nic.load_panel(conn, nic.SAMPLES["A"][0] - nis.PANEL_LOOKBACK, AS_OF, cal, etfs=frozenset(), themes={})
+        lo, hi = nic.SAMPLES["A"]
+        # the first sample session where X's limit at close(D-2) fills: the synthetic bars are a random walk
+        d = next(s for s in sessions if lo <= s <= hi
+                 and isinstance(nic.pullback_trade(p, "X", s, nth(sessions, s, -2), 10), nic.Trade))
+        p0 = nth(sessions, d, -2)
+        expect = [r for s in sorted(nic.liquid(p, nth(sessions, d, -1)))
+                  if isinstance(r := nic.pullback_trade(p, s, d, p0, 10), nic.Trade)]
+    finally:
+        conn.close()
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(nth(sessions, d, -1), 11))
+    seen = []
+    real = nis.make_trade
+
+    def spy(panel, construct, sig, hold):
+        if construct == "pullback" and not sig.stories:            # the population's signals carry no story
+            seen.append((sig.key, sig.d, sig.p0_session))
+        return real(panel, construct, sig, hold)
+
+    monkeypatch.setattr(nis, "make_trade", spy)
+    doc = run(st, market_db, write_mappings(tmp_path / "maps.sqlite", {}))
+    h = doc["hypotheses"]["stock_pullback"]
+    assert [(t["key"], t["signal_date"], t["p0_session"]) for t in h["trades"]] == [("X", d, p0)]
+    assert seen and {(sd, sp) for _, sd, sp in seen} == {(d, p0)}
+    assert h["population"]["n"] == len(expect)
+    # the stock arm's population is untouched: one run per entry session
+    assert doc["hypotheses"]["stock_next_open"]["population"]["sessions"] == [d]
+
+
+def test_unmappable_story_never_holds_a_look(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.call(at(d1, 8), [_score("g0", "market", 0.5, 0.8, "global_market")], {"g0": "   "})   # no readable headline
+    maps = write_mappings(tmp_path / "maps.sqlite", {})
+    out = tmp_path / "rep" / "r.json"
+    rc = nis.main(["--sample", "A", "--db", str(market_db), "--state-db", str(st.path), "--mappings", str(maps),
+                   "--as-of", AS_OF.isoformat(), "--out", str(out)], etfs=frozenset(), themes={})
+    assert rc == 0
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["status"] == "complete"
+    assert doc["meta"]["unmappable"] == 1
+    assert "unmappable: 1 " in out.with_suffix(".md").read_text(encoding="utf-8")
+    # a mappable one still waits, and the unmappable one is not counted among the waiting
+    st.glob("g1", at(d1, 8))
+    doc = run(st, market_db, maps)
+    assert doc["status"] == "waiting: 1 stories unmapped (domain 0, global 1)" and doc["meta"]["unmappable"] == 1
 
 
 _OUTCOME_KEY = re.compile(r"\b(excess|net|gross|rho|label)\b", re.IGNORECASE)

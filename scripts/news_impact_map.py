@@ -66,7 +66,7 @@ MAX_CALLS_PER_NIGHT = 40
 MAX_GROUPS = 3
 MAX_COMPANIES = 5
 #: The prompt file's sha256, registered with the study: an edit would silently change the instrument mid-study.
-MAPPER_PROMPT_SHA256 = "000ee8252be364f77c2d95685bb08923bfcd5d9969872934334f89cb8492595e"
+MAPPER_PROMPT_SHA256 = "200875da005040a3f659f7b1d4b65ce920d64c3f845bb1c6c62a88cb3a70b8c2"
 STOP_PREFIXES = ncs.STOP_PREFIXES
 MarketHoursHalt = ncs.MarketHoursHalt
 KINDS = ("domain", "global")
@@ -146,7 +146,8 @@ def parse_mapping(item: Any) -> tuple[int, list[tuple[str, int]], list[tuple[str
 # --------------------------------------------------------------------------- what to map
 def stories_to_map(stories: Sequence[Any], sessions: Sequence[date], sample: str) -> list[Any]:
     """Domain and global stories whose entry session lies in the sample's inclusive window, oldest first.
-    ``sessions`` must reach past the window's last day and start before its first."""
+    ``sessions`` must start before the window's first day; a story whose entry session lies past their end is not
+    placed, so it is left out."""
     lo, hi = nic.SAMPLES[sample]
     keep = []
     for s in stories:
@@ -208,8 +209,19 @@ def read_mappings(db: Path) -> dict[str, tuple[int, list, list]]:
         con.close()
 
 
+def night_start(now: datetime) -> datetime:
+    """The most recent 15:30 IST at or before ``now``: a mapping night starts at the close and runs past midnight,
+    so a calendar-date count would give a night that crosses midnight two caps."""
+    local = now.astimezone(IST)
+    start = datetime.combine(local.date(), nic.CLOSE_TIME, IST)
+    return start if start <= local else start - timedelta(days=1)
+
+
 def night_budget(db: Path, now: datetime, max_calls: int = MAX_CALLS_PER_NIGHT) -> tuple[int, str | None]:
-    """``(calls left today, the first stopping error logged today)``; today is ``now``'s IST calendar date."""
+    """``(calls left this night, the first stopping error logged this night)``; the night is every call stamped at
+    or after ``night_start(now)``."""
+    if now.tzinfo is None:
+        raise ValueError("now must be tz-aware")
     if not Path(db).is_file():
         return max_calls, None
     con = _open_ro(db)
@@ -219,11 +231,11 @@ def night_budget(db: Path, now: datetime, max_calls: int = MAX_CALLS_PER_NIGHT) 
         rows = con.execute("SELECT at, error FROM llm_calls ORDER BY rowid").fetchall()
     finally:
         con.close()
-    today = now.astimezone(IST).date()
+    start = night_start(now)
     used, stop = 0, None
     for raw_at, error in rows:
         at = ncs._parse_ts(raw_at)
-        if at is None or at.date() != today:
+        if at is None or at < start:
             continue
         used += 1
         if stop is None and isinstance(error, str) and error.startswith(STOP_PREFIXES):
@@ -319,17 +331,40 @@ def _record(con: sqlite3.Connection, batch: Sequence[Any], res: Any, system_prom
 
 
 # --------------------------------------------------------------------------- the CLI
-def _todo_for(sample: str, state_db: Path, now: datetime) -> list[Any]:
-    """The sample's stories to map, read from ``state.db`` as scored before ``now``."""
+def _calendar_end(cal: Any, lo: date, hi: date) -> date:
+    """``hi``, or 31 December of the year before the first year after ``lo``'s without a calendar file: NSE
+    publishes the next year's holidays late in the year, and the stories before then can still be placed. ``lo``'s
+    own year is never capped away, so a range starting without a calendar still refuses."""
+    for y in range(lo.year + 1, hi.year + 1):
+        if not nic.mmf._calendar_has_year(cal, y):
+            return date(y - 1, 12, 31)
+    return hi
+
+
+def _todo_for(sample: str, state_db: Path, now: datetime) -> tuple[list[Any], int]:
+    """The sample's stories to map, read from ``state.db`` as scored before ``now``, and the number of domain and
+    global stories left out because their entry session lies past the last calendar year (``beyond_calendar``);
+    those are mapped on a later run, once the calendar reaches them. A range starting in a year without a calendar
+    raises ``Unavailable``."""
     stories, _ = nic.load_first_scores(state_db, now)
     lo, hi = nic.SAMPLES[sample]
     cal = nic.load_calendar()
-    sessions = nic.regular_sessions(cal, lo - timedelta(days=14), min(hi, now.date()) + timedelta(days=14))
-    return stories_to_map(stories, sessions, sample)
+    first = lo - timedelta(days=14)
+    last = min(hi, now.astimezone(IST).date()) + timedelta(days=14)
+    end = _calendar_end(cal, first, last)
+    sessions = nic.regular_sessions(cal, first, end)
+    beyond = 0
+    if end < last:
+        could_enter = datetime.combine(hi, nic.ENTRY_CUTOFF, IST)  # a story at or after it enters past the window
+        beyond = sum(1 for s in stories if nic.story_kind(s) in KINDS and s.at < could_enter
+                     and nic.entry_session(s.at, sessions) is None)
+    return stories_to_map(stories, sessions, sample), beyond
 
 
-def _dry_run(todo: Sequence[Any], mapped: dict[str, Any], remaining: int, sample: str) -> None:
+def _dry_run(todo: Sequence[Any], mapped: dict[str, Any], remaining: int, sample: str, beyond: int = 0) -> None:
     print(f"sample {sample}: {len(todo)} domain and global stories")
+    print(f"beyond_calendar {beyond}: stories whose entry session lies past the last config/calendar year, "
+          "not mapped this run")
     needed = 0
     for kind in KINDS:
         of_kind = [s for s in todo if nic.story_kind(s) == kind]
@@ -347,7 +382,8 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
     ap.add_argument("--state-db", type=Path, default=DEFAULT_STATE_DB)
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
     ap.add_argument("--max-calls", type=int, default=MAX_CALLS_PER_NIGHT,
-                    help=f"the night's call cap, at most {MAX_CALLS_PER_NIGHT}; calls already made today count")
+                    help=f"the night's call cap, at most {MAX_CALLS_PER_NIGHT}; calls already made since the last "
+                         "15:30 IST count")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what is mapped and what is left; reads only, makes no call")
     args = ap.parse_args(argv)
@@ -362,13 +398,14 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
     try:
         remaining, stop = night_budget(args.db, now, args.max_calls)
         if args.dry_run:
-            _dry_run(_todo_for(args.sample, args.state_db, now), read_mappings(args.db), remaining, args.sample)
+            todo, beyond = _todo_for(args.sample, args.state_db, now)
+            _dry_run(todo, read_mappings(args.db), remaining, args.sample, beyond)
             return 0
         if reason := ncs.call_refusal(now):
             print(f"refused: {reason}")
             return 0
         if stop is not None:
-            print(f"stopped earlier today ({stop}); nothing to do until tomorrow")
+            print(f"stopped earlier this night ({stop}); nothing to do until the next 15:30 IST")
             return 0
         lock = Path(args.db).with_name("news_impact_map.lock")
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -377,7 +414,7 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
             return 0
         try:
             mapped = read_mappings(args.db)
-            todo = [s for s in _todo_for(args.sample, args.state_db, now) if s.cluster_id not in mapped]
+            todo = [s for s in _todo_for(args.sample, args.state_db, now)[0] if s.cluster_id not in mapped]
             llm = mml.StudyLLM(max_calls=remaining)
             out = asyncio.run(run_night(args.db, todo, llm, now, prompt_bytes.decode("utf-8"), clock=clock))
             if out["stopped"] is None and getattr(llm, "stopped", False):

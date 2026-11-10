@@ -428,7 +428,10 @@ separate and is unaffected.
   window (haiku-4.5, sonnet-5, then sonnet-5.5 from 2026-10-03); they are pooled, with a per-model split as a
   diagnostic. Calls begin 2026-07-28 21:15.
 - **Definitions:**
-  - t = the first score's `at`. Entry session D = the first regular session with t before 09:15 IST on D.
+  - t = the first score's `at`. Entry session D = the first regular session with t before 09:00 IST on D.
+    - NSE's open is the pre-open auction's price, and its order entry closes about 09:07. A story scored later than
+      that cannot trade at that open, so 09:00 leaves a margin, as the macro mood study's cut-off does.
+    - The first draft said 09:15. It was corrected on 2026-11-10, before any outcome was computed.
   - P0 = the close of the last regular session that closed (15:30 IST) before t.
   - Material: materiality ≥ 0.6. Positive: sentiment ≥ +0.4. Negative: sentiment ≤ −0.4.
   - `pump_promo_suspect` stories are never used. `dividend_corp_action` stories are left out of the stock
@@ -443,9 +446,10 @@ separate and is unaffected.
       engine's universe before 11-08 has no sector there, so its story makes no stock trade, and it is counted.
     - Fixed 2026-11-10, before any outcome was computed.
   - Sector peers: the liquid members of the stock's sector in that snapshot, the stock itself excluded. At least 5
-    are required, and `UNCLASSIFIED` has none.
+    are required at D−1, and at least 5 of them must have a usable leg over the hold. `UNCLASSIFIED` has none.
   - Group members: a sector group's liquid members from that snapshot; a theme's liquid members from the macro mood
-    study's frozen `config/research/macro_mood/theme_lists.yaml`. A basket needs at least 3.
+    study's frozen `config/research/macro_mood/theme_lists.yaml`. A basket needs at least 3 at D−1, and at least 3
+    usable legs over the hold.
   - β: the OLS slope of a stock's or an equal-weight basket's daily close-to-close returns on the equal-weight liquid
     universe's, over the 250 sessions to D−1, with at least 200 pairs.
   - Returns run from open(entry session) to close(exit session), the exit session being the hold's last, entry
@@ -484,8 +488,9 @@ separate and is unaffected.
     {−1, +1} drops that item; a market value outside {−1, 0, +1} becomes 0. Both are counted.
   - Model `claude-sonnet-5-5`, pinned. Its training data ends June 2026, before every story in the study.
   - Batches of 20 stories, through the macro mood study's `StudyLLM` on the shared subscription, never the paid API.
-  - At most 40 calls a night. Calls are refused 09:15–15:30 IST on weekdays, re-checked before every call. The run
-    stops at the first quota or login failure, with no retries.
+  - At most 40 calls a night, a night running from 15:30 IST to 09:15 the next morning. Calls are refused 09:15–15:30
+    IST on weekdays, re-checked before every call. The run stops at the first quota or login failure, with no retries.
+  - A story without a readable headline cannot be mapped. It is reported as unmappable and never holds a look.
   - Each call is stored append-only with its time, model, prompt sha256 and raw output in
     `data/research/news_impact.sqlite`, never in `agent_calls`.
   - Expected use: about 80 calls for sample A and about as many for sample B. A look stays "waiting" while any story
@@ -495,12 +500,13 @@ separate and is unaffected.
     x and the 10-session sector excess y is above 0.
     - Observations come from every stock story with a resolved liquid symbol, any materiality or sentiment, one per
       (D, symbol). x is the mean sentiment × materiality of that (D, symbol)'s stories.
-    - A bootstrap that resamples whole entry sessions (2,000 draws, fixed seed) gives a percentile CI at
-      1 − 0.05/6.
+    - A moving-block bootstrap over entry sessions gives a percentile CI at 1 − 0.05/6, with 2,000 draws and a fixed
+      seed. Blocks are 10 consecutive sessions, the hold, because consecutive sessions' 10-session returns overlap.
     - **Supported** iff the CI's lower bound is above 0 with at least 300 observations. **Refuted** iff ρ ≤ 0.
       **Insufficient** below 300. Otherwise **null**.
   - **Stock news, next open:** a material positive stock story ⇒ buy the stock at D's open, hold 10 sessions. Judged
-    on sector excess.
+    on sector excess. A (stock, D) that a material negative stock story also names for the same D is skipped and
+    counted, as for the mapped hypotheses.
   - **Stock news, pullback entry** (the owner's "watch the next trades to judge entry"): the same signals.
     - A limit buy at P0 rests over sessions D to D+4. It fills on the first session whose low is at or below P0, at
       min(that session's open, P0). An unfilled signal makes no trade.
@@ -514,8 +520,10 @@ separate and is unaffected.
   - **Global news, sectors:** each group that a global story for D maps +1, and none maps −1 ⇒ buy the group's liquid
     members equal-weight at D's open, hold 5, judged on β-excess.
 - **Samples:**
-  - **A** (history): entry sessions 2026-07-29 → 2026-10-23, read from `data/research/full_market_2026-11-09.duckdb`
-    and `state.db` bounded at 2026-11-09.
+  - **A** (history): entry sessions 2026-07-29 → 2026-10-23.
+    - Read from a whole-file copy of `market.duckdb` taken after the 2026-11-12 close, the pullback arm's last possible
+      exit, with `state.db` bounded at that copy's date. The 2026-11-09 copy ends before that exit, so it would drop
+      late fills.
   - **Excluded:** entries 2026-10-26 → 2026-11-10, the window of the November rally that motivated the owner's news
     questions. They are reported separately and never counted.
   - **Seen:** on 2026-11-10 the `cat` v2 interim reading showed 10-session outcomes of 16 `cat` signals, a gated subset
@@ -530,14 +538,16 @@ separate and is unaffected.
     - mean net > 0 and median net > 0;
     - `permutation_pvalue` < 0.05/6. The sample's median gross excess is compared with same-size draws from the
       population: the same construct applied to every eligible liquid stock (baskets: every eligible group) entering on
-      the sample's own entry sessions;
+      the sample's own entry sessions. For the pullback arm the population uses each kept trade's own (D, P0 session)
+      pair, so its limits sit where the sample's do;
     - CPCV fold-pass fraction ≥ `fold_pass_min(6)` on the net series, with purge = embargo = the hold, through the
       shared `cpcv_report` helper;
     - mean net > 0 in both halves, split at the median entry date;
     - mean net > 0 with the 3 best trades removed.
   - **Refuted** iff at least 30 trades and mean net ≤ 0. **Insufficient** iff fewer than 30 trades. Otherwise
     **null**.
-  - The data gate: a run whose bars end before the sample's last exit session refuses (exit 2) and labels nothing.
+  - The data gate: a run whose bars end before the sample's last possible exit refuses (exit 2) and labels nothing.
+    That exit is the last entry plus 13 sessions, a pullback filled on the fifth session and then held 10.
     Sample B also needs `config/calendar/2027.yaml`, which waits on NSE's 2027 holiday circular.
 - **Diagnostics (decide nothing):**
   - Horizons 1, 3, 5, 10 and 20 sessions for every hypothesis.

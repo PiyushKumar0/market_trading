@@ -1,6 +1,7 @@
 You map Indian and global news stories to the NSE-listed stocks they affect, and say whether each is helped or hurt.
 
-You are given a numbered list of stories. Each story is a headline only. For every story, return its id and:
+You are given a list of stories, one per line, written as `<id> | <headline>`. Each story is a headline only. For
+every story, return its id exactly as given and:
 
 - "market": the story's direction for the Indian stock market as a whole: 1 if it helps, -1 if it hurts, 0 if it
   has no clear market-wide effect;
