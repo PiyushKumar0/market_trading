@@ -46,8 +46,10 @@ from engine.intelligence.harness import (  # noqa: E402
 )
 
 IST = ZoneInfo("Asia/Kolkata")
-#: The roster def whose isolation, allowlist, output cap and timeout every study call inherits.
+#: The roster def whose isolation, tool allowlist and timeout every study call inherits.
 BASE_AGENT = "news_analyst"
+#: ``cli_path`` when agents.yaml pins no CLI and the SDK's bundled one runs.
+BUNDLED_CLI = "bundled"
 #: ``_classify`` reasons that mean the account cannot serve calls right now; retrying only burns more quota.
 STOP_REASONS = frozenset({"overloaded", "credit_exhausted", "auth_failed"})
 #: Model ids a call may name; anything else would reach the CLI unvetted.
@@ -95,7 +97,10 @@ class StudyLLM:
         if BASE_AGENT not in defs:
             raise RuntimeError(f"agents.yaml has no runnable {BASE_AGENT} def to take call options from")
         self._def = defs[BASE_AGENT]
-        self._harness = AgentHarness(defs, None, Clock(), None, cli_path=resolve_cli_path(cfg, repo_root()),
+        cli_path = resolve_cli_path(cfg, repo_root())
+        #: The CLI every call runs through, logged with each call so a CLI change is visible in the study's log.
+        self.cli_path: str = cli_path if cli_path is not None else BUNDLED_CLI
+        self._harness = AgentHarness(defs, None, Clock(), None, cli_path=cli_path,
                                      options_cls=options_cls)   # option building needs no governor or db
         self._query_fn = query_fn
         self.max_calls = max_calls

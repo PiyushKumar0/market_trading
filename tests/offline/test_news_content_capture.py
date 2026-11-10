@@ -8,7 +8,7 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -127,6 +127,33 @@ def test_capture_403_page_keeps_summary_and_records_status(tmp_path):
                        ).fetchone() == (403, "none", "")
     assert con.execute("SELECT summary FROM items WHERE url='https://a.example/1'").fetchone() == (
         "Markets rose on Rs 5 & more.",)
+
+
+def test_body_is_stamped_after_its_fetch_returns(tmp_path):
+    """A page request suspended across 09:00 carries the post-fetch time, failed fetches included."""
+    db = tmp_path / "nc.sqlite"
+    clock = {"t": datetime(2026, 11, 10, 8, 55, tzinfo=IST)}
+    pages = {"https://a.example/1": (200, (FIX / "page_jsonld.html").read_bytes())}
+    base = _fake(pages)
+
+    def fetch(url):
+        if url in ncc.FEEDS.values():
+            return base(url)
+        clock["t"] += timedelta(minutes=10)
+        if url == "https://a.example/2":
+            raise OSError("suspended")
+        return base(url)
+
+    ncc.capture(db, fetch, lambda: clock["t"], sleep=lambda s: None)
+    con = sqlite3.connect(db)
+    rows = dict(con.execute("SELECT url, fetched_at FROM bodies").fetchall())
+    items = dict(con.execute("SELECT url, first_captured_at FROM items").fetchall())
+    assert items["https://a.example/1"] == "2026-11-10T08:55:00+05:30"
+    assert rows["https://a.example/1"] == "2026-11-10T09:05:00+05:30"
+    assert items["https://a.example/2"] == "2026-11-10T09:05:00+05:30"
+    assert rows["https://a.example/2"] == "2026-11-10T09:15:00+05:30"
+    assert con.execute("SELECT http_status, source FROM bodies WHERE url='https://a.example/2'"
+                       ).fetchone() == (None, "none")
 
 
 def test_feed_500_and_malformed_xml_are_logged_not_raised(tmp_path):

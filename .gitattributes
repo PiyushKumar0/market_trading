@@ -4,3 +4,6 @@
 config/*.yaml text eol=lf
 config/calendar/*.yaml text eol=lf
 runbooks/patches/*.patch text eol=lf
+# The macro mood study's frozen inputs: the nightly scorer pins the mapper prompt's bytes by SHA-256, so a CRLF
+# checkout would stop its scoring.
+config/research/macro_mood/* text eol=lf

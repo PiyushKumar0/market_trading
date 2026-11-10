@@ -564,9 +564,11 @@ def _atr(ctx: StudyContext) -> dict[date, float]:
     return _memo(ctx, "atr", build)
 
 
-def atr_stop_trade(ctx: StudyContext, t: TradeRow, cost: float) -> TradeRow | None:
-    """``t`` with a stop at entry open - 2.5 x ATR14 through D-1, exiting at the stop when a session's low
-    touches it (at the open when a later session opens through it); None without an ATR or a usable bar."""
+def atr_stop_trade(ctx: StudyContext, t: TradeRow, cost: float) -> tuple[TradeRow, bool] | None:
+    """``(trade, stopped)``: ``t`` with a stop at entry open - 2.5 x ATR14 through D-1, exiting at the stop when a
+    session's low touches it (at the open when a later session opens through it), and whether the stop fired.
+    The flag is returned rather than read off the exit date, which a stop on the exit session itself (always, for
+    a 1-session hold) leaves unchanged. None without an ATR or a usable bar."""
     k = ctx.pos[t.entry_date]
     atr = _atr(ctx).get(ctx.sessions[k - 1]) if k else None
     if atr is None:
@@ -581,9 +583,9 @@ def atr_stop_trade(ctx: StudyContext, t: TradeRow, cost: float) -> TradeRow | No
         if lo <= stop:
             px = stop if j == k else min(op, stop)
             g = (px / o - 1.0) * 100.0
-            return TradeRow(t.signal_date, t.entry_date, d, g, g - cost, t.flagged)
+            return TradeRow(t.signal_date, t.entry_date, d, g, g - cost, t.flagged), True
     g = t.gross
-    return TradeRow(t.signal_date, t.entry_date, t.exit_date, g, g - cost, t.flagged)
+    return TradeRow(t.signal_date, t.entry_date, t.exit_date, g, g - cost, t.flagged), False
 
 
 def regime_at(ctx: StudyContext, d: date) -> str:
@@ -688,7 +690,8 @@ def basket_trade(ctx: StudyContext, d: date, hold: int) -> tuple[date, float, in
 
 
 def high_beta_arm(ctx: StudyContext, name: str, hold: int) -> dict[str, Any]:
-    cost = mm.cost_pct("CNC")                        # one CNC round trip per leg at the research notional
+    # One round trip per leg at the research notional, in the hypothesis's own product: us_rebound is intraday.
+    cost = mm.cost_pct(mm.PRODUCT[name])
     days = signal_days(ctx, name, HIGH_BETA_WINDOW)
     built = {d: b for d in days if (b := basket_trade(ctx, d, hold)) is not None}
     kept = mm.non_overlapping(list(built), ctx.sessions, hold)
@@ -716,8 +719,8 @@ def diagnostics(name: str, ctx: StudyContext) -> dict[str, Any]:
         h_rows, _ = trades_for(ctx, name, window, hold=h, cost=mm.cost_pct(hp))
         horizons[str(h)] = {"product": hp, **summary(h_rows)}
     cost = mm.cost_pct(product)
-    stopped = [atr_stop_trade(ctx, t, cost) for t in rows]
-    stop_rows = [t for t in stopped if t is not None]
+    stopped = [s for t in rows if (s := atr_stop_trade(ctx, t, cost)) is not None]
+    stop_rows = [row for row, _ in stopped]
     etf = etf_cost_pct(product)
     out: dict[str, Any] = {
         "window": _window(window),
@@ -725,9 +728,7 @@ def diagnostics(name: str, ctx: StudyContext) -> dict[str, Any]:
         "regime_at_d_minus_1": _group(rows, lambda t: regime_at(ctx, t.entry_date)),
         "by_year": _group(rows, lambda t: t.entry_date.year),
         "atr_stop": {"mult": ATR_STOP_MULT, "period": ATR_PERIOD, "no_atr_or_bar": len(rows) - len(stop_rows),
-                     "stopped": sum(s.exit_date != t.exit_date for s, t in zip(stopped, rows, strict=True)
-                                    if s is not None),
-                     "summary": summary(stop_rows)},
+                     "stopped": sum(fired for _, fired in stopped), "summary": summary(stop_rows)},
         "etf_cost": {"cost_pct": etf, "summary": summary(
             [TradeRow(t.signal_date, t.entry_date, t.exit_date, t.gross, t.gross - etf, t.flagged) for t in rows])},
         "high_beta_basket": high_beta_arm(ctx, name, hold),

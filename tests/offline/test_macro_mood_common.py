@@ -77,7 +77,7 @@ def trades(n: int, *, net: float, gross: float | None = None, second_half_net: f
     return out
 
 
-# ----------------------------------------------------------------------------- brief tests
+# ----------------------------------------------------------------------------- timing rules, trade construct, verdict
 def test_bzf_bar_stamped_new_york_midnight_in_summer_is_its_own_session(tmp_path):
     # 2026-10-30 04:00 UTC = 00:00 EDT -> session 2026-10-30, not 10-29
     df = yahoo_daily(write_chart(tmp_path, tz="America/New_York", ts=[1793332800], close=[117.64]))
@@ -412,12 +412,37 @@ def test_verdict_halves_split_by_entry_date_not_input_order():
     assert v["half1_mean"] == pytest.approx(2.7) and v["half2_mean"] == pytest.approx(-1.0)
 
 
-def test_verdict_odd_n_puts_the_extra_trade_in_the_second_half():
-    rows = trades(31, net=1.0)
+@pytest.mark.parametrize("n, first", [(30, 15), (31, 16)])
+def test_verdict_halves_split_at_the_lower_median_entry_date(n, first):
+    rows = trades(n, net=1.0)
     rows = [TradeRow(t.signal_date, t.entry_date, t.exit_date, t.gross, float(i)) for i, t in enumerate(rows)]
     v = verdict(rows, [0.0] * 1000, 5, 0.3)
-    assert v["half1_mean"] == pytest.approx(sum(range(15)) / 15)
-    assert v["half2_mean"] == pytest.approx(sum(range(15, 31)) / 16)
+    assert v["half1_mean"] == pytest.approx(sum(range(first)) / first)
+    assert v["half2_mean"] == pytest.approx(sum(range(first, n)) / (n - first))
+
+
+def test_verdict_trades_on_the_median_date_share_the_first_half():
+    d = sessions(3, date(2010, 1, 4))
+    # Entry dates d0, d1, d1, d1, d2: the lower median is d1, so all three d1 trades are in the first half
+    # (a split by count, 2 / 3, would cut through them).
+    rows = [TradeRow(e, e, e, 1.0, net) for e, net in
+            ((d[0], 1.0), (d[1], 2.0), (d[1], 3.0), (d[1], 4.0), (d[2], -8.0))]
+    v = verdict(rows, [0.0] * 1000, 5, 0.3)
+    assert v["half1_mean"] == pytest.approx(2.5) and v["half2_mean"] == pytest.approx(-8.0)
+    # 32 trades, four a date: the lower median is the 16th smallest date, so the halves are 16 / 16
+    days = sessions(8, date(2010, 1, 4))
+    rows = [TradeRow(days[i // 4], days[i // 4], days[i // 4], 1.0, float(i)) for i in range(32)]
+    v = verdict(rows, [0.0] * 1000, 5, 0.3)
+    assert v["half1_mean"] == pytest.approx(sum(range(16)) / 16)
+    assert v["half2_mean"] == pytest.approx(sum(range(16, 32)) / 16)
+
+
+def test_verdict_an_empty_half_fails_the_criterion():
+    d = date(2010, 1, 4)
+    rows = [TradeRow(d, d, d, 3.0, 2.7)] * 40                           # every trade on one date
+    v = verdict(rows, [0.0] * 1000, 5, 0.3)
+    assert v["half1_mean"] == pytest.approx(2.7) and v["half2_mean"] is None
+    assert v["criteria"]["both_halves_positive"] is False and v["label"] != "supported"
 
 
 def test_verdict_permutation_failure_blocks_supported():
@@ -522,6 +547,15 @@ def test_liquid_universe_cached_per_connection():
     assert mm.liquid_universe(c2, s[-1], frozenset()) == {"B"}
     c1.execute("DELETE FROM bars_1d")
     assert mm.liquid_universe(c1, s[-1], frozenset()) == {"A"}                  # computed once per connection
+
+
+def test_liquid_universe_skip_days_leave_windows_and_are_cached_apart():
+    s = sessions(21)
+    special = s[10]                                   # a bar on a day the caller does not count as a session
+    conn = _db(_bars("A", s[1:], 100.0, 1_000_000))   # 20 bars to s[-1], one of them on the special day
+    assert mm.liquid_universe(conn, s[-1], frozenset()) == {"A"}
+    assert mm.liquid_universe(conn, s[-1], frozenset(), frozenset({special})) == set()    # 19 sessions
+    assert mm.liquid_universe(conn, s[-1], frozenset()) == {"A"}                         # each set cached apart
 
 
 def test_liquid_universe_returns_a_fresh_set():

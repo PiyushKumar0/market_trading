@@ -163,12 +163,13 @@ class World:
     # ---- the engine's News Analyst calls
     def call(self, when: datetime, scores: list[dict], *, model: str = "claude-sonnet-5-5", pv: str | None = "v1",
              ok: int = 1, heads: dict[str, str] | None = None, agent_id: str = "news_analyst",
-             stamp: str | None = None) -> str:
+             stamp: str | None = None, context: bytes | None = None) -> str:
         call_id = uuid.uuid4().hex
         heads = heads or {}
         rows = [{"cluster_id": s["cluster_id"], "representative": heads.get(s["cluster_id"], f"story {s['cluster_id']}"),
                  "source_domains": ["a.com"], "first_seen": when} for s in scores]
-        blob = gzip.compress(f"{news_analyst.SYSTEM_PROMPT}\n\n{engine_prompt(rows)}".encode())
+        blob = context if context is not None else gzip.compress(
+            f"{news_analyst.SYSTEM_PROMPT}\n\n{engine_prompt(rows)}".encode())
         con = sqlite3.connect(self.state_db)
         con.execute("INSERT INTO agent_calls (call_id, agent_id, trigger, model, context_gz, output_json, ok, at, "
                     "prompt_version) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -181,16 +182,20 @@ class World:
     # ---- the study's content file
     def _llm_call(self, con: sqlite3.Connection, purpose: str, model: str, when: datetime, ok: int = 1) -> str:
         call_id = uuid.uuid4().hex
-        con.execute("INSERT INTO llm_calls (call_id, at, purpose, model, prompt_sha256, ok, error, effort) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO llm_calls (call_id, at, purpose, model, prompt_sha256, ok, error, effort, "
+                    "system_sha256, cli) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (call_id, when.isoformat(), purpose, model, hashlib.sha256(b"x").hexdigest(), ok, None,
-                     "default"))
+                     "default", hashlib.sha256(b"s").hexdigest(), "claude.exe"))
         return call_id
 
-    def cluster(self, key: str, captured: datetime, title: str, *, summary: str | None = None) -> None:
+    def cluster(self, key: str, captured: datetime, title: str, *, summary: str | None = None,
+                published: datetime | None | str = "captured") -> None:
+        """A one-item cluster; its item is published when captured unless ``published`` says otherwise."""
         url = f"https://a.com/{key}"
+        pub = captured if published == "captured" else published
         con = sqlite3.connect(self.content_db)
-        con.execute("INSERT INTO items VALUES (?,?,?,?,?,?)", (url, "et", title, summary, None, captured.isoformat()))
+        con.execute("INSERT INTO items VALUES (?,?,?,?,?,?)",
+                    (url, "et", title, summary, pub.isoformat() if pub is not None else None, captured.isoformat()))
         con.execute("INSERT INTO clusters VALUES (?,?,?,?,?,?,?,?)",
                     (key, captured.isoformat(), url, json.dumps([url]), title, json.dumps(["a.com"]),
                      captured.isoformat(), captured.isoformat()))
@@ -198,12 +203,25 @@ class World:
         con.commit()
         con.close()
 
+    def item(self, url: str, captured: datetime, title: str = "an unclustered story") -> None:
+        con = sqlite3.connect(self.content_db)
+        con.execute("INSERT INTO items VALUES (?,?,?,?,?,?)",
+                    (url, "et", title, None, captured.isoformat(), captured.isoformat()))
+        con.commit()
+        con.close()
+
     def study_score(self, key: str, variant: str, scope: str = "market", sentiment: float = 0.5,
-                    materiality: float = 1.0, event_type: str = "macro_data", *, model: str = HAIKU) -> None:
+                    materiality: float = 1.0, event_type: str = "macro_data", *, model: str = HAIKU,
+                    omitted: bool = False) -> None:
         con = sqlite3.connect(self.content_db)
         call_id = self._llm_call(con, f"score_{variant}", model, at(D(11, 30), 22))
-        con.execute("INSERT INTO scores VALUES (?,?,?,?,?,?,?,?)",
-                    (key, variant, scope, event_type, sentiment, materiality, 0.5, call_id))
+        if omitted:
+            con.execute("INSERT INTO scores (cluster_key, variant, call_id, omitted) VALUES (?,?,?,1)",
+                        (key, variant, call_id))
+        else:
+            con.execute("INSERT INTO scores (cluster_key, variant, scope, event_type, sentiment, materiality, "
+                        "novelty, call_id) VALUES (?,?,?,?,?,?,?,?)",
+                        (key, variant, scope, event_type, sentiment, materiality, 0.5, call_id))
         con.commit()
         con.close()
 
@@ -247,7 +265,7 @@ def rising_calls(w: World, days: list[date], step: float = 0.0065) -> None:
         w.call(at(d, 8), [score(f"m{i}", "market", -0.95 + step * i, 1.0)])
 
 
-# --------------------------------------------------------------------------- the brief's seven
+# --------------------------------------------------------------------------- windows, keys, baskets, looks, the comparison
 def test_cutoff_0900_exclusive_boundary(tmp_path, cal_dir):
     s = regular(cal_dir, D(10, 1), D(12, 31))
     assert mmf.session_for(at(D(11, 12), 9, 0, 0), s) == D(11, 13)
@@ -301,8 +319,12 @@ def test_weekend_and_holiday_news_counts_for_the_next_session(tmp_path, cal_dir)
 
 def test_a_calendar_without_the_year_is_unavailable(tmp_path, cal_dir):
     w = World(tmp_path, cal_dir, D(10, 1), D(12, 31))
+    short = tmp_path / "calendar_2024_2026"
+    short.mkdir()
+    for y in (2024, 2025, 2026):
+        (short / f"{y}.yaml").write_bytes((cal_dir / f"{y}.yaml").read_bytes())
     with pytest.raises(mmf.Unavailable, match="2027"):
-        w.evaluate(D(1, 15, 2027), calendar_dir=config_dir() / "calendar")
+        w.evaluate(D(1, 15, 2027), calendar_dir=short)
 
 
 def test_session_without_market_scores_has_no_tone(tmp_path, cal_dir):
@@ -345,7 +367,8 @@ def test_policy_basket_excess_over_ew_universe_with_leg_costs(tmp_path, cal_dir)
     w.stock("AUTOB")                                                             # split inside the window: voided
     w.corp.append(("AUTOB", sessions[k + 3], "split"))
     w.corp.append(("BANKA", sessions[k + 3], "dividend"))                         # not structural: kept
-    w.stock("AUTOC", volume=10, bars={d0: (100.0, 100.0, 1_000_000_000)})         # liquid on D only: never a leg
+    # Thin every session but D: one huge bar cannot lift a 20-session median, so it is never liquid, never a leg.
+    w.stock("AUTOC", volume=10, bars={d0: (100.0, 100.0, 1_000_000_000)})
     w.stock("HAL", bars={exit_d: (100.0, 95.0, 2_000_000)})                       # defence theme list
     w.stock("BANKA", bars={exit_d: (100.0, 102.0, 2_000_000)})
     for sym, sector in (("AUTOA", "AUTO"), ("AUTOB", "AUTO"), ("AUTOC", "AUTO"), ("HAL", "CAPITAL_GOODS"),
@@ -571,7 +594,7 @@ def test_empty_content_file_and_an_early_as_of_still_report(tmp_path, cal_dir):
     doc = w.evaluate(D(11, 5))
     assert doc["meta"]["headline_key"] is None and doc["meta"]["content_start"] is None
     assert doc["counts"]["engine_calls_excluded"] == 0 and doc["counts"]["engine_clusters_excluded"] == 1
-    assert len(doc["meta"]["study_tables_missing"]) == 6
+    assert len(doc["meta"]["study_tables_missing"]) == 7
     assert {h["status_text"] for h in doc["hypotheses"].values()} == {"accruing 0/30"}
     assert doc["comparison"]["tone"]["answer"] == "not enough data"
     assert "LOOKS" in mmf.render(doc)
@@ -603,3 +626,248 @@ def test_cli_prints_unavailable_and_exits_zero_and_never_writes_the_stores(tmp_p
                    "--db", str(w.snapshot), "--as-of", "2026-11-30", "--out", str(out), "--etf-list", str(etfs)])
     assert rc == 0
     assert "UNAVAILABLE" in capsys.readouterr().out
+
+
+def test_cli_exits_zero_when_rendering_fails(tmp_path, cal_dir, capsys, monkeypatch):
+    w = World(tmp_path, cal_dir, D(10, 1), D(11, 30))
+    w.build_snapshot()
+    etfs = tmp_path / "etf.csv"
+    etfs.write_text("Symbol\nNIFTYBEES\n", encoding="utf-8")
+
+    def broken(doc):
+        raise KeyError("a field the renderer expects")
+
+    monkeypatch.setattr(mmf, "render", broken)
+    out = tmp_path / "reports" / "fwd.json"
+    assert mmf.main(["--state-db", str(w.state_db), "--content-db", str(w.content_db), "--db", str(w.snapshot),
+                     "--as-of", "2026-11-30", "--out", str(out), "--etf-list", str(etfs)]) == 0
+    assert "UNAVAILABLE: unexpected KeyError" in capsys.readouterr().out
+    assert not out.exists()
+
+
+def test_content_tables_are_read_in_one_transaction(tmp_path, cal_dir, monkeypatch):
+    w = World(tmp_path, cal_dir, D(10, 1), D(11, 30))
+    w.cluster("c-1", at(D(11, 12), 8), "a market story")
+    w.study_score("c-1", "C", "market", 0.4, 1.0)
+    real = mmf._read_content
+    blocked: list[str] = []
+
+    def mid_read(con, *args):
+        con.execute("SELECT count(*) FROM llm_calls").fetchone()     # the read has begun
+        writer = sqlite3.connect(w.content_db, timeout=0)
+        try:
+            writer.execute("INSERT INTO llm_calls (call_id, at, purpose, model, prompt_sha256, ok, effort, "
+                           "system_sha256, cli) VALUES ('late', 'x', 'score_C', 'm', 'h', 1, 'e', 's', 'c')")
+            writer.commit()
+        except sqlite3.OperationalError as exc:
+            blocked.append(str(exc))
+        finally:
+            writer.close()
+        return real(con, *args)
+
+    monkeypatch.setattr(mmf, "_read_content", mid_read)
+    study = mmf.load_content(w.content_db, at(D(11, 30), 9), D(11, 30))
+    assert blocked and "locked" in blocked[0]          # a scorer's commit waits until the whole read is done
+    assert [s.key for s in study.scores["C"]] == ["c-1"]
+
+
+# --------------------------------------------------------------------------- looks form on final inputs
+def _thirty_trade_world(tmp_path, cal_dir):
+    """23 liquid one-stock sector groups. Events at d0 on 20 groups and at d1 = d0 + 10 sessions on 10 groups give
+    30 policy trades, the 30th closing at e1 = d0 + 19 sessions: the look's cut."""
+    w = World(tmp_path, cal_dir, D(10, 1), D(1, 29, 2027))
+    sectors = [g for g in mmf.VOCAB[:23]]
+    for i, sector in enumerate(sectors):
+        w.stock(f"S{i:02d}")
+        w.sector_rows.append((D(10, 1), f"S{i:02d}", sector))
+    s = w.sessions
+    k0 = s.index(D(11, 12))
+    days = {"d0": s[k0], "d2": s[k0 + 5], "d1": s[k0 + 10], "e1": s[k0 + 19], "d3": s[k0 + 21]}
+    return w, sectors, days
+
+
+def policy(cid: str) -> dict:
+    return score(cid, "sector", 0.6, 0.8, "govt_program")
+
+
+def look(doc: dict, name: str) -> tuple:
+    h = hyp(doc, name)
+    v = {k: x for k, x in h["verdict"].items() if k != "cpcv"} if h["verdict"] else None
+    return h["status"], h["cut"], h["trades"], v
+
+
+def test_a_pending_headline_mapping_holds_the_look_until_it_lands(tmp_path, cal_dir):
+    w, sectors, d = _thirty_trade_world(tmp_path, cal_dir)
+    w.call(at(d["d0"], 8), [policy("k1")])
+    w.call(at(d["d1"], 8), [policy("k2")])
+    w.mapping("k1", "headline", sectors[:20])
+    w.mapping("k2", "headline", sectors[:10])
+    w.call(at(d["d2"], 8), [policy("k3")])                         # unmapped, before the cut
+    as_of = D(1, 29, 2027)
+
+    h = hyp(w.evaluate(as_of), "policy_headline")
+    assert h["status"] == "waiting" and h["label"] == "waiting" and h["verdict"] is None and h["cut"] is None
+    assert h["status_text"] == f"waiting: 1 candidate unmapped in windows up to {d['e1']}"
+    assert len(h["trades"]) == 30                                   # provisional trades stay visible
+
+    w.call(at(d["d2"], 8, 30), [policy("k5")], context=b"not gzip")  # unreadable headline: final, no groups
+    assert hyp(w.evaluate(as_of), "policy_headline")["status"] == "waiting"
+    w.mapping("k3", "headline", [sectors[20]])
+    doc = w.evaluate(as_of)
+    status, cut, trades, verdict = look(doc, "policy_headline")
+    assert status == "verdict" and cut == d["e1"] and verdict["n"] == 31
+    assert (sectors[20], d["d2"]) in {(t["group"], t["entry_date"]) for t in trades}
+    assert hyp(doc, "policy_headline")["pending"] is None
+
+    w.call(at(d["d3"], 8), [policy("k4")])                         # after the cut: never holds the formed look
+    after = w.evaluate(as_of)
+    assert look(after, "policy_headline") == look(doc, "policy_headline")
+    w.mapping("k4", "headline", [sectors[21]])
+    mapped = w.evaluate(as_of)
+    assert look(mapped, "policy_headline") == look(doc, "policy_headline")
+    assert hyp(mapped, "policy_headline")["trades_after_look"] == 1
+
+
+def test_unclustered_and_unscored_content_hold_the_content_look(tmp_path, cal_dir):
+    w, sectors, d = _thirty_trade_world(tmp_path, cal_dir)
+    w.poll(at(D(11, 9), 9, 5))
+    w.poll(at(D(11, 11), 8, 30))
+    for key, day, groups in (("c-1", d["d0"], sectors[:20]), ("c-2", d["d1"], sectors[:10])):
+        w.cluster(key, at(day, 8), f"cabinet clears scheme {key}")
+        w.study_score(key, "C", "sector", 0.6, 0.8, "govt_program")
+        w.mapping(key, "content", groups)
+    as_of = D(1, 29, 2027)
+    base = hyp(w.evaluate(as_of), "policy_content")
+    assert base["status"] == "verdict" and base["cut"] == d["e1"]
+
+    w.item("https://a.com/blank", at(d["d2"], 8), title=" -- ")    # never clustered: no words to cluster on
+    assert hyp(w.evaluate(as_of), "policy_content")["status"] == "verdict"
+    w.item("https://a.com/u1", at(d["d2"], 8))
+    doc = w.evaluate(as_of)
+    p = hyp(doc, "policy_content")
+    assert p["status_text"] == f"waiting: 1 item unclustered in windows up to {d['e1']}"
+    assert doc["comparison"]["policy"]["read"] is False
+
+    con = sqlite3.connect(w.content_db)
+    con.execute("DELETE FROM items WHERE url = 'https://a.com/u1'")
+    con.commit()
+    con.close()
+    w.cluster("c-3", at(d["d2"], 8), "a cluster still to be scored")
+    assert hyp(w.evaluate(as_of), "policy_content")["status_text"] == (
+        f"waiting: 1 cluster unscored in windows up to {d['e1']}")
+    w.study_score("c-3", "C", omitted=True)                         # an omission is final
+    final = hyp(w.evaluate(as_of), "policy_content")
+    assert (final["status"], final["cut"], final["trades"]) == (base["status"], base["cut"], base["trades"])
+
+
+def test_an_off_model_score_leaves_its_cluster_pending(tmp_path, cal_dir):
+    w, sectors, d = _thirty_trade_world(tmp_path, cal_dir)
+    w.poll(at(D(11, 9), 9, 5))
+    w.poll(at(D(11, 11), 8, 30))
+    for key, day, groups in (("c-1", d["d0"], sectors[:20]), ("c-2", d["d1"], sectors[:10])):
+        w.cluster(key, at(day, 8), f"cabinet clears scheme {key}")
+        w.study_score(key, "C", "sector", 0.6, 0.8, "govt_program")
+        w.mapping(key, "content", groups)
+    w.cluster("c-3", at(d["d2"], 8), "a cluster scored by another model")
+    w.study_score("c-3", "C", "market", 0.5, 1.0, model="claude-opus-5-5")
+    doc = w.evaluate(D(1, 29, 2027))
+    assert hyp(doc, "policy_content")["status"] == "waiting"
+    assert doc["counts"]["study_scores_excluded_model"] == 1
+
+
+def test_a_content_cluster_is_placed_by_the_later_of_capture_and_publication(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(10, 1), D(11, 30))
+    w.cluster("c-1", at(D(11, 12), 8), "published after it was captured", published=at(D(11, 12), 9, 30))
+    w.study_score("c-1", "C", "market", 0.4, 1.0)
+    w.cluster("c-2", at(D(11, 16), 8), "captured after it was published", published=at(D(11, 13), 7))
+    w.study_score("c-2", "C", "market", -0.2, 1.0)
+    w.cluster("c-3", at(D(11, 17), 8), "no publication time", published=None)
+    w.study_score("c-3", "C", "market", 0.9, 1.0)
+    doc = w.evaluate(D(11, 30))
+    assert tone(doc, "content", D(11, 12)) is None
+    assert tone(doc, "content", D(11, 13)) == pytest.approx(0.4)
+    assert tone(doc, "content", D(11, 16)) == pytest.approx(-0.2)
+    assert tone(doc, "content", D(11, 17)) is None
+    assert doc["counts"]["content_no_published_at"] == 1
+
+
+def test_capture_completeness_is_reported_per_session_from_the_content_start(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(10, 1), D(11, 30))
+    w.poll(at(D(11, 9), 9, 5))
+    w.poll(at(D(11, 11), 8, 30))                                    # content start 11-11
+    w.poll(at(D(11, 12), 8, 59))
+    w.poll(at(D(11, 13), 8, 30), skip=("et",))
+    w.poll(at(D(11, 16), 8, 30), errored=("bs_markets",))
+    w.poll(at(D(11, 18), 9, 0))                                     # 09:00 is outside [08:00, 09:00)
+    doc = w.evaluate(D(11, 18))
+    assert doc["meta"]["content_start"] == D(11, 11)
+    assert doc["meta"]["capture_incomplete"] == {"n": 4, "dates": [D(11, 13), D(11, 16), D(11, 17), D(11, 18)]}
+    assert "capture incomplete (a feed missed its 08:00-09:00 poll; decides nothing): 4 session(s): " \
+           "2026-11-13, 2026-11-16, 2026-11-17, 2026-11-18" in mmf.render(doc)
+    assert w.evaluate(D(11, 10))["meta"]["capture_incomplete"] == {"n": 0, "dates": []}   # no start yet
+
+
+def test_a_special_session_bar_is_not_a_session(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(9, 1), D(11, 30))
+    s = w.sessions
+    sunday = D(11, 8)                                               # the muhurat session, not a regular one
+    assert sunday not in s
+    w.nifty[sunday] = (100.0, 100.5)
+    w.stock("S1")
+    w.stocks["S1"][sunday] = (100.0, 100.0, 2_000_000)
+    i9 = s.index(D(11, 9))
+    w.stocks["EDGE"] = {d: (100.0, 100.0, 2_000_000) for d in s[i9 - 18:i9 + 1]} | {
+        sunday: (100.0, 100.0, 2_000_000)}                          # 19 regular bars to 11-09, plus the Sunday
+    w.sector_rows += [(D(9, 1), "S1", "BANK"), (sunday, "S1", "IT")]
+    conn = mmf.rc.open_snapshot(w.build_snapshot())
+    try:
+        m = mmf.load_market(conn, D(11, 30), frozenset(), {}, mmf.load_calendar(cal_dir))
+        assert sunday not in m.sessions and m.skip_days == frozenset({sunday})
+        assert mm.index_trade(m.nifty, m.sessions, D(11, 5), 5)[0] == D(11, 12)   # Thu, Fri, Mon, Wed, Thu
+        d_prev = m.sessions[m.pos[D(11, 9)] - 1]
+        assert d_prev == D(11, 6)                                   # D-1 of the Monday is the Friday
+        assert mmf.members(m, "IT", d_prev) == frozenset() and mmf.members(m, "BANK", d_prev) == {"S1"}
+        assert "EDGE" in mm.liquid_universe(conn, D(11, 9), frozenset())          # counting the Sunday: 20 bars
+        assert "EDGE" not in mmf._liquid(m, D(11, 9)) and "S1" in mmf._liquid(m, D(11, 9))
+    finally:
+        mm._LIQUID_CACHE.pop(id(conn), None)
+        conn.close()
+
+
+def test_the_headline_path_keeps_each_clusters_first_score(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(10, 1), D(12, 31))
+    for sym, sector in (("BANKA", "BANK"), ("ITA", "IT")):
+        w.stock(sym)
+        w.sector_rows.append((D(10, 1), sym, sector))
+    w.call(at(D(11, 12), 8), [score("A", "market", 0.5, 1.0), score("P", "sector", 0.6, 0.8, "other")])
+    w.call(at(D(11, 13), 7), [score("A", "market", -0.9, 1.0), policy("P")])     # later re-scores
+    w.mapping("P", "headline", ["BANK"])
+    doc = w.evaluate(D(12, 31))
+    assert tone(doc, "headline", D(11, 12)) == pytest.approx(0.5)
+    assert tone(doc, "headline", D(11, 13)) is None
+    p = hyp(doc, "policy_headline")
+    assert p["counts"]["candidates_candidates"] == 0 and p["trades"] == []
+
+
+def test_an_omitted_row_adds_nothing_and_is_final(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(10, 1), D(12, 31))
+    w.poll(at(D(11, 9), 9, 5))
+    w.poll(at(D(11, 11), 8, 30))
+    w.cluster("c-1", at(D(11, 12), 8), "a story the model left out")
+    w.study_score("c-1", "C", omitted=True)
+    w.study_score("c-1", "H", "market", 0.7, 1.0)
+    w.cluster("c-2", at(D(11, 12), 8, 10), "a story both variants scored")
+    w.study_score("c-2", "C", "market", 0.3, 1.0)
+    w.study_score("c-2", "H", "market", 0.1, 1.0)
+    w.cluster("c-3", at(D(11, 13), 8), "an H score still to come")
+    w.study_score("c-3", "C", "sector", 0.6, 0.8, "govt_program")
+    w.mapping("c-3", "content", ["BANK"])
+    doc = w.evaluate(D(12, 31))
+    assert tone(doc, "content", D(11, 12)) == pytest.approx(0.3)
+    assert tone(doc, "study_c", D(11, 12)) == pytest.approx(0.3) and tone(doc, "study_h", D(11, 12)) == (
+        pytest.approx(0.1))
+    assert hyp(doc, "policy_content")["counts"]["candidates_candidates"] == 1     # c-3 only
+    assert doc["comparison"]["h_side"] == {"clusters_unscored_h": 1, "study_h_candidates_unmapped": 0,
+                                           "comparison_excluded_omitted": 1}
+    for name in ("news_tone_content", "policy_content"):
+        assert hyp(doc, name)["status"] == "accruing"

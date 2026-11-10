@@ -4,19 +4,26 @@ Runs at 22:00 IST from Windows Task Scheduler over the SQLite file ``news_conten
 
 1. clusters the newly captured items with the engine's ``HeadlineClusterer`` at its pinned threshold, passing the
    persisted study clusters as ``existing`` so a run of incremental nights groups as one pass would;
-2. scores each forward-window cluster twice with the pinned Haiku model, the News Analyst's system prompt and its
-   output schema, in separate blind calls: **H**, the engine's own News Analyst prompt layout (representative
-   headline only), and **C**, the same layout plus the representative's summary and article excerpt;
+2. scores each study cluster captured from ``STUDY_FORWARD_START`` on, once its cut-off has passed, twice with the
+   pinned Haiku model, the News Analyst's system prompt and its output schema, in separate blind calls: **H**, the
+   engine's own News Analyst prompt layout (representative headline only), and **C**, the same layout plus the
+   representative's summary and article excerpt;
 3. maps policy stories to stock groups with the pinned Sonnet mapper, one story per call: the News Analyst's own
-   first scores from ``state.db`` (``headline``), the study's C scores (``content``) and its H scores (``study_h``).
+   first scores from ``state.db`` first scored from ``HEADLINE_FORWARD_START`` on (``headline``), the study's C
+   scores (``content``) and its H scores (``study_h``).
 
 Writes only to the study's own file; ``state.db`` is opened read-only. Every call goes through ``StudyLLM`` (the
-night's cap, no retries, a permanent stop on a quota or login failure) and is logged append-only in ``llm_calls``.
-Work runs in priority order, so a capped or stopped night leaves the least urgent part for the next one.
+night's cap, no retries, a permanent stop on a quota or login failure) and is logged append-only in ``llm_calls``
+with its prompt hashes and CLI; every run appends its summary to ``score_runs``. Work runs in priority order, so a
+capped or stopped night leaves the least urgent part for the next one. No call is made in market hours, checked
+again before each call, because a run suspended by host standby can resume inside the session. No call is made
+once either registered prompt differs from its pinned hash.
 
-No lookahead: a cluster's cut-off is the first 09:00 IST strictly after its representative's capture (the 09:00
-that closes the window it belongs to). Its prompts count only members captured before the cut-off, and show an
-excerpt only when the page was fetched before it.
+No lookahead: a cluster's cut-off is the first 09:00 IST strictly after its representative's capture. For a
+weekend or holiday capture that is earlier than the close of the cluster's news window; the cut-off only drops
+late members and excerpts, so it is conservative. A cluster is scored only once its cut-off has passed, so both
+variants see the same members. Its prompts count only members captured before the cut-off, and show an excerpt
+only when the page was fetched before it.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ import sys
 import time as time_mod
 import uuid
 import zlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -50,6 +57,10 @@ import engine  # noqa: E402,F401,I001  native import-order guard (engine._preloa
 from engine.datafeeds.news import Headline, _domain  # noqa: E402
 from engine.datafeeds.news_pipeline import HeadlineClusterer, NewsCluster, title_tokens  # noqa: E402
 from engine.intelligence.agents import news_analyst  # noqa: E402
+
+_SCRIPTS = str(Path(__file__).resolve().parent)
+if _SCRIPTS not in sys.path:  # pragma: no cover - loose-script shim
+    sys.path.insert(0, _SCRIPTS)
 
 
 def _load_sibling(name: str) -> Any:
@@ -80,10 +91,19 @@ DEFAULT_EFFORT = "default"
 #: ``llm_calls.error`` prefixes of a quota or login failure: one of them today ends the day's work.
 STOP_PREFIXES = tuple(f"{reason}:" for reason in sorted(mml.STOP_REASONS))
 
-#: The forward window opens at 09:00 IST on the registration day; the headline backlog before it is reported as seen.
-FORWARD_START = datetime(2026, 11, 10, 9, 0, tzinfo=IST)
-BACKLOG_START = datetime(2026, 7, 16, 0, 0, tzinfo=IST)
+#: Engine headline candidates are mapped from here: the first registered session is 2026-11-11, and 2026-11-10 is a
+#: holiday, so that session's news window opens at 09:00 on 2026-11-09. Earlier candidates were first scored under
+#: an older engine key the forward evaluator never uses, so mapping them would spend calls for nothing.
+HEADLINE_FORWARD_START = datetime(2026, 11, 9, 9, 0, tzinfo=IST)
+#: Study clusters are scored and mapped from here, the registration day's 09:00.
+STUDY_FORWARD_START = datetime(2026, 11, 10, 9, 0, tzinfo=IST)
 CUTOFF_TIME = time(9, 0)
+
+#: Registered instruments, pinned at registration: the mapper prompt file's bytes, and the scoring prompt the study
+#: imports live from the engine (its system prompt, a newline, then its output schema as sorted-key JSON). A change
+#: to either would silently change a registered instrument mid-study, so the night refuses to call.
+MAPPER_PROMPT_SHA256 = "89ada625ed09846a38d57f04fac7903bfe392b94aa36ca006f0afdef4d94aaf8"
+SCORE_PROMPT_SHA256 = "549b6c6feba7960261e5871f24fbcca867e0dae2106ed3e19d8c596542c4e91b"
 MARKET_OPEN, MARKET_CLOSE = time(9, 15), time(15, 30)
 
 CLUSTER_SIM_THRESHOLD = 0.75
@@ -117,7 +137,10 @@ MAPPER_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_SCHEMA = """
+#: The ``scores`` column marking a row the model left out of a parsed answer: final, with no score values.
+OMITTED_COLUMN = "omitted"
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS clusters(
     cluster_key TEXT PRIMARY KEY, first_captured_at TEXT NOT NULL, representative_url TEXT NOT NULL,
     member_urls TEXT NOT NULL, representative_title TEXT NOT NULL, source_domains TEXT NOT NULL,
@@ -129,14 +152,20 @@ CREATE TABLE IF NOT EXISTS llm_calls(
     call_id TEXT PRIMARY KEY, at TEXT NOT NULL,
     purpose TEXT NOT NULL CHECK(purpose IN ('score_H','score_C','map_headline','map_content')),
     model TEXT NOT NULL, prompt_sha256 TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT,
-    effort TEXT NOT NULL, duration_s REAL, output_json TEXT, prompt_gz BLOB);
+    effort TEXT NOT NULL, duration_s REAL, output_json TEXT, prompt_gz BLOB,
+    system_sha256 TEXT NOT NULL, cli TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scores(
     cluster_key TEXT NOT NULL, variant TEXT NOT NULL CHECK(variant IN ('H','C')), scope TEXT, event_type TEXT,
     sentiment REAL, materiality REAL, novelty REAL, call_id TEXT NOT NULL,
+    {OMITTED_COLUMN} INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(cluster_key, variant));
 CREATE TABLE IF NOT EXISTS mappings(
     candidate_key TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('headline','study_h','content')),
     groups TEXT NOT NULL, call_id TEXT NOT NULL, PRIMARY KEY(candidate_key, source));
+"""
+_RUNS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS score_runs(
+    run_at TEXT NOT NULL, finished_at TEXT NOT NULL, summary_json TEXT NOT NULL);
 """
 
 _CONTEXT_CLUSTER = re.compile(r"^\d+\. cluster_id=(\S+) \| ")
@@ -163,7 +192,8 @@ def _clean(text: Any) -> str | None:
 
 
 def cutoff_for(captured: datetime) -> datetime:
-    """The first 09:00 IST strictly after ``captured``: the close of the window it belongs to."""
+    """The first 09:00 IST strictly after ``captured``. For a weekend or holiday capture this is earlier than the
+    close of the cluster's news window; it only drops late members and excerpts, so it is conservative."""
     local = captured.astimezone(IST)
     nine = datetime.combine(local.date(), CUTOFF_TIME, tzinfo=IST)
     return nine if local < nine else nine + timedelta(days=1)
@@ -185,6 +215,40 @@ def market_hours_refusal(now: datetime) -> str | None:
     if local.weekday() < 5 and MARKET_OPEN <= local.time() < MARKET_CLOSE:
         return f"market hours ({local:%Y-%m-%d %H:%M} IST); run outside 09:15-15:30 on a weekday"
     return None
+
+
+def calendar_refusal(now: datetime) -> str | None:
+    """``research_common``'s trading-calendar rule, imported on first use: that module pulls in the backtest
+    scripts, and a fault in one of them must not kill the nightly run before the weekday rule has answered."""
+    import research_common  # noqa: PLC0415
+
+    return research_common.market_hours_refusal(now)
+
+
+def call_refusal(now: datetime) -> str | None:
+    """The weekday rule, else the trading-calendar rule (which also covers a special session on a weekend). A
+    calendar rule that cannot answer (no file for the year, or a fault importing it) is ignored: the weekday rule
+    still covers weekdays."""
+    if reason := market_hours_refusal(now):
+        return reason
+    try:
+        return calendar_refusal(now)
+    except Exception:  # noqa: BLE001 - a calendar fault must not crash the night; the weekday rule stands
+        return None
+
+
+class MarketHoursHalt(mml.LLMHalt):
+    """A call refused because the clock reads market hours: the engine's analysts share this subscription."""
+
+
+def prompt_pin_mismatch(mapper_bytes: bytes) -> str | None:
+    """Which registered prompt differs from its pinned hash, or None when both match."""
+    score = f"{news_analyst.SYSTEM_PROMPT}\n{json.dumps(news_analyst.output_json_schema(), sort_keys=True)}"
+    changed = [name for name, text, pin in (
+        ("the scoring prompt", score.encode("utf-8"), SCORE_PROMPT_SHA256),
+        ("the mapper prompt", mapper_bytes, MAPPER_PROMPT_SHA256),
+    ) if hashlib.sha256(text).hexdigest() != pin]
+    return " and ".join(changed) if changed else None
 
 
 @dataclass(frozen=True)
@@ -287,8 +351,10 @@ def _context_headlines(blob: Any) -> dict[str, str]:
 
 
 def headline_candidates(state: sqlite3.Connection, now: datetime) -> list[HeadlineCandidate]:
-    """Engine clusters whose FIRST successful News Analyst score meets the policy bars, first scored from the
-    backlog start up to ``now``, oldest first. A later re-score never replaces the first, in either direction."""
+    """Engine clusters whose FIRST successful News Analyst score meets the policy bars, first scored from
+    ``HEADLINE_FORWARD_START`` up to ``now``, oldest first. The first score is found across every call before the
+    start filter applies, so a cluster first scored before the start never qualifies through a later re-score, and a
+    later re-score never replaces the first, in either direction."""
     index = state.execute(
         "SELECT rowid, call_id, at FROM agent_calls WHERE agent_id = ? AND ok = 1", (news_analyst.AGENT_ID,),
     ).fetchall()
@@ -304,7 +370,7 @@ def headline_candidates(state: sqlite3.Connection, now: datetime) -> list[Headli
         for s in scores:
             first.setdefault(s.cluster_id, (at, call_id, s))
     picked = [(cid, at, call_id) for cid, (at, call_id, s) in first.items()
-              if at >= BACKLOG_START and meets_policy_bars(s.event_type, s.sentiment, s.materiality)]
+              if at >= HEADLINE_FORWARD_START and meets_policy_bars(s.event_type, s.sentiment, s.materiality)]
     contexts: dict[str, dict[str, str]] = {}
     for call_id in {call_id for _, _, call_id in picked}:
         row = state.execute("SELECT context_gz FROM agent_calls WHERE call_id = ?", (call_id,)).fetchone()
@@ -416,9 +482,11 @@ class _Cluster:
 
 class _Night:
     def __init__(self, con: sqlite3.Connection, llm: Any, now: datetime, mapper_prompt: str,
-                 out: dict[str, Any]) -> None:
+                 out: dict[str, Any], clock: Callable[[], datetime]) -> None:
         self.con, self.llm, self.now, self.mapper_prompt, self.out = con, llm, now, mapper_prompt, out
+        self.clock = clock
         self.effort = getattr(getattr(llm, "_def", None), "effort", None) or DEFAULT_EFFORT
+        self.cli = getattr(llm, "cli_path", None) or "unknown"
         self.clusters = {
             key: _Cluster(key, captured, rep_url, rep_title)
             for key, raw, rep_url, rep_title in con.execute(
@@ -427,27 +495,33 @@ class _Night:
         }
 
     async def work(self, headlines: list[HeadlineCandidate]) -> None:
-        """Priority: forward H/C scoring, forward headline maps, content maps, study_h maps, the seen backlog."""
+        """Priority: H/C scoring, headline maps, content maps, study_h maps."""
         await self._score_forward()
         mapped = self._mapped("headline")
-        todo = [c for c in headlines if c.cluster_id not in mapped]
-        for cand in (c for c in todo if c.at >= FORWARD_START):
-            await self._map_headline(cand, "headline")
+        for cand in (c for c in headlines if c.cluster_id not in mapped):
+            await self._map_headline(cand)
         for key, text in self._study_candidates("C"):
-            await self._map(key, "content", text, "content")
+            await self._map(key, "content", text)
         for key, text in self._study_candidates("H"):
-            await self._map(key, "study_h", text, "study_h")
-        for cand in (c for c in todo if c.at < FORWARD_START):
-            await self._map_headline(cand, "headline_seen")
+            await self._map(key, "study_h", text)
+
+    async def _call(self, **kw: Any) -> Any:
+        """``llm.call`` after a fresh market-hours check on the injected clock."""
+        if reason := call_refusal(self.clock()):
+            raise MarketHoursHalt(reason)
+        return await self.llm.call(**kw)
 
     # ---------------------------------------------------------------- scoring
     def _scored(self) -> set[tuple[str, str]]:
         return {(k, v) for k, v in self.con.execute("SELECT cluster_key, variant FROM scores")}
 
     async def _score_forward(self) -> None:
+        # Only after its cut-off are a cluster's members and excerpt before the cut-off final: scoring earlier would
+        # tie the score to when the scorer ran, and let a C retried a night later see members H never saw.
         scored = self._scored()
         pending = sorted((c for c in self.clusters.values()
-                          if c.first_captured_at >= FORWARD_START
+                          if c.first_captured_at >= STUDY_FORWARD_START
+                          and cutoff_for(c.first_captured_at) <= self.now
                           and ((c.key, "H") not in scored or (c.key, "C") not in scored)),
                          key=lambda c: (c.first_captured_at, c.key))
         size = news_analyst.MAX_CLUSTERS_PER_CALL
@@ -464,15 +538,22 @@ class _Night:
     async def _score(self, rows: list[PromptCluster], variant: str) -> None:
         prompt = build_prompt(rows, variant)
         system = news_analyst.SYSTEM_PROMPT
-        res = await self.llm.call(model=SCORE_MODEL, system_prompt=system, prompt=prompt,
-                                  json_schema=news_analyst.output_json_schema())
+        res = await self._call(model=SCORE_MODEL, system_prompt=system, prompt=prompt,
+                               json_schema=news_analyst.output_json_schema())
         scores: list[Any] = []
+        parsed = False
         if res.ok:
             try:
+                # The engine's parser reads a dict without "scores" as an empty batch; here that is a malformed
+                # answer, not one that omits every cluster.
+                if not isinstance(res.output, dict) or not isinstance(res.output.get("scores"), list):
+                    raise ValueError("no scores list")
                 scores, _ = news_analyst.parse_output(res.output)
+                parsed = True
             except (ValueError, TypeError):
                 self.out["unparsed_outputs"] += 1
-        sent = {r.cluster_key for r in rows}
+        sent = [r.cluster_key for r in rows]
+        written: set[str] = set()
         with self.con:
             call_id = self._log_call(f"score_{variant}", system, prompt, res)
             for s in scores:
@@ -483,6 +564,20 @@ class _Night:
                     "novelty, call_id) VALUES (?,?,?,?,?,?,?,?)",
                     (s.cluster_id, variant, s.scope, s.event_type, s.sentiment, s.materiality, s.novelty, call_id))
                 self.out["scored"][variant] += cur.rowcount
+                if cur.rowcount:
+                    written.add(s.cluster_id)
+            # A parsed answer that leaves a sent cluster out is final for it: a forward look waits for every cluster
+            # in its windows, and one the model keeps omitting would hold it forever. A failed or unparsed call
+            # writes nothing and is retried next night.
+            if parsed:
+                for key in sent:
+                    if key in written:
+                        continue
+                    cur = self.con.execute(
+                        f"INSERT OR IGNORE INTO scores (cluster_key, variant, call_id, {OMITTED_COLUMN}) "
+                        "VALUES (?,?,?,1)",
+                        (key, variant, call_id))
+                    self.out["scores_omitted"][variant] += cur.rowcount
 
     def _prompt_cluster(self, c: _Cluster) -> PromptCluster:
         """The cluster as it stood at its cut-off: members captured before it, an excerpt fetched before it."""
@@ -533,14 +628,14 @@ class _Night:
                 out.append((key, story_text(self.clusters[key].representative_title)))
         return out
 
-    async def _map_headline(self, cand: HeadlineCandidate, counter: str) -> None:
+    async def _map_headline(self, cand: HeadlineCandidate) -> None:
         if cand.headline is None:
-            return        # counted once, up front, in ``headline_no_text``
-        await self._map(cand.cluster_id, "headline", story_text(cand.headline), counter)
+            return        # never mapped; counted up front in ``headline_no_text_total``
+        await self._map(cand.cluster_id, "headline", story_text(cand.headline))
 
-    async def _map(self, key: str, source: str, text: str, counter: str) -> None:
-        res = await self.llm.call(model=MAP_MODEL, system_prompt=self.mapper_prompt, prompt=text,
-                                  json_schema=MAPPER_SCHEMA)
+    async def _map(self, key: str, source: str, text: str) -> None:
+        res = await self._call(model=MAP_MODEL, system_prompt=self.mapper_prompt, prompt=text,
+                               json_schema=MAPPER_SCHEMA)
         groups = parse_mapper_output(res.output) if res.ok else None
         if res.ok and groups is None:
             self.out["unparsed_outputs"] += 1
@@ -551,46 +646,85 @@ class _Night:
                 cur = self.con.execute(
                     "INSERT OR IGNORE INTO mappings (candidate_key, source, groups, call_id) VALUES (?,?,?,?)",
                     (key, source, json.dumps(groups), call_id))
-                self.out["mapped"][counter] += cur.rowcount
+                self.out["mapped"][source] += cur.rowcount
 
     # ---------------------------------------------------------------- the call log
     def _log_call(self, purpose: str, system: str, prompt: str, res: Any) -> str:
-        """One append-only ``llm_calls`` row; the caller's transaction makes it atomic with what the call wrote."""
+        """One append-only ``llm_calls`` row; the caller's transaction makes it atomic with what the call wrote.
+        ``system_sha256`` hashes the system prompt alone, so a mapper call carries the mapper prompt's hash."""
         call_id = uuid.uuid4().hex
         hashed = f"{system}\n{prompt}".encode()
         self.con.execute(
             "INSERT INTO llm_calls (call_id, at, purpose, model, prompt_sha256, ok, error, effort, duration_s, "
-            "output_json, prompt_gz) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "output_json, prompt_gz, system_sha256, cli) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (call_id, res.at.astimezone(IST).isoformat(), purpose, res.model, hashlib.sha256(hashed).hexdigest(),
              1 if res.ok else 0, res.error, self.effort, res.duration_s,
-             json.dumps(res.output, sort_keys=True) if res.output is not None else None, gzip.compress(hashed)))
+             json.dumps(res.output, sort_keys=True) if res.output is not None else None, gzip.compress(hashed),
+             hashlib.sha256(system.encode()).hexdigest(), self.cli))
         self.out["calls"] += 1
         return call_id
 
 
 def _summary() -> dict[str, Any]:
     return {"skipped": None, "stopped": None, "clustered_items": 0, "new_clusters": 0, "calls": 0,
-            "scored": {"H": 0, "C": 0}, "mapped": {"headline": 0, "content": 0, "study_h": 0, "headline_seen": 0},
-            "headline_candidates": 0, "headline_no_text": 0, "unparsed_outputs": 0, "mapper_prompt_sha256": None}
+            "scored": {"H": 0, "C": 0}, "scores_omitted": {"H": 0, "C": 0},
+            "mapped": {"headline": 0, "content": 0, "study_h": 0},
+            "headline_candidates": 0, "headline_no_text_total": 0, "unparsed_outputs": 0,
+            "mapper_prompt_sha256": None}
 
 
-async def run_night(content_db: Path, state_db: Path, llm: Any, now: datetime) -> dict[str, Any]:
-    """One night's clustering, scoring and mapping. A cap or a stop ends the night cleanly (``stopped``); a
-    setup fault (an unknown model, a missing pinned CLI, an unreadable store) raises."""
+def _log_run(content_db: Path, run_at: datetime, finished_at: datetime, out: dict[str, Any]) -> None:
+    """One ``score_runs`` row: the scheduled task runs under pythonw, so its printed summary is lost."""
+    con = sqlite3.connect(content_db, timeout=30)
+    try:
+        con.executescript(_RUNS_SCHEMA)
+        with con:
+            con.execute("INSERT INTO score_runs (run_at, finished_at, summary_json) VALUES (?,?,?)",
+                        (run_at.isoformat(), finished_at.astimezone(IST).isoformat(),
+                         json.dumps(out, sort_keys=True, default=str)))
+    finally:
+        con.close()
+
+
+async def run_night(content_db: Path, state_db: Path, llm: Any, now: datetime, *,
+                    clock: Callable[[], datetime] | None = None) -> dict[str, Any]:
+    """One night's clustering, scoring and mapping. A cap, a stop or the market-hours check before a call ends the
+    night cleanly (``stopped``); a setup fault (an unknown model, a missing pinned CLI, an unreadable store) raises.
+    ``clock`` is read before every call and when the run ends. Every run whose content file exists, skipped,
+    stopped or raising, appends its summary to ``score_runs``."""
     if now.tzinfo is None:
         raise ValueError("now must be tz-aware")
     now = now.astimezone(IST)
-    out = _summary()
-    if reason := market_hours_refusal(now):
-        out["skipped"] = reason
-        return out
+    clock = clock if clock is not None else (lambda: datetime.now(IST))
     content_db = Path(content_db)
+    out = _summary()
+    try:
+        await _run_night(content_db, state_db, llm, now, clock, out)
+    except BaseException as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        if content_db.is_file():
+            _log_run(content_db, now, clock(), out)
+    return out
+
+
+async def _run_night(content_db: Path, state_db: Path, llm: Any, now: datetime, clock: Callable[[], datetime],
+                     out: dict[str, Any]) -> None:
+    if reason := call_refusal(now):
+        out["skipped"] = reason
+        return
     if not content_db.is_file():
         raise FileNotFoundError(f"{content_db}: the capture's database is missing")
+    mapper_bytes = MAPPER_PROMPT_PATH.read_bytes()
+    out["mapper_prompt_sha256"] = hashlib.sha256(mapper_bytes).hexdigest()
+    if changed := prompt_pin_mismatch(mapper_bytes):
+        out["skipped"] = f"{changed} changed since registration: content accrual stops until the owner re-registers"
+        return
     _, stop = night_budget(content_db, now)
     if stop is not None:
         out["skipped"] = f"stopped earlier today: {stop}"
-        return out
+        return
 
     state = open_state_ro(state_db)
     try:
@@ -598,23 +732,20 @@ async def run_night(content_db: Path, state_db: Path, llm: Any, now: datetime) -
     finally:
         state.close()
     out["headline_candidates"] = len(headlines)
-    out["headline_no_text"] = sum(1 for c in headlines if c.headline is None)
-    mapper_bytes = MAPPER_PROMPT_PATH.read_bytes()
-    out["mapper_prompt_sha256"] = hashlib.sha256(mapper_bytes).hexdigest()
+    out["headline_no_text_total"] = sum(1 for c in headlines if c.headline is None)
 
     con = sqlite3.connect(content_db, timeout=30)
     try:
         con.executescript(_SCHEMA)
         out["clustered_items"], out["new_clusters"] = _cluster_new_items(con, now)
         try:
-            await _Night(con, llm, now, mapper_bytes.decode("utf-8"), out).work(headlines)
+            await _Night(con, llm, now, mapper_bytes.decode("utf-8"), out, clock).work(headlines)
         except mml.LLMHalt as exc:
             out["stopped"] = f"{type(exc).__name__}: {exc}"
         if out["stopped"] is None and getattr(llm, "stopped", False):
             out["stopped"] = f"LLMStopped: {getattr(llm, 'stop_reason', None) or 'stopped'}"
     finally:
         con.close()
-    return out
 
 
 def _acquire_lock(path: Path) -> bool:
@@ -644,7 +775,7 @@ def main(argv: list[str] | None = None) -> int:
     if not 0 <= args.max_calls <= MAX_CALLS_PER_NIGHT:
         ap.error(f"--max-calls must be 0..{MAX_CALLS_PER_NIGHT}")
     now = datetime.now(IST)
-    if reason := market_hours_refusal(now):
+    if reason := call_refusal(now):
         print(f"refused: {reason}")
         return 2
     lock = Path(args.content_db).with_name("news_content_score.lock")

@@ -14,9 +14,14 @@ only its report files and always exits 0; an unreadable store prints ``UNAVAILAB
 No lookahead. tone(D) and D's policy candidates come from D's news window, [09:00 IST on the previous regular
 NSE session, 09:00 IST on D), so weekend and holiday news counts for the next session and every item belongs to
 exactly one session. Regular sessions come from ``config/calendar`` (muhurat excluded), never from the snapshot's
-bars, since D's own bar may not exist yet. Items are timed by ``agent_calls.at`` for headlines and by the cluster
-representative's ``first_captured_at`` for content (the anchor the scorer's cut-off uses). Baskets hold members
-liquid as of D-1, under the ``sector_map`` snapshot in force on D-1.
+bars, since D's own bar may not exist yet; the market's sessions are the NIFTY bar dates that are regular sessions,
+so holds, D-1, liquidity windows and populations never count a special session. Items are timed by
+``agent_calls.at`` for headlines and, for content, by the later of the cluster representative's
+``first_captured_at`` and ``published_at``. Baskets hold members liquid as of D-1, under the ``sector_map``
+snapshot in force on D-1.
+
+A look forms only on final inputs. While a score, a clustering or a mapping is still to come in a news window up
+to the look's cut, the hypothesis is waiting, since a late input would change trades the look already counted.
 """
 
 from __future__ import annotations
@@ -277,90 +282,135 @@ def _read_headline(con: sqlite3.Connection, limit: datetime, forward_open: datet
 
 @dataclass
 class StudyData:
-    scores: dict[str, list[Scored]]                 # variant -> scores
+    scores: dict[str, list[Scored]]                 # variant -> scores (omitted rows excluded)
     mappings: dict[str, dict[str, list[str]]]       # source -> candidate key -> groups
     runs: list[tuple[datetime, str, Any]]
     pinned_last_ok: dict[str, date | None]
     counts: dict[str, int]
     missing_tables: list[str]
+    #: variant -> keys whose final row is an omission: the model left the cluster out of a parsed answer
+    omitted: dict[str, set[str]] = field(default_factory=lambda: {"H": set(), "C": set()})
+    #: variant -> availability times of forward clusters with no counted row in that variant yet
+    unscored: dict[str, list[datetime]] = field(default_factory=lambda: {"H": [], "C": []})
+    #: capture times of forward items the scorer has not clustered yet
+    unclustered: list[datetime] = field(default_factory=list)
 
 
-_STUDY_TABLES = ("items", "capture_runs", "clusters", "llm_calls", "scores", "mappings")
+_STUDY_TABLES = ("items", "capture_runs", "clusters", "cluster_members", "llm_calls", "scores", "mappings")
+
+
+def _available_at(captured: datetime, published: datetime | None) -> datetime | None:
+    """When a cluster's representative was known: the later of its capture and its publication; None without a
+    publication time, since the spec times content news by both."""
+    return None if published is None else max(captured, published)
 
 
 def load_content(content_db: Path, limit: datetime, as_of: date) -> StudyData:
-    """The study's H and C scores of clusters captured before ``limit``, its mappings and its capture log. A
-    score or mapping from a call logged under another model than the pinned one is dropped and counted."""
+    """The study's H and C scores of clusters available before ``limit``, its mappings, its capture log and the
+    inputs still pending. A cluster is timed by the later of its representative's ``first_captured_at`` and
+    ``published_at``; one without ``published_at`` is dropped and counted. A score or mapping from a call logged
+    under another model than the pinned one is dropped and counted, which leaves its input pending. Every table is
+    read inside one transaction, so a scorer committing mid-read cannot pair new scores with an old call list."""
     con = _ro(content_db)
     counts = {"study_scores_excluded_model": 0, "study_mappings_excluded_model": 0, "study_at_unparsed": 0,
-              "study_mappings_unparsed": 0}
+              "study_mappings_unparsed": 0, "content_no_published_at": 0}
     try:
-        tables = {n for (n,) in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        missing = [t for t in _STUDY_TABLES if t not in tables]
-        day_end = datetime.combine(as_of + timedelta(days=1), time(0, 0), tzinfo=IST)
-        models: dict[str, str] = {}
-        last_ok: dict[str, date | None] = {SCORE_MODEL: None, MAP_MODEL: None}
-        if "llm_calls" in tables:
-            for call_id, raw_at, model, ok in con.execute("SELECT call_id, at, model, ok FROM llm_calls"):
-                models[call_id] = model
-                t = ncs._parse_ts(raw_at)
-                if ok == 1 and model in last_ok and t is not None and t < day_end:
-                    d = t.date()
-                    last_ok[model] = d if last_ok[model] is None else max(last_ok[model], d)
-        summaries: dict[str, str | None] = {}
-        if "items" in tables:
-            summaries = dict(con.execute("SELECT url, summary FROM items").fetchall())
-        clusters: dict[str, tuple[datetime, str, str]] = {}
-        if "clusters" in tables:
-            for key, raw, url, title in con.execute(
-                    "SELECT cluster_key, first_captured_at, representative_url, representative_title FROM clusters"):
-                t = ncs._parse_ts(raw)
-                if t is None:
-                    counts["study_at_unparsed"] += 1
-                elif t < limit:
-                    clusters[key] = (t, url, title)
-        scores: dict[str, list[Scored]] = {"H": [], "C": []}
-        if "scores" in tables:
-            for key, variant, scope, event_type, sent, mat, call_id in con.execute(
-                    "SELECT cluster_key, variant, scope, event_type, sentiment, materiality, call_id FROM scores "
-                    "ORDER BY cluster_key, variant"):
-                if key not in clusters or variant not in scores:
-                    continue
-                if models.get(call_id) != SCORE_MODEL:
-                    counts["study_scores_excluded_model"] += 1
-                    continue
-                t, url, title = clusters[key]
-                texts = (title,) if variant == "H" else (title, summaries.get(url) or "")
-                scores[variant].append(Scored(key, t, scope, event_type, _num(sent), _num(mat), texts))
-        mappings: dict[str, dict[str, list[str]]] = {"headline": {}, "study_h": {}, "content": {}}
-        if "mappings" in tables:
-            for key, source, raw, call_id in con.execute(
-                    "SELECT candidate_key, source, groups, call_id FROM mappings"):
-                if source not in mappings:
-                    continue
-                if models.get(call_id) != MAP_MODEL:
-                    counts["study_mappings_excluded_model"] += 1
-                    continue
-                try:
-                    groups = json.loads(raw)
-                except (TypeError, ValueError):
-                    counts["study_mappings_unparsed"] += 1
-                    continue
-                if not isinstance(groups, list):
-                    counts["study_mappings_unparsed"] += 1
-                    continue
-                mappings[source][key] = [g for g in groups if isinstance(g, str) and g in VOCAB]
-        runs: list[tuple[datetime, str, Any]] = []
-        if "capture_runs" in tables:
-            for raw, feed, error in con.execute("SELECT run_at, feed, error FROM capture_runs"):
-                t = ncs._parse_ts(raw)
-                if t is not None:
-                    runs.append((t, feed, error))
+        con.execute("BEGIN")
+        doc = _read_content(con, limit, as_of, counts)
+        con.rollback()
     except sqlite3.Error as exc:
         raise Unavailable(f"{content_db}: unreadable ({type(exc).__name__}: {exc})") from exc
     finally:
         con.close()
-    return StudyData(scores, mappings, runs, last_ok, counts, missing)
+    return doc
+
+
+def _read_content(con: sqlite3.Connection, limit: datetime, as_of: date, counts: dict[str, int]) -> StudyData:
+    tables = {n for (n,) in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    missing = [t for t in _STUDY_TABLES if t not in tables]
+    forward = ncs.STUDY_FORWARD_START
+    day_end = datetime.combine(as_of + timedelta(days=1), time(0, 0), tzinfo=IST)
+    models: dict[str, str] = {}
+    last_ok: dict[str, date | None] = {SCORE_MODEL: None, MAP_MODEL: None}
+    if "llm_calls" in tables:
+        for call_id, raw_at, model, ok in con.execute("SELECT call_id, at, model, ok FROM llm_calls"):
+            models[call_id] = model
+            t = ncs._parse_ts(raw_at)
+            if ok == 1 and model in last_ok and t is not None and t < day_end:
+                d = t.date()
+                last_ok[model] = d if last_ok[model] is None else max(last_ok[model], d)
+    items: dict[str, tuple[str | None, datetime | None, datetime | None, str | None]] = {}
+    if "items" in tables:
+        for url, title, summary, raw_pub, raw_cap in con.execute(
+                "SELECT url, title, summary, published_at, first_captured_at FROM items"):
+            items[url] = (summary, ncs._parse_ts(raw_pub), ncs._parse_ts(raw_cap), title)
+    members: set[str] = set()
+    if "cluster_members" in tables:
+        members = {u for (u,) in con.execute("SELECT url FROM cluster_members")}
+    # Items the scorer will cluster: captured from the study's start, before ``limit``, with a title it can
+    # tokenise (it never clusters one without words, so such an item is never pending).
+    unclustered = sorted(cap for url, (_, _, cap, title) in items.items()
+                         if url not in members and cap is not None and forward <= cap < limit
+                         and title_tokens(title or ""))
+    clusters: dict[str, tuple[datetime, str, str, datetime]] = {}
+    if "clusters" in tables:
+        for key, raw, url, title in con.execute(
+                "SELECT cluster_key, first_captured_at, representative_url, representative_title FROM clusters"):
+            captured = ncs._parse_ts(raw)
+            if captured is None:
+                counts["study_at_unparsed"] += 1
+                continue
+            t = _available_at(captured, items[url][1] if url in items else None)
+            if t is None:
+                counts["content_no_published_at"] += 1
+            elif t < limit:
+                clusters[key] = (t, url, title, captured)
+    scores: dict[str, list[Scored]] = {"H": [], "C": []}
+    omitted: dict[str, set[str]] = {"H": set(), "C": set()}
+    counted: dict[str, set[str]] = {"H": set(), "C": set()}
+    if "scores" in tables:
+        for key, variant, scope, event_type, sent, mat, call_id, omit in con.execute(
+                "SELECT cluster_key, variant, scope, event_type, sentiment, materiality, call_id, "
+                f"{ncs.OMITTED_COLUMN} FROM scores ORDER BY cluster_key, variant"):
+            if key not in clusters or variant not in scores:
+                continue
+            if models.get(call_id) != SCORE_MODEL:
+                counts["study_scores_excluded_model"] += 1
+                continue
+            counted[variant].add(key)
+            if omit:
+                omitted[variant].add(key)      # final, and adds nothing
+                continue
+            t, url, title, _ = clusters[key]
+            texts = (title,) if variant == "H" else (title, (items[url][0] if url in items else None) or "")
+            scores[variant].append(Scored(key, t, scope, event_type, _num(sent), _num(mat), texts))
+    unscored = {v: sorted(t for key, (t, _, _, captured) in clusters.items()
+                          if captured >= forward and key not in counted[v]) for v in ("H", "C")}
+    mappings: dict[str, dict[str, list[str]]] = {"headline": {}, "study_h": {}, "content": {}}
+    if "mappings" in tables:
+        for key, source, raw, call_id in con.execute(
+                "SELECT candidate_key, source, groups, call_id FROM mappings"):
+            if source not in mappings:
+                continue
+            if models.get(call_id) != MAP_MODEL:
+                counts["study_mappings_excluded_model"] += 1
+                continue
+            try:
+                groups = json.loads(raw)
+            except (TypeError, ValueError):
+                counts["study_mappings_unparsed"] += 1
+                continue
+            if not isinstance(groups, list):
+                counts["study_mappings_unparsed"] += 1
+                continue
+            mappings[source][key] = [g for g in groups if isinstance(g, str) and g in VOCAB]
+    runs: list[tuple[datetime, str, Any]] = []
+    if "capture_runs" in tables:
+        for raw, feed, error in con.execute("SELECT run_at, feed, error FROM capture_runs"):
+            t = ncs._parse_ts(raw)
+            if t is not None:
+                runs.append((t, feed, error))
+    return StudyData(scores, mappings, runs, last_ok, counts, missing, omitted, unscored, unclustered)
 
 
 # ----------------------------------------------------------------------------- the market
@@ -390,18 +440,36 @@ class Market:
     closes: np.ndarray
     notes: list[str] = field(default_factory=list)
     cache: dict[Any, Any] = field(default_factory=dict)
+    #: Bar dates the calendar does not count as regular sessions (special sessions), left out of liquidity windows.
+    skip_days: frozenset[date] = frozenset()
+
+
+def _calendar_has_year(cal: Any, y: int) -> bool:
+    d = date(y, 1, 1)
+    while d.year == y:
+        if cal.is_trading_day(d):
+            return True
+        d += timedelta(days=1)
+    return False
 
 
 def load_market(conn: duckdb.DuckDBPyConnection, as_of: date, etfs: frozenset[str],
-                themes: dict[str, frozenset[str]]) -> Market:
-    """The NIFTY session grid through ``as_of`` (every date with a NIFTY 50 bar) and the stock opens and closes
-    from the session before the seen window on."""
+                themes: dict[str, frozenset[str]], cal: Any) -> Market:
+    """The session grid through ``as_of`` and the stock opens and closes from the session before the seen window
+    on. Sessions are the NIFTY 50 bar dates that are regular sessions in ``cal`` (loaded without special
+    sessions), as the news windows count them, so holds, D-1, liquidity windows and populations never count a
+    special session's bar."""
     notes: list[str] = []
     try:
-        rows = conn.execute('SELECT d, "open", "close" FROM bars_1d WHERE symbol = ? AND d <= ? ORDER BY d',
-                            [INDEX_SYMBOL, as_of]).fetchall()
+        all_rows = conn.execute('SELECT d, "open", "close" FROM bars_1d WHERE symbol = ? AND d <= ? ORDER BY d',
+                                [INDEX_SYMBOL, as_of]).fetchall()
+        rows = [r for r in all_rows if cal.is_trading_day(mm._as_date(r[0]))]
         if not rows:
-            raise Unavailable(f"bars_1d has no {INDEX_SYMBOL!r} rows on or before {as_of}")
+            raise Unavailable(f"bars_1d has no {INDEX_SYMBOL!r} rows on regular sessions on or before {as_of}")
+        bar_days = {mm._as_date(d) for (d,) in conn.execute(
+            "SELECT DISTINCT d FROM bars_1d WHERE d <= ?", [as_of]).fetchall()}
+        covered = {y for y in {d.year for d in bar_days} if _calendar_has_year(cal, y)}
+        skip_days = frozenset(d for d in bar_days if d.year in covered and not cal.is_trading_day(d))
         sessions = [mm._as_date(r[0]) for r in rows]
         nifty = pd.DataFrame({"open": [float(r[1]) for r in rows], "close": [float(r[2]) for r in rows]},
                              index=pd.Index(sessions, name="date"))
@@ -433,13 +501,14 @@ def load_market(conn: duckdb.DuckDBPyConnection, as_of: date, etfs: frozenset[st
         by_asof[mm._as_date(a)][str(sector)].add(str(sym))
     sector_members = {a: {s: frozenset(v) for s, v in secs.items()} for a, secs in by_asof.items()}
     return Market(conn, sessions, {d: i for i, d in enumerate(sessions)}, nifty, etfs, themes, structural,
-                  sorted(sector_members), sector_members, day_row, sym_col, opens, closes, notes)
+                  sorted(sector_members), sector_members, day_row, sym_col, opens, closes, notes,
+                  skip_days=skip_days)
 
 
 def _liquid(m: Market, d_prev: date) -> frozenset[str]:
     key = ("liquid", d_prev)
     if key not in m.cache:
-        m.cache[key] = frozenset(mm.liquid_universe(m.conn, d_prev, m.etfs))
+        m.cache[key] = frozenset(mm.liquid_universe(m.conn, d_prev, m.etfs, m.skip_days))
     return m.cache[key]
 
 
@@ -687,10 +756,23 @@ def policy_population(m: Market, lo: date) -> Callable[[date], list[float]]:
 
 
 # ----------------------------------------------------------------------------- looks
+_PENDING_WORDS = (("clusters_unscored", "cluster", "unscored"), ("items_unclustered", "item", "unclustered"),
+                  ("candidates_unmapped", "candidate", "unmapped"))
+
+
+def _waiting_text(pending: dict[str, int], cut: date) -> str:
+    parts = [f"{n} {noun}{'' if n == 1 else 's'} {what}" for key, noun, what in _PENDING_WORDS
+             if (n := pending.get(key, 0))]
+    return f"waiting: {', '.join(parts)} in windows up to {cut}"
+
+
 def judge(closed: list[tuple[str, TradeRow]], population: Callable[[date], list[float]], cost: float, hold: int,
-          as_of: date, last_session: date) -> dict[str, Any]:
+          as_of: date, last_session: date,
+          pending: Callable[[date], dict[str, int]] | None = None) -> dict[str, Any]:
     """The look: a verdict on every trade closed by the exit of the 30th to close (if that is by the deadline);
-    else insufficient once the deadline has passed and the snapshot reaches it; else accruing."""
+    else insufficient once the deadline has passed and the snapshot reaches it; else accruing. A look forms only on
+    final inputs: while ``pending(cut)`` counts any input still to come in a news window up to the cut, it is
+    waiting, because a late score or mapping would change trades the look has already counted."""
     order = sorted(closed, key=lambda r: (r[1].exit_date, r[1].entry_date, r[0]))
     n = len(order)
     notes: list[str] = []
@@ -702,8 +784,14 @@ def judge(closed: list[tuple[str, TradeRow]], population: Callable[[date], list[
         status, cut = "accruing", None
         if as_of >= DEADLINE:
             notes.append(f"the snapshot ends {last_session}, before the {DEADLINE} deadline; refresh it to judge")
+    waiting = pending(cut) if cut is not None and pending is not None else {}
     out: dict[str, Any] = {"status": status, "look_date": cut if status == "verdict" else None, "cut": cut,
-                           "n_closed": n, "verdict": None, "population_n": None, "notes": notes}
+                           "n_closed": n, "verdict": None, "population_n": None, "notes": notes,
+                           "pending": waiting if any(waiting.values()) else None}
+    if any(waiting.values()):
+        out |= {"status": "waiting", "look_date": None, "cut": None, "label": "waiting",
+                "status_text": _waiting_text(waiting, cut), "sample": closed}
+        return out
     if cut is None:
         out |= {"status_text": f"accruing {n}/{mm.MIN_TRADES}", "label": "accruing", "sample": closed}
         return out
@@ -732,9 +820,10 @@ def _trade_dicts(rows: list[tuple[str, TradeRow]], baskets: dict[tuple[str, date
 
 def _hypothesis(name: str, start: date | None, rows: list[tuple[str, TradeRow]], open_: list[dict],
                 counts: dict[str, int], population: Callable[[date], list[float]] | None, cost: float, hold: int,
-                as_of: date, last: date, baskets: dict[tuple[str, date], Basket] | None) -> dict[str, Any]:
+                as_of: date, last: date, baskets: dict[tuple[str, date], Basket] | None,
+                pending: Callable[[date], dict[str, int]] | None = None) -> dict[str, Any]:
     pop = population if population is not None else (lambda cut: [])
-    look = judge(rows, pop, cost, hold, as_of, last)
+    look = judge(rows, pop, cost, hold, as_of, last, pending)
     sample = look.pop("sample")
     if start is None:
         look["notes"].append("not started: the content start has not been reached")
@@ -755,6 +844,16 @@ def content_start(runs: Iterable[tuple[datetime, str, Any]], windows: Sequence[d
     """The first regular session D on or after ``REGISTERED_FROM`` whose news window is complete: every feed
     polled without error in [09:00, 10:00) on the previous regular session's date and in [08:00, 09:00) on D.
     ``windows`` is ascending regular sessions, as for ``session_for``."""
+    polled = _polled(runs)
+    need = set(FEEDS)
+    for prev, d in zip(windows, windows[1:], strict=False):
+        if d >= mm.REGISTERED_FROM and need <= polled[(prev, "first")] and need <= polled[(d, "on_d")]:
+            return d
+    return None
+
+
+def _polled(runs: Iterable[tuple[datetime, str, Any]]) -> dict[tuple[date, str], set[str]]:
+    """``(date, slot) -> feeds polled without error``, for the two slots a window's completeness is judged on."""
     polled: dict[tuple[date, str], set[str]] = defaultdict(set)
     for t, feed, error in runs:
         if error is not None:
@@ -763,11 +862,19 @@ def content_start(runs: Iterable[tuple[datetime, str, Any]], windows: Sequence[d
         for slot, (a, b) in (("first", COMPLETE_FIRST_DAY), ("on_d", COMPLETE_ON_D)):
             if a <= local.time() < b:
                 polled[(local.date(), slot)].add(feed)
+    return polled
+
+
+def capture_incomplete(runs: Iterable[tuple[datetime, str, Any]], windows: Sequence[date],
+                       start: date | None) -> list[date]:
+    """The regular sessions D from ``start`` on where some feed had no error-free poll in [08:00, 09:00) on D.
+    Decides nothing: pre-open news is placed by capture time, so a missed last poll moves it into the next
+    session's window, and this shows where that may have happened."""
+    if start is None:
+        return []
+    polled = _polled(runs)
     need = set(FEEDS)
-    for prev, d in zip(windows, windows[1:], strict=False):
-        if d >= mm.REGISTERED_FROM and need <= polled[(prev, "first")] and need <= polled[(d, "on_d")]:
-            return d
-    return None
+    return [d for d in windows[1:] if d >= start and not need <= polled[(d, "on_d")]]
 
 
 # ----------------------------------------------------------------------------- comparison
@@ -881,6 +988,12 @@ def news_windows(cal: Any, as_of: date) -> list[date]:
     return [days[k - 1], *(d for d in days[k:] if d <= as_of)]
 
 
+def _in_windows(times: Iterable[datetime], windows: Sequence[date], cut: date, lo: date | None = None) -> int:
+    """How many of ``times`` fall in a news window D with ``lo`` <= D <= ``cut``."""
+    return sum(1 for t in times
+               if (d := session_for(t, windows)) is not None and d <= cut and (lo is None or d >= lo))
+
+
 def _window_open(windows: Sequence[date], d: date) -> datetime:
     """09:00 IST on the regular session before the first window session on or after ``d`` (the last drawn
     session when ``d`` lies past them all)."""
@@ -897,7 +1010,8 @@ def evaluate(state_db: Path, content_db: Path, snapshot: Path, as_of: date, *,
     as_of = mm._as_date(as_of)
     limit = datetime.combine(as_of, CUTOFF, tzinfo=IST)
     try:
-        windows = news_windows(load_calendar(calendar_dir), as_of)
+        cal = load_calendar(calendar_dir)
+        windows = news_windows(cal, as_of)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise Unavailable(f"NSE calendar unreadable ({type(exc).__name__}: {exc})") from exc
     themes = load_theme_lists(theme_lists)
@@ -906,7 +1020,7 @@ def evaluate(state_db: Path, content_db: Path, snapshot: Path, as_of: date, *,
     study = load_content(content_db, limit, as_of)
     conn = rc.open_snapshot(snapshot)
     try:
-        m = load_market(conn, as_of, etfs, themes)
+        m = load_market(conn, as_of, etfs, themes, cal)
         doc = _evaluate(m, head, study, as_of, windows)
     finally:
         mm._LIQUID_CACHE.pop(id(conn), None)
@@ -921,8 +1035,34 @@ def _evaluate(m: Market, head: HeadlineData, study: StudyData, as_of: date,
     cost = mm.cost_pct("CNC")
     start_c = content_start(study.runs, windows)
     h_all, c_all = study.scores["H"], study.scores["C"]
+    # Omitted rows never reach the score lists, so a cluster omitted in either variant is outside "both".
     both = {s.key for s in h_all} & {s.key for s in c_all}
     h_both, c_both = [s for s in h_all if s.key in both], [s for s in c_all if s.key in both]
+    any_h, any_c = {s.key for s in h_all} | study.omitted["H"], {s.key for s in c_all} | study.omitted["C"]
+    excluded_omitted = len((any_h & any_c) & (study.omitted["H"] | study.omitted["C"]))
+
+    def unmapped(scores: Iterable[Scored], source: str, *, need_text: bool = False) -> list[datetime]:
+        return [s.at for s in scores if ncs.meets_policy_bars(s.event_type, s.sentiment, s.materiality)
+                and s.key not in study.mappings[source] and (s.texts or not need_text)]
+
+    # A headline candidate with no readable text is final with no LLM groups: the scorer never maps it.
+    unmapped_head = unmapped(head.scores, "headline", need_text=True)
+    unmapped_content = unmapped(c_all, "content")
+
+    def content_pending(cut: date) -> dict[str, int]:
+        nine = datetime.combine(cut, CUTOFF, tzinfo=IST)
+        return {"clusters_unscored": _in_windows(study.unscored["C"], windows, cut),
+                "items_unclustered": sum(t < nine for t in study.unclustered)}
+
+    def policy_content_pending(cut: date) -> dict[str, int]:
+        lo = start_c if start_c is not None else cut + timedelta(days=1)
+        return content_pending(cut) | {"candidates_unmapped": _in_windows(unmapped_content, windows, cut, lo)}
+
+    def policy_headline_pending(cut: date) -> dict[str, int]:
+        return {"candidates_unmapped": _in_windows(unmapped_head, windows, cut, mm.REGISTERED_FROM)}
+
+    pending = {"news_tone_headline": None, "news_tone_content": content_pending,
+               "policy_headline": policy_headline_pending, "policy_content": policy_content_pending}
 
     tones = {"headline": tone_series(head.scores, windows), "content": tone_series(c_all, windows),
              "study_h": tone_series(h_both, windows), "study_c": tone_series(c_both, windows)}
@@ -938,7 +1078,8 @@ def _evaluate(m: Market, head: HeadlineData, study: StudyData, as_of: date,
         sig = tone_signal(series)
         rows, open_, counts = tone_trades(m, sig, start, None, cost)
         pop = tone_population(m, start) if start is not None else None
-        hyps[name] = _hypothesis(name, start, rows, open_, counts, pop, cost, TONE_HOLD, as_of, last, None)
+        hyps[name] = _hypothesis(name, start, rows, open_, counts, pop, cost, TONE_HOLD, as_of, last, None,
+                                 pending[name])
         if name == "news_tone_headline":
             s_rows, _, s_counts = tone_trades(m, sig, SEEN[0], SEEN[1], cost)
             seen[name] = {"window": list(SEEN), "summary": _summary(s_rows), "counts": s_counts}
@@ -948,13 +1089,17 @@ def _evaluate(m: Market, head: HeadlineData, study: StudyData, as_of: date,
         pop = policy_population(m, start) if start is not None else None
         hyps[name] = _hypothesis(name, start, rows, open_, counts | {f"candidates_{k}": v for k, v in
                                                                       ev_counts.items()},
-                                 pop, cost, POLICY_HOLD, as_of, last, baskets)
+                                 pop, cost, POLICY_HOLD, as_of, last, baskets, pending[name])
         if name == "policy_headline":
             s_rows, _, s_counts, _ = policy_trades(m, events, SEEN[0], SEEN[1], cost)
             seen[name] = {"window": list(SEEN), "summary": _summary(s_rows), "counts": s_counts}
 
     comparison = _comparison(m, tones, ev_sc, ev_sh, start_c, hyps, last)
     comparison["policy"]["study_h_candidates"] = cnt_sh
+    comparison["h_side"] = {"clusters_unscored_h": len(study.unscored["H"]),
+                            "study_h_candidates_unmapped": len(unmapped(h_all, "study_h")),
+                            "comparison_excluded_omitted": excluded_omitted}
+    incomplete = capture_incomplete(study.runs, windows, start_c)
 
     def no_tone(series: pd.Series, start: date | None) -> int | None:
         if start is None:
@@ -970,6 +1115,7 @@ def _evaluate(m: Market, head: HeadlineData, study: StudyData, as_of: date,
             "last_session": last, "min_trades": mm.MIN_TRADES, "cost_round_trip_pct_cnc": cost,
             "notional_inr": str(mm.NOTIONAL), "headline_key": list(head.key) if head.key is not None else None,
             "content_start": start_c, "pinned_models_last_ok": study.pinned_last_ok,
+            "capture_incomplete": {"n": len(incomplete), "dates": incomplete},
             "study_tables_missing": study.missing_tables, "notes": m.notes}
     return {"meta": meta, "counts": counts,
             "tones": {k: {d.isoformat(): (None if math.isnan(v) else float(v)) for d, v in s.items()}
@@ -980,11 +1126,13 @@ def _evaluate(m: Market, head: HeadlineData, study: StudyData, as_of: date,
 def _comparison(m: Market, tones: dict[str, pd.Series], ev_c: dict, ev_h: dict, start_c: date | None,
                 hyps: dict[str, Any], last: date) -> dict[str, Any]:
     """The headlines-versus-content comparison (decides nothing), cut where its content hypothesis is judged,
-    else at the snapshot's last session (an interim reading)."""
+    else at the snapshot's last session (an interim reading). It stays interim while either content hypothesis is
+    waiting for inputs."""
     out: dict[str, Any] = {"note": "decides nothing; read when the content hypothesis is judged or at 18 months"}
+    waiting = any(hyps[n]["status"] == "waiting" for n in ("news_tone_content", "policy_content"))
     for kind, hyp_name in (("tone", "news_tone_content"), ("policy", "policy_content")):
         cut = hyps[hyp_name]["cut"] or last
-        read = hyps[hyp_name]["status"] in ("verdict", "insufficient")
+        read = hyps[hyp_name]["status"] in ("verdict", "insufficient") and not waiting
         if start_c is None:
             res = compare_tone(pd.Series(dtype="float64"), pd.Series(dtype="float64"), pd.Series(dtype="float64")) \
                 if kind == "tone" else compare_policy([], [])
@@ -1023,11 +1171,16 @@ def render(doc: dict[str, Any]) -> str:
            f"engine clusters dropped {c['engine_clusters_excluded']}; unparsed outputs "
            f"{c['engine_outputs_unparsed']}; study scores/mappings off-model {c['study_scores_excluded_model']}/"
            f"{c['study_mappings_excluded_model']}",
-           f"sessions with no tone: {c['sessions_no_tone']}; voided legs: {c['legs_voided']}"]
+           f"sessions with no tone: {c['sessions_no_tone']}; voided legs: {c['legs_voided']}; "
+           f"content clusters without published_at {c['content_no_published_at']}"]
+    inc = m["capture_incomplete"]
+    out.append(f"capture incomplete (a feed missed its 08:00-09:00 poll; decides nothing): {inc['n']} session(s)"
+               + (f": {', '.join(str(d) for d in inc['dates'])}" if inc["dates"] else ""))
     if m["study_tables_missing"]:
         out.append(f"study tables missing (read as empty): {m['study_tables_missing']}")
     out += [f"note: {n}" for n in m["notes"]]
-    out += ["", "LOOKS (each judged once, at its 30th closed trade)"]
+    out += ["", "LOOKS (each judged once, at its 30th closed trade, on final inputs: no score, clustering or "
+                "mapping still to come in a window up to the cut)"]
     for name, h in doc["hypotheses"].items():
         out.append(f"  {name:<20} {h['status_text']}  [start {h['start'] or 'not reached'}; closed {h['n_closed']}, "
                    f"open {len(h['open'])}]")
@@ -1051,6 +1204,10 @@ def render(doc: dict[str, Any]) -> str:
                f"IC H {_f(t['ic_h'])} C {_f(t['ic_c'])} C-H {_f(t['diff'])} CI {ci_t}")
     out.append(f"  policy {p['answer']}  ({'read' if p['read'] else 'interim'}; cut {p['cut']}) events C {p['n_c']} "
                f"H {p['n_h']} mean C {_f(p['mean_c'])} H {_f(p['mean_h'])} C-H {_f(p['diff'])} CI {ci_p}")
+    hs = cmp_["h_side"]
+    out.append(f"  H side: clusters without an H score {hs['clusters_unscored_h']}, H candidates unmapped "
+               f"{hs['study_h_candidates_unmapped']}, clusters left out for an omitted score "
+               f"{hs['comparison_excluded_omitted']}")
     return rc.ascii_text("\n".join(out))
 
 
@@ -1078,6 +1235,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         etfs = mm.load_etf_symbols(args.etf_list)
         doc = evaluate(args.state_db, args.content_db, args.db, as_of, etf_symbols=etfs)
+        text = render(doc)
     except (Unavailable, rc.Refusal) as exc:
         print(f"macro_mood_forward: UNAVAILABLE: {rc.ascii_text(str(exc))}")
         return 0
@@ -1085,7 +1243,6 @@ def main(argv: list[str] | None = None) -> int:
         traceback.print_exc()
         print(f"macro_mood_forward: UNAVAILABLE: unexpected {type(exc).__name__}: {rc.ascii_text(str(exc))}")
         return 0
-    text = render(doc)
     out = args.out or default_out(args.db, as_of)
     try:
         md = rc.write_reports(doc, f"# MACRO MOOD FORWARD LOOKS\n\n```\n{text}\n```\n", out)

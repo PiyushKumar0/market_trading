@@ -213,7 +213,7 @@ def _capture_locked(db, fetch, now, max_new, sleep) -> dict:
                     if fetched_page:
                         sleep(PAGE_GAP_S)
                     fetched_page = True
-                    _store_body(con, it["url"], fetch, stamp())
+                    _store_body(con, it["url"], fetch, stamp)
             except Exception as exc:  # a feed failure is data, never a crash
                 error = f"{type(exc).__name__}: {exc}"
             con.execute("INSERT INTO capture_runs VALUES (?,?,?,?,?)", (run_at, name, seen, new, error))
@@ -224,7 +224,7 @@ def _capture_locked(db, fetch, now, max_new, sleep) -> dict:
     return {"skipped": False, "seen": sum(s for s, _ in feeds.values()), "new": total_new, "feeds": feeds}
 
 
-def _store_body(con: sqlite3.Connection, url: str, fetch, fetched_at: str) -> None:
+def _store_body(con: sqlite3.Connection, url: str, fetch, stamp: Callable[[], str]) -> None:
     status: int | None = None
     source, text = "none", ""
     try:
@@ -233,6 +233,9 @@ def _store_body(con: sqlite3.Connection, url: str, fetch, fetched_at: str) -> No
             source, text = extract_body(content.decode("utf-8", errors="replace"))
     except Exception:  # network failure: recorded as no body; the url is not retried
         pass
+    # Stamped once the fetch has returned: a request suspended by host standby across 09:00 can
+    # return a page edited after the open, and the stamp is what the 09:00 body cut-off reads.
+    fetched_at = stamp()
     con.execute("INSERT OR IGNORE INTO bodies VALUES (?,?,?,?,?)", (url, fetched_at, status, source, text))
     con.commit()
 

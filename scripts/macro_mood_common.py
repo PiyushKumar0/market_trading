@@ -395,11 +395,15 @@ def verdict(trades: list[TradeRow], population_gross: Sequence[float], hold: int
                            "cpcv": None}
     if not n:
         return out
-    half = n // 2
+    # Halves split at the median trade date (the lower median of the entry dates): trades on one date always share
+    # a half, and an empty half fails the criterion.
+    mid = statistics.median_low(t.entry_date for t in rows)
+    first = [t.net for t in rows if t.entry_date <= mid]
+    second = [t.net for t in rows if t.entry_date > mid]
     out["mean_net"] = statistics.fmean(nets)
     out["median_net"] = statistics.median(nets)
-    out["half1_mean"] = statistics.fmean(nets[:half]) if half else None
-    out["half2_mean"] = statistics.fmean(nets[half:])
+    out["half1_mean"] = statistics.fmean(first) if first else None
+    out["half2_mean"] = statistics.fmean(second) if second else None
     out["drop_top3_mean"] = statistics.fmean(sorted(nets)[:-3]) if n > 3 else None
     out["perm_p"] = permutation_pvalue([t.gross for t in rows], pop, seed=PERM_SEED)
     cv_rows = [SimpleNamespace(fill_date=t.entry_date, net={hold: t.net}) for t in rows]
@@ -435,22 +439,32 @@ def verdict(trades: list[TradeRow], population_gross: Sequence[float], hold: int
 
 
 # ----------------------------------------------------------------------------- liquid universe
-#: id(conn) -> (conn, {day: liquid symbols}, {ex_date: symbols}). The connection is held so its id is
-#: never reused while the entry exists.
-_LIQUID_CACHE: dict[int, tuple[Any, dict[date, frozenset[str]], dict[date, frozenset[str]]]] = {}
+#: id(conn) -> (conn, {skipped days: {day: liquid symbols}}, {ex_date: symbols}). The connection is held so its
+#: id is never reused while the entry exists.
+_LIQUID_CACHE: dict[int, tuple[Any, dict[frozenset[date], dict[date, frozenset[str]]],
+                               dict[date, frozenset[str]]]] = {}
 
 
-def _liquid_tables(conn: duckdb.DuckDBPyConnection) -> tuple[dict[date, frozenset[str]], dict[date, frozenset[str]]]:
+def _liquid_tables(conn: duckdb.DuckDBPyConnection, skip_days: frozenset[date] = frozenset()
+                   ) -> tuple[dict[date, frozenset[str]], dict[date, frozenset[str]]]:
     hit = _LIQUID_CACHE.get(id(conn))
-    if hit is not None and hit[0] is conn:
-        return hit[1], hit[2]
-    try:
-        ex_rows = conn.execute(
-            "SELECT ex_date, list(DISTINCT symbol) FROM corp_actions WHERE ex_date IS NOT NULL GROUP BY ex_date"
-        ).fetchall()
-    except duckdb.Error as exc:
-        raise Refusal(f"corp_actions unreadable ({type(exc).__name__}: {exc}); the breadth universe's "
-                      "ex-date exclusion requires it") from exc
+    if hit is not None and hit[0] is not conn:
+        hit = None
+    if hit is not None and skip_days in hit[1]:
+        return hit[1][skip_days], hit[2]
+    if hit is not None:
+        ex = hit[2]
+    else:
+        try:
+            ex_rows = conn.execute(
+                "SELECT ex_date, list(DISTINCT symbol) FROM corp_actions WHERE ex_date IS NOT NULL GROUP BY ex_date"
+            ).fetchall()
+        except duckdb.Error as exc:
+            raise Refusal(f"corp_actions unreadable ({type(exc).__name__}: {exc}); the breadth universe's "
+                          "ex-date exclusion requires it") from exc
+        ex = {_as_date(d): frozenset(syms) for d, syms in ex_rows}
+    skip = sorted(skip_days)
+    skip_sql = f"AND d NOT IN ({', '.join('?' * len(skip))})" if skip else ""
     # Index rows (e.g. "NIFTY 50", "INDIA VIX") share bars_1d; NSE equity symbols never contain a space.
     liquid_rows = conn.execute(
         f"""
@@ -459,28 +473,33 @@ def _liquid_tables(conn: duckdb.DuckDBPyConnection) -> tuple[dict[date, frozense
                    median("close" * volume) OVER w AS med_tv,
                    count(*) OVER w AS n_sessions
             FROM bars_1d
-            WHERE strpos(symbol, ' ') = 0
+            WHERE strpos(symbol, ' ') = 0 {skip_sql}
             WINDOW w AS (PARTITION BY symbol ORDER BY d
                          ROWS BETWEEN {LIQUID_WINDOW - 1} PRECEDING AND CURRENT ROW)
         )
         WHERE n_sessions = {LIQUID_WINDOW} AND med_tv >= ?
         GROUP BY d
         """,
-        [int(LIQUID_MIN_TV)],
+        [*skip, int(LIQUID_MIN_TV)],
     ).fetchall()
     liquid = {_as_date(d): frozenset(syms) for d, syms in liquid_rows}
-    ex = {_as_date(d): frozenset(syms) for d, syms in ex_rows}
-    _LIQUID_CACHE[id(conn)] = (conn, liquid, ex)
+    by_skip = hit[1] if hit is not None else {}
+    by_skip[skip_days] = liquid
+    _LIQUID_CACHE[id(conn)] = (conn, by_skip, ex)
     return liquid, ex
 
 
-def liquid_universe(conn: duckdb.DuckDBPyConnection, d_prev: date, etf_symbols: frozenset[str]) -> set[str]:
+def liquid_universe(conn: duckdb.DuckDBPyConnection, d_prev: date, etf_symbols: frozenset[str],
+                    skip_days: frozenset[date] = frozenset()) -> set[str]:
     """The breadth universe as of D-1: ``bars_1d`` stocks with a bar on ``d_prev`` whose median close x volume
     over their own 20 sessions to ``d_prev`` (inclusive) is >= Rs 10 cr; fewer than 20 sessions is not liquid.
     Drops ETFs (``backtest_hvol.is_etf``) and any name with a ``corp_actions`` ex-date on ``d_prev``.
+    ``skip_days`` are left out of every 20-session window (the forward looks pass the special sessions, which they
+    do not count as sessions); the backtests pass none.
 
-    The rolling medians are computed once per connection and cached; a fresh set is returned per call."""
-    liquid, ex = _liquid_tables(conn)
+    The rolling medians are computed once per connection and set of skipped days, and cached; a fresh set is
+    returned per call."""
+    liquid, ex = _liquid_tables(conn, frozenset(skip_days))
     d_prev = _as_date(d_prev)
     drop = ex.get(d_prev, frozenset())
     return {s for s in liquid.get(d_prev, ()) if s not in drop and not hv.is_etf(s, etf_symbols)}

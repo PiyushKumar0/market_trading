@@ -431,12 +431,36 @@ def test_atr_stop_exits_at_the_stop_when_a_low_touches_it(tmp_path):
     db, ext = build_world(tmp_path, post=post)
     ctx = context(db, ext)
     t = mm.TradeRow(s[20], s[20], s[24], 0.0, 0.0)
-    got = msm.atr_stop_trade(ctx, t, cost=0.1)
-    assert got.exit_date == s[22]
+    got, fired = msm.atr_stop_trade(ctx, t, cost=0.1)
+    assert got.exit_date == s[22] and fired is True
     assert got.gross == pytest.approx(-5.0) and got.net == pytest.approx(-5.1)
     post.loc[s[22], "low"] = 95.5
     db2, ext2 = build_world(tmp_path / "b", post=post)
-    assert msm.atr_stop_trade(context(db2, ext2), t, cost=0.1).exit_date == s[24]
+    got2, fired2 = msm.atr_stop_trade(context(db2, ext2), t, cost=0.1)
+    assert got2.exit_date == s[24] and fired2 is False
+
+
+def test_a_stop_on_the_exit_session_counts_as_stopped(tmp_path):
+    s = weekdays(30, date(2010, 1, 4))
+    pre = ohlc(s, [100.0 + 0.2 * (i % 2) for i in range(30)])           # ATR14 about 2.6
+    pre.loc[s[21], "low"] = 80.0                                        # the signal session's low hits the stop
+    spx = pd.Series([100.0] * 20 + [97.0] * 10, index=s)                # the US session dated s[20] falls 3%
+    db, ext = build_world(tmp_path, pre=pre, spx=spx)
+    ctx = context(db, ext)
+    rows, _ = msm.trades_for(ctx, "us_rebound", mm.SAMPLES["us_rebound"]["confirm"])
+    assert [(t.entry_date, t.exit_date) for t in rows] == [(s[21], s[21])]   # a 1-session hold
+    got, fired = msm.atr_stop_trade(ctx, rows[0], cost=0.1)
+    assert fired is True and got.exit_date == rows[0].exit_date          # the exit date cannot tell
+    assert got.gross < rows[0].gross and got.gross < -5.0
+    assert msm.diagnostics("us_rebound", ctx)["atr_stop"]["stopped"] == 1
+
+
+def test_high_beta_arm_charges_the_hypothesis_product_per_leg(tmp_path):
+    (db, ext), _, _ = _seen_world(tmp_path)
+    ctx = context(db, ext)
+    assert msm.high_beta_arm(ctx, "us_rebound", 1)["cost_pct_per_leg"] == pytest.approx(mm.cost_pct("MIS"))
+    assert msm.high_beta_arm(ctx, "us_follow", 5)["cost_pct_per_leg"] == pytest.approx(mm.cost_pct("CNC"))
+    assert mm.cost_pct("MIS") != pytest.approx(mm.cost_pct("CNC"))
 
 
 def test_high_beta_basket_takes_the_top_quintile_and_drops_ex_date_legs(tmp_path):

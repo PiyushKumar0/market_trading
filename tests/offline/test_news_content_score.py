@@ -46,8 +46,9 @@ from engine.intelligence.context import ContextAssembler  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
 HAIKU, SONNET = "claude-haiku-5-5", "claude-sonnet-5-5"
-NIGHT1 = datetime(2026, 11, 11, 22, 0, tzinfo=IST)
-NIGHT2 = datetime(2026, 11, 12, 22, 0, tzinfo=IST)
+# Thursday and Friday nights: a cluster captured on 11-11 after 09:00 is past its cut-off (11-12 09:00) on NIGHT1.
+NIGHT1 = datetime(2026, 11, 12, 22, 0, tzinfo=IST)
+NIGHT2 = datetime(2026, 11, 13, 22, 0, tzinfo=IST)
 _IDS = re.compile(r"cluster_id=(\S+)")
 
 AGENT_CALLS_DDL = """
@@ -180,15 +181,21 @@ class FakeLLM:
         return mml.LLMResult(True, payload, None, model, self.at, 0.1)
 
 
-def run(content_db: Path, state_db: Path, llm: Any, now: datetime = NIGHT1) -> dict:
-    return asyncio.run(ncs.run_night(content_db, state_db, llm, now))
+def run(content_db: Path, state_db: Path, llm: Any, now: datetime = NIGHT1, clock: Any = None) -> dict:
+    """One night whose per-call market-hours clock reads ``now`` unless given: never the wall clock."""
+    return asyncio.run(ncs.run_night(content_db, state_db, llm, now, clock=clock or (lambda: now)))
 
 
 def prompts(llm: FakeLLM, model: str) -> list[str]:
     return [c["prompt"] for c in llm.calls if c["model"] == model]
 
 
-# --------------------------------------------------------------------------- the brief's six
+def head_line(prompt: str) -> list[str]:
+    """Each cluster's ``N. cluster_id=... | first seen ... | k source domain(s)`` line."""
+    return [line for line in prompt.split("\n") if _IDS.search(line)]
+
+
+# --------------------------------------------------------------------------- prompts, cut-offs, candidates, CLI
 def test_h_and_c_prompts_differ_only_by_summary_and_excerpt_lines(content_db, state_db):
     add_item(content_db, "https://a.com/1", title(1), ts(11, 10), summary="Summary one.", body="Body one text.")
     add_item(content_db, "https://b.com/2", title(2), ts(11, 11), summary=None, body="Body two text.")
@@ -267,7 +274,7 @@ def test_headline_candidates_read_from_agent_calls_only_ok_news_analyst(content_
     assert sonnet == ["headline: Govt clears PLI for drones", "headline: Boundary scheme story"]
     assert all(c["system_prompt"] == ncs.MAPPER_PROMPT_PATH.read_text(encoding="utf-8")
                for c in llm.calls)
-    assert out["headline_no_text"] == 1                  # c-G: its context is unreadable
+    assert out["headline_no_text_total"] == 1            # c-G: its context is unreadable
 
 
 def test_context_headline_parsing_survives_damage():
@@ -308,7 +315,7 @@ def test_cli_refuses_a_cap_above_forty_and_skips_a_stopped_day(content_db, state
 
     add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
     run(content_db, state_db, FakeLLM(stop_at=1, at=datetime.now(IST)))
-    monkeypatch.setattr(ncs, "market_hours_refusal", lambda now: None)
+    monkeypatch.setattr(ncs, "call_refusal", lambda now: None)
 
     def no_llm(**kw):
         raise AssertionError("a stopped day must not build an LLM")
@@ -321,7 +328,7 @@ def test_cli_refuses_a_cap_above_forty_and_skips_a_stopped_day(content_db, state
 def test_cli_skips_while_another_run_holds_the_lock(content_db, state_db, monkeypatch):
     lock = content_db.parent / "news_content_score.lock"
     lock.write_bytes(b"")
-    monkeypatch.setattr(ncs, "market_hours_refusal", lambda now: None)
+    monkeypatch.setattr(ncs, "call_refusal", lambda now: None)
 
     def no_llm(**kw):
         raise AssertionError("a locked run must not build an LLM")
@@ -333,6 +340,32 @@ def test_cli_skips_while_another_run_holds_the_lock(content_db, state_db, monkey
     old = lock.stat().st_mtime - ncs.LOCK_STALE_S - 1
     os.utime(lock, (old, old))
     assert ncs._acquire_lock(lock) is True                                      # a crashed run's lock is reclaimed
+
+
+def test_cli_hands_the_budgets_remaining_calls_to_the_llm(content_db, state_db, monkeypatch):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    add_item(content_db, "https://a.com/2", title(2), ts(11, 10, 1))
+    today = datetime.now(IST)
+    run(content_db, state_db, FakeLLM(at=today, max_calls=3))                   # three calls logged today
+    assert ncs.night_budget(content_db, today) == (37, None)
+    monkeypatch.setattr(ncs, "call_refusal", lambda now: None)
+    built: list[int] = []
+    nights: list[tuple] = []
+
+    class Spy:
+        def __init__(self, *, max_calls):
+            built.append(max_calls)
+
+    async def fake_night(content, state, llm, now, **kw):
+        nights.append((content, state, type(llm).__name__))
+        return ncs._summary()
+
+    monkeypatch.setattr(ncs.mml, "StudyLLM", Spy)
+    monkeypatch.setattr(ncs, "run_night", fake_night)
+    assert ncs.main(["--content-db", str(content_db), "--state-db", str(state_db)]) == 0
+    assert built == [37] and nights == [(content_db, state_db, "Spy")]
+    assert ncs.main(["--content-db", str(content_db), "--state-db", str(state_db), "--max-calls", "5"]) == 0
+    assert built == [37, 2]                                                     # the cap minus today's three
 
 
 def test_representatives_capture_sets_the_window(content_db, state_db):
@@ -431,7 +464,7 @@ def test_night_stops_at_cap_and_resumes_next_night(content_db, state_db, agents_
     responder = Responder()
     llm = mml.StudyLLM(max_calls=3, query_fn=responder, options_cls=FakeOptions, agents_cfg=agents_cfg)
 
-    out1 = asyncio.run(ncs.run_night(content_db, state_db, llm, NIGHT1))
+    out1 = run(content_db, state_db, llm, NIGHT1)
 
     assert out1["stopped"].startswith("CallCapReached")
     # Batch 1 (30 oldest) scored H and C, batch 2 scored H only; nothing mapped yet.
@@ -442,7 +475,7 @@ def test_night_stops_at_cap_and_resumes_next_night(content_db, state_db, agents_
         ("score_H",), ("score_C",), ("score_H",)]
 
     llm2 = mml.StudyLLM(max_calls=40, query_fn=responder, options_cls=FakeOptions, agents_cfg=agents_cfg)
-    out2 = asyncio.run(ncs.run_night(content_db, state_db, llm2, NIGHT1 + timedelta(days=1)))
+    out2 = run(content_db, state_db, llm2, NIGHT1 + timedelta(days=1))
 
     assert out2["stopped"].startswith("CallCapReached")
     assert q(content_db, "SELECT variant, count(*) FROM scores GROUP BY 1 ORDER BY 1") == [("C", 31), ("H", 31)]
@@ -452,7 +485,7 @@ def test_night_stops_at_cap_and_resumes_next_night(content_db, state_db, agents_
         ("content", 31), ("headline", 1), ("study_h", 7)]
 
     llm3 = mml.StudyLLM(max_calls=40, query_fn=responder, options_cls=FakeOptions, agents_cfg=agents_cfg)
-    out3 = asyncio.run(ncs.run_night(content_db, state_db, llm3, NIGHT1 + timedelta(days=2)))
+    out3 = run(content_db, state_db, llm3, NIGHT1 + timedelta(days=2))
 
     assert out3["stopped"] is None and llm3.calls_made == 24
     assert q(content_db, "SELECT source, count(*) FROM mappings GROUP BY 1 ORDER BY 1") == [
@@ -524,7 +557,7 @@ def test_budget_subtracts_todays_calls_and_a_stop_ends_the_day(content_db, state
     add_item(content_db, "https://a.com/2", title(2), ts(11, 10, 5))
     assert ncs.night_budget(content_db, NIGHT1) == (40, None)
 
-    llm = FakeLLM(stop_at=2, at=ts(11, 21, 59))
+    llm = FakeLLM(stop_at=2, at=ts(12, 21, 59))
     out = run(content_db, state_db, llm)
 
     assert out["stopped"].startswith("LLMStopped")
@@ -545,9 +578,9 @@ def test_budget_subtracts_todays_calls_and_a_stop_ends_the_day(content_db, state
 
 def test_budget_counts_by_ist_date_across_midnight(content_db, state_db):
     add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
-    run(content_db, state_db, FakeLLM(at=ts(11, 23, 59, 59), max_calls=1))
-    assert ncs.night_budget(content_db, ts(11, 23, 59, 59))[0] == 39
-    assert ncs.night_budget(content_db, ts(12, 0, 0, 0))[0] == 40
+    run(content_db, state_db, FakeLLM(at=ts(12, 23, 59, 59), max_calls=1), ts(12, 23, 59, 59))
+    assert ncs.night_budget(content_db, ts(12, 23, 59, 59))[0] == 39
+    assert ncs.night_budget(content_db, ts(13, 0, 0, 0))[0] == 40
 
 
 @pytest.mark.parametrize("now", [ts(11, 9, 15), ts(11, 15, 29, 59), ts(13, 12, 0)])
@@ -563,6 +596,146 @@ def test_market_hours_are_refused(content_db, state_db, now):
 def test_outside_market_hours_runs(content_db, state_db, now):
     add_item(content_db, "https://a.com/1", title(1), ts(11, 8))
     assert run(content_db, state_db, FakeLLM(at=now), now)["skipped"] is None
+
+
+def test_a_night_resumed_inside_market_hours_stops_before_its_next_call(content_db, state_db):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    reads = iter([NIGHT1])                                   # the first call at 22:00, then standby until 09:20
+
+    def clock():
+        return next(reads, ts(13, 9, 20))
+
+    llm = FakeLLM()
+    out = run(content_db, state_db, llm, NIGHT1, clock=clock)
+    assert llm.calls_made == 1
+    assert out["stopped"].startswith("MarketHoursHalt: market hours (2026-11-13 09:20 IST)")
+    assert q(content_db, "SELECT purpose FROM llm_calls") == [("score_H",)]
+
+
+def test_the_calendar_rule_alone_refuses(content_db, state_db, monkeypatch):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    sunday_session = ts(15, 10)                              # a weekend special session the weekday rule misses
+    assert ncs.market_hours_refusal(sunday_session) is None
+    monkeypatch.setattr(ncs, "calendar_refusal",
+                        lambda now: "market hours (special session)" if now == sunday_session else None)
+    assert ncs.call_refusal(sunday_session) == "market hours (special session)"
+    llm = FakeLLM()
+    out = run(content_db, state_db, llm, sunday_session)
+    assert out["skipped"] == "market hours (special session)" and llm.calls_made == 0
+
+    reads = iter([NIGHT1])                                   # and before a call, on the injected clock
+    llm2 = FakeLLM()
+    out2 = run(content_db, state_db, llm2, NIGHT1, clock=lambda: next(reads, sunday_session))
+    assert llm2.calls_made == 1 and out2["stopped"] == "MarketHoursHalt: market hours (special session)"
+
+
+def test_the_calendar_rule_runs_through_the_real_calendar():
+    session = datetime(2026, 11, 12, 10, 0, tzinfo=IST)        # a regular Thursday session
+    assert ncs.calendar_refusal(session).startswith("market hours")
+    assert ncs.calendar_refusal(session.replace(hour=22)) is None
+
+
+def test_a_calendar_that_raises_is_ignored_and_the_weekday_rule_stands(content_db, state_db, monkeypatch):
+    def broken(now):
+        raise FileNotFoundError("config/calendar/2027.yaml")
+
+    monkeypatch.setattr(ncs, "calendar_refusal", broken)
+    assert ncs.call_refusal(ts(15, 10)) is None                                 # Sunday: nothing refuses
+    assert ncs.call_refusal(ts(13, 10)).startswith("market hours")               # Friday: the weekday rule
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    llm = FakeLLM()
+    assert run(content_db, state_db, llm)["stopped"] is None and llm.calls_made == 4
+    assert run(content_db, state_db, FakeLLM(), ts(13, 10))["skipped"].startswith("market hours")
+
+
+def test_prompt_pins_are_the_registered_prompts():
+    mapper = ncs.MAPPER_PROMPT_PATH.read_bytes()
+    assert hashlib.sha256(mapper).hexdigest() == ncs.MAPPER_PROMPT_SHA256
+    score_text = news_analyst.SYSTEM_PROMPT + "\n" + json.dumps(news_analyst.output_json_schema(), sort_keys=True)
+    assert hashlib.sha256(score_text.encode("utf-8")).hexdigest() == ncs.SCORE_PROMPT_SHA256
+    assert ncs.prompt_pin_mismatch(mapper) is None
+    assert ncs.prompt_pin_mismatch(mapper + b" ") == "the mapper prompt"
+
+
+@pytest.mark.parametrize("pin, which", [("MAPPER_PROMPT_SHA256", "the mapper prompt"),
+                                        ("SCORE_PROMPT_SHA256", "the scoring prompt")])
+def test_a_changed_prompt_stops_accrual_without_a_call(content_db, state_db, monkeypatch, pin, which):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    add_call(state_db, "k1", ts(10, 10), [("c-A", "Govt scheme")], [score("c-A")])
+    monkeypatch.setattr(ncs, pin, "0" * 64)
+    llm = FakeLLM()
+    out = run(content_db, state_db, llm)
+    assert out["skipped"] == (f"{which} changed since registration: content accrual stops until the owner "
+                              "re-registers")
+    assert llm.calls_made == 0 and q(content_db, "SELECT name FROM sqlite_master WHERE name='llm_calls'") == []
+
+
+def test_every_run_appends_its_summary_to_score_runs(content_db, state_db, monkeypatch):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    finished = [ts(12, 22, 5)]
+    run(content_db, state_db, FakeLLM(), NIGHT1, clock=lambda: finished[0])     # a full night
+    run(content_db, state_db, FakeLLM(), ts(13, 10))                            # skipped: market hours
+    run(content_db, state_db, FakeLLM(max_calls=0), NIGHT2)                     # nothing to do, never stopped
+    add_item(content_db, "https://a.com/2", title(2), ts(12, 10))
+    run(content_db, state_db, FakeLLM(max_calls=0), NIGHT2)                     # stopped by the cap
+    def unreadable(path):
+        raise sqlite3.OperationalError("gone")
+
+    monkeypatch.setattr(ncs, "open_state_ro", unreadable)
+    with pytest.raises(sqlite3.OperationalError):
+        run(content_db, state_db, FakeLLM(), NIGHT2)                            # a setup fault, logged then raised
+    rows = q(content_db, "SELECT run_at, finished_at, summary_json FROM score_runs ORDER BY rowid")
+    assert [(r[0], r[1]) for r in rows[:2]] == [(NIGHT1.isoformat(), ts(12, 22, 5).isoformat()),
+                                                (ts(13, 10).isoformat(), ts(13, 10).isoformat())]
+    docs = [json.loads(r[2]) for r in rows]
+    assert docs[0]["scored"] == {"H": 1, "C": 1} and docs[0]["skipped"] is None and docs[0]["calls"] == 4
+    assert docs[1]["skipped"].startswith("market hours")
+    assert docs[2]["calls"] == 0 and docs[2]["stopped"] is None
+    assert docs[3]["stopped"].startswith("CallCapReached")
+    assert docs[4]["error"] == "OperationalError: gone"
+    assert len(rows) == 5
+
+
+def test_a_missing_content_file_raises_and_logs_nothing(tmp_path, state_db):
+    with pytest.raises(FileNotFoundError):
+        run(tmp_path / "absent.sqlite", state_db, FakeLLM())
+    assert not (tmp_path / "absent.sqlite").exists()
+
+
+# --------------------------------------------------------------------------- the cut-off rule
+def test_a_cluster_is_not_scored_before_its_cutoff(content_db, state_db):
+    add_item(content_db, "https://a.com/1", title(1), ts(12, 9, 0))                # cut-off 11-13 09:00
+    add_item(content_db, "https://a.com/2", title(2), ts(12, 8, 59, 59))           # cut-off 11-12 09:00
+    llm = FakeLLM()
+    out = run(content_db, state_db, llm, NIGHT1)
+    assert out["new_clusters"] == 2
+    assert [_IDS.findall(p) for p in prompts(llm, HAIKU)] == [["c-" + ncs.headline_id_for("https://a.com/2")]] * 2
+
+    llm0 = FakeLLM()
+    run(content_db, state_db, llm0, ts(13, 8, 59, 59))                          # still before it: no call
+    assert llm0.calls_made == 0
+    llm2 = FakeLLM(at=NIGHT2)
+    run(content_db, state_db, llm2, NIGHT2)
+    assert [_IDS.findall(p) for p in prompts(llm2, HAIKU)] == [["c-" + ncs.headline_id_for("https://a.com/1")]] * 2
+
+
+def test_a_retried_c_sees_the_members_h_saw(content_db, state_db):
+    base = "Cabinet clears new semiconductor fab incentive worth Rs 76,000 crore"
+    add_item(content_db, "https://a.com/1", base, ts(11, 10), published=ts(11, 9, 50), summary="S.")
+    llm1 = FakeLLM(fail_at=frozenset({2}))                                      # H scored, C fails
+    run(content_db, state_db, llm1, NIGHT1)
+    assert q(content_db, "SELECT variant FROM scores") == [("H",)]
+    # A new member captured after the 11-12 09:00 cut-off joins before C is retried.
+    add_item(content_db, "https://b.com/2", base + " now", ts(12, 23), published=ts(12, 8, 0))
+    llm2 = FakeLLM(at=NIGHT2)
+    run(content_db, state_db, llm2, NIGHT2)
+    (h,) = prompts(llm1, HAIKU)[:1]
+    (c,) = prompts(llm2, HAIKU)
+    assert "   summary: S." in c and c.count("cluster_id=") == 1
+    assert head_line(c) == head_line(h) == [
+        f"1. cluster_id={'c-' + ncs.headline_id_for('https://a.com/1')} | first seen 2026-11-11 | 1 source domain(s)"]
+    assert json.loads(q(content_db, "SELECT member_urls FROM clusters")[0][0]) == [
+        "https://a.com/1", "https://b.com/2"]
 
 
 # --------------------------------------------------------------------------- clustering and scoring
@@ -615,8 +788,8 @@ def test_prompt_counts_only_members_captured_before_the_cutoff(content_db, state
 def test_pre_window_clusters_are_clustered_but_never_scored(content_db, state_db):
     add_item(content_db, "https://a.com/old", title(1), ts(10, 8, 59, 59))
     add_item(content_db, "https://a.com/new", title(2), ts(10, 9, 0, 0))
-    llm = FakeLLM(at=ts(10, 22))
-    run(content_db, state_db, llm, ts(10, 22))
+    llm = FakeLLM(at=ts(11, 22))
+    run(content_db, state_db, llm, ts(11, 22))
 
     assert q(content_db, "SELECT count(*) FROM clusters") == [(2,)]
     assert q(content_db, "SELECT DISTINCT cluster_key FROM scores") == [("c-" + ncs.headline_id_for("https://a.com/new"),)]
@@ -638,28 +811,56 @@ def test_null_published_at_falls_back_to_capture_time(content_db, state_db):
     assert q(content_db, "SELECT first_seen FROM clusters") == [(ts(11, 10).isoformat(),)]
 
 
-def test_failed_and_partial_score_calls_leave_clusters_for_the_next_night(content_db, state_db):
+def test_a_failed_call_is_retried_and_an_omitted_cluster_is_final(content_db, state_db):
     for i in range(3):
         add_item(content_db, f"https://a.com/{i}", title(i), ts(11, 10, i))
     key0 = "c-" + ncs.headline_id_for("https://a.com/0")
 
     def scorer(cid, prompt):
         if cid == key0:
-            return None                                            # the model skipped one cluster
+            return None                                            # the model leaves one cluster out
         return score(cid)
 
     llm = FakeLLM(fail_at=frozenset({2}), scorer=scorer)           # the C call fails outright
     out = run(content_db, state_db, llm)
     assert out["stopped"] is None
-    assert q(content_db, "SELECT variant, count(*) FROM scores GROUP BY 1") == [("H", 2)]
+    assert out["scored"] == {"H": 2, "C": 0} and out["scores_omitted"] == {"H": 1, "C": 0}
+    h_call = q(content_db, "SELECT call_id FROM llm_calls WHERE purpose='score_H'")[0][0]
+    assert q(content_db, "SELECT cluster_key, scope, event_type, sentiment, materiality, novelty, call_id, omitted "
+                         "FROM scores WHERE omitted=1") == [(key0, None, None, None, None, None, h_call, 1)]
+    assert q(content_db, "SELECT variant, omitted, count(*) FROM scores GROUP BY 1, 2 ORDER BY 1, 2") == [
+        ("H", 0, 2), ("H", 1, 1)]
     assert q(content_db, "SELECT purpose, ok, error FROM llm_calls WHERE ok=0") == [
         ("score_C", 0, "timeout: no complete response")]
 
     llm2 = FakeLLM(at=NIGHT2)
-    run(content_db, state_db, llm2, NIGHT2)
+    out2 = run(content_db, state_db, llm2, NIGHT2)
     assert q(content_db, "SELECT variant, count(*) FROM scores GROUP BY 1 ORDER BY 1") == [("C", 3), ("H", 3)]
-    h2, c2 = prompts(llm2, HAIKU)
-    assert _IDS.findall(h2) == [key0] and len(_IDS.findall(c2)) == 3
+    (c2,) = prompts(llm2, HAIKU)                                   # the omitted H is never re-sent; C retried
+    assert len(_IDS.findall(c2)) == 3 and out2["scored"] == {"H": 0, "C": 3}
+    assert q(content_db, "SELECT omitted FROM scores WHERE cluster_key=? AND variant='H'", key0) == [(1,)]
+
+
+@pytest.mark.parametrize("garbled", [{"not_scores": []}, {"scores": "none"}, {"scores": None}])
+def test_an_unparsed_score_output_writes_no_rows_and_is_retried(content_db, state_db, garbled):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+
+    class Garbled(FakeLLM):
+        async def call(self, **kw):
+            res = await super().call(**kw)
+            if kw["model"] == HAIKU:
+                res.output = garbled
+            return res
+
+    out = run(content_db, state_db, Garbled())
+    assert out["unparsed_outputs"] == 2 and out["scores_omitted"] == {"H": 0, "C": 0}
+    assert q(content_db, "SELECT count(*) FROM scores") == [(0,)]
+    assert q(content_db, "SELECT purpose, ok FROM llm_calls ORDER BY rowid") == [("score_H", 1), ("score_C", 1)]
+
+    llm2 = FakeLLM(at=NIGHT2)
+    run(content_db, state_db, llm2, NIGHT2)
+    assert len(prompts(llm2, HAIKU)) == 2
+    assert q(content_db, "SELECT variant, omitted FROM scores ORDER BY 1") == [("C", 0), ("H", 0)]
 
 
 def test_unknown_duplicate_and_invalid_score_ids_are_ignored(content_db, state_db):
@@ -684,44 +885,59 @@ def test_llm_calls_rows_carry_effort_hash_and_prompt(content_db, state_db):
     llm = FakeLLM()
     run(content_db, state_db, llm)
 
-    rows = q(content_db, "SELECT purpose, model, prompt_sha256, ok, error, effort, prompt_gz, at FROM llm_calls "
-                         "ORDER BY rowid")
+    rows = q(content_db, "SELECT purpose, model, prompt_sha256, ok, error, effort, prompt_gz, at, system_sha256, cli "
+                         "FROM llm_calls ORDER BY rowid")
     assert [r[0] for r in rows] == ["score_H", "score_C", "map_content", "map_headline"]
-    for (_purpose, model, sha, ok, error, effort, blob, at), call in zip(rows, llm.calls, strict=True):
+    for (_purpose, model, sha, ok, error, effort, blob, at, system_sha, cli), call in zip(rows, llm.calls,
+                                                                                          strict=True):
         text = call["system_prompt"] + "\n" + call["prompt"]
         assert sha == hashlib.sha256(text.encode("utf-8")).hexdigest()
         assert gzip.decompress(blob).decode("utf-8") == text
+        assert system_sha == hashlib.sha256(call["system_prompt"].encode("utf-8")).hexdigest()
         assert model == call["model"] and ok == 1 and error is None and effort == "default"
-        assert at == NIGHT1.isoformat()
+        assert at == NIGHT1.isoformat() and cli == "unknown"                    # FakeLLM has no cli_path
+    mapper_sha = hashlib.sha256(ncs.MAPPER_PROMPT_PATH.read_bytes()).hexdigest()
+    assert [r[8] for r in rows[2:]] == [mapper_sha, mapper_sha]                 # the spec's per-call mapper hash
     assert [c["model"] for c in llm.calls] == [HAIKU, HAIKU, SONNET, SONNET]
 
 
+def test_llm_calls_log_the_study_llms_cli_path(content_db, state_db, agents_cfg):
+    add_item(content_db, "https://a.com/1", title(1), ts(11, 10))
+    llm = mml.StudyLLM(max_calls=1, query_fn=Responder(), options_cls=FakeOptions, agents_cfg=agents_cfg)
+    run(content_db, state_db, llm)
+    assert q(content_db, "SELECT cli FROM llm_calls") == [(agents_cfg["llm"]["cli_path"],)]
+
+
 # --------------------------------------------------------------------------- candidates and priority
-def test_priority_forward_then_content_then_study_h_then_backlog(content_db, state_db):
+def test_priority_scores_then_headlines_then_content_then_study_h(content_db, state_db):
     add_item(content_db, "https://a.com/1", title(1), ts(11, 10), summary="Study summary.", body="Study body.")
     add_call(state_db, "old", ts(7, 20, month=8), [("c-OLD", "Backlog scheme")], [score("c-OLD")])
-    add_call(state_db, "seen0", ts(16, 0, 0, month=7), [("c-EDGE", "First backlog day")], [score("c-EDGE")])
-    add_call(state_db, "pre", ts(15, 23, 59, month=7), [("c-PRE", "Before the backlog")], [score("c-PRE")])
+    add_call(state_db, "pre", ts(9, 8, 59, 59), [("c-PRE", "Just before the start")], [score("c-PRE")])
+    add_call(state_db, "edge", ts(9, 9, 0), [("c-EDGE", "Forward from the start")], [score("c-EDGE")])
     add_call(state_db, "fwd2", ts(11, 8), [("c-F2", "Forward two")], [score("c-F2")])
     add_call(state_db, "fwd1", ts(10, 9, 0), [("c-F1", "Forward one")], [score("c-F1")])
+    # First scored before the start, re-scored after it: its first score decides, so it is never a candidate.
+    add_call(state_db, "first", ts(9, 8), [("c-RE", "Re-scored story")], [score("c-RE", event_type="other")])
+    add_call(state_db, "again", ts(11, 9), [("c-RE", "Re-scored story")], [score("c-RE")])
     add_call(state_db, "late", NIGHT1 + timedelta(seconds=1), [("c-LATE", "After now")], [score("c-LATE")])
     llm = FakeLLM(max_calls=5)
 
     out = run(content_db, state_db, llm)
 
-    assert prompts(llm, SONNET) == [
-        "headline: Forward one", "headline: Forward two",
-        f"headline: {title(1)}\nsummary: Study summary.\nexcerpt: Study body."]
+    assert prompts(llm, SONNET) == ["headline: Forward from the start", "headline: Forward one",
+                                    "headline: Forward two"]
     assert out["stopped"].startswith("CallCapReached")
+    assert out["headline_candidates"] == 3 and out["mapped"] == {"headline": 3, "content": 0, "study_h": 0}
 
     llm2 = FakeLLM(at=NIGHT2)
     out2 = run(content_db, state_db, llm2, NIGHT2)
-    # c-LATE was scored after night 1's `now`, so it is new forward work on night 2 and goes first.
-    assert prompts(llm2, SONNET) == ["headline: After now", f"headline: {title(1)}",
-                                     "headline: First backlog day", "headline: Backlog scheme"]
-    assert out2["mapped"] == {"headline": 1, "content": 0, "study_h": 1, "headline_seen": 2}
+    # c-LATE was scored after night 1's `now`, so it is new work on night 2 and goes first.
+    assert prompts(llm2, SONNET) == ["headline: After now",
+                                     f"headline: {title(1)}\nsummary: Study summary.\nexcerpt: Study body.",
+                                     f"headline: {title(1)}"]
+    assert out2["mapped"] == {"headline": 1, "content": 1, "study_h": 1}
     keys = {r[0] for r in q(content_db, "SELECT candidate_key FROM mappings WHERE source='headline'")}
-    assert keys == {"c-F1", "c-F2", "c-EDGE", "c-OLD", "c-LATE"}             # c-PRE is before the backlog
+    assert keys == {"c-EDGE", "c-F1", "c-F2", "c-LATE"}                     # nothing first scored before the start
 
 
 def test_policy_bars_gate_study_candidates(content_db, state_db):

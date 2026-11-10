@@ -122,7 +122,7 @@ async def call(llm, model: str = HAIKU, prompt: str = "PROMPT"):
     return await llm.call(model=model, system_prompt="SYSTEM", prompt=prompt, json_schema=SCHEMA)
 
 
-# --------------------------------------------------------------------------- the brief's four
+# --------------------------------------------------------------------------- pinned options, the cap, the stop
 async def test_options_carry_pinned_model_and_isolation(agents_cfg):
     fake = FakeQuery(ok())
     llm = make(agents_cfg, fake)
@@ -143,6 +143,13 @@ async def test_options_carry_pinned_model_and_isolation(agents_cfg):
     assert prompt == "PROMPT"
     assert res.ok and res.output == {"mood": 0.4} and res.error is None and res.model == SONNET
     assert llm.results == [res]
+
+
+def test_cli_path_is_the_resolved_pinned_cli(agents_cfg):
+    llm = make(agents_cfg, FakeQuery(ok()))
+    assert isinstance(llm.cli_path, str) and llm.cli_path == agents_cfg["llm"]["cli_path"]
+    del agents_cfg["llm"]["cli_path"]
+    assert make(agents_cfg, FakeQuery(ok())).cli_path == mml.BUNDLED_CLI
 
 
 async def test_cap_raises_after_max_calls(agents_cfg):
