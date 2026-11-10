@@ -5,7 +5,8 @@ The four forward hypotheses are news tone and policy push, each read two ways: f
 scores (``state.db`` ``agent_calls``) and from the study's own content scores (variant C of
 ``news_content_score.py``). Each one accrues closed trades from its start and is judged once, at its 30th closed
 trade. One with fewer than 30 closed trades at ``REGISTERED_FROM`` + 18 months is insufficient. The pre-declared
-headlines-versus-content comparison runs over the study's own H and C scores and decides nothing.
+headlines-versus-content comparison runs over the study's own H and C scores and decides nothing. From 2026-11-11 a
+headline score counts only when its cluster held a headline from a registered Indian outlet when first scored.
 
 Read-only everywhere. ``state.db`` and the content file are opened through ``mode=ro`` URIs, because the capture
 and the scorer write the content file concurrently; the market is read from a research snapshot. The script writes
@@ -38,7 +39,7 @@ from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -80,6 +81,14 @@ CUTOFF = time(9, 0)
 KEY_FROM = datetime.combine(mm.REGISTERED_FROM, time(0, 0), tzinfo=IST)
 #: A forward hypothesis with fewer than 30 closed trades by this date is insufficient.
 DEADLINE = _add_months(mm.REGISTERED_FROM, 18)
+#: The engine's Indian outlets when the study was registered (its GDELT allowlist plus the exchange feed). They are
+#: frozen here rather than imported, so that an engine change cannot move a registered input.
+REGISTERED_NEWS_DOMAINS: frozenset[str] = frozenset({
+    "economictimes.indiatimes.com", "moneycontrol.com", "livemint.com", "business-standard.com",
+    "financialexpress.com", "thehindubusinessline.com", "businesstoday.in", "ndtvprofit.com",
+    "cnbctv18.com", "zeebiz.com", "nseindia.com"})
+#: Before this every engine headline came from a registered outlet, so scores before it are kept without a lookup.
+GLOBAL_FEEDS_FROM = datetime(2026, 11, 11, 0, 0, tzinfo=IST)
 TONE_HOLD = mm.HOLD["news_tone"]
 POLICY_HOLD = mm.HOLD["policy"]
 TONE_MIN_HISTORY, TONE_MAX_HISTORY = 20, 60
@@ -278,6 +287,43 @@ def _read_headline(con: sqlite3.Connection, limit: datetime, forward_open: datet
                 texts = (head,)
         out.append(Scored(cid, t, s.scope, s.event_type, _num(s.sentiment), _num(s.materiality), texts))
     return HeadlineData(key, out, counts)
+
+
+def _epoch_us(t: datetime) -> int:
+    return (t - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(microseconds=1)
+
+
+def registered_sources(head: HeadlineData, conn: duckdb.DuckDBPyConnection) -> HeadlineData:
+    """``head`` without the scores whose cluster held no headline from a registered Indian outlet when it was first
+    scored (a member ingested at or before the score). Scores before ``GLOBAL_FEEDS_FROM`` are kept unread. Raises
+    ``Unavailable`` for a snapshot without a ``news`` table when a later score needs it."""
+    counts = {**head.counts, "engine_clusters_unregistered_source": 0, "engine_clusters_no_members": 0}
+    later = [s for s in head.scores if s.at >= GLOBAL_FEEDS_FROM]
+    if not later:
+        return HeadlineData(head.key, list(head.scores), counts)
+    has = conn.execute("SELECT count(*) FROM information_schema.tables WHERE table_name = 'news'").fetchone()[0]
+    if not has:
+        raise Unavailable("the snapshot has no news table; the forward look cannot keep its registered headline "
+                          "inputs (Indian outlets only) without it")
+    members: dict[str, list[tuple[str | None, int]]] = defaultdict(list)
+    ids = sorted({s.key for s in later})
+    for cid, dom, us in conn.execute("SELECT cluster_id, source_domain, epoch_us(ingested_at) FROM news "
+                                     "WHERE cluster_id IN (SELECT unnest(?::VARCHAR[]))", [ids]).fetchall():
+        members[str(cid)].append((None if dom is None else str(dom), int(us)))
+    kept: list[Scored] = []
+    for s in head.scores:
+        if s.at < GLOBAL_FEEDS_FROM:
+            kept.append(s)
+            continue
+        at_us = _epoch_us(s.at)
+        seen = [dom for dom, us in members.get(s.key, ()) if us <= at_us]
+        if not seen:
+            counts["engine_clusters_no_members"] += 1
+        elif any(dom in REGISTERED_NEWS_DOMAINS for dom in seen):
+            kept.append(s)
+        else:
+            counts["engine_clusters_unregistered_source"] += 1
+    return HeadlineData(head.key, kept, counts)
 
 
 @dataclass
@@ -1020,6 +1066,7 @@ def evaluate(state_db: Path, content_db: Path, snapshot: Path, as_of: date, *,
     study = load_content(content_db, limit, as_of)
     conn = rc.open_snapshot(snapshot)
     try:
+        head = registered_sources(head, conn)
         m = load_market(conn, as_of, etfs, themes, cal)
         doc = _evaluate(m, head, study, as_of, windows)
     finally:

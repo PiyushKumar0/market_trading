@@ -100,6 +100,16 @@ def regular(cal_dir: Path, lo: date, hi: date) -> list[date]:
     return mmf.regular_sessions(mmf.load_calendar(cal_dir), lo, hi)
 
 
+def make_news_table(conn: duckdb.DuckDBPyConnection, rows: list[tuple[str, str, datetime]]) -> None:
+    """The engine's ``news`` table, minimal; ``rows`` are (cluster_id, source_domain, ingested_at)."""
+    conn.execute("CREATE TABLE news (headline_id TEXT, title TEXT, source_domain TEXT, url TEXT, "
+                 "published_at TIMESTAMPTZ, cluster_id TEXT, untrusted BOOLEAN, ingested_at TIMESTAMPTZ)")
+    if rows:
+        conn.executemany("INSERT INTO news VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         [(f"h{i}", f"title {i}", dom, f"https://{dom}/{i}", ing, cid, False, ing)
+                          for i, (cid, dom, ing) in enumerate(rows)])
+
+
 class World:
     """A research snapshot, an engine ``agent_calls`` table and the study's content file, all synthetic. NIFTY and
     stock bars exist on the calendar's regular sessions in [lo, hi]."""
@@ -113,6 +123,8 @@ class World:
         self.stocks: dict[str, dict[date, tuple[float, float, int]]] = {}
         self.corp: list[tuple] = []
         self.sector_rows: list[tuple] = []
+        self.news_rows: list[tuple[str, str, datetime]] = []
+        self.with_news_table = True
         con = sqlite3.connect(self.state_db)
         con.execute(AGENT_CALLS_DDL)
         con.commit()
@@ -153,6 +165,8 @@ class World:
                     rows.append((sym, d, o, max(o, c), min(o, c), c, v))
         conn.executemany('INSERT INTO bars_1d (symbol, d, "open", high, low, "close", volume) '
                          "VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        if self.with_news_table:
+            make_news_table(conn, self.news_rows)
         if self.corp:
             conn.executemany("INSERT INTO corp_actions (symbol, ex_date, kind) VALUES (?, ?, ?)", self.corp)
         if self.sector_rows:
@@ -163,9 +177,19 @@ class World:
     # ---- the engine's News Analyst calls
     def call(self, when: datetime, scores: list[dict], *, model: str = "claude-sonnet-5-5", pv: str | None = "v1",
              ok: int = 1, heads: dict[str, str] | None = None, agent_id: str = "news_analyst",
-             stamp: str | None = None, context: bytes | None = None) -> str:
+             stamp: str | None = None, context: bytes | None = None, domain: str | None = "livemint.com") -> str:
+        """``domain`` is the outlet of the one ``news`` member each scored cluster gets, ingested as the call ran;
+        None adds no member."""
         call_id = uuid.uuid4().hex
         heads = heads or {}
+        if domain is not None:
+            new = [(s["cluster_id"], domain, when) for s in scores]
+            self.news_rows += new
+            if self.with_news_table and self.snapshot.exists():      # a snapshot already built keeps up
+                conn = duckdb.connect(str(self.snapshot))
+                conn.executemany("INSERT INTO news VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                 [("h", "t", dom, f"https://{dom}/x", ing, cid, False, ing) for cid, dom, ing in new])
+                conn.close()
         rows = [{"cluster_id": s["cluster_id"], "representative": heads.get(s["cluster_id"], f"story {s['cluster_id']}"),
                  "source_domains": ["a.com"], "first_seen": when} for s in scores]
         blob = context if context is not None else gzip.compress(
@@ -871,3 +895,84 @@ def test_an_omitted_row_adds_nothing_and_is_final(tmp_path, cal_dir):
                                            "comparison_excluded_omitted": 1}
     for name in ("news_tone_content", "policy_content"):
         assert hyp(doc, name)["status"] == "accruing"
+
+
+# --------------------------------------------------------------------------- registered outlets
+LATER = at(D(11, 12), 8)
+
+
+def _head(*scored: tuple[str, datetime]):
+    return mmf.HeadlineData(("m", "v1"), [mmf.Scored(k, t, "market", "macro_data", 0.5, 1.0) for k, t in scored],
+                            {"engine_calls_excluded": 3})
+
+
+def _news(rows: list[tuple[str, str, datetime]] | None):
+    conn = duckdb.connect(":memory:")
+    if rows is not None:
+        make_news_table(conn, rows)
+    return conn
+
+
+def _kept(head, conn) -> list[str]:
+    return [s.key for s in mmf.registered_sources(head, conn).scores]
+
+
+def test_a_score_before_the_global_feeds_is_kept_without_any_news_rows():
+    before = mmf.GLOBAL_FEEDS_FROM - timedelta(microseconds=1)
+    out = mmf.registered_sources(_head(("a", before)), _news([]))
+    assert [s.key for s in out.scores] == ["a"]
+    assert out.counts == {"engine_calls_excluded": 3, "engine_clusters_unregistered_source": 0,
+                          "engine_clusters_no_members": 0}
+    assert out.key == ("m", "v1")
+
+
+def test_a_later_score_with_a_registered_member_before_it_is_kept():
+    assert _kept(_head(("a", LATER)), _news([("a", "livemint.com", LATER - timedelta(minutes=5))])) == ["a"]
+
+
+def test_a_later_score_whose_only_member_is_another_outlet_is_excluded_and_counted():
+    out = mmf.registered_sources(_head(("a", LATER)), _news([("a", "bloomberg.com", LATER - timedelta(minutes=5))]))
+    assert out.scores == []
+    assert out.counts["engine_clusters_unregistered_source"] == 1 and out.counts["engine_clusters_no_members"] == 0
+
+
+def test_a_registered_member_ingested_after_the_score_does_not_count_but_one_at_the_score_does():
+    late = _news([("a", "livemint.com", LATER + timedelta(microseconds=1))])
+    out = mmf.registered_sources(_head(("a", LATER)), late)
+    assert out.scores == [] and out.counts["engine_clusters_no_members"] == 1
+    mixed = _news([("a", "bloomberg.com", LATER - timedelta(minutes=1)), ("a", "livemint.com", LATER + timedelta(seconds=1))])
+    out = mmf.registered_sources(_head(("a", LATER)), mixed)
+    assert out.scores == [] and out.counts["engine_clusters_unregistered_source"] == 1
+    assert _kept(_head(("a", LATER)), _news([("a", "livemint.com", LATER)])) == ["a"]
+    utc = datetime.fromtimestamp(LATER.timestamp(), tz=UTC)       # the same instant, stamped in UTC
+    assert _kept(_head(("a", LATER)), _news([("a", "moneycontrol.com", utc)])) == ["a"]
+
+
+def test_a_later_score_with_no_member_rows_is_excluded_and_counted():
+    out = mmf.registered_sources(_head(("a", LATER)), _news([("other", "livemint.com", LATER)]))
+    assert out.scores == []
+    assert out.counts["engine_clusters_no_members"] == 1 and out.counts["engine_clusters_unregistered_source"] == 0
+
+
+def test_a_mixed_cluster_is_kept():
+    rows = [("a", "bloomberg.com", LATER - timedelta(hours=1)), ("a", "livemint.com", LATER - timedelta(minutes=1))]
+    assert _kept(_head(("a", LATER)), _news(rows)) == ["a"]
+
+
+def test_no_news_table_is_unavailable_only_for_a_later_score():
+    with pytest.raises(mmf.Unavailable, match="news table"):
+        mmf.registered_sources(_head(("a", LATER)), _news(None))
+    before = mmf.GLOBAL_FEEDS_FROM - timedelta(hours=1)
+    assert _kept(_head(("a", before)), _news(None)) == ["a"]
+
+
+def test_evaluate_reports_the_registered_source_counts_and_drops_other_outlets(tmp_path, cal_dir):
+    w = World(tmp_path, cal_dir, D(10, 1), D(12, 31))
+    w.call(at(D(11, 12), 8), [score("a", "market", 0.5, 1.0)])
+    w.call(at(D(11, 12), 8, 1), [score("b", "market", -0.9, 1.0)], domain="bloomberg.com")
+    w.call(at(D(11, 12), 8, 2), [score("c", "market", -0.9, 1.0)], domain=None)
+    doc = w.evaluate(D(11, 20))
+    assert doc["counts"]["engine_clusters_unregistered_source"] == 1
+    assert doc["counts"]["engine_clusters_no_members"] == 1
+    assert tone(doc, "headline", D(11, 12)) == pytest.approx(0.5)      # only "a" counts
+
