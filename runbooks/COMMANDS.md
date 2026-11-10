@@ -625,8 +625,14 @@ Register-ScheduledTask -TaskName MT-NewsContentScore -Principal $pri -Settings $
   -Trigger (New-ScheduledTaskTrigger -Daily -At 22:00) `
   -Description 'Macro mood study: nightly H/C scoring and policy mapping (scripts/news_content_score.py)'
 # move both tasks to the background session ("Run whether user is logged on or not"), where the engine service runs:
-# no window on the desktop, and they run while logged off. Asks for the Windows password. If a later run reports
-# 0x80070569, the account lacks "Log on as a batch job": set the same option in the Task Scheduler GUI instead.
+# no window on the desktop, and they run while logged off. Route 1 stores no password (the S4U logon type, "Do not
+# store password" in the GUI): Windows then gives the task no network credentials, Credential Manager or EFS access,
+# none of which these tasks use. Route 2 stores the password, as the engine service does. Neither was tested here;
+# if a run after route 1 ends in a logon error, or the CLI cannot read its login, use route 2. 0x80070569 on either
+# means the account lacks "Log on as a batch job" (a local admin has it): set the option in the Task Scheduler GUI.
+$pri = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+'MT-NewsContentCapture', 'MT-NewsContentScore' | ForEach-Object { Set-ScheduledTask -TaskName $_ -Principal $pri | Out-Null }
+# route 2, only if route 1 fails:
 $cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message 'Windows password for the macro mood study tasks'
 'MT-NewsContentCapture', 'MT-NewsContentScore' | ForEach-Object {
   Set-ScheduledTask -TaskName $_ -User $cred.UserName -Password $cred.GetNetworkCredential().Password | Out-Null }
