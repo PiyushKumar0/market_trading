@@ -378,7 +378,7 @@ Build this second, so content starts accruing as early as possible.
   - `theme_lists.yaml`.
 - **Produces:** `evaluate(state_db: Path, content_db: Path, snapshot: Path, as_of: date) -> dict` and the CLI `macro_mood_forward.py --state-db ... --content-db ... --db <snapshot>`. It is read-only, always exits 0 and prints `UNAVAILABLE` for an unreadable store.
 - **Window boundaries:**
-  - Tone(D) and policy candidates for D use the window [09:00 IST on D − 24 h, 09:00 IST on D), inclusive below and exclusive above. The time is `agent_calls.at` for headlines and `items.first_captured_at` for content.
+  - Tone(D) and policy candidates for D use D's news window, [09:00 IST on the previous regular session, 09:00 IST on D), inclusive below and exclusive above, so weekend and holiday news counts. The time is `agent_calls.at` for headlines and `clusters.first_captured_at` for content.
   - **Headline key:** the `(model, prompt_version)` of the first ok News Analyst call at or after 2026-11-11 00:00 IST. A call in any window with another key is excluded and counted.
   - The content start is the first regular session after the capture's first complete 09:00→09:00 day in `capture_runs`.
   - **Pinned-model health:** the report shows each pinned model's last ok call date. A pinned model retired before a look forms makes that hypothesis insufficient unless the owner re-registers.
@@ -391,7 +391,7 @@ Build this second, so content starts accruing as early as possible.
   - **Verdict timing:** a verdict forms at the 30th closed trade. With fewer than 30 closed trades at `REGISTERED_FROM` + 18 months, the label is insufficient. Before either, the report says "accruing n/30".
 - **Comparison** (decides nothing):
   - Tone: the Spearman rank correlation of tone(D) with NIFTY open(D)→close(D+4), for C minus H, with a moving-block bootstrap 95% CI (block 5, 2,000 draws, seed `PERM_SEED`).
-  - Policy: the mean 10-session excess of C-identified events (`mappings.source='content'`) minus H-identified ones (`source='study_h'`), with a bootstrap 95% CI.
+  - Policy: the mean 10-session excess of C-identified events (`mappings.source='content'`) minus H-identified ones (`source='study_h'`). The 95% CI resamples whole entry sessions, and each side needs at least 10 events, else "not enough data".
   - The answer is "content adds leverage", "content hurts" or "no measurable difference", per the spec.
 
 - [ ] **Step 1: Write the failing tests:**

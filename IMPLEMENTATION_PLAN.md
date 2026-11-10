@@ -220,7 +220,11 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
     - Pre-declared comparison (decides no verdict): each input alone, under the same top-10%-of-own-z rule and the
       same sample, as diagnostic arms. **Combining helps** iff the score's mean net per trade exceeds every arm's.
   - **News tone, headlines (forward only):** tone(D) is the mean of sentiment × materiality over the `market`-scope
-    scores that News Analyst calls returned in the 24 hours before 09:00 IST on D.
+    scores that News Analyst calls returned in D's news window.
+    - The window runs from 09:00 IST on the previous regular session to 09:00 IST on D, inclusive below and exclusive
+      above, so weekend and holiday news counts for the next session.
+    - The first draft said "the 24 hours before 09:00 on D", which would have dropped every weekend's news. It was
+      amended on 2026-11-10, before the first forward session and before any forward data existed.
     - Source: `state.db` `agent_calls` (`at` and the parsed `output_json`), taking the first successful score per
       cluster. The table is append-only, so it keeps the state as it stood at 09:00. `news_clusters` would not: its
       `first_seen` and `sectors` are rewritten when headlines merge later.
@@ -229,9 +233,8 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
     - The registered key is `(model, prompt_version)` on the first News Analyst call on or after the registration
       date. Calls with another key are excluded and counted, so a scorer change stops accrual until the owner
       re-registers, as with the analyst-value verdict.
-  - **Policy push, headlines (forward only):** a candidate is a cluster the News Analyst scored in the 24 hours before
-    09:00 IST on D (from `agent_calls`) with `event_type` `govt_program` or `sector_policy`, sentiment ≥ +0.4 and
-    materiality ≥ 0.6.
+  - **Policy push, headlines (forward only):** a candidate is a cluster the News Analyst scored in D's news window
+    (from `agent_calls`) with `event_type` `govt_program` or `sector_policy`, sentiment ≥ +0.4 and materiality ≥ 0.6.
     - Mapping: its groups are the union of two maps, both computed from the headline text in that call's context.
       - Theme map: a whole-word match of a `config/themes.yaml` keyword (the resolver's rule) maps to that theme's
         frozen stock list.
@@ -301,7 +304,10 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
   - The comparison uses the study's own H and C scores over the same clusters, so the model is held fixed.
   - Tone: the rank correlation between tone(D) and the NIFTY's open(D) → close(D+4) return, C minus H, with a
     moving-block bootstrap 95% CI (block = 5 sessions).
-  - Policy: the mean 10-session excess per event, C-identified minus H-identified, with a bootstrap 95% CI.
+  - Policy: the mean 10-session excess per event, C-identified minus H-identified.
+    - The 95% CI comes from a bootstrap that resamples whole entry sessions, because same-session events overlap.
+    - Each side needs at least 10 events; with fewer, the answer is "not enough data". Both details were added on
+      2026-11-10, before any data.
   - For each, the answer is **content adds leverage** if the CI lies above 0, **content hurts** if it lies below,
     and **no measurable difference** otherwise. It is read when the content hypotheses are judged, or at 18 months.
 - **Trade mechanics:**
