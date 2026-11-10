@@ -154,6 +154,31 @@ news:
       bs_companies:
         url:    "https://www.business-standard.com/rss/companies-101.rss"
         poll_s: 900
+      # Global outlets (owner, 2026-11-11: "Add global news channel"), so Fed decisions, wars and oil reach the
+      # News Analyst first-hand instead of only as Indian outlets retell them. Picked from a 34-feed probe on
+      # 2026-11-11 for current RSS 2.0 items: WSJ and MarketWatch feeds were stale since 2025, Nikkei and DW
+      # empty, Yahoo malformed, Al Jazeera ~130 general items a day. About 160 items a day in all.
+      bloomberg_markets:
+        url:    "https://feeds.bloomberg.com/markets/news.rss"
+        poll_s: 900
+      bloomberg_economics:                                                                   # central banks, data
+        url:    "https://feeds.bloomberg.com/economics/news.rss"
+        poll_s: 900
+      cnbc_world:
+        url:    "https://www.cnbc.com/id/100727362/device/rss/rss.html"
+        poll_s: 900
+      cnbc_energy:                                                                           # oil, Gulf supply
+        url:    "https://www.cnbc.com/id/19836768/device/rss/rss.html"
+        poll_s: 900
+      ft_world:
+        url:    "https://www.ft.com/rss/home/international"
+        poll_s: 900
+      bbc_world:                                                                             # wars, geopolitics
+        url:    "https://feeds.bbci.co.uk/news/world/rss.xml"
+        poll_s: 900
+      fed_monetary:                                                                          # FOMC statements
+        url:    "https://www.federalreserve.gov/feeds/press_monetary.xml"
+        poll_s: 900
     gdelt_doc_query:  "sourcecountry:IN (markets OR stocks OR earnings OR NSE)"               # DOC 2.0 query [VERIFY]
     # The EXCHANGE as a feed: NSE corporate-announcements, fetched
     # through the shared nse_http client. Items carry `symbol` natively, so each becomes a news row

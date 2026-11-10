@@ -244,6 +244,15 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
       10 sessions. A sector group's members come from the `sector_map` snapshot in force on D−1; a theme's come from
       its frozen list. Each leg pays one CNC round trip at the research notional. One position per group at a time.
     - Judged on the basket's return minus the equal-weight liquid universe's over the same window.
+  - **Registered outlets, for both headline hypotheses (amended 2026-11-11, before any forward outcome existed):**
+    - On 2026-11-11 the owner asked the engine to read global feeds too: Bloomberg, CNBC, FT, BBC and the Federal
+      Reserve.
+    - From that date a headline score counts only when its cluster held a headline from a registered outlet when it
+      was first scored. The registered outlets are the engine's Indian outlets at registration: its GDELT allowlist
+      plus nseindia.com.
+    - The check reads the database copy's `news` table. Scores before 2026-11-11 need none.
+    - Without it, global clusters would change what the two hypotheses average partway through their forward window.
+    - The content hypotheses read the study's own frozen feed list and are unaffected.
   - **News tone, content (forward only):** the news-tone rule applied to the study's own scores of the captured
     articles, using variant C (below) in place of the News Analyst's headline scores. Same `market` scope, window
     and percentile rule.

@@ -830,6 +830,8 @@ def test_settings_load_with_the_added_keys():
         "et": 300, "livemint_markets": 900, "livemint_companies": 900,
         "hbl_markets": 900, "hbl_companies": 900, "cnbctv18_market": 900, "ndtvprofit": 900,
         "bs_markets": 900, "bs_companies": 900,
+        "bloomberg_markets": 900, "bloomberg_economics": 900, "cnbc_world": 900, "cnbc_energy": 900,
+        "ft_world": 900, "bbc_world": 900, "fed_monetary": 900,
     }
     ann = s.news.feeds.nse_announcements
     assert (ann.enabled, ann.poll_s) == (True, 300) and "Trading Window" in ann.drop_subjects
