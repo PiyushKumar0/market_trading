@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import sys
 import time
@@ -49,28 +50,44 @@ def _norm(cell: str) -> str:
 
 
 def _to_int(cell: str) -> int:
-    return int(re.sub(r"[\s\",]", "", cell))
+    """A count with quotes, spaces, tabs and any digit grouping stripped; a ``.00`` suffix is accepted."""
+    x = float(re.sub(r"[\s\",]", "", cell))
+    if not math.isfinite(x):
+        raise ValueError(cell)
+    return round(x)
+
+
+_CLIENT_LABELS = {"client", "dii", "fii", "fpi", "pro", "total"}
 
 
 def parse_participant_oi(csv_bytes: bytes) -> dict | None:
-    """The FII/FPI row's index-futures long and short contracts, or None when the row or a column is absent.
+    """The FII/FPI row's index-futures long and short contracts, or None when the row or a column is absent
+    or the content is malformed (never raises).
 
     The first line is a title; the header is found by its first cell ("Client Type" / "CLIENT_TYPE"), and
-    column names are compared lowercased with whitespace and tabs collapsed."""
-    rows = csv.reader(io.StringIO(csv_bytes.decode("utf-8-sig", errors="replace")))
-    header = None
-    for row in rows:
-        if header is None:
-            if row and _norm(row[0]) == "client type":
-                header = [_norm(c) for c in row]
-            continue
-        if not row or _norm(row[0]).upper() not in ("FII", "FPI"):
-            continue
-        try:
+    column names are compared lowercased with whitespace and tabs collapsed. A file with no header (one 2014
+    file) falls back to the standard positions 1 and 2, accepted only when the TOTAL row balances (every
+    index-futures contract has one long and one short side)."""
+    text = csv_bytes.decode("utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        rows = [r for r in csv.reader(io.StringIO(text)) if r and any(c.strip() for c in r)]
+        head = next((i for i, r in enumerate(rows)
+                     if _norm(r[0]) == "client type" and "future index long" in map(_norm, r)), None)
+        if head is not None:
+            header = [_norm(c) for c in rows[head]]
             long_i, short_i = header.index("future index long"), header.index("future index short")
-            return {"fut_index_long": _to_int(row[long_i]), "fut_index_short": _to_int(row[short_i])}
-        except (ValueError, IndexError):
-            return None
+            body = rows[head + 1:]
+        else:
+            long_i, short_i = 1, 2
+            body = [r for r in rows if _norm(r[0]) in _CLIENT_LABELS]
+            total = next((r for r in body if _norm(r[0]) == "total"), None)
+            if total is None or _to_int(total[long_i]) != _to_int(total[short_i]):
+                return None
+        for row in body:
+            if _norm(row[0]).upper() in ("FII", "FPI"):
+                return {"fut_index_long": _to_int(row[long_i]), "fut_index_short": _to_int(row[short_i])}
+    except (csv.Error, ValueError, IndexError):
+        return None
     return None
 
 
