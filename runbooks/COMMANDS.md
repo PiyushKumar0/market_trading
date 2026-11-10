@@ -584,6 +584,51 @@ A SUPPORTED result goes to the owner and wires nothing.
 
 A SUPPORTED result goes to the owner and wires nothing.
 
+## Macro mood-signal study (registered 2026-11-10) — research copy, outside 09:15–15:30
+
+```powershell
+# external data, stored once with a manifest; --resume fetches only what is missing or failed
+.venv\Scripts\python.exe scripts\fetch_macro_external.py --resume
+# the six registered backtests on the research copy; refuses (exit 2) during market hours on a trading day,
+# or when a stored file is missing from the manifest; writes data\reports\macro_mood_<timestamp>.{json,md}
+.venv\Scripts\python.exe scripts\macro_mood_study.py --db data\research\full_market_2026-11-09.duckdb
+# forward looks and the headlines-versus-content comparison: read-only, always exit 0, safe with the engine running;
+# a look reads "waiting" until every input up to its cut is scored and mapped
+$snap = (Get-ChildItem data\research\market_*.duckdb | Sort-Object Name -Descending | Select-Object -First 1).FullName
+.venv\Scripts\python.exe scripts\macro_mood_forward.py --db $snap   # optional --as-of YYYY-MM-DD, --out <json path>
+# one scoring night by hand: spends quota (at most 40 calls a day, counted together with the scheduled run);
+# refuses 09:15–15:30 on weekdays and trading days, and re-checks before every call
+.venv\Scripts\python.exe scripts\news_content_score.py
+```
+
+The two scheduled tasks run the project venv's `pythonw` under the account that owns the engine's Claude CLI login.
+They are Interactive, so they run only while that user is logged on (a locked screen counts):
+
+```powershell
+$repo = 'C:\Users\piyush.kumar_atari\projects\personal\market_trading'
+$py = "$repo\.venv\Scripts\pythonw.exe"
+$pri = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+# capture: every 15 minutes, all days
+$set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 40) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName MT-NewsContentCapture -Principal $pri -Settings $set `
+  -Action (New-ScheduledTaskAction -Execute $py -Argument "`"$repo\scripts\news_content_capture.py`"" -WorkingDirectory $repo) `
+  -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)) `
+  -Description 'Macro mood study: RSS summary and article capture every 15 min (scripts/news_content_capture.py)'
+# scoring: daily at 22:00. A late start after standby is safe, because the scorer re-checks market hours before each call
+$set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName MT-NewsContentScore -Principal $pri -Settings $set `
+  -Action (New-ScheduledTaskAction -Execute $py -Argument "`"$repo\scripts\news_content_score.py`"" -WorkingDirectory $repo) `
+  -Trigger (New-ScheduledTaskTrigger -Daily -At 22:00) `
+  -Description 'Macro mood study: nightly H/C scoring and policy mapping (scripts/news_content_score.py)'
+# health (read-only): last run and result per task; the scorer also appends every run's summary to score_runs
+Get-ScheduledTask -TaskName 'MT-NewsContent*' | Get-ScheduledTaskInfo | Select-Object TaskName, LastRunTime, LastTaskResult, NextRunTime
+```
+
+The capture makes no LLM calls. The scorer draws on the subscription the engine's analysts share, so it runs only at
+night.
+
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 
 ```powershell

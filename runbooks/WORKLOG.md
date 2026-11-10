@@ -4,6 +4,27 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 12:31 — Macro mood study: backtests run; the nightly scorer task is left to the owner
+
+- **Backtests:** `macro_mood_study.py` ran on `data\research\full_market_2026-11-09.duckdb`. The manifest
+  verified (3,646 files) and the `^NSEI` data gate passed. Result: four refuted (US big-fall rebound, oil drop,
+  foreign short-covering, combined score), two null (US rally follow-through, breadth thrust), none supported. The
+  report is `data\reports\macro_mood_20261110T123105.{json,md}`, and the labels are in the trial ledger.
+- **`MT-NewsContentScore` was not created.** Claude Code's permission classifier refused `Register-ScheduledTask`
+  as persistence. **Owner action:** run the scoring-task block in COMMANDS.md "Macro mood-signal study". Until it
+  runs, nothing scores or maps the captured news, so three forward tests do not accrue: news tone from content,
+  policy push from content, and policy push from headlines. A dry run on a copy of the capture database (fake LLM,
+  no calls) passed end to end.
+- **Scoring volume against the cap:** the engine's own News Analyst scored 424–1,125 distinct clusters per weekday
+  from 10-27 to 11-09. At that volume, H plus C needs 30–76 calls a night against the registered cap of 40, so a
+  backlog can build in busy weeks, and the content looks wait while it stands. Watch `score_runs`. Raising the cap is
+  the owner's quota decision.
+- **Capture gaps:** the capture runs only while the host is awake.
+  - On 11-10 it ran 01:36–02:21, then nothing until 09:21 (Modern Standby 03:15–08:44).
+  - The 08:51 and 09:06 runs did not fire after the wake. The cause is unknown, because the TaskScheduler
+    operational log is disabled.
+  - The forward report now lists sessions whose 08:00–09:00 capture is incomplete.
+
 ## 2026-11-10 08:59 — Engine restart after overnight Modern Standby (owner: "Restart the engine meanwhile")
 
 - **Standby:** the host was in Modern Standby from 01:32, with throttled processes, and fully from 03:15 to 08:44
