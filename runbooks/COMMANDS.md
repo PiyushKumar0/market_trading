@@ -647,6 +647,29 @@ Get-ScheduledTask -TaskName 'MT-NewsContent*' | Get-ScheduledTaskInfo | Select-O
 The capture makes no LLM calls. The scorer draws on the subscription the engine's analysts share, so it runs only at
 night.
 
+## News impact study (proposed 2026-11-10) — research copy, outside 09:15–15:30
+
+The rules are in IMPLEMENTATION_PLAN.md "News impact study". The mapper spends subscription quota, so run it only
+after the owner signs off the registration, and only at night. The study is read-only.
+
+```powershell
+# what the mapper still has to do for a sample (reads only; no call)
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample A --dry-run
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --dry-run
+# map: at most 40 calls a night, refused 09:15–15:30 on weekdays, stops at the first quota or login failure.
+# Sample A needs about 72 calls and the excluded window about 10, so it takes three nights at the cap.
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample A
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded
+# pipeline check with no outcome shown: story, signal, trade and drop counts only; writes no report
+.venv\Scripts\python.exe scripts\news_impact_study.py --sample A --counts-only
+# the verdict run (once everything is mapped; prints "waiting" until then). Report: data\reports\news_impact_A_<stamp>.*
+.venv\Scripts\python.exe scripts\news_impact_study.py --sample A
+# sample B, after its last exit (about 2027-03-11, ten sessions from 02-26) on a fresh whole-file copy, with
+# config/calendar/2027.yaml in place
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample B
+.venv\Scripts\python.exe scripts\news_impact_study.py --sample B --db data\research\full_market_<date>.duckdb --as-of <date>
+```
+
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 
 ```powershell
