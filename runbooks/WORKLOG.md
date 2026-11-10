@@ -12,9 +12,10 @@ refactors and doc or comment passes are not logged; git history has them.
   was watched: `pythonw.exe` and its `python.exe` child ran in session 0, the non-interactive session, under the
   Task Scheduler service. Their command lines are hidden from the desktop session. So no window reaches the desktop,
   and the tasks run while logged off.
-- **Still to confirm:** the scorer's first run under S4U is tonight at 22:00 (no model calls on the holiday). The
-  first night with model calls is 11-11 22:00. The Claude CLI reads its login from a plain file in the profile, which
-  S4U can reach; that night's `llm_calls` will prove it.
+- **Scorer under S4U:** the 22:00 run returned 0 and logged a `score_runs` row: 826 items clustered into 780 new
+  clusters, 0 calls, no skip or stop. It made no model calls on the holiday.
+- **Still to confirm:** the first night with model calls is 11-11 22:00. The Claude CLI reads its login from a plain
+  file in the profile, which S4U can reach; that night's `llm_calls` will prove it.
 
 ## 2026-11-10 14:15 — Scorer task registered by the owner and validated; both study tasks open a console window
 
