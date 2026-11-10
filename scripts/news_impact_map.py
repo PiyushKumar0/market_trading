@@ -1,8 +1,9 @@
 """News impact study (``edge/news_impact``): the capped nightly mapper of domain, global and orphan news stories.
 
 For each story first scored by the engine's News Analyst whose kind is ``domain`` or ``global``, or which is an
-orphan (a material stock story the resolver reads no symbol in: ``news_impact_common.orphan_ids``), and whose entry
-session falls in the chosen sample window, the pinned Sonnet mapper reads the headline alone, never a score, and
+orphan (a material stock story in which the resolver reads no symbol listed by its D-1:
+``news_impact_common.orphan_ids``), and whose entry session falls in the chosen sample window, the pinned Sonnet
+mapper reads the headline alone, never a score, and
 returns the direction for the whole Indian market, up to 3 stock groups from a closed vocabulary and up to 5 listed
 companies, each with a direction. A batch is up to 20 stories in one call.
 
@@ -14,8 +15,8 @@ because a run suspended by host standby can resume inside the session. No call i
 from its pinned hash.
 
 Orphans are decided by the resolver over ``--market-db`` (a whole-file ``market.duckdb`` copy, opened read-only and
-used for nothing else) with the frozen alias supplement; no call is made while the supplement is missing or differs
-from its registered digest.
+used for nothing else) with the frozen alias supplement, and by that copy's first bar dates; no call is made while
+the supplement is missing or differs from its registered digest.
 """
 
 from __future__ import annotations
@@ -347,34 +348,45 @@ def _calendar_end(cal: Any, lo: date, hi: date) -> date:
     return hi
 
 
-def open_resolver(market_db: Path, supplement: Mapping[str, str]) -> Any:
-    """The study's resolver over a read-only ``market.duckdb`` copy and the alias supplement; the copy is closed
-    before returning, since the resolver holds its tables in memory."""
+def read_copy(market_db: Path, supplement: Mapping[str, str]) -> tuple[Any, dict[str, date]]:
+    """What the orphan rule reads from a read-only ``market.duckdb`` copy: the study's resolver over its tables and
+    the alias supplement, and each symbol's first bar date. The copy is closed before returning; both are held in
+    memory."""
     conn = nic.rc.open_snapshot(Path(market_db))
     try:
-        return nic.indexed_resolver(nic.build_resolver(conn, supplement))
+        return nic.indexed_resolver(nic.build_resolver(conn, supplement)), nic.load_first_bars(conn)
     finally:
         conn.close()
 
 
-def _todo_for(sample: str, state_db: Path, now: datetime, resolver: Any) -> tuple[list[Any], int]:
-    """The sample's stories to map, read from ``state.db`` as scored before ``now`` with orphans by ``resolver``,
-    and the number of such stories left out because their entry session lies past the last calendar year
-    (``beyond_calendar``); those are mapped on a later run, once the calendar reaches them. A range starting in a
-    year without a calendar raises ``Unavailable``."""
+def _todo_for(sample: str, state_db: Path, now: datetime, resolver: Any,
+              first_bars: dict[str, date]) -> tuple[list[Any], int]:
+    """The sample's stories to map, read from ``state.db`` as scored before ``now`` with orphans by ``resolver`` and
+    ``first_bars`` (``nic.orphan_ids``), and the number of such stories left out because their entry session lies
+    past the last calendar year (``beyond_calendar``); those are mapped on a later run, once the calendar reaches
+    them. A range starting in a year without a calendar raises ``Unavailable``."""
     stories, _ = nic.load_first_scores(state_db, now)
-    orphans = nic.orphan_ids(stories, resolver)
     lo, hi = nic.SAMPLES[sample]
     cal = nic.load_calendar()
     first = lo - timedelta(days=14)
     last = min(hi, now.astimezone(IST).date()) + timedelta(days=14)
     end = _calendar_end(cal, first, last)
     sessions = nic.regular_sessions(cal, first, end)
+    orphans = nic.orphan_ids(stories, resolver, sessions=sessions, first_bars=first_bars)
     beyond = 0
     if end < last:
         could_enter = datetime.combine(hi, nic.ENTRY_CUTOFF, IST)  # a story at or after it enters past the window
-        beyond = sum(1 for s in stories if nic.map_kind(s, orphans) in KINDS and s.at < could_enter
-                     and nic.entry_session(s.at, sessions) is None)
+
+        def maybe_orphan(s: Any) -> bool:
+            # D-1 lies past the calendar, so orphan status is not known yet; the calendar's last session is a lower
+            # bound for D-1, and a story with no symbol listed by then may still be an orphan
+            if nic.story_kind(s) != "stock" or not s.materiality >= nic.MATERIAL:
+                return False
+            return not any(first_bars.get(x) is not None and first_bars[x] <= sessions[-1]
+                           for x in nic.stock_symbols(resolver, s))
+
+        beyond = sum(1 for s in stories if s.at < could_enter and nic.entry_session(s.at, sessions) is None
+                     and (nic.map_kind(s, orphans) in KINDS or maybe_orphan(s)))
     return stories_to_map(stories, sessions, sample, orphans), beyond
 
 
@@ -408,7 +420,7 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
     ap.add_argument("--market-db", type=Path, required=True,
                     help="a whole-file market.duckdb copy, read-only; its alias table, with the frozen supplement, "
-                         "decides which stock stories are orphans")
+                         "and its first bar dates decide which stock stories are orphans")
     ap.add_argument("--max-calls", type=int, default=MAX_CALLS_PER_NIGHT,
                     help=f"the night's call cap, at most {MAX_CALLS_PER_NIGHT}; calls already made since the last "
                          "15:30 IST count")
@@ -431,7 +443,7 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
     try:
         remaining, stop = night_budget(args.db, now, args.max_calls)
         if args.dry_run:
-            todo, beyond = _todo_for(args.sample, args.state_db, now, open_resolver(args.market_db, extra))
+            todo, beyond = _todo_for(args.sample, args.state_db, now, *read_copy(args.market_db, extra))
             _dry_run(todo, read_mappings(args.db), remaining, args.sample, beyond)
             return 0
         if reason := ncs.call_refusal(now):
@@ -447,8 +459,8 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
             return 0
         try:
             mapped = read_mappings(args.db)
-            resolver = open_resolver(args.market_db, extra)
-            todo = [s for s in _todo_for(args.sample, args.state_db, now, resolver)[0] if s.cluster_id not in mapped]
+            todo = [s for s in _todo_for(args.sample, args.state_db, now, *read_copy(args.market_db, extra))[0]
+                    if s.cluster_id not in mapped]
             llm = mml.StudyLLM(max_calls=remaining)
             out = asyncio.run(run_night(args.db, todo, llm, now, prompt_bytes.decode("utf-8"), clock=clock))
             if out["stopped"] is None and getattr(llm, "stopped", False):

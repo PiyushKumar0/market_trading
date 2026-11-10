@@ -514,6 +514,8 @@ separate and is unaffected.
       - It overrides the table for its own alias strings and skips the engine's stoplist. The stoplist guards seed
         aliases derived from every company name in every headline; here only stock-scope stories and mapped company
         names are resolved.
+      - It holds 432 names. The review dropped `heg`: the series-code rule already resolves it to HEG, which traded
+        until 2026-09, while the entry pointed at HEGAM, its renamed successor, first trading 2026-09-22.
       - It was built from headlines and NSE's list alone, with no outcome.
     - The engine's resolver is unchanged; its alias fixes wait for the `cat` v2 verdict.
   - Mapped companies: their names go through the same resolver as extra texts with an empty headline. An unmatched or
@@ -523,7 +525,11 @@ separate and is unaffected.
     `regulatory_policy`;
   - **global:** scope `market` with event type `global_market`, `macro_data` or `disruption`;
   - **orphan** (amended 2026-11-11, at the owner's question): a stock story, any event type the stock arms take,
-    with materiality ≥ 0.6, that resolves to no symbol at all, even with the short names.
+    with materiality ≥ 0.6, that resolves to no symbol that was trading, even with the short names.
+    - A resolved symbol counts only if it has a daily bar on or before D−1.
+    - Otherwise a story about a firm before its IPO would stop being an orphan once the firm listed, which is
+      information from after t (65 of A's material stock stories on the 11-09 copy).
+    - Found by the review of the amendment code and fixed the same night, before any outcome.
     - Most are unlisted Indian companies (startups, firms heading for an IPO, subsidiaries such as Adani Airports),
       foreign companies (Microsoft, TSMC), business groups and NSE's own IPO.
     - A resolved symbol that is merely illiquid does not make an orphan.
@@ -629,8 +635,11 @@ separate and is unaffected.
     NIFTY's open(D) → close(D+4).
   - The origin split for both domain hypotheses: signals from domain stories, from orphans, or from both.
   - The global-outlet split for the domain and global hypotheses: whether any story behind a signal had a headline
-    from outside the engine's Indian outlets when first scored. This tells whether the global feeds added anything;
-    in A it is all one side.
+    from one of the global feeds' hosts before its first score. The hosts are bloomberg.com, cnbc.com, ft.com,
+    bbc.co.uk, bbc.com and federalreserve.gov. This tells whether the global feeds added anything; in A it is all one
+    side. Hosts outside both the Indian and the global lists are reported with counts.
+  - The count of mapped stories this run no longer reads as domain, global or orphan, so a mapping that goes unused
+    is visible.
   - The pullback arm's fill rate; the excluded window's results; per-hypothesis counts of dropped stories, unresolved
     names and voided legs.
 - **Tools and records:**

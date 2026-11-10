@@ -658,7 +658,7 @@ resolve which stock stories are orphans, so any recent copy serves.
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample A --dry-run --market-db data\research\full_market_2026-11-09.duckdb
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --dry-run --market-db data\research\full_market_2026-11-09.duckdb
 # map: at most 40 calls a night, refused 09:15–15:30 on weekdays, stops at the first quota or login failure.
-# After the first night (40 calls, 800 stories) A needs 57 more and the excluded window 12: two nights at the cap.
+# After the first night (40 calls, 800 stories) A needs 61 more and the excluded window 12: two nights at the cap.
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample A --market-db data\research\full_market_2026-11-09.duckdb
 .venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --market-db data\research\full_market_2026-11-09.duckdb
 # Sample A needs prices through 2026-11-12, the pullback arm's last possible exit: take a whole-file copy of

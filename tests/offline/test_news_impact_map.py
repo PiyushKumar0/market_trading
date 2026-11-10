@@ -14,7 +14,7 @@ import json
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -131,20 +131,31 @@ def story(cid: str, *, scope: str = "sector", event: str = "sector_policy", head
     return nic.Story(cid, at, "call-" + cid, "m", scope, event, 0.5, materiality, (), headline)
 
 
-def market_copy(path: Path, aliases: list[tuple[str, str]] | None = None) -> Path:
-    """A ``market.duckdb`` copy holding only the resolver's tables."""
+#: The copy's first bar of each symbol: INFY long listed, NEWCO listed on 2026-08-10.
+FIRST_BARS = {"INFY": date(2020, 1, 1), "NEWCO": date(2026, 8, 10)}
+
+
+def market_copy(path: Path, aliases: list[tuple[str, str]] | None = None,
+                first_bars: dict[str, date] | None = None) -> Path:
+    """A ``market.duckdb`` copy holding only what the orphan rule reads: the resolver's tables and ``bars_1d``
+    dates."""
     conn = duckdb.connect(str(path))
     conn.execute("CREATE TABLE entity_aliases (alias TEXT, tradingsymbol TEXT, source TEXT, added_at TIMESTAMPTZ)")
     conn.execute("CREATE TABLE sector_map (as_of DATE, symbol TEXT, sector TEXT)")
     conn.execute("CREATE TABLE theme_map (theme TEXT, keywords TEXT[], symbols TEXT[], updated_at TIMESTAMPTZ)")
+    conn.execute("CREATE TABLE bars_1d (symbol TEXT, d DATE)")
     conn.executemany("INSERT INTO entity_aliases (alias, tradingsymbol, source) VALUES (?, ?, 'seed')",
-                     aliases or [("infosys", "INFY")])
+                     aliases or [("infosys", "INFY"), ("newco", "NEWCO")])
+    bars = FIRST_BARS if first_bars is None else first_bars
+    conn.executemany("INSERT INTO bars_1d VALUES (?, ?)",
+                     [(s, d) for s, first in bars.items() for d in (first, first + timedelta(days=30))])
     conn.close()
     return path
 
 
-def resolver(tmp_path: Path, supplement: dict[str, str] | None = None) -> Any:
-    return nim.open_resolver(market_copy(tmp_path / "copy.duckdb"), supplement or {})
+def resolver(tmp_path: Path, supplement: dict[str, str] | None = None) -> tuple[Any, dict[str, date]]:
+    """``(resolver, first_bars)`` from a fresh copy in ``tmp_path``."""
+    return nim.read_copy(market_copy(tmp_path / "copy.duckdb"), supplement or {})
 
 
 def run(db, todo, llm, *, now=NIGHT, clock=None):
@@ -278,16 +289,22 @@ def test_stories_to_map_takes_orphans_in_window(tmp_path):
         story("late", scope="stock", event="order_win", headline="Unlisted Co wins again",
               at=datetime(2026, 10, 23, 9, 0, tzinfo=IST)),                       # enters 10-26: excluded window
         story("dom", at=wed),
+        # NEWCO's first bar is 08-10: a story entering 08-06 names a firm not yet listed, one entering 08-12 does not
+        story("pre_ipo", scope="stock", event="ipo", headline="NewCo IPO anchor book", at=wed),
+        story("post_ipo", scope="stock", event="order_win", headline="NewCo wins order",
+              at=datetime(2026, 8, 11, 12, 0, tzinfo=IST)),
     ]
-    orphans = nic.orphan_ids(stories, resolver(tmp_path))
-    assert orphans == frozenset({"orphan", "late"})
-    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == ["dom", "orphan"]
+    r, first_bars = resolver(tmp_path)
+    orphans = nic.orphan_ids(stories, r, sessions=sessions, first_bars=first_bars)
+    assert orphans == frozenset({"orphan", "late", "pre_ipo"})
+    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == ["dom", "orphan", "pre_ipo"]
     assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "excluded", orphans)] == ["late"]
-    # the orphan set is the resolver's: aliases that read the name leave a stock story the mapper never sees
-    orphans = nic.orphan_ids(stories, nim.open_resolver(market_copy(tmp_path / "c2.duckdb"),
-                                                        {"Unlisted Co": "UNLISTED"}))
-    assert orphans == frozenset() and [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == [
-        "dom"]
+    # the orphan set is the copy's: aliases that read the name leave a stock story the mapper never sees
+    r, first_bars = nim.read_copy(market_copy(tmp_path / "c2.duckdb", first_bars={**FIRST_BARS, "UNLISTED": date(
+        2020, 1, 1)}), {"Unlisted Co": "UNLISTED"})
+    orphans = nic.orphan_ids(stories, r, sessions=sessions, first_bars=first_bars)
+    assert orphans == frozenset({"pre_ipo"})
+    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == ["dom", "pre_ipo"]
 
 
 # --------------------------------------------------------------------------- the night
@@ -524,9 +541,9 @@ def test_sample_b_maps_up_to_the_last_calendar_year(monkeypatch, tmp_path, capsy
     monkeypatch.setattr(nim.nic, "load_first_scores", lambda state_db, limit: (stories, {}))
     monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2027))
     monkeypatch.setattr(nim.mml, "StudyLLM", lambda **kw: pytest.fail("a dry run must not build the LLM"))
-    todo, beyond = nim._todo_for("B", tmp_path / "state.db", now, resolver(tmp_path))
+    todo, beyond = nim._todo_for("B", tmp_path / "state.db", now, *resolver(tmp_path))
     assert [s.cluster_id for s in todo] == ["in_b", "last_day"]
-    assert beyond == 3                                             # the resolved stock story is never mapped
+    assert beyond == 3                                             # the resolved, listed stock story is never mapped
     assert nim.main(["--sample", "B", "--dry-run", "--db", str(tmp_path / "map.sqlite"), "--state-db",
                      str(tmp_path / "state.db"), "--market-db", str(tmp_path / "copy.duckdb")], clock=lambda: now,
                     supplement={}) == 0
@@ -535,7 +552,7 @@ def test_sample_b_maps_up_to_the_last_calendar_year(monkeypatch, tmp_path, capsy
     # a range that starts in a year without a calendar still refuses
     monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2026))
     with pytest.raises(nic.Unavailable):
-        nim._todo_for("B", tmp_path / "state.db", now, nim.open_resolver(tmp_path / "copy.duckdb", {}))
+        nim._todo_for("B", tmp_path / "state.db", now, *nim.read_copy(tmp_path / "copy.duckdb", {}))
 
 
 def test_main_rejects_max_calls_above_ceiling(capsys):

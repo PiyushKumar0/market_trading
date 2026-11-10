@@ -130,24 +130,29 @@ STOCK_SKIP_TYPES = {"pump_promo_suspect", "dividend_corp_action"}
 DOMAIN_MARKET_TYPES = {"govt_program", "sector_policy", "regulatory_policy"}
 GLOBAL_TYPES = {"global_market", "macro_data", "disruption"}
 HORIZONS = (1, 3, 5, 10, 20)
-#: The kinds the mapper reads: ``orphan`` is a material stock story that resolves to no symbol at all.
+#: The kinds the mapper reads: ``orphan`` is a material stock story that resolves to no symbol listed by its D-1.
 MAPPED_KINDS = ("domain", "global", "orphan")
 
 #: The reviewed short-name aliases the engine's table misses ("Titan", "Sun Pharma"), frozen at registration by
 #: this digest of the file's bytes.
 ALIAS_SUPPLEMENT_PATH = _ROOT / "config" / "research" / "news_impact" / "aliases_extra.yaml"
-ALIAS_SUPPLEMENT_SHA256 = "3682e47fc3912b59a636de90852bcd449794daa39c75c1ddcfdd74b066f311e1"
+ALIAS_SUPPLEMENT_SHA256 = "47a0a4d9b3554336df587c6bb8a11084ff49603c627961c505b25ad7615d6809"
 _SYMBOL_RE = re.compile(r"[A-Z0-9&-]+")
 #: NSE series codes the alias seed carries as separate symbols for one company ("BODALCHEM", "BODALCHEM-BE").
 SERIES_SUFFIXES = ("BE", "BZ", "SM", "ST")
 
 #: The engine's Indian outlets before the owner's 2026-11-11 global feeds. Frozen here rather than imported because
-#: the engine's lists can change; a story heard from any other domain counts as reaching a global outlet.
+#: the engine's lists can change. Only the stray-domain note reads it: a member domain in neither this set nor
+#: ``GLOBAL_FEED_DOMAINS`` is reported, so an unexpected host is visible.
 INDIAN_NEWS_DOMAINS = frozenset({
     "economictimes.indiatimes.com", "moneycontrol.com", "livemint.com", "business-standard.com",
     "financialexpress.com", "thehindubusinessline.com", "businesstoday.in", "ndtvprofit.com", "cnbctv18.com",
     "zeebiz.com", "nseindia.com",
 })
+#: The hosts the engine stores for the seven global feeds the owner added on 2026-11-11, measured from the feeds'
+#: item links with the engine's own domain rule (``bbc.com`` included because BBC links use both). A story reached a
+#: global outlet when a member headline came from one of them.
+GLOBAL_FEED_DOMAINS = frozenset({"bloomberg.com", "cnbc.com", "ft.com", "bbc.co.uk", "bbc.com", "federalreserve.gov"})
 
 # Reasons a constructor makes no trade.
 NO_PRIOR_SESSION = "no_prior_session"
@@ -276,6 +281,21 @@ def entry_session(t: datetime, sessions: Sequence[date]) -> date | None:
     first = local.date() if local.time() < ENTRY_CUTOFF else local.date() + timedelta(days=1)
     i = bisect_left(sessions, first)
     return sessions[i] if i < len(sessions) else None
+
+
+def placed_session(t: datetime, sessions: Sequence[date]) -> date | None:
+    """D for a story scored at ``t``, or None when it cannot be placed: ``sessions`` is empty, ``t`` falls before the
+    first of them (its D would be a guess), or past the last cut-off. The study's placement and the orphan rule both
+    read D here, so they agree on every story."""
+    if not sessions or _ist(t).date() < sessions[0]:
+        return None
+    return entry_session(t, sessions)
+
+
+def session_before(d: date, sessions: Sequence[date]) -> date | None:
+    """D-1: the session of ``sessions`` before ``d``; None when there is none."""
+    i = bisect_left(sessions, d)
+    return sessions[i - 1] if i > 0 else None
 
 
 def pre_news_session(t: datetime, sessions: Sequence[date]) -> date | None:
@@ -452,19 +472,38 @@ def stock_symbols(resolver: EntityResolver, s: Story) -> frozenset[str]:
     return frozenset(resolver.resolve(c, extra_texts=extra).symbols)
 
 
-def orphan_ids(stories: Iterable[Story], resolver: EntityResolver, *,
-               symbols: Mapping[str, frozenset[str]] | None = None) -> frozenset[str]:
+def load_first_bars(conn: duckdb.DuckDBPyConnection) -> dict[str, date]:
+    """Each symbol's first ``bars_1d`` date in the copy: when it was first listed, as far as the copy knows."""
+    try:
+        rows = conn.execute("SELECT symbol, min(d) FROM bars_1d GROUP BY 1").fetchall()
+    except duckdb.Error as exc:
+        raise Unavailable(f"bars_1d unreadable ({type(exc).__name__}: {exc})") from exc
+    return {str(sym): mm._as_date(d) for sym, d in rows}
+
+
+def orphan_ids(stories: Iterable[Story], resolver: EntityResolver, *, sessions: Sequence[date],
+               first_bars: Mapping[str, date], symbols: Mapping[str, frozenset[str]] | None = None) -> frozenset[str]:
     """The cluster ids of the orphan stories: stock stories (``story_kind``) with materiality at least ``MATERIAL``
-    whose headline and entities resolve to no symbol at all, liquid or not. A resolved but illiquid symbol is not an
-    orphan. ``symbols`` holds stories already resolved by this same resolver, reused rather than resolved again."""
+    and an entry session D (``placed_session`` over ``sessions``) whose headline and entities resolve to no symbol
+    listed by D-1, liquid or not.
+
+    A symbol counts only with a ``first_bars`` date on or before D-1. The copy's aliases and the supplement know
+    companies that listed after the story, so a story about a firm before its listing would otherwise read as
+    resolved through later information. A resolved, listed but illiquid symbol is not an orphan. A story without D or
+    D-1 is never an orphan. ``symbols`` holds stories already resolved by this same resolver, reused rather than
+    resolved again."""
     out = set()
     for s in stories:
         if story_kind(s) != "stock" or not s.materiality >= MATERIAL:
             continue
+        d = placed_session(s.at, sessions)
+        d_prev = session_before(d, sessions) if d is not None else None
+        if d_prev is None:
+            continue
         found = symbols.get(s.cluster_id) if symbols is not None else None
         if found is None:
             found = stock_symbols(resolver, s)
-        if not found:
+        if not any(first_bars.get(sym) is not None and first_bars[sym] <= d_prev for sym in found):
             out.add(s.cluster_id)
     return frozenset(out)
 

@@ -88,9 +88,11 @@ def first_on_or_after(sessions: list[date], d: date) -> date:
 
 
 # --------------------------------------------------------------------------- synthetic stores
-def build_market(path: Path, sessions: list[date], *, news_rows: list[tuple] | None = None) -> Path:
+def build_market(path: Path, sessions: list[date], *, news_rows: list[tuple] | None = None,
+                 late: dict[str, date] | None = None) -> Path:
     """Random-walk daily bars for every name (so betas and universe returns exist), NIFTY 50 on every session, one
-    ``sector_map`` snapshot, an alias per name (``<sym>corp``), a theme row and, optionally, a ``news`` table."""
+    ``sector_map`` snapshot, an alias per name (``<sym>corp``), a theme row and, optionally, a ``news`` table.
+    ``late`` names list on their date: bars from it on, an alias, no sector."""
     rng = np.random.default_rng(7)
     rows = []
     nifty = 100.0
@@ -103,6 +105,9 @@ def build_market(path: Path, sessions: list[date], *, news_rows: list[tuple] | N
         for d in sessions:
             o, px = px, px * (1.0 + rng.normal(0.0, 0.01))
             rows.append((sym, d, o, max(o, px) * 1.002, min(o, px) * 0.998, px, 2_000_000))
+    for sym, listed in (late or {}).items():
+        rows += [(sym, d, 100.0, 101.0, 99.0, 100.0, 2_000_000) for d in sessions if d >= listed]
+    names += list(late or {})
     conn = duckdb.connect(str(path))
     conn.execute('CREATE TABLE bars_1d (symbol TEXT NOT NULL, d DATE NOT NULL, "open" DOUBLE NOT NULL, '
                  'high DOUBLE NOT NULL, low DOUBLE NOT NULL, "close" DOUBLE NOT NULL, volume BIGINT NOT NULL, '
@@ -657,6 +662,69 @@ def test_mapped_orphan_feeds_both_domain_hypotheses_and_never_global(tmp_path, m
     g = sp["domain_groups"]["boolean"]["global_outlet"]
     assert (g["n"], g["false"], g["perm_p"], g["note"]) == (0, 2, None, nis.ONE_SIDED)
     assert nis.ONE_SIDED in nis.render(doc)
+    assert doc["diagnostics"]["outlet_stray_domains"] == {name: {} for name in nis.OUTLET_HYPOTHESES}
+    assert doc["meta"]["mapped_not_orphan"] == 0
+    assert "member domains in neither" in nis.render(doc)
+
+
+def test_domain_plus_and_orphan_minus_on_one_key_conflict(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.domain("dom1", at(d1, 8))
+    st.orphan("o1", at(d1, 8, 30))
+    maps = write_mappings(tmp_path / "maps.sqlite", {"dom1": (1, [["AUTO", 1]], [["P1corp", 1]]),
+                                                     "o1": (-1, [["AUTO", -1]], [["P1corp Ltd", -1]])})
+    doc = run(st, market_db, maps)
+    h = doc["hypotheses"]
+    for name in ("domain_companies", "domain_groups"):
+        assert h[name]["signals"] == 0 and h[name]["trades"] == [], name
+        assert h[name]["drops"]["conflict"] == 1 and h[name]["stories"] == 2, name
+    # the orphan's -1 still reaches the negative side
+    neg = doc["diagnostics"]["negative_side"]
+    assert neg["domain_companies_minus"]["n"] == 1 and neg["domain_groups_minus"]["n"] == 1
+
+
+def test_mapped_not_orphan_counts_mappings_this_run_reads_under_no_kind(tmp_path, market_db, d1, capsys):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o1", at(d1, 8))
+    # sx1 was mapped as an orphan by a copy that did not read its name; this run resolves it
+    maps = write_mappings(tmp_path / "maps.sqlite", {"o1": (1, [["AUTO", 1]], []), "sx1": (1, [["BANK", 1]], [])})
+    doc = run(st, market_db, maps)
+    assert doc["meta"]["mapped_not_orphan"] == 1
+    assert [t["key"] for t in doc["hypotheses"]["domain_groups"]["trades"]] == ["AUTO"]     # sx1's BANK unread
+    assert "mapped_not_orphan: 1 " in nis.render(doc)
+    args = ["--sample", "A", "--db", str(market_db), "--state-db", str(st.path), "--mappings", str(maps),
+            "--as-of", AS_OF.isoformat(), "--counts-only"]
+    assert nis.main(args, etfs=frozenset(), themes={}) == 0
+    text = capsys.readouterr().out
+    assert "mapped_not_orphan 1:" in text and not _OUTCOME_KEY.search(text)
+    assert nis.counts_only("A", st.path, market_db, AS_OF, etfs=frozenset(), themes={})["mapped_not_orphan"] == 0
+
+
+def test_orphans_use_no_listing_after_d_minus_1_and_both_scripts_agree(tmp_path, sessions, d1):
+    """A story about a firm before its listing is an orphan even though the copy knows its symbol; the mapper and
+    the study read the same orphans from the same copy and stories."""
+    listed = nth(sessions, d1, 3)
+    db = build_market(tmp_path / "late.duckdb", sessions, late={"NEWCO": listed})
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o1", at(d1, 8))                                       # names nothing
+    st.stock("pre", "NEWCO", at(d1, 8))                              # first bar three sessions after D: orphan
+    st.stock("on", "NEWCO", at(nth(sessions, d1, 4), 8))             # D-1 is the first bar's session: listed
+    st.call(at(d1, 8), [_score("mix", "stock", 0.8, 0.9, "order_win")], {"mix": "xcorp and newcorp sign a pact"})
+    conn, _, _, _, placed, _, _, orphans, _ = nis._open("A", st.path, db, AS_OF, frozenset(), {}, mappings=None,
+                                                        check_waiting=False, supplement={})
+    conn.close()
+    assert orphans == frozenset({"o1", "pre"})
+    nim = _load("mt_news_impact_map", "news_impact_map.py")
+    todo, _ = nim._todo_for("A", st.path, datetime(2026, 11, 11, 22, 0, tzinfo=IST), *nim.read_copy(db, {}))
+    in_a = {p.story.cluster_id for p in placed if p.story.cluster_id in orphans and nis._in(p.d, nic.SAMPLES["A"])}
+    assert {s.cluster_id for s in todo if nic.story_kind(s) == "stock"} == in_a == {"o1", "pre"}
+    # the stock arms still take the listed-later symbol as a candidate, which drops as not liquid
+    c = nis.counts_only("A", st.path, db, AS_OF, etfs=frozenset(), themes={})
+    drops = c["windows"]["sample"]["stock_next_open"]["drops"]
+    assert drops["stories_unresolved"] == 1 and drops["not_liquid"] >= 1
 
 
 def test_unmapped_orphan_waits_by_this_runs_resolver(tmp_path, market_db, d1):
@@ -735,28 +803,36 @@ def news_db(rows: list[tuple[str, str, datetime]]) -> duckdb.DuckDBPyConnection:
     return conn
 
 
-def test_global_outlet_reads_members_ingested_by_the_first_score(d1):
+def test_global_outlet_reads_global_feed_members_ingested_before_the_first_score(d1):
     t = at(d1, 8)
     conn = news_db([
         ("g1", "moneycontrol.com", t - timedelta(hours=1)),
-        ("g1", "reuters.com", t + timedelta(minutes=1)),           # after the first score: does not count
+        ("g1", "bloomberg.com", t + timedelta(minutes=1)),         # after the first score: does not count
         ("g2", "economictimes.indiatimes.com", t - timedelta(hours=1)),
-        ("g2", "bloomberg.com", t),                                # ingested at the first score: counts
+        ("g2", "ft.com", t),                                       # at the first score: not before it
+        ("g2", "bbc.com", t - timedelta(seconds=1)),               # just before it: counts
+        ("g4", "reuters.com", t - timedelta(hours=1)),             # in neither list: not a global feed, a stray
+        ("g4", "reuters.com", t - timedelta(minutes=30)),
+        ("g4", "cnbc.com", t + timedelta(hours=1)),                # late: neither counted nor a stray
     ])
-    news = nis.load_news_domains(conn, ["g1", "g2", "g3"])
-    s1, s2, s3 = (story(c, t, scope="market", event_type="global_market") for c in ("g1", "g2", "g3"))
+    news = nis.load_news_domains(conn, ["g1", "g2", "g3", "g4"])
+    s1, s2, s3, s4 = (story(c, t, scope="market", event_type="global_market") for c in ("g1", "g2", "g3", "g4"))
     assert nis.global_outlet(nis.Signal("BANK", d1, (s1,)), news) is False
     assert nis.global_outlet(nis.Signal("BANK", d1, (s2,)), news) is True
     assert nis.global_outlet(nis.Signal("BANK", d1, (s1, s2)), news) is True       # any of the signal's stories
     assert nis.global_outlet(nis.Signal("BANK", d1, (s3,)), news) is False         # a cluster without rows
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s4,)), news) is False         # a positive list, not "not Indian"
     # a later story of the same cluster sees the late member
     late = story("g1", t + timedelta(minutes=5), scope="market", event_type="global_market")
     assert nis.global_outlet(nis.Signal("BANK", d1, (late,)), news) is True
+    # the strays: member domains in neither list, before each story's first score, each story once
+    sigs = [nis.Signal("BANK", d1, (s1, s4)), nis.Signal("IT", d1, (s4,)), nis.Signal("AUTO", d1, (s2,))]
+    assert nis.outlet_strays(sigs, news) == {"reuters.com": 2}
+    assert nis.outlet_strays([], news) == {}
     # a copy without a news table leaves the split unavailable
     assert nis.global_outlet(nis.Signal("BANK", d1, (s2,)), None) is None
+    assert nis.outlet_strays(sigs, None) is None
     assert nis.load_news_domains(duckdb.connect(), ["g1"]) is None
-    assert "reuters.com" not in nic.INDIAN_NEWS_DOMAINS and "moneycontrol.com" in nic.INDIAN_NEWS_DOMAINS
-    assert len(nic.INDIAN_NEWS_DOMAINS) == 11
 
 
 def test_one_sided_split_reports_no_p(sessions, d1):

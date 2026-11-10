@@ -73,6 +73,12 @@ def regular(cal, lo: date, hi: date) -> list[date]:
 
 
 # --------------------------------------------------------------------------- registered constants
+def test_outlet_domain_lists():
+    assert nic.GLOBAL_FEED_DOMAINS == {"bloomberg.com", "cnbc.com", "ft.com", "bbc.co.uk", "bbc.com",
+                                       "federalreserve.gov"}
+    assert len(nic.INDIAN_NEWS_DOMAINS) == 11 and not nic.INDIAN_NEWS_DOMAINS & nic.GLOBAL_FEED_DOMAINS
+
+
 def test_registered_constants_are_the_spec_values():
     assert (nic.FAMILY, nic.N_TRIALS, nic.MIN_TRADES, nic.MIN_INFO_OBS) == ("edge/news_impact", 6, 30, 300)
     assert nic.ALPHA == registration_alpha(6) == pytest.approx(0.05 / 6)
@@ -812,7 +818,16 @@ def test_resolver_collapses_series_duplicates():
 
 
 # --------------------------------------------------------------------------- orphans
-def test_orphan_ids():
+#: Every symbol of ``resolver_db`` long listed.
+LISTED = {s: D(1, 2, 2020) for s in ("RELIANCE", "RELINFRA", "TATAMOTORS", "TATASTEEL", "HDFCBANK", "INFY", "X")}
+
+
+def orphans_of(stories, r, cal, first_bars=None, **kw):
+    return nic.orphan_ids(stories, r, sessions=regular(cal, D(7, 1), D(12, 31)),
+                          first_bars=LISTED if first_bars is None else first_bars, **kw)
+
+
+def test_orphan_ids(cal):
     r = nic.build_resolver(resolver_db())
     stories = [
         story(cluster_id="orphan", headline="Unlisted Co wins a large order", entities=("Unlisted Co",)),
@@ -828,17 +843,52 @@ def test_orphan_ids():
         story(cluster_id="pump", event_type="pump_promo_suspect", headline="Unlisted Co multibagger"),
         story(cluster_id="nohead", headline=None, entities=()),
     ]
-    assert nic.orphan_ids(stories, r) == frozenset({"orphan", "ambiguous", "edge", "nohead"})
+    assert orphans_of(stories, r, cal) == frozenset({"orphan", "ambiguous", "edge", "nohead"})
     by = {s.cluster_id: s for s in stories}
-    orphans = nic.orphan_ids(stories, r)
+    orphans = orphans_of(stories, r, cal)
     assert {c: nic.map_kind(s, orphans) for c, s in by.items()} == {
         "orphan": "orphan", "resolved": None, "via_entity": None, "ambiguous": "orphan", "weak": None,
         "edge": "orphan", "sector": "domain", "market": "global", "dividend": None, "pump": None, "nohead": "orphan"}
     # symbols already resolved by the same resolver are reused
-    assert nic.orphan_ids([by["orphan"]], r, symbols={"orphan": frozenset({"X"})}) == frozenset()
-    assert nic.orphan_ids([], r) == frozenset()
+    assert orphans_of([by["orphan"]], r, cal, symbols={"orphan": frozenset({"X"})}) == frozenset()
+    assert orphans_of([], r, cal) == frozenset()
     # a non-stock story is never an orphan, whatever set it is looked up in
     assert nic.map_kind(by["sector"], {"sector"}) == "domain" and nic.map_kind(by["dividend"], {"dividend"}) is None
+
+
+def test_orphan_counts_only_symbols_listed_by_d_minus_1(cal):
+    """The copy's aliases know companies that listed after the story; a symbol counts only with a bar by D-1."""
+    r = nic.build_resolver(resolver_db())
+    sessions = regular(cal, D(7, 1), D(12, 31))
+    infy = story(cluster_id="infy", headline="Infosys IPO anchor book", entities=())
+    both = story(cluster_id="both", headline="HDFC Bank and Infosys tie up", entities=())
+    d = nic.placed_session(infy.at, sessions)
+    d_prev = nic.session_before(d, sessions)
+    assert (d, d_prev) == (D(8, 3), D(7, 31))
+    after = {**LISTED, "INFY": d}                                    # first bar on D itself: after D-1
+    on = {**LISTED, "INFY": d_prev}
+    assert orphans_of([infy], r, cal, after) == frozenset({"infy"})
+    assert orphans_of([infy], r, cal, on) == frozenset()
+    # one symbol listed by D-1 and one not: not an orphan
+    assert orphans_of([both], r, cal, after) == frozenset()
+    assert orphans_of([both], r, cal, {**after, "HDFCBANK": d}) == frozenset({"both"})
+    # a symbol with no bar at all in the copy was never listed by D-1
+    assert orphans_of([infy], r, cal, {k: v for k, v in LISTED.items() if k != "INFY"}) == frozenset({"infy"})
+    # a story that cannot be placed (before the sessions, or past their last cut-off) is never an orphan
+    early = story(cluster_id="early", headline="Unlisted Co wins", at=at(D(6, 20), 8))
+    late = story(cluster_id="late", headline="Unlisted Co wins", at=at(D(12, 31), 10))
+    assert orphans_of([early, late], r, cal) == frozenset()
+    # placement agrees with the study's: a story before the first session has no D
+    assert nic.placed_session(early.at, sessions) is None
+    assert nic.placed_session(at(sessions[0], 8), sessions) == sessions[0]
+    assert nic.session_before(sessions[0], sessions) is None
+    # the first bars come from bars_1d; a copy without it refuses
+    with pytest.raises(nic.Unavailable, match="bars_1d"):
+        nic.load_first_bars(resolver_db())
+    m, _ = auto_market(cal)
+    del m.bars["X"][m.sessions[0]]
+    first = nic.load_first_bars(m.build())
+    assert first["X"] == m.sessions[1] and first["P1"] == m.sessions[0]
 
 
 # --------------------------------------------------------------------------- the verdict

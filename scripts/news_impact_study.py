@@ -7,10 +7,12 @@ and resolved to symbols by the engine's resolver over the research copy's own ta
 supplement; the domain and global ones read the mapper's store. Every threshold, hold, window and verdict rule is the
 registration's, held in ``news_impact_common``.
 
-* An orphan is a material stock story that this run's resolver resolves to no symbol at all (an unlisted, foreign or
-  group company, or a listed name the aliases miss). The mapper maps it, and the two domain hypotheses read it with
-  the domain stories; it still counts as unresolved in the stock hypotheses. Orphan status is this run's, so a story
-  an older copy resolved, and the mapper therefore skipped, holds the run until it is mapped.
+* An orphan is a material stock story that this run's resolver resolves to no symbol with a bar on or before its D-1
+  (an unlisted, foreign or group company, a firm before its listing, or a listed name the aliases miss). The mapper
+  maps it, and the two domain hypotheses read it with the domain stories; in the stock hypotheses it still counts as
+  unresolved, or a not-yet-listed symbol drops as not liquid. Orphan status is this run's, so a story an older copy
+  resolved, and the mapper therefore skipped, holds the run until it is mapped; a mapping this run reads under no
+  kind is counted as ``mapped_not_orphan``.
 * Signals are per (key, entry session D): several stories on one key for one D make one signal. A key that another
   story the same hypothesis reads maps the other way on that D is skipped and counted.
 * One position per key at a time within a hypothesis: a signal on or before the exit session of the last kept trade
@@ -167,14 +169,7 @@ Window = tuple[date, date]
 
 def place(stories: Sequence[Story], sessions: Sequence[date]) -> list[Placed]:
     """Each story's kind and entry session. ``sessions`` are regular sessions that start before every story."""
-    first = sessions[0] if sessions else None
-    out = []
-    for s in stories:
-        d = None
-        if first is not None and s.at.astimezone(IST).date() >= first:
-            d = nic.entry_session(s.at, sessions)
-        out.append(Placed(s, nic.story_kind(s), d))
-    return out
+    return [Placed(s, nic.story_kind(s), nic.placed_session(s.at, sessions)) for s in stories]
 
 
 def _in(d: date | None, window: Window) -> bool:
@@ -565,14 +560,31 @@ def split_features(p: nic.Panel, sig: Signal,
     return f
 
 
+def _members_before(s: Story, news: dict[str, list[tuple[str, int]]]) -> Iterator[str]:
+    """The domains of the story's cluster members ingested strictly before its first score, as ``two_domains``
+    reads them."""
+    cut = _us(s.at)
+    return (dom for dom, us in news.get(s.cluster_id, ()) if us < cut)
+
+
 def global_outlet(sig: Signal, news: dict[str, list[tuple[str, int]]] | None) -> bool | None:
-    """Whether any of the signal's stories had, at its first score, a cluster member from a domain outside
-    ``nic.INDIAN_NEWS_DOMAINS``: a ``news`` row ingested at or before the story's ``at``. None without a ``news``
-    table."""
+    """Whether any of the signal's stories had, before its first score, a cluster member from one of
+    ``nic.GLOBAL_FEED_DOMAINS``. None without a ``news`` table."""
     if news is None:
         return None
-    return any(dom not in nic.INDIAN_NEWS_DOMAINS and us <= _us(s.at)
-               for s in sig.stories for dom, us in news.get(s.cluster_id, ()))
+    return any(dom in nic.GLOBAL_FEED_DOMAINS for s in sig.stories for dom in _members_before(s, news))
+
+
+def outlet_strays(signals: Sequence[Signal], news: dict[str, list[tuple[str, int]]] | None) -> dict[str, int] | None:
+    """The member domains in neither ``nic.INDIAN_NEWS_DOMAINS`` nor ``nic.GLOBAL_FEED_DOMAINS``, counted over the
+    members (ingested before each story's first score) of the signals' distinct stories, so a host the global-outlet
+    split does not know is visible. None without a ``news`` table."""
+    if news is None:
+        return None
+    known = nic.INDIAN_NEWS_DOMAINS | nic.GLOBAL_FEED_DOMAINS
+    stories = {s.cluster_id: s for sig in signals for s in sig.stories}
+    out: Counter = Counter(dom for s in stories.values() for dom in _members_before(s, news) if dom not in known)
+    return _counts(out)
 
 
 ONE_SIDED = "one side of the split is empty, so there is no permutation p"
@@ -671,6 +683,13 @@ def unmappable(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequ
     return sum(not _mappable(p.story) for _, p in _needed_unmapped(placed, mappings, windows, orphans))
 
 
+def mapped_not_orphan(placed: Sequence[Placed], mappings: dict[str, Any], orphans: Collection[str]) -> int:
+    """The stories with a mapping in the store that this run reads as neither domain, global nor orphan (a story the
+    mapper took as an orphan by another copy, which this run's resolver reads as listed): their mappings feed
+    nothing, so they are counted rather than lost silently."""
+    return sum(1 for p in placed if p.story.cluster_id in mappings and nic.map_kind(p.story, orphans) is None)
+
+
 #: Sessions from the last entry to the longest exit: a pullback filled on the last resting session, then held.
 LAST_EXIT_OFFSET = nic.PULLBACK_SESSIONS - 1 + MAX_HOLD - 1
 
@@ -714,7 +733,8 @@ def _open(sample: str, state_db: Path, db: Path, as_of: date, etfs: frozenset[st
     try:
         resolver = nic.indexed_resolver(nic.build_resolver(conn, extra))
         syms = _stock_syms(resolver, placed)
-        orphans = nic.orphan_ids(stories, resolver, symbols=syms)
+        orphans = nic.orphan_ids(stories, resolver, sessions=sessions, first_bars=nic.load_first_bars(conn),
+                                 symbols=syms)
         waiting = (unmapped(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]), orphans) if check_waiting
                    else Counter())
         if sum(waiting.values()):
@@ -871,11 +891,13 @@ def _diagnostics(ctx: Ctx, window: Window, sig: dict[str, list[Signal]],
                           "ci95": mean_ci(days, vals), "drops": _counts(drops)}
     negative["domain_companies_minus"]["drops"]["unresolved_names"] = int(neg["_unresolved_minus_names"])
     filled, unfilled = len(kept_all["stock_pullback"]), drops_all["stock_pullback"][nic.UNFILLED]
+    strays = None if news is None else {
+        name: outlet_strays([s for s, _ in kept_all[name]], news) for name in OUTLET_HYPOTHESES}
     return {"horizons": horizons, "splits": splits, "negative_side": negative,
             "market_direction": market_direction(ctx, window),
             "pullback_fill_rate": {"filled": filled, "unfilled": int(unfilled),
                                    "rate": filled / (filled + unfilled) if filled + unfilled else None},
-            "source_domains_available": news is not None}
+            "source_domains_available": news is not None, "outlet_stray_domains": strays}
 
 
 def market_direction(ctx: Ctx, window: Window) -> dict[str, Any]:
@@ -962,6 +984,7 @@ def run(sample: str, state_db: Path, db: Path, mappings_db: Path, as_of: date, *
         sample, state_db, db, as_of, etfs, themes, mappings=mappings_db, check_waiting=True, supplement=supplement)
     meta = _meta(sample, as_of, Path(state_db), Path(db), Path(mappings_db), load_counts, placed, orphans)
     meta["unmappable"] = unmappable(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]), orphans)
+    meta["mapped_not_orphan"] = mapped_not_orphan(placed, maps, orphans)
     if ctx is None:
         n = sum(waiting.values())
         return {"meta": meta, "status": f"waiting: {n} stories unmapped (domain {waiting['domain']}, "
@@ -982,14 +1005,15 @@ def run(sample: str, state_db: Path, db: Path, mappings_db: Path, as_of: date, *
 
 
 def counts_only(sample: str, state_db: Path, db: Path, as_of: date, *, etfs: frozenset[str] | None = None,
-                themes: dict[str, frozenset[str]] | None = None,
-                supplement: Mapping[str, str] | None = None) -> dict[str, Any]:
+                themes: dict[str, frozenset[str]] | None = None, supplement: Mapping[str, str] | None = None,
+                mappings: Path | None = None) -> dict[str, Any]:
     """Counts for validating the stock-story pipeline on real data before sign-off: stories by kind (orphans apart),
-    signals, trades, drops by reason and population sizes for the stock hypotheses. No return, excess, net, rho or
-    label is ever put in the result. Skips the waiting check and the mapped hypotheses."""
+    signals, trades, drops by reason and population sizes for the stock hypotheses, and, with ``mappings``, the
+    mappings this run reads under no kind. No return, excess, net, rho or label is ever put in the result. Skips the
+    waiting check and the mapped hypotheses."""
     t0 = _time.perf_counter()
-    conn, _, load_counts, _, placed, _, _, orphans, ctx = _open(
-        sample, state_db, db, as_of, etfs, themes, mappings=None, check_waiting=False, supplement=supplement)
+    conn, _, load_counts, _, placed, maps, _, orphans, ctx = _open(
+        sample, state_db, db, as_of, etfs, themes, mappings=mappings, check_waiting=False, supplement=supplement)
     try:
         windows: dict[str, Any] = {}
         for wname, window in (("sample", nic.SAMPLES[sample]), (EXCLUDED, nic.SAMPLES[EXCLUDED])):
@@ -1013,6 +1037,7 @@ def counts_only(sample: str, state_db: Path, db: Path, as_of: date, *, etfs: fro
     by_window = {wn: _kinds(placed, orphans, nic.SAMPLES[ws]) for wn, ws in (("sample", sample), (EXCLUDED, EXCLUDED))}
     return {"sample": sample, "as_of": as_of, "panel": panel, "first_scores": dict(load_counts),
             "stories_by_kind": {"all": _kinds(placed, orphans), **by_window}, "windows": windows,
+            "mapped_not_orphan": mapped_not_orphan(placed, maps, orphans),
             "seconds": round(_time.perf_counter() - t0, 1)}
 
 
@@ -1057,7 +1082,9 @@ def render(doc: dict[str, Any]) -> str:
            f"stories by kind: all ({_kv(m['stories_by_kind']['all'])}); sample window "
            f"({_kv(m['stories_by_kind']['sample_window'])})",
            f"unmappable: {m['unmappable']} domain, global and orphan stories in the sample and excluded windows "
-           f"without a readable headline (never mapped, never waited on)"]
+           f"without a readable headline (never mapped, never waited on)",
+           f"mapped_not_orphan: {m['mapped_not_orphan']} stories with a mapping that this run reads as neither "
+           f"domain, global nor orphan (their mappings feed nothing)"]
     if "panel" in m:
         out.append(f"panel: {m['panel']['first_session']}..{m['panel']['last_session']}")
         out += [f"panel note: {n}" for n in m["panel"]["notes"]]
@@ -1114,6 +1141,11 @@ def render(doc: dict[str, Any]) -> str:
                f"(sessions skipped {md['sessions_skipped']})")
     fr = dg["pullback_fill_rate"]
     out.append(f"  pullback fill rate: {fr['filled']} filled, {fr['unfilled']} unfilled, rate {_f(fr['rate'], '.3f')}")
+    strays = dg["outlet_stray_domains"]
+    out.append("  member domains in neither the Indian nor the global-feed list (rows before the first score):"
+               + (" unavailable" if strays is None else ""))
+    for name, doms in (strays or {}).items():
+        out.append(f"    {name:<18} {_kv(doms)}")
     ex = doc["excluded_window"]
     out += ["", f"EXCLUDED WINDOW {ex['window'][0]}..{ex['window'][1]} ({ex['label']}; never feeds a verdict)"]
     i = ex["info"]
@@ -1144,6 +1176,7 @@ def render_counts(c: dict[str, Any]) -> str:
                 pop = h["population"]
                 out.append(f"  {'':<16} population: {pop['size']} on {pop['sessions']} entry sessions; drops "
                            f"{_kv(pop['drops'])}")
+    out.append(f"mapped_not_orphan {c['mapped_not_orphan']}: stories with a mapping this run reads under no kind")
     out.append(f"run time {c['seconds']} s")
     return rc.ascii_text("\n".join(out))
 
@@ -1171,7 +1204,7 @@ def main(argv: list[str] | None = None, *, etfs: frozenset[str] | None = None,
     try:
         if args.counts_only:
             print(render_counts(counts_only(args.sample, args.state_db, db, as_of, etfs=etfs, themes=themes,
-                                            supplement=supplement)))
+                                            supplement=supplement, mappings=args.mappings)))
             return 0
         doc = run(args.sample, args.state_db, db, args.mappings, as_of, etfs=etfs, themes=themes,
                   supplement=supplement)
