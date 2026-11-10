@@ -4,6 +4,29 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-11 02:30 — Found: 11-08 evening News Analyst outage was host standby, not the login
+
+- **What failed:** every News Analyst call on 11-08 from 19:06:11 to 21:59:42 (`agent_calls`):
+  - 29 `sdk_error`, "Control request timeout: initialize": the CLI child never started;
+  - 4 timeouts at 240 s.
+
+  Eight error alerts went out. The next successful call was 11-09 01:34 after the 01:31 restart, and the forced
+  batch scored 657 clusters by 01:41.
+- **Cause:** the host was in Modern Standby from 16:12:09 to 22:07:41 (Kernel-Power 506/507). In the same window the
+  engine log shows:
+  - DNS failing everywhere: `getaddrinfo failed` on 155 feed polls, NSE and Telegram;
+  - 50 ticker respawns;
+  - 149 skipped jobs.
+
+  The 19:06 start matches the 11-06 login failure only by clock time. The 11-09 01:31 self-test passed the Claude
+  login (refresh token good to 2026-12-05).
+- **Keep-awake gap on special sessions:** on 11-08 the engine logged no `keep_awake` line at all. The health check
+  engages keep-awake only inside `calendar.session(today)`, which returns None for the Muhurat special session
+  (14:20–15:30). The host slept 13:41–14:11 and from 15:25, inside that session. The next special session is a year
+  away; this is noted for the keep-awake verdict.
+- **News studies:** no effect. Stories missed in standby were backfilled and first scored on 11-09 before 09:00, so
+  their entry session is 11-09 either way.
+
 ## 2026-11-11 01:29 — Global news feeds live (owner: "Add global news channel"); engine restarted
 
 - **Change:** seven RSS feeds were added to `settings.yaml` `news.feeds.rss` (commit 419f5db):
