@@ -400,7 +400,7 @@ trials:
   - id: "edge-macro_mood_news_tone_headline-20261110"
     date: "2026-11-10"
     family: "edge/macro_mood"
-    hypothesis: "When the News Analyst's market-scope tone in the 24 hours before 09:00 IST is in the top third of its previous sessions, the NIFTY bought at D's open gains over 5 sessions net of costs"
+    hypothesis: "When the News Analyst's market-scope tone in D's news window (09:00 IST on the previous regular session to 09:00 IST on D) is in the top third of its previous sessions, the NIFTY bought at D's open gains over 5 sessions net of costs"
     population: "forward from the registration session; state.db agent_calls under the registered (model, prompt_version) key"
     construct: "buy NIFTY at D open, 5-session hold, one CNC round trip; judged at the 30th closed trade or insufficient at 18 months"
     variants: 1
