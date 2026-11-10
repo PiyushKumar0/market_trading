@@ -602,7 +602,9 @@ $snap = (Get-ChildItem data\research\market_*.duckdb | Sort-Object Name -Descend
 ```
 
 The two scheduled tasks run the project venv's `pythonw` under the account that owns the engine's Claude CLI login.
-They are Interactive, so they run only while that user is logged on (a locked screen counts):
+That `pythonw.exe` is uv's console launcher, so an Interactive run opens a console window on the desktop. Registered
+as below, the tasks are Interactive and run only while that user is logged on (a locked screen counts). The block
+after it moves them to the background session:
 
 ```powershell
 $repo = 'C:\Users\piyush.kumar_atari\projects\personal\market_trading'
@@ -622,8 +624,18 @@ Register-ScheduledTask -TaskName MT-NewsContentScore -Principal $pri -Settings $
   -Action (New-ScheduledTaskAction -Execute $py -Argument "`"$repo\scripts\news_content_score.py`"" -WorkingDirectory $repo) `
   -Trigger (New-ScheduledTaskTrigger -Daily -At 22:00) `
   -Description 'Macro mood study: nightly H/C scoring and policy mapping (scripts/news_content_score.py)'
-# health (read-only): last run and result per task; the scorer also appends every run's summary to score_runs
+# move both tasks to the background session ("Run whether user is logged on or not"), where the engine service runs:
+# no window on the desktop, and they run while logged off. Asks for the Windows password. If a later run reports
+# 0x80070569, the account lacks "Log on as a batch job": set the same option in the Task Scheduler GUI instead.
+$cred = Get-Credential -UserName "$env:USERDOMAIN\$env:USERNAME" -Message 'Windows password for the macro mood study tasks'
+'MT-NewsContentCapture', 'MT-NewsContentScore' | ForEach-Object {
+  Set-ScheduledTask -TaskName $_ -User $cred.UserName -Password $cred.GetNetworkCredential().Password | Out-Null }
+Get-ScheduledTask -TaskName 'MT-NewsContent*' | Select-Object TaskName, State, @{n = 'LogonType'; e = { $_.Principal.LogonType } }
+# health (read-only): last run and result per task (0 ok, 2 the scorer's market-hours refusal, 267011 never run)
 Get-ScheduledTask -TaskName 'MT-NewsContent*' | Get-ScheduledTaskInfo | Select-Object TaskName, LastRunTime, LastTaskResult, NextRunTime
+# the scorer's last three run summaries: skipped or stopped reason, calls, scored and mapped counts ("no such table"
+# until a run gets past the market-hours check)
+.venv\Scripts\python.exe -c "import sqlite3; c = sqlite3.connect('file:data/research/news_content.sqlite?mode=ro', uri=True); [print(*r) for r in c.execute('SELECT run_at, summary_json FROM score_runs ORDER BY rowid DESC LIMIT 3')]"
 ```
 
 The capture makes no LLM calls. The scorer draws on the subscription the engine's analysts share, so it runs only at

@@ -4,6 +4,33 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 14:15 — Scorer task registered by the owner and validated; both study tasks open a console window
+
+- **`MT-NewsContentScore`:** the owner registered it from the COMMANDS.md block, and it matches that block field
+  for field. State Ready, next run 22:00 tonight.
+- **Validation:**
+  - Launch: `Start-ScheduledTask` at 13:58 gave exit 2, the scorer's own market-hours refusal (its weekday rule
+    covers 09:15–15:30 even on a holiday). So the interpreter, imports and working directory are right under the
+    task.
+  - Preflight, read-only: both prompt pins match, 40 calls are left for today, no stop is logged.
+  - Call path: three real calls through `macro_mood_llm.StudyLLM`, outside the scorer, writing to no store. They
+    were made on the holiday, when the engine's analysts were idle. Pinned Haiku 5.5 scored a policy headline
+    `govt_program` 0.7/0.8, and the API reports Haiku 5.5 as the model that served it. Pinned Sonnet 5.5 mapped it
+    to make_in_india, CONSUMER_DURABLES and CAPITAL_GOODS. The pinned CLI 2.1.288 logs `unrecognized_model` for
+    `claude-haiku-5-5` and adds one small Haiku 4.5 request of its own per call; the scores come from Haiku 5.5.
+- **The first model calls are on the 11-11 22:00 run:** 11-10 is an NSE holiday (Diwali-Balipratipada), and the
+  engine's News Analyst has returned no policy-bar candidate since 11-09 09:00. Clusters captured after 11-10 09:00
+  become scoreable only at their 11-11 09:00 cut-off. Tonight's run only clusters about 700 captured items and logs a
+  `score_runs` row. Check `score_runs` and `llm_calls` after the 11-11 run.
+- **Console windows:** `.venv\Scripts\pythonw.exe` is uv's console trampoline, not a windowless interpreter. It has
+  PE subsystem 3, is the same 45,568-byte file as `python.exe`, and runs the base `python.exe`. Started by an
+  Interactive task, it opens a Windows Terminal window for the whole run, which was watched happening at the 14:06
+  capture run. The capture has shown one every 15 minutes since 01:36 (22 runs), and the scorer will show one at
+  22:00. Windows Terminal hosts the window, so a script cannot hide it.
+  - **Owner action:** switch both tasks to "Run whether user is logged on or not" (block in COMMANDS.md; it asks
+    for the Windows password). They then run in the background session like the engine service: no window, and
+    they keep running while logged off.
+
 ## 2026-11-10 12:31 — Macro mood study: backtests run; the nightly scorer task is left to the owner
 
 - **Backtests:** `macro_mood_study.py` ran on `data\research\full_market_2026-11-09.duckdb`. The manifest
@@ -11,8 +38,8 @@ refactors and doc or comment passes are not logged; git history has them.
   foreign short-covering, combined score), two null (US rally follow-through, breadth thrust), none supported. The
   report is `data\reports\macro_mood_20261110T123105.{json,md}`, and the labels are in the trial ledger.
 - **`MT-NewsContentScore` was not created.** Claude Code's permission classifier refused `Register-ScheduledTask`
-  as persistence. **Owner action:** run the scoring-task block in COMMANDS.md "Macro mood-signal study". Until it
-  runs, nothing scores or maps the captured news, so three forward tests do not accrue: news tone from content,
+  as persistence. **Owner action (done the same day, see 14:15):** run the scoring-task block in COMMANDS.md "Macro
+  mood-signal study". Until it runs, nothing scores or maps the captured news, so three forward tests do not accrue: news tone from content,
   policy push from content, and policy push from headlines. A dry run on a copy of the capture database (fake LLM,
   no calls) passed end to end.
 - **Scoring volume against the cap:** the engine's own News Analyst scored 424–1,125 distinct clusters per weekday
@@ -39,8 +66,8 @@ refactors and doc or comment passes are not logged; git history has them.
 
 ## 2026-11-10 01:34 — Scheduled task `MT-NewsContentCapture` (macro mood study content capture)
 
-- **What it runs:** `scripts\news_content_capture.py` through `.venv\Scripts\pythonw.exe` (no console window), every
-  15 minutes, starting 01:36 on 11-10. It writes `data\research\news_content.sqlite`.
+- **What it runs:** `scripts\news_content_capture.py` through `.venv\Scripts\pythonw.exe`, every 15 minutes, starting
+  01:36 on 11-10. That launcher opens a console window for each run (see 14:15). It writes `data\research\news_content.sqlite`.
 - **Settings:** IgnoreNew multiple-instances, a 40-minute limit, runs on battery. Principal piyush.kumar_atari,
   Interactive, so it runs only while that user is logged on (a locked screen counts). A reboot without a login stops
   capture until the next login.
