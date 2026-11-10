@@ -4,6 +4,18 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 08:59 — Engine restart after overnight Modern Standby (owner: "Restart the engine meanwhile")
+
+- **Standby:** the host was in Modern Standby from 01:32, with throttled processes, and fully from 03:15 to 08:44
+  (Kernel-Power 506/507). At wake the ticker hit `ticker_warming_timeout`, respawned, and then kept closing with
+  code 1006 and reconnecting every minute. The Telegram updater threw once.
+- **Restart (holiday, nothing in flight):** all `job_runs` terminal, no agent call open. Stopped 08:58:37,
+  `engine_ready` 08:59:01, selftest ok, catch-up owed nothing, ticker `kws.connected` on its first attempt
+  (303 tokens).
+- **Seen in passing, owner to check:** `holdings_reconcile` reports `position_not_in_holdings` for JINDALSTEL. That
+  is the 2026-11-03 ins recommendation marked `/taken`, which the broker holdings don't show. The reconcile is
+  alert-only.
+
 ## 2026-11-10 01:34 — Scheduled task `MT-NewsContentCapture` (macro mood study content capture)
 
 - **What it runs:** `scripts\news_content_capture.py` through `.venv\Scripts\pythonw.exe` (no console window), every
