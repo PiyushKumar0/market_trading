@@ -627,8 +627,8 @@ Register-ScheduledTask -TaskName MT-NewsContentScore -Principal $pri -Settings $
 # move both tasks to the background session ("Run whether user is logged on or not"), where the engine service runs:
 # no window on the desktop, and they run while logged off. Route 1 stores no password (the S4U logon type, "Do not
 # store password" in the GUI): Windows then gives the task no network credentials, Credential Manager or EFS access,
-# none of which these tasks use. Route 2 stores the password, as the engine service does. Neither was tested here;
-# if a run after route 1 ends in a logon error, or the CLI cannot read its login, use route 2. 0x80070569 on either
+# none of which these tasks use. Route 2 stores the password, as the engine service does. Route 1 is in use since
+# 2026-11-10 (capture runs return 0 in session 0); if the CLI cannot read its login under it, use route 2. 0x80070569 on either
 # means the account lacks "Log on as a batch job" (a local admin has it): set the option in the Task Scheduler GUI.
 $pri = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
 'MT-NewsContentCapture', 'MT-NewsContentScore' | ForEach-Object { Set-ScheduledTask -TaskName $_ -Principal $pri | Out-Null }

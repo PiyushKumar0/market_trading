@@ -4,6 +4,18 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-10 20:23 — Study tasks moved to the background session by the owner; validated
+
+- **Change:** the owner ran the COMMANDS.md no-password route. Both `MT-NewsContentCapture` and `MT-NewsContentScore`
+  now have logon type S4U (run level Limited, same user), set before 19:52.
+- **Validation:** the 20:06 and 20:21 capture runs both returned 0 and wrote all 9 feeds with no error. The 20:21 run
+  was watched: `pythonw.exe` and its `python.exe` child ran in session 0, the non-interactive session, under the
+  Task Scheduler service. Their command lines are hidden from the desktop session. So no window reaches the desktop,
+  and the tasks run while logged off.
+- **Still to confirm:** the scorer's first run under S4U is tonight at 22:00 (no model calls on the holiday). The
+  first night with model calls is 11-11 22:00. The Claude CLI reads its login from a plain file in the profile, which
+  S4U can reach; that night's `llm_calls` will prove it.
+
 ## 2026-11-10 14:15 — Scorer task registered by the owner and validated; both study tasks open a console window
 
 - **`MT-NewsContentScore`:** the owner registered it from the COMMANDS.md block, and it matches that block field
