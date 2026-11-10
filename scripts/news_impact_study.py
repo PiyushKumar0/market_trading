@@ -3,26 +3,31 @@
 
 The six hypotheses (``info``, ``stock_next_open``, ``stock_pullback``, ``domain_companies``, ``domain_groups``,
 ``global_sectors``) are built from each cluster's first successful News Analyst score, timed by that score's ``at``
-and resolved to symbols by the engine's resolver over the research copy's own tables; the domain and global ones read
-the mapper's store. Every threshold, hold, window and verdict rule is the registration's, held in
-``news_impact_common``.
+and resolved to symbols by the engine's resolver over the research copy's own tables plus the frozen alias
+supplement; the domain and global ones read the mapper's store. Every threshold, hold, window and verdict rule is the
+registration's, held in ``news_impact_common``.
 
+* An orphan is a material stock story that this run's resolver resolves to no symbol at all (an unlisted, foreign or
+  group company, or a listed name the aliases miss). The mapper maps it, and the two domain hypotheses read it with
+  the domain stories; it still counts as unresolved in the stock hypotheses. Orphan status is this run's, so a story
+  an older copy resolved, and the mapper therefore skipped, holds the run until it is mapped.
 * Signals are per (key, entry session D): several stories on one key for one D make one signal. A key that another
-  story of the same kind maps the other way on that D is skipped and counted.
+  story the same hypothesis reads maps the other way on that D is skipped and counted.
 * One position per key at a time within a hypothesis: a signal on or before the exit session of the last kept trade
   for its key is skipped. A signal that makes no trade (a reason string) keeps nothing and blocks nothing; a pullback
   trade's exit counts from its fill.
 * A trade hypothesis's population is the same construct applied to every eligible key on the sample's own entry
   sessions, the pullback's with each kept trade's own P0 session; its gross excess values feed the permutation test.
-* While any domain or global story the sample or the excluded window needs is unmapped, the run is waiting and
-  computes no hypothesis, so the stock hypotheses never land ahead of the rest. A story without a readable headline
-  can never be mapped, so it is counted as unmappable and never holds the run.
+* While any domain, global or orphan story the sample or the excluded window needs is unmapped, the run is waiting
+  and computes no hypothesis, so the stock hypotheses never land ahead of the rest. A story without a readable
+  headline can never be mapped, so it is counted as unmappable and never holds the run.
 * The excluded window (the rally that prompted the study) runs through the same code and is reported apart, as not
   evidence; it never feeds a verdict.
 * Diagnostics decide nothing.
 
 Read-only: the research DuckDB copy through ``research_common.open_snapshot``, ``state.db`` and the mapper store
-through ``mode=ro`` URIs. Writes only its report. Exit 0, or 2 on a refusal (an unreadable store, the data gate).
+through ``mode=ro`` URIs. Writes only its report. Exit 0, or 2 on a refusal (an unreadable store, an alias supplement
+that is missing, malformed or not the registered file, the data gate).
 ``--counts-only`` prints counts alone, never an outcome, and writes nothing.
 """
 
@@ -34,10 +39,9 @@ import math
 import statistics
 import sys
 import time as _time
-import types
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -52,7 +56,6 @@ import engine  # noqa: E402,F401,I001  native import-order guard (engine._preloa
 import duckdb  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from engine.datafeeds.news_pipeline import title_tokens  # noqa: E402
 from engine.learning.multiplicity import permutation_pvalue  # noqa: E402
 from engine.strategy.regime import INDEX_SMA, RISING_LOOKBACK, index_regime  # noqa: E402
 
@@ -99,6 +102,17 @@ CONSTRUCT = {"info": "sector", "stock_next_open": "sector", "stock_pullback": "p
 SPLIT_HYPOTHESES = ("stock_next_open", "stock_pullback", "domain_companies")
 BOOLEAN_SPLITS = ("volume_confirm", "above_sma50", "regime_up", "gap_up_2pct", "strong_story", "two_domains")
 CATEGORY_SPLITS = ("model", "event_type")
+#: The story kinds (``nic.map_kind``) each mapped hypothesis reads: orphans join the domain stories.
+DOMAIN_KINDS = frozenset({"domain", "orphan"})
+GLOBAL_KINDS = frozenset({"global"})
+#: The mapped hypotheses that read domain and orphan stories together, split by which of them made each signal.
+DOMAIN_HYPOTHESES = ("domain_companies", "domain_groups")
+ORIGIN = "origin"
+#: The hypotheses split by whether a signal's stories had reached an outlet outside ``nic.INDIAN_NEWS_DOMAINS``.
+OUTLET_HYPOTHESES = ("domain_companies", "domain_groups", "global_sectors")
+GLOBAL_OUTLET = "global_outlet"
+#: Every category split, in report order.
+ALL_CATEGORY_SPLITS = (*CATEGORY_SPLITS, ORIGIN)
 #: A category is reported with its own test only from this many trades.
 MIN_CATEGORY = 10
 STRONG_STORY = 0.8
@@ -124,6 +138,8 @@ NOTES = (
     "2026-10-27); no other outcome in A had been looked at",
     "three scorer models served the window and are pooled; the per-model split is a diagnostic",
     "a stock that the D-1 sector snapshot leaves unclassified, or does not list, is counted as no_sector",
+    "orphan stock stories (material, resolving to no symbol) are mapped and read by both domain hypotheses; they "
+    "also count as unresolved in the stock hypotheses",
 )
 
 
@@ -232,16 +248,18 @@ def stock_signals(placed: Sequence[Placed], syms: dict[str, frozenset[str]], win
 Resolve = Callable[[Sequence[str]], list[str | None]]
 
 
-def mapped_pairs(placed: Sequence[Placed], mappings: dict[str, Any], window: Window, kind: str, field: str,
-                 resolve: Resolve | None) -> tuple[dict, dict, Counter]:
-    """The (key, D) pairs that ``kind`` stories in ``window`` map +1 and -1, each with its stories by cluster.
-    ``field`` is ``groups`` (keys are the names) or ``companies`` (names go through ``resolve``; an unresolved name
-    is counted by its direction)."""
+def mapped_pairs(placed: Sequence[Placed], mappings: dict[str, Any], window: Window, kinds: str | Collection[str],
+                 field: str, resolve: Resolve | None,
+                 orphans: Collection[str] = frozenset()) -> tuple[dict, dict, Counter]:
+    """The (key, D) pairs that stories of ``kinds`` (``nic.map_kind`` with ``orphans``: ``domain``, ``global``,
+    ``orphan``) in ``window`` map +1 and -1, each with its stories by cluster. ``field`` is ``groups`` (keys are the
+    names) or ``companies`` (names go through ``resolve``; an unresolved name is counted by its direction)."""
+    kinds = frozenset((kinds,) if isinstance(kinds, str) else kinds)
     plus: dict[tuple[str, date], dict[str, Story]] = defaultdict(dict)
     minus: dict[tuple[str, date], dict[str, Story]] = defaultdict(dict)
     counts: Counter = Counter()
     for p in placed:
-        if p.kind != kind or not _in(p.d, window):
+        if nic.map_kind(p.story, orphans) not in kinds or not _in(p.d, window):
             continue
         m = mappings.get(p.story.cluster_id)
         if m is None:
@@ -276,33 +294,11 @@ def mapped_signals(plus: dict, minus: dict) -> tuple[list[Signal], int]:
     return out, conflicts
 
 
-def indexed_resolver(resolver: Any) -> Any:
-    """``resolver`` with its alias scan narrowed per text: the engine's own matcher runs unchanged on just the
-    aliases whose first token occurs in the text. An alias whose first token is absent cannot match, and the
-    matcher's subsumption, ordering and ambiguity steps do not depend on scan order, so every result equals a scan
-    of the whole table. The whole-table scan (every alias at every token position, for every story and entity) is
-    nearly all of a run's time otherwise. A resolver without the expected table is returned as it is."""
-    table = getattr(resolver, "_aliases", None)
-    engine_match = getattr(type(resolver), "_match_aliases", None)
-    if not isinstance(table, dict) or engine_match is None:
-        return resolver
-    by_first: dict[str, dict[str, Any]] = defaultdict(dict)
-    for alias, syms in table.items():
-        by_first[alias.split(" ")[0]][alias] = syms
-
-    def match(self: Any, text: str) -> Any:
-        subset: dict[str, Any] = {}
-        for tok in set(title_tokens(text)):
-            subset.update(by_first.get(tok, {}))
-        whole = self._aliases
-        self._aliases = subset
-        try:
-            return engine_match(self, text)
-        finally:
-            self._aliases = whole
-
-    resolver._match_aliases = types.MethodType(match, resolver)
-    return resolver
+def origin(sig: Signal, orphans: Collection[str]) -> str:
+    """Which stories made a mapped signal: ``domain`` (all domain stories), ``orphan`` (all orphan stories) or
+    ``mixed``."""
+    found = {"orphan" if s.cluster_id in orphans else "domain" for s in sig.stories}
+    return found.pop() if len(found) == 1 else "mixed"
 
 
 def company_resolver(resolver: Any) -> Resolve:
@@ -569,10 +565,29 @@ def split_features(p: nic.Panel, sig: Signal,
     return f
 
 
+def global_outlet(sig: Signal, news: dict[str, list[tuple[str, int]]] | None) -> bool | None:
+    """Whether any of the signal's stories had, at its first score, a cluster member from a domain outside
+    ``nic.INDIAN_NEWS_DOMAINS``: a ``news`` row ingested at or before the story's ``at``. None without a ``news``
+    table."""
+    if news is None:
+        return None
+    return any(dom not in nic.INDIAN_NEWS_DOMAINS and us <= _us(s.at)
+               for s in sig.stories for dom, us in news.get(s.cluster_id, ()))
+
+
+ONE_SIDED = "one side of the split is empty, so there is no permutation p"
+
+
 def _subset(sub: Sequence[float], all_nets: Sequence[float]) -> dict[str, Any]:
-    return {"n": len(sub), "mean_net": statistics.fmean(sub) if sub else None,
-            "median_net": statistics.median(sub) if sub else None,
-            "perm_p": permutation_pvalue(sub, all_nets, draws=nic.SPLIT_DRAWS, seed=nic.SEED) if sub else None}
+    """A subset's summary and its permutation p against same-size random subsets of every trade. An empty subset
+    has nothing to test, and one holding every trade equals every draw, so neither has a p; a note says why."""
+    out = {"n": len(sub), "mean_net": statistics.fmean(sub) if sub else None,
+           "median_net": statistics.median(sub) if sub else None, "perm_p": None}
+    if not sub or len(sub) == len(all_nets):
+        out["note"] = ONE_SIDED
+    else:
+        out["perm_p"] = permutation_pvalue(sub, all_nets, draws=nic.SPLIT_DRAWS, seed=nic.SEED)
+    return out
 
 
 def split_report(rows: Sequence[tuple[Signal, Trade]], feats: Sequence[dict[str, Any]], booleans: Sequence[str],
@@ -607,6 +622,8 @@ class Ctx:
     syms: dict[str, frozenset[str]]
     mappings: dict[str, Any]
     companies: Resolve
+    #: The orphan stories' cluster ids by this run's resolver (``nic.orphan_ids``).
+    orphans: frozenset[str] = frozenset()
 
 
 def _calendar_sessions(cal: Any, stories: Sequence[Story], sample: str, as_of: date) -> list[date]:
@@ -631,23 +648,27 @@ def _mappable(s: Story) -> bool:
     return nic.ncs._clean(s.headline) is not None
 
 
-def _needed_unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> Iterator[Placed]:
+def _needed_unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window],
+                     orphans: Collection[str]) -> Iterator[tuple[str, Placed]]:
     for p in placed:
-        if p.kind in ("domain", "global") and any(_in(p.d, w) for w in windows) \
-                and p.story.cluster_id not in mappings:
-            yield p
+        kind = nic.map_kind(p.story, orphans)
+        if kind is not None and any(_in(p.d, w) for w in windows) and p.story.cluster_id not in mappings:
+            yield kind, p
 
 
-def unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> Counter:
-    """The domain and global stories entering in any of ``windows`` that have no mapping yet but can get one, by
-    kind. A story without a readable headline is never sent to the mapper, so it is left out here: waiting on it
-    would hold the run for ever."""
-    return Counter(p.kind for p in _needed_unmapped(placed, mappings, windows) if _mappable(p.story))
+def unmapped(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window],
+             orphans: Collection[str]) -> Counter:
+    """The domain, global and orphan stories entering in any of ``windows`` that have no mapping yet but can get
+    one, by kind. A story without a readable headline is never sent to the mapper, so it is left out here: waiting
+    on it would hold the run for ever."""
+    return Counter(kind for kind, p in _needed_unmapped(placed, mappings, windows, orphans) if _mappable(p.story))
 
 
-def unmappable(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window]) -> int:
-    """The domain and global stories entering in any of ``windows`` that have no mapping and no readable headline."""
-    return sum(not _mappable(p.story) for p in _needed_unmapped(placed, mappings, windows))
+def unmappable(placed: Sequence[Placed], mappings: dict[str, Any], windows: Sequence[Window],
+               orphans: Collection[str]) -> int:
+    """The domain, global and orphan stories entering in any of ``windows`` that have no mapping and no readable
+    headline."""
+    return sum(not _mappable(p.story) for _, p in _needed_unmapped(placed, mappings, windows, orphans))
 
 
 #: Sessions from the last entry to the longest exit: a pullback filled on the last resting session, then held.
@@ -675,30 +696,37 @@ def _stock_syms(resolver: Any, placed: Sequence[Placed]) -> dict[str, frozenset[
 
 
 def _open(sample: str, state_db: Path, db: Path, as_of: date, etfs: frozenset[str] | None,
-          themes: dict[str, frozenset[str]] | None, *, mappings: Path | None, check_waiting: bool):
-    """Stories, sessions and placements; then (unless waiting) the snapshot, panel, data gate and resolver.
-    Returns ``(conn or None, stories, load_counts, sessions, placed, mappings, waiting, ctx or None)``."""
+          themes: dict[str, frozenset[str]] | None, *, mappings: Path | None, check_waiting: bool,
+          supplement: Mapping[str, str] | None = None):
+    """The alias supplement, stories, sessions and placements; the snapshot and its resolver, which decide the
+    orphans; then (unless waiting) the panel and the data gate. ``supplement`` None reads the frozen file.
+    Returns ``(conn or None, stories, load_counts, sessions, placed, mappings, waiting, orphans, ctx or None)``."""
     if sample not in ("A", "B"):
         raise ValueError(f"sample must be A or B, got {sample!r}")
+    extra = nic.frozen_alias_supplement() if supplement is None else supplement
     cal = nic.load_calendar()
     limit = datetime.combine(as_of, nic.ENTRY_CUTOFF, IST)
     stories, load_counts = nic.load_first_scores(Path(state_db), limit)
     sessions = _calendar_sessions(cal, stories, sample, as_of)
     placed = place(stories, sessions)
     maps = _read_mappings(mappings) if mappings is not None else {}
-    waiting = unmapped(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED])) if check_waiting else Counter()
-    if sum(waiting.values()):
-        return None, stories, load_counts, sessions, placed, maps, waiting, None
     conn = rc.open_snapshot(Path(db))
     try:
+        resolver = nic.indexed_resolver(nic.build_resolver(conn, extra))
+        syms = _stock_syms(resolver, placed)
+        orphans = nic.orphan_ids(stories, resolver, symbols=syms)
+        waiting = (unmapped(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]), orphans) if check_waiting
+                   else Counter())
+        if sum(waiting.values()):
+            conn.close()
+            return None, stories, load_counts, sessions, placed, maps, waiting, orphans, None
         panel = nic.load_panel(conn, nic.SAMPLES[sample][0] - PANEL_LOOKBACK, as_of, cal, etfs=etfs, themes=themes)
         data_gate(panel, sessions, sample)
-        resolver = indexed_resolver(nic.build_resolver(conn))
     except BaseException:
         conn.close()
         raise
-    ctx = Ctx(panel, sessions, placed, _stock_syms(resolver, placed), maps, company_resolver(resolver))
-    return conn, stories, load_counts, sessions, placed, maps, waiting, ctx
+    ctx = Ctx(panel, sessions, placed, syms, maps, company_resolver(resolver), orphans)
+    return conn, stories, load_counts, sessions, placed, maps, waiting, orphans, ctx
 
 
 # ----------------------------------------------------------------------------- one window
@@ -718,7 +746,8 @@ def window_signals(ctx: Ctx, window: Window, *, mapped: bool = True) -> tuple[di
     negative, _ = stock_pairs(ctx.placed, ctx.syms, window, _material_negative)
     neg["stock_material_negative"] = ("sector", nic.HOLD["info"],
                                       [Signal(k, d, _by_time(v)) for (k, d), v in _sorted_pairs(negative)])
-    plus, minus, c = mapped_pairs(ctx.placed, ctx.mappings, window, "domain", "companies", ctx.companies)
+    plus, minus, c = mapped_pairs(ctx.placed, ctx.mappings, window, DOMAIN_KINDS, "companies", ctx.companies,
+                                  ctx.orphans)
     sig["domain_companies"], conflicts = mapped_signals(plus, minus)
     counts["domain_companies"] = Counter({"stories": c["stories"], CONFLICT: conflicts,
                                           "unresolved_names": c["unresolved_plus"],
@@ -726,8 +755,8 @@ def window_signals(ctx: Ctx, window: Window, *, mapped: bool = True) -> tuple[di
     neg["domain_companies_minus"] = ("beta", nic.HOLD["domain_companies"],
                                      [Signal(k, d, _by_time(list(v.values()))) for (k, d), v in _sorted_pairs(minus)])
     neg_unresolved = c["unresolved_minus"]
-    for name, kind in (("domain_groups", "domain"), ("global_sectors", "global")):
-        plus, minus, c = mapped_pairs(ctx.placed, ctx.mappings, window, kind, "groups", None)
+    for name, kinds in (("domain_groups", DOMAIN_KINDS), ("global_sectors", GLOBAL_KINDS)):
+        plus, minus, c = mapped_pairs(ctx.placed, ctx.mappings, window, kinds, "groups", None, ctx.orphans)
         sig[name], conflicts = mapped_signals(plus, minus)
         counts[name] = Counter({"stories": c["stories"], CONFLICT: conflicts, "malformed_items": c["malformed_items"]})
         neg[f"{name}_minus"] = ("basket", nic.HOLD[name],
@@ -803,18 +832,28 @@ def _diagnostics(ctx: Ctx, window: Window, sig: dict[str, list[Signal]],
         for h in nic.HORIZONS:
             kept, drops = keep_trades(sig[name], maker(p, name), h)
             horizons[name][str(h)] = {**net_summary([t for _, t in kept]), "drops": _counts(drops)}
-    stories = [s.cluster_id for name in SPLIT_HYPOTHESES for sg, _ in kept_all[name] for s in sg.stories]
+    stories = [s.cluster_id for name in TRADE_HYPOTHESES for sg, _ in kept_all[name] for s in sg.stories]
     news = load_news_domains(p.conn, stories)
+    no_news = ("two_domains", GLOBAL_OUTLET) if news is None else ()
     splits: dict[str, Any] = {}
-    for name in SPLIT_HYPOTHESES:
+    for name in TRADE_HYPOTHESES:
         rows = kept_all[name]
-        feats = [split_features(p, s, news) for s, _ in rows]
-        splits[name] = split_report(rows, feats, BOOLEAN_SPLITS, CATEGORY_SPLITS,
-                                    unavailable=("two_domains",) if news is None else ())
-    g_rows = kept_all["global_sectors"]
-    splits["global_sectors"] = split_report(
-        g_rows, [{"event_type": s.stories[0].event_type if s.stories else "unknown"} for s, _ in g_rows], (),
-        ("event_type",))
+        if name in SPLIT_HYPOTHESES:
+            feats, booleans, cats = [split_features(p, s, news) for s, _ in rows], BOOLEAN_SPLITS, CATEGORY_SPLITS
+        elif name == "global_sectors":
+            feats = [{"event_type": s.stories[0].event_type if s.stories else "unknown"} for s, _ in rows]
+            booleans, cats = (), ("event_type",)
+        else:
+            feats, booleans, cats = [{} for _ in rows], (), ()
+        if name in OUTLET_HYPOTHESES:
+            for f, (s, _) in zip(feats, rows, strict=True):
+                f[GLOBAL_OUTLET] = global_outlet(s, news)
+            booleans = (*booleans, GLOBAL_OUTLET)
+        if name in DOMAIN_HYPOTHESES:
+            for f, (s, _) in zip(feats, rows, strict=True):
+                f[ORIGIN] = origin(s, ctx.orphans)
+            cats = (*cats, ORIGIN)
+        splits[name] = split_report(rows, feats, booleans, cats, unavailable=no_news)
     negative: dict[str, Any] = {}
     for name, value in neg.items():
         if name.startswith("_"):
@@ -890,10 +929,17 @@ def _git_head() -> str | None:
     return None
 
 
+def _kind_label(p: Placed, orphans: Collection[str]) -> str:
+    """The kind a story is counted under in the report: ``orphan`` apart from the other stock stories."""
+    return "orphan" if nic.map_kind(p.story, orphans) == "orphan" else (p.kind or "none")
+
+
+def _kinds(placed: Sequence[Placed], orphans: Collection[str], window: Window | None = None) -> dict[str, int]:
+    return _counts(Counter(_kind_label(p, orphans) for p in placed if window is None or _in(p.d, window)))
+
+
 def _meta(sample: str, as_of: date, state_db: Path, db: Path, mappings: Path, load_counts: dict[str, int],
-          placed: Sequence[Placed]) -> dict[str, Any]:
-    kinds = Counter(p.kind or "none" for p in placed)
-    in_window = Counter(p.kind or "none" for p in placed if _in(p.d, nic.SAMPLES[sample]))
+          placed: Sequence[Placed], orphans: Collection[str]) -> dict[str, Any]:
     return {"family": nic.FAMILY, "sample": sample, "as_of": as_of,
             "windows": {"sample": list(nic.SAMPLES[sample]), "excluded": list(nic.SAMPLES[EXCLUDED])},
             "stores": {"db": str(db), "state_db": str(state_db), "mappings": str(mappings)},
@@ -901,22 +947,25 @@ def _meta(sample: str, as_of: date, state_db: Path, db: Path, mappings: Path, lo
             "alpha": nic.ALPHA, "fold_pass_min": nic.FOLD_PASS_MIN, "min_trades": nic.MIN_TRADES,
             "min_info_obs": nic.MIN_INFO_OBS, "generated_at": datetime.now(IST).isoformat(timespec="seconds"),
             "git_head": _git_head(), "first_scores": dict(load_counts),
-            "stories_by_kind": {"all": _counts(kinds), "sample_window": _counts(in_window)}, "notes": list(NOTES)}
+            "stories_by_kind": {"all": _kinds(placed, orphans),
+                                "sample_window": _kinds(placed, orphans, nic.SAMPLES[sample])},
+            "notes": list(NOTES)}
 
 
 def run(sample: str, state_db: Path, db: Path, mappings_db: Path, as_of: date, *,
-        etfs: frozenset[str] | None = None, themes: dict[str, frozenset[str]] | None = None) -> dict[str, Any]:
+        etfs: frozenset[str] | None = None, themes: dict[str, frozenset[str]] | None = None,
+        supplement: Mapping[str, str] | None = None) -> dict[str, Any]:
     """The sample's report document. Waiting (no hypothesis computed) while any needed story is unmapped. Raises
     ``research_common.Refusal`` or ``Unavailable`` on a refusal. ``etfs`` and ``themes`` default to the macro mood
-    study's files."""
-    conn, _, load_counts, _, placed, maps, waiting, ctx = _open(
-        sample, state_db, db, as_of, etfs, themes, mappings=mappings_db, check_waiting=True)
-    meta = _meta(sample, as_of, Path(state_db), Path(db), Path(mappings_db), load_counts, placed)
-    meta["unmappable"] = unmappable(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]))
+    study's files, ``supplement`` to the frozen alias supplement."""
+    conn, _, load_counts, _, placed, maps, waiting, orphans, ctx = _open(
+        sample, state_db, db, as_of, etfs, themes, mappings=mappings_db, check_waiting=True, supplement=supplement)
+    meta = _meta(sample, as_of, Path(state_db), Path(db), Path(mappings_db), load_counts, placed, orphans)
+    meta["unmappable"] = unmappable(placed, maps, (nic.SAMPLES[sample], nic.SAMPLES[EXCLUDED]), orphans)
     if ctx is None:
         n = sum(waiting.values())
         return {"meta": meta, "status": f"waiting: {n} stories unmapped (domain {waiting['domain']}, "
-                                        f"global {waiting['global']})",
+                                        f"global {waiting['global']}, orphan {waiting['orphan']})",
                 "hypotheses": {}, "diagnostics": {}, "excluded_window": {}}
     try:
         main_part = evaluate_window(ctx, nic.SAMPLES[sample], evidence=True)
@@ -933,13 +982,14 @@ def run(sample: str, state_db: Path, db: Path, mappings_db: Path, as_of: date, *
 
 
 def counts_only(sample: str, state_db: Path, db: Path, as_of: date, *, etfs: frozenset[str] | None = None,
-                themes: dict[str, frozenset[str]] | None = None) -> dict[str, Any]:
-    """Counts for validating the stock-story pipeline on real data before sign-off: stories by kind, signals,
-    trades, drops by reason and population sizes for the stock hypotheses. No return, excess, net, rho or label is
-    ever put in the result. Skips the waiting check and the mapped hypotheses."""
+                themes: dict[str, frozenset[str]] | None = None,
+                supplement: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Counts for validating the stock-story pipeline on real data before sign-off: stories by kind (orphans apart),
+    signals, trades, drops by reason and population sizes for the stock hypotheses. No return, excess, net, rho or
+    label is ever put in the result. Skips the waiting check and the mapped hypotheses."""
     t0 = _time.perf_counter()
-    conn, _, load_counts, _, placed, _, _, ctx = _open(sample, state_db, db, as_of, etfs, themes, mappings=None,
-                                                       check_waiting=False)
+    conn, _, load_counts, _, placed, _, _, orphans, ctx = _open(
+        sample, state_db, db, as_of, etfs, themes, mappings=None, check_waiting=False, supplement=supplement)
     try:
         windows: dict[str, Any] = {}
         for wname, window in (("sample", nic.SAMPLES[sample]), (EXCLUDED, nic.SAMPLES[EXCLUDED])):
@@ -960,11 +1010,9 @@ def counts_only(sample: str, state_db: Path, db: Path, as_of: date, *, etfs: fro
         panel = (ctx.panel.sessions[0], ctx.panel.sessions[-1])
     finally:
         conn.close()
-    kinds = Counter(p.kind or "none" for p in placed)
-    by_window = {wn: _counts(Counter(p.kind or "none" for p in placed if _in(p.d, nic.SAMPLES[ws])))
-                 for wn, ws in (("sample", sample), (EXCLUDED, EXCLUDED))}
+    by_window = {wn: _kinds(placed, orphans, nic.SAMPLES[ws]) for wn, ws in (("sample", sample), (EXCLUDED, EXCLUDED))}
     return {"sample": sample, "as_of": as_of, "panel": panel, "first_scores": dict(load_counts),
-            "stories_by_kind": {"all": _counts(kinds), **by_window}, "windows": windows,
+            "stories_by_kind": {"all": _kinds(placed, orphans), **by_window}, "windows": windows,
             "seconds": round(_time.perf_counter() - t0, 1)}
 
 
@@ -979,6 +1027,10 @@ def _kv(d: dict[str, Any]) -> str:
 
 def _ci(ci: Any) -> str:
     return "-" if not ci else f"[{ci[0]:+.4f}, {ci[1]:+.4f}]"
+
+
+def _note(s: dict[str, Any]) -> str:
+    return f"; {s['note']}" if s.get("note") else ""
 
 
 def _trade_line(t: dict[str, Any]) -> str:
@@ -1004,8 +1056,8 @@ def render(doc: dict[str, Any]) -> str:
            f"first scores: {_kv(m['first_scores'])}",
            f"stories by kind: all ({_kv(m['stories_by_kind']['all'])}); sample window "
            f"({_kv(m['stories_by_kind']['sample_window'])})",
-           f"unmappable: {m['unmappable']} domain and global stories in the sample and excluded windows without a "
-           f"readable headline (never mapped, never waited on)"]
+           f"unmappable: {m['unmappable']} domain, global and orphan stories in the sample and excluded windows "
+           f"without a readable headline (never mapped, never waited on)"]
     if "panel" in m:
         out.append(f"panel: {m['panel']['first_session']}..{m['panel']['last_session']}")
         out += [f"panel note: {n}" for n in m["panel"]["notes"]]
@@ -1043,13 +1095,14 @@ def render(doc: dict[str, Any]) -> str:
                 out.append(f"      {split:<15} unavailable")
                 continue
             out.append(f"      {split:<15} n={s['n']} mean net {_f(s['mean_net'])} median net {_f(s['median_net'])} "
-                       f"perm p {_f(s['perm_p'], '.4f')} (false {s['false']}, unknown {s['unknown']})")
-        for cat in CATEGORY_SPLITS:
+                       f"perm p {_f(s['perm_p'], '.4f')} (false {s['false']}, unknown {s['unknown']})"
+                       f"{_note(s)}")
+        for cat in ALL_CATEGORY_SPLITS:
             if cat not in sp:
                 continue
             for g, s in sp[cat]["tested"].items():
                 out.append(f"      {cat} {g}: n={s['n']} mean net {_f(s['mean_net'])} median net "
-                           f"{_f(s['median_net'])} perm p {_f(s['perm_p'], '.4f')}")
+                           f"{_f(s['median_net'])} perm p {_f(s['perm_p'], '.4f')}{_note(s)}")
             if sp[cat]["small"]:
                 out.append(f"      {cat} below {MIN_CATEGORY} trades: {_kv(sp[cat]['small'])}")
     out.append("  negative side (gross excess; 95% moving-block session bootstrap CI of the mean):")
@@ -1097,7 +1150,7 @@ def render_counts(c: dict[str, Any]) -> str:
 
 # ----------------------------------------------------------------------------- CLI
 def main(argv: list[str] | None = None, *, etfs: frozenset[str] | None = None,
-         themes: dict[str, frozenset[str]] | None = None) -> int:
+         themes: dict[str, frozenset[str]] | None = None, supplement: Mapping[str, str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="news_impact_study", description=__doc__.splitlines()[0])
     ap.add_argument("--sample", required=True, choices=("A", "B"))
     ap.add_argument("--db", type=Path, default=None,
@@ -1117,9 +1170,11 @@ def main(argv: list[str] | None = None, *, etfs: frozenset[str] | None = None,
     as_of = args.as_of if args.as_of is not None else DEFAULT_AS_OF_A
     try:
         if args.counts_only:
-            print(render_counts(counts_only(args.sample, args.state_db, db, as_of, etfs=etfs, themes=themes)))
+            print(render_counts(counts_only(args.sample, args.state_db, db, as_of, etfs=etfs, themes=themes,
+                                            supplement=supplement)))
             return 0
-        doc = run(args.sample, args.state_db, db, args.mappings, as_of, etfs=etfs, themes=themes)
+        doc = run(args.sample, args.state_db, db, args.mappings, as_of, etfs=etfs, themes=themes,
+                  supplement=supplement)
         text = render(doc)
     except (rc.Refusal, nic.Unavailable) as exc:
         print(f"news_impact_study: REFUSED: {rc.ascii_text(str(exc))}")

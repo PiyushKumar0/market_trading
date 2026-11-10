@@ -647,19 +647,20 @@ Get-ScheduledTask -TaskName 'MT-NewsContent*' | Get-ScheduledTaskInfo | Select-O
 The capture makes no LLM calls. The scorer draws on the subscription the engine's analysts share, so it runs only at
 night.
 
-## News impact study (proposed 2026-11-10) — research copy, outside 09:15–15:30
+## News impact study (registered 2026-11-11) — research copy, outside 09:15–15:30
 
-The rules are in IMPLEMENTATION_PLAN.md "News impact study". The mapper spends subscription quota, so run it only
-after the owner signs off the registration, and only at night. The study is read-only.
+The rules are in IMPLEMENTATION_PLAN.md "News impact study". The mapper spends subscription quota; run it at night
+only. The study is read-only. Every command reads a whole-file `market.duckdb` copy: the mapper uses it only to
+resolve which stock stories are orphans, so any recent copy serves.
 
 ```powershell
 # what the mapper still has to do for a sample (reads only; no call)
-.venv\Scripts\python.exe scripts\news_impact_map.py --sample A --dry-run
-.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --dry-run
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample A --dry-run --market-db data\research\full_market_2026-11-09.duckdb
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --dry-run --market-db data\research\full_market_2026-11-09.duckdb
 # map: at most 40 calls a night, refused 09:15–15:30 on weekdays, stops at the first quota or login failure.
-# Sample A needs about 72 calls and the excluded window about 10, so it takes three nights at the cap.
-.venv\Scripts\python.exe scripts\news_impact_map.py --sample A
-.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded
+# After the first night (40 calls, 800 stories) A needs 57 more and the excluded window 12: two nights at the cap.
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample A --market-db data\research\full_market_2026-11-09.duckdb
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample excluded --market-db data\research\full_market_2026-11-09.duckdb
 # Sample A needs prices through 2026-11-12, the pullback arm's last possible exit: take a whole-file copy of
 # market.duckdb after that close (engine OFF, as for the macro mood study's copy) and pass it with its date.
 # pipeline check with no outcome shown: story, signal, trade and drop counts only; writes no report
@@ -668,7 +669,7 @@ after the owner signs off the registration, and only at night. The study is read
 .venv\Scripts\python.exe scripts\news_impact_study.py --sample A --db data\research\full_market_<date>.duckdb --as-of <date>
 # sample B, after its last exit (about 2027-03-11, ten sessions from 02-26) on a fresh whole-file copy, with
 # config/calendar/2027.yaml in place
-.venv\Scripts\python.exe scripts\news_impact_map.py --sample B
+.venv\Scripts\python.exe scripts\news_impact_map.py --sample B --market-db data\research\full_market_<date>.duckdb
 .venv\Scripts\python.exe scripts\news_impact_study.py --sample B --db data\research\full_market_<date>.duckdb --as-of <date>
 ```
 

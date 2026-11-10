@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """News impact study (``edge/news_impact``): the shared data layer.
 
-The registered constants, the first-score loader, the timing rules, the symbol resolver, the market panel with its
+The registered constants, the first-score loader, the timing rules, the symbol resolver with its frozen alias
+supplement and the orphan rule, the market panel with its
 benchmarks, the trade constructors and the per-hypothesis verdict that the mapper and the study script build on.
 Every threshold, window and sample date is the registration's; changing one is a new registration. Evidence only;
 nothing here is wired into the engine.
@@ -20,14 +21,17 @@ Conventions:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import math
+import re
 import sqlite3
 import statistics
 import sys
+import types
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -44,7 +48,8 @@ import engine  # noqa: E402,F401,I001  native import-order guard (engine._preloa
 import duckdb  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
-from engine.datafeeds.news_pipeline import EntityResolver, NewsCluster  # noqa: E402
+import yaml  # noqa: E402
+from engine.datafeeds.news_pipeline import EntityResolver, NewsCluster, title_tokens  # noqa: E402
 from engine.intelligence.agents import news_analyst  # noqa: E402
 from engine.learning.multiplicity import permutation_pvalue, registration_alpha  # noqa: E402
 from engine.learning.validate import fold_pass_min  # noqa: E402
@@ -125,6 +130,24 @@ STOCK_SKIP_TYPES = {"pump_promo_suspect", "dividend_corp_action"}
 DOMAIN_MARKET_TYPES = {"govt_program", "sector_policy", "regulatory_policy"}
 GLOBAL_TYPES = {"global_market", "macro_data", "disruption"}
 HORIZONS = (1, 3, 5, 10, 20)
+#: The kinds the mapper reads: ``orphan`` is a material stock story that resolves to no symbol at all.
+MAPPED_KINDS = ("domain", "global", "orphan")
+
+#: The reviewed short-name aliases the engine's table misses ("Titan", "Sun Pharma"), frozen at registration by
+#: this digest of the file's bytes.
+ALIAS_SUPPLEMENT_PATH = _ROOT / "config" / "research" / "news_impact" / "aliases_extra.yaml"
+ALIAS_SUPPLEMENT_SHA256 = "3682e47fc3912b59a636de90852bcd449794daa39c75c1ddcfdd74b066f311e1"
+_SYMBOL_RE = re.compile(r"[A-Z0-9&-]+")
+#: NSE series codes the alias seed carries as separate symbols for one company ("BODALCHEM", "BODALCHEM-BE").
+SERIES_SUFFIXES = ("BE", "BZ", "SM", "ST")
+
+#: The engine's Indian outlets before the owner's 2026-11-11 global feeds. Frozen here rather than imported because
+#: the engine's lists can change; a story heard from any other domain counts as reaching a global outlet.
+INDIAN_NEWS_DOMAINS = frozenset({
+    "economictimes.indiatimes.com", "moneycontrol.com", "livemint.com", "business-standard.com",
+    "financialexpress.com", "thehindubusinessline.com", "businesstoday.in", "ndtvprofit.com", "cnbctv18.com",
+    "zeebiz.com", "nseindia.com",
+})
 
 # Reasons a constructor makes no trade.
 NO_PRIOR_SESSION = "no_prior_session"
@@ -230,6 +253,15 @@ def story_kind(s: Story) -> str | None:
     return None
 
 
+def map_kind(s: Story, orphans: Collection[str]) -> str | None:
+    """The kind under which the mapper reads a story: ``orphan`` for a stock story in ``orphans`` (``orphan_ids``),
+    ``domain`` or ``global`` by ``story_kind``; None for a story the mapper never reads."""
+    kind = story_kind(s)
+    if kind == "stock":
+        return "orphan" if s.cluster_id in orphans else None
+    return kind
+
+
 # ----------------------------------------------------------------------------- timing
 def _ist(t: datetime) -> datetime:
     if t.tzinfo is None:
@@ -259,10 +291,105 @@ def pre_news_session(t: datetime, sessions: Sequence[date]) -> date | None:
 _NO_TIME = datetime(2000, 1, 1, tzinfo=IST)
 
 
-def build_resolver(conn: duckdb.DuckDBPyConnection) -> EntityResolver:
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """A safe YAML loader that refuses a repeated mapping key, which plain YAML loading resolves silently to the
+    last value."""
+
+
+def _unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict:
+    seen: list[Any] = []
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ValueError(f"alias supplement: key {key!r} appears twice")
+        seen.append(key)
+    return loader.construct_mapping(node, deep=deep)
+
+
+_UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
+def normalize_supplement(entries: Mapping[Any, Any]) -> dict[str, str]:
+    """``{alias: symbol}`` with each alias in the resolver's whole-word form (``title_tokens`` joined by spaces).
+    ``ValueError`` on a non-string or empty alias, two aliases with one form, or a symbol that is not an NSE
+    trading symbol (``[A-Z0-9&-]+``)."""
+    out: dict[str, str] = {}
+    for raw, sym in entries.items():
+        if not isinstance(raw, str):
+            raise ValueError(f"alias supplement: alias {raw!r} is not a string")
+        alias = " ".join(title_tokens(raw))
+        if not alias:
+            raise ValueError(f"alias supplement: alias {raw!r} has no word in it")
+        if alias in out:
+            raise ValueError(f"alias supplement: {raw!r} reads as {alias!r}, which another alias also reads as")
+        if not (isinstance(sym, str) and _SYMBOL_RE.fullmatch(sym)):
+            raise ValueError(f"alias supplement: {raw!r} maps to {sym!r}, not an NSE trading symbol")
+        out[alias] = sym
+    return out
+
+
+def load_alias_supplement(path: Path = ALIAS_SUPPLEMENT_PATH, sha256: str = ALIAS_SUPPLEMENT_SHA256) -> dict[str, str]:
+    """The frozen alias supplement as ``{normalized alias: symbol}``.
+
+    The file is YAML whose only top-level key is ``aliases``, a mapping of alias text to one NSE symbol.
+    ``Unavailable`` when the file is missing or unreadable, or its bytes' sha256 is not ``sha256`` (``PENDING`` never
+    is); ``ValueError`` when it is malformed (``normalize_supplement``'s rules, a repeated key, a wrong top level)."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as exc:
+        raise Unavailable(f"alias supplement {path} unreadable ({type(exc).__name__}: {exc})") from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != sha256:
+        raise Unavailable(f"alias supplement {path} has sha256 {digest}, not the registered {sha256}")
+    try:
+        doc = yaml.load(raw.decode("utf-8"), Loader=_UniqueKeyLoader)     # a SafeLoader subclass
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise ValueError(f"alias supplement {path} is not YAML ({type(exc).__name__}: {exc})") from exc
+    if not (isinstance(doc, dict) and list(doc) == ["aliases"] and isinstance(doc["aliases"], dict)):
+        raise ValueError(f"alias supplement {path}: the top level must be one key, aliases, holding a mapping")
+    return normalize_supplement(doc["aliases"])
+
+
+def frozen_alias_supplement() -> dict[str, str]:
+    """``load_alias_supplement`` at the module's registered path and digest, read when called; a malformed file is
+    ``Unavailable`` too, so every script refuses it the same way."""
+    try:
+        return load_alias_supplement(ALIAS_SUPPLEMENT_PATH, ALIAS_SUPPLEMENT_SHA256)
+    except ValueError as exc:
+        raise Unavailable(str(exc)) from exc
+
+
+def _series_base(sym: str) -> str:
+    head, sep, tail = sym.rpartition("-")
+    return head if sep and head and tail in SERIES_SUFFIXES else sym
+
+
+def collapse_series(aliases: Mapping[str, tuple[str, ...]]) -> tuple[dict[str, tuple[str, ...]], int]:
+    """Each alias whose symbols are one company under several series codes mapped to that company's base symbol:
+    with a trailing ``-<series>`` (``SERIES_SUFFIXES``) stripped, every symbol has the same base, and that base is
+    itself one of the alias's symbols. Any other alias is unchanged. Returns the table and the number collapsed."""
+    out: dict[str, tuple[str, ...]] = {}
+    collapsed = 0
+    for alias, syms in aliases.items():
+        bases = {_series_base(s) for s in syms}
+        if len(syms) > 1 and len(bases) == 1 and next(iter(bases)) in syms:
+            out[alias] = (next(iter(bases)),)
+            collapsed += 1
+        else:
+            out[alias] = tuple(syms)
+    return out, collapsed
+
+
+def build_resolver(conn: duckdb.DuckDBPyConnection, supplement: Mapping[str, str] | None = None) -> EntityResolver:
     """The engine's resolver over the copy's own tables: ``entity_aliases`` with ``EntityResolver.load``'s rule (an
     alias with any curated row loads only its curated symbols), the latest ``sector_map`` snapshot, ``theme_map``
-    keywords, and no universe filter. A copy without aliases would resolve nothing, so it refuses."""
+    keywords, and no universe filter. A copy without aliases would resolve nothing, so it refuses.
+
+    An alias the table maps to one company under several series codes then maps to its base symbol
+    (``collapse_series``): the seed lists such a company once per series, which would otherwise read as ambiguous.
+    Each ``supplement`` entry then maps its alias to its one symbol, replacing whatever the table held for that
+    alias, an ambiguous seed alias included. It is set after the engine's loader has run, so the engine's alias
+    stoplist does not apply to it: the supplement is reviewed by hand."""
     try:
         alias_rows = conn.execute("SELECT alias, tradingsymbol, source FROM entity_aliases").fetchall()
         sectors = conn.execute("SELECT symbol, sector FROM sector_map "
@@ -278,9 +405,43 @@ def build_resolver(conn: duckdb.DuckDBPyConnection) -> EntityResolver:
         every.setdefault(str(alias), set()).add(str(sym))
         if source == "curated":
             curated.setdefault(str(alias), set()).add(str(sym))
-    aliases = {a: tuple(sorted(curated.get(a) or syms)) for a, syms in every.items()}
-    return EntityResolver(aliases=aliases, sector_map={str(s): str(sec) for s, sec in sectors},
-                          theme_map={str(t): [str(k) for k in (kws or [])] for t, kws in themes}, universe=None)
+    aliases, _ = collapse_series({a: tuple(sorted(curated.get(a) or syms)) for a, syms in every.items()})
+    resolver = EntityResolver(aliases=aliases, sector_map={str(s): str(sec) for s, sec in sectors},
+                              theme_map={str(t): [str(k) for k in (kws or [])] for t, kws in themes}, universe=None)
+    extra = normalize_supplement(supplement or {})
+    if extra:
+        resolver._aliases = {**resolver._aliases, **{a: frozenset({sym}) for a, sym in extra.items()}}
+    return resolver
+
+
+def indexed_resolver(resolver: Any) -> Any:
+    """``resolver`` with its alias scan narrowed per text: the engine's own matcher runs unchanged on just the
+    aliases whose first token occurs in the text. An alias whose first token is absent cannot match, and the
+    matcher's subsumption, ordering and ambiguity steps do not depend on scan order, so every result equals a scan
+    of the whole table. The whole-table scan (every alias at every token position, for every story and entity) is
+    nearly all of a run's time otherwise. The index is built from the table as it is now. A resolver without the
+    expected table is returned as it is."""
+    table = getattr(resolver, "_aliases", None)
+    engine_match = getattr(type(resolver), "_match_aliases", None)
+    if not isinstance(table, dict) or engine_match is None:
+        return resolver
+    by_first: dict[str, dict[str, Any]] = defaultdict(dict)
+    for alias, syms in table.items():
+        by_first[alias.split(" ")[0]][alias] = syms
+
+    def match(self: Any, text: str) -> Any:
+        subset: dict[str, Any] = {}
+        for tok in set(title_tokens(text)):
+            subset.update(by_first.get(tok, {}))
+        whole = self._aliases
+        self._aliases = subset
+        try:
+            return engine_match(self, text)
+        finally:
+            self._aliases = whole
+
+    resolver._match_aliases = types.MethodType(match, resolver)
+    return resolver
 
 
 def stock_symbols(resolver: EntityResolver, s: Story) -> frozenset[str]:
@@ -289,6 +450,23 @@ def stock_symbols(resolver: EntityResolver, s: Story) -> frozenset[str]:
                     last_seen=s.at)
     extra = [e for e in s.entities if isinstance(e, str) and e.strip()]
     return frozenset(resolver.resolve(c, extra_texts=extra).symbols)
+
+
+def orphan_ids(stories: Iterable[Story], resolver: EntityResolver, *,
+               symbols: Mapping[str, frozenset[str]] | None = None) -> frozenset[str]:
+    """The cluster ids of the orphan stories: stock stories (``story_kind``) with materiality at least ``MATERIAL``
+    whose headline and entities resolve to no symbol at all, liquid or not. A resolved but illiquid symbol is not an
+    orphan. ``symbols`` holds stories already resolved by this same resolver, reused rather than resolved again."""
+    out = set()
+    for s in stories:
+        if story_kind(s) != "stock" or not s.materiality >= MATERIAL:
+            continue
+        found = symbols.get(s.cluster_id) if symbols is not None else None
+        if found is None:
+            found = stock_symbols(resolver, s)
+        if not found:
+            out.add(s.cluster_id)
+    return frozenset(out)
 
 
 def company_symbols(resolver: EntityResolver, names: Sequence[str]) -> tuple[list[str | None], int]:

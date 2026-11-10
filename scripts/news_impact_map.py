@@ -1,6 +1,7 @@
-"""News impact study (``edge/news_impact``): the capped nightly mapper of domain and global news stories.
+"""News impact study (``edge/news_impact``): the capped nightly mapper of domain, global and orphan news stories.
 
-For each story first scored by the engine's News Analyst whose kind is ``domain`` or ``global`` and whose entry
+For each story first scored by the engine's News Analyst whose kind is ``domain`` or ``global``, or which is an
+orphan (a material stock story the resolver reads no symbol in: ``news_impact_common.orphan_ids``), and whose entry
 session falls in the chosen sample window, the pinned Sonnet mapper reads the headline alone, never a score, and
 returns the direction for the whole Indian market, up to 3 stock groups from a closed vocabulary and up to 5 listed
 companies, each with a direction. A batch is up to 20 stories in one call.
@@ -11,6 +12,10 @@ with the system prompt's hash. A story has one ``mappings`` row, written once an
 leaves out stays unmapped for the next night. No call is made in market hours, checked again before each call,
 because a run suspended by host standby can resume inside the session. No call is made once the prompt file differs
 from its pinned hash.
+
+Orphans are decided by the resolver over ``--market-db`` (a whole-file ``market.duckdb`` copy, opened read-only and
+used for nothing else) with the frozen alias supplement; no call is made while the supplement is missing or differs
+from its registered digest.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -69,7 +74,7 @@ MAX_COMPANIES = 5
 MAPPER_PROMPT_SHA256 = "200875da005040a3f659f7b1d4b65ce920d64c3f845bb1c6c62a88cb3a70b8c2"
 STOP_PREFIXES = ncs.STOP_PREFIXES
 MarketHoursHalt = ncs.MarketHoursHalt
-KINDS = ("domain", "global")
+KINDS = nic.MAPPED_KINDS
 
 _DIRECTION = {"type": "integer", "enum": [-1, 1]}
 MAPPER_SCHEMA: dict[str, Any] = {
@@ -144,14 +149,15 @@ def parse_mapping(item: Any) -> tuple[int, list[tuple[str, int]], list[tuple[str
 
 
 # --------------------------------------------------------------------------- what to map
-def stories_to_map(stories: Sequence[Any], sessions: Sequence[date], sample: str) -> list[Any]:
-    """Domain and global stories whose entry session lies in the sample's inclusive window, oldest first.
-    ``sessions`` must start before the window's first day; a story whose entry session lies past their end is not
-    placed, so it is left out."""
+def stories_to_map(stories: Sequence[Any], sessions: Sequence[date], sample: str,
+                   orphans: Collection[str]) -> list[Any]:
+    """Domain, global and orphan stories (``orphans``, from ``nic.orphan_ids``) whose entry session lies in the
+    sample's inclusive window, oldest first. ``sessions`` must start before the window's first day; a story whose
+    entry session lies past their end is not placed, so it is left out."""
     lo, hi = nic.SAMPLES[sample]
     keep = []
     for s in stories:
-        if nic.story_kind(s) not in KINDS:
+        if nic.map_kind(s, orphans) not in KINDS:
             continue
         d = nic.entry_session(s.at, sessions)
         if d is not None and lo <= d <= hi:
@@ -341,12 +347,23 @@ def _calendar_end(cal: Any, lo: date, hi: date) -> date:
     return hi
 
 
-def _todo_for(sample: str, state_db: Path, now: datetime) -> tuple[list[Any], int]:
-    """The sample's stories to map, read from ``state.db`` as scored before ``now``, and the number of domain and
-    global stories left out because their entry session lies past the last calendar year (``beyond_calendar``);
-    those are mapped on a later run, once the calendar reaches them. A range starting in a year without a calendar
-    raises ``Unavailable``."""
+def open_resolver(market_db: Path, supplement: Mapping[str, str]) -> Any:
+    """The study's resolver over a read-only ``market.duckdb`` copy and the alias supplement; the copy is closed
+    before returning, since the resolver holds its tables in memory."""
+    conn = nic.rc.open_snapshot(Path(market_db))
+    try:
+        return nic.indexed_resolver(nic.build_resolver(conn, supplement))
+    finally:
+        conn.close()
+
+
+def _todo_for(sample: str, state_db: Path, now: datetime, resolver: Any) -> tuple[list[Any], int]:
+    """The sample's stories to map, read from ``state.db`` as scored before ``now`` with orphans by ``resolver``,
+    and the number of such stories left out because their entry session lies past the last calendar year
+    (``beyond_calendar``); those are mapped on a later run, once the calendar reaches them. A range starting in a
+    year without a calendar raises ``Unavailable``."""
     stories, _ = nic.load_first_scores(state_db, now)
+    orphans = nic.orphan_ids(stories, resolver)
     lo, hi = nic.SAMPLES[sample]
     cal = nic.load_calendar()
     first = lo - timedelta(days=14)
@@ -356,18 +373,24 @@ def _todo_for(sample: str, state_db: Path, now: datetime) -> tuple[list[Any], in
     beyond = 0
     if end < last:
         could_enter = datetime.combine(hi, nic.ENTRY_CUTOFF, IST)  # a story at or after it enters past the window
-        beyond = sum(1 for s in stories if nic.story_kind(s) in KINDS and s.at < could_enter
+        beyond = sum(1 for s in stories if nic.map_kind(s, orphans) in KINDS and s.at < could_enter
                      and nic.entry_session(s.at, sessions) is None)
-    return stories_to_map(stories, sessions, sample), beyond
+    return stories_to_map(stories, sessions, sample, orphans), beyond
+
+
+def _todo_kind(s: Any) -> str | None:
+    """A selected story's kind: ``stories_to_map`` admits a stock story only as an orphan."""
+    kind = nic.story_kind(s)
+    return "orphan" if kind == "stock" else kind
 
 
 def _dry_run(todo: Sequence[Any], mapped: dict[str, Any], remaining: int, sample: str, beyond: int = 0) -> None:
-    print(f"sample {sample}: {len(todo)} domain and global stories")
+    print(f"sample {sample}: {len(todo)} domain, global and orphan stories")
     print(f"beyond_calendar {beyond}: stories whose entry session lies past the last config/calendar year, "
           "not mapped this run")
     needed = 0
     for kind in KINDS:
-        of_kind = [s for s in todo if nic.story_kind(s) == kind]
+        of_kind = [s for s in todo if _todo_kind(s) == kind]
         unmapped = [s for s in of_kind if s.cluster_id not in mapped]
         batches, no_head = split_batches(unmapped)
         needed += len(batches)
@@ -376,11 +399,16 @@ def _dry_run(todo: Sequence[Any], mapped: dict[str, Any], remaining: int, sample
     print(f"batches needed {needed}; calls left tonight: {remaining}")
 
 
-def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None = None) -> int:
+def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None = None,
+         supplement: Mapping[str, str] | None = None) -> int:
+    """The CLI. ``supplement`` None reads the frozen alias supplement; the CLI never passes one."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--sample", required=True, choices=sorted(nic.SAMPLES))
     ap.add_argument("--state-db", type=Path, default=DEFAULT_STATE_DB)
     ap.add_argument("--db", type=Path, default=DEFAULT_DB)
+    ap.add_argument("--market-db", type=Path, required=True,
+                    help="a whole-file market.duckdb copy, read-only; its alias table, with the frozen supplement, "
+                         "decides which stock stories are orphans")
     ap.add_argument("--max-calls", type=int, default=MAX_CALLS_PER_NIGHT,
                     help=f"the night's call cap, at most {MAX_CALLS_PER_NIGHT}; calls already made since the last "
                          "15:30 IST count")
@@ -394,11 +422,16 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
     if digest != MAPPER_PROMPT_SHA256:
         print(f"the mapper prompt changed since registration ({digest} != {MAPPER_PROMPT_SHA256}); no call is made")
         return 2
+    try:
+        extra = nic.frozen_alias_supplement() if supplement is None else supplement
+    except nic.Unavailable as exc:
+        print(f"refused: {exc}; no call is made")
+        return 2
     now = (clock or (lambda: datetime.now(IST)))()
     try:
         remaining, stop = night_budget(args.db, now, args.max_calls)
         if args.dry_run:
-            todo, beyond = _todo_for(args.sample, args.state_db, now)
+            todo, beyond = _todo_for(args.sample, args.state_db, now, open_resolver(args.market_db, extra))
             _dry_run(todo, read_mappings(args.db), remaining, args.sample, beyond)
             return 0
         if reason := ncs.call_refusal(now):
@@ -414,14 +447,15 @@ def main(argv: list[str] | None = None, *, clock: Callable[[], datetime] | None 
             return 0
         try:
             mapped = read_mappings(args.db)
-            todo = [s for s in _todo_for(args.sample, args.state_db, now)[0] if s.cluster_id not in mapped]
+            resolver = open_resolver(args.market_db, extra)
+            todo = [s for s in _todo_for(args.sample, args.state_db, now, resolver)[0] if s.cluster_id not in mapped]
             llm = mml.StudyLLM(max_calls=remaining)
             out = asyncio.run(run_night(args.db, todo, llm, now, prompt_bytes.decode("utf-8"), clock=clock))
             if out["stopped"] is None and getattr(llm, "stopped", False):
                 out["stopped"] = f"LLMStopped: {getattr(llm, 'stop_reason', None) or 'stopped'}"
         finally:
             lock.unlink(missing_ok=True)
-    except (sqlite3.Error, nic.Unavailable) as exc:
+    except (sqlite3.Error, nic.Unavailable, nic.rc.Refusal) as exc:
         print(f"unreadable input: {type(exc).__name__}: {exc}")
         return 2
     print(json.dumps(out, indent=2, sort_keys=True))

@@ -8,6 +8,7 @@ holiday). Nothing here reads ``data/``: the ETF list and theme lists are passed 
 from __future__ import annotations
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import re
@@ -15,7 +16,7 @@ import sqlite3
 import sys
 import types
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -56,6 +57,16 @@ SNAP = date(2026, 11, 8)
 
 def at(day: date, hh: int, mi: int = 0) -> datetime:
     return datetime(day.year, day.month, day.day, hh, mi, tzinfo=IST)
+
+
+_FROZEN_SUPPLEMENT = nic.frozen_alias_supplement
+
+
+@pytest.fixture(autouse=True)
+def _empty_supplement(monkeypatch):
+    """The frozen alias supplement is the registration's file: a run here reads an empty one unless the test sets
+    another."""
+    monkeypatch.setattr(nic, "frozen_alias_supplement", lambda: {})
 
 
 @pytest.fixture(scope="module")
@@ -171,6 +182,10 @@ class State:
     def glob(self, cid: str, when: datetime) -> None:
         self.call(when, [_score(cid, "market", 0.5, 0.8, "global_market")], {cid: f"global story {cid}"})
 
+    def orphan(self, cid: str, when: datetime, headline: str = "Unlisted Co wins a large order") -> None:
+        """A material stock story whose headline names no alias of the synthetic copy."""
+        self.call(when, [_score(cid, "stock", 0.8, 0.9, "order_win")], {cid: headline})
+
 
 def _score(cid: str, scope: str, sentiment: float, materiality: float, event_type: str) -> dict:
     return {"cluster_id": cid, "scope": scope, "entities": [], "sectors": [], "themes": [], "sentiment": sentiment,
@@ -221,7 +236,7 @@ def test_waiting_when_unmapped(tmp_path, market_db, sessions, d1):
     st.domain("dom0", at(date(2026, 7, 27), 8))                # enters before the sample window: not needed
     maps = write_mappings(tmp_path / "maps.sqlite", {"glb1": (1, [["BANK", 1]], [])})
     doc = run(st, market_db, maps)
-    assert doc["status"] == "waiting: 2 stories unmapped (domain 2, global 0)"
+    assert doc["status"] == "waiting: 2 stories unmapped (domain 2, global 0, orphan 0)"
     assert doc["hypotheses"] == {} and doc["diagnostics"] == {} and doc["excluded_window"] == {}
     out = tmp_path / "rep" / "r.json"
     rc = nis.main(["--sample", "A", "--db", str(market_db), "--state-db", str(st.path), "--mappings", str(maps),
@@ -229,7 +244,8 @@ def test_waiting_when_unmapped(tmp_path, market_db, sessions, d1):
     assert rc == 0
     assert json.loads(out.read_text(encoding="utf-8"))["status"].startswith("waiting: 2 stories unmapped")
     # no mappings store at all reads as nothing mapped yet
-    assert run(st, market_db, tmp_path / "absent.sqlite")["status"] == "waiting: 3 stories unmapped (domain 2, global 1)"
+    assert run(st, market_db, tmp_path / "absent.sqlite")["status"] == (
+        "waiting: 3 stories unmapped (domain 2, global 1, orphan 0)")
 
 
 # --------------------------------------------------------------------------- signals
@@ -306,7 +322,7 @@ def test_indexed_resolver_matches_the_whole_table_scan():
         ("bank of baroda", "BANKBARODA", "seed"), ("baroda", "BARODA", "seed"), ("l t", "LT", "seed")])
     conn.execute("INSERT INTO sector_map VALUES (DATE '2026-11-08', 'HDFCBANK', 'BANK')")
     conn.execute("INSERT INTO theme_map VALUES ('defence', ['missile'], [], NULL)")
-    plain, fast = nic.build_resolver(conn), nis.indexed_resolver(nic.build_resolver(conn))
+    plain, fast = nic.build_resolver(conn), nic.indexed_resolver(nic.build_resolver(conn))
     texts = ["PVR Inox shares jump", "PVR and Inox Wind rally", "SBI Card SBI results", "Tata Steel Authority deal",
              "Tata stocks rally", "Reliance and HDFC Bank lead", "Bank of Baroda raises rates in Baroda",
              "L&T wins missile order", "", "nothing here", "tata tata steel steel authority", "[NSE:INFY] Infosys up"]
@@ -546,7 +562,8 @@ def test_unmappable_story_never_holds_a_look(tmp_path, market_db, d1):
     # a mappable one still waits, and the unmappable one is not counted among the waiting
     st.glob("g1", at(d1, 8))
     doc = run(st, market_db, maps)
-    assert doc["status"] == "waiting: 1 stories unmapped (domain 0, global 1)" and doc["meta"]["unmappable"] == 1
+    assert doc["status"] == "waiting: 1 stories unmapped (domain 0, global 1, orphan 0)"
+    assert doc["meta"]["unmappable"] == 1
 
 
 _OUTCOME_KEY = re.compile(r"\b(excess|net|gross|rho|label)\b", re.IGNORECASE)
@@ -609,3 +626,168 @@ def test_report_roundtrip(tmp_path, market_db, sessions, d1):
     assert neg["domain_companies_minus"]["n"] == 1 and neg["domain_groups_minus"]["n"] == 1
     assert dg["market_direction"]["n"] == 1
     assert "not evidence" in md and "NEWS IMPACT STUDY" in md
+
+
+# --------------------------------------------------------------------------- orphan stock stories
+def test_mapped_orphan_feeds_both_domain_hypotheses_and_never_global(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o1", at(d1, 8))
+    maps = write_mappings(tmp_path / "maps.sqlite", {
+        "o1": (1, [["AUTO", 1], ["BANK", 1]], [["P1corp", 1], ["Titan", 1]])})
+    # the supplement reaches mapped company names too: "Titan" is in no alias of the copy
+    doc = nis.run("A", st.path, market_db, maps, AS_OF, etfs=frozenset(), themes={}, supplement={"titan": "P2"})
+    assert doc["status"] == "complete"
+    h = doc["hypotheses"]
+    assert sorted(t["key"] for t in h["domain_companies"]["trades"]) == ["P1", "P2"]
+    assert sorted(t["key"] for t in h["domain_groups"]["trades"]) == ["AUTO", "BANK"]
+    assert h["domain_companies"]["stories"] == 1 and h["domain_groups"]["stories"] == 1
+    assert h["global_sectors"]["signals"] == 0 and h["global_sectors"]["stories"] == 0
+    # the stock arms still count the orphan, as an unresolved story
+    assert h["stock_next_open"]["stories"] == 2 and h["stock_next_open"]["drops"]["stories_unresolved"] == 1
+    assert doc["meta"]["stories_by_kind"]["sample_window"] == {"orphan": 1, "stock": 1}
+    sp = doc["diagnostics"]["splits"]
+    assert sp["domain_groups"]["origin"]["small"] == {"orphan": 2}
+    assert sp["domain_companies"]["origin"]["small"] == {"orphan": 2}
+    assert "origin" not in sp["stock_next_open"] and "origin" not in sp["global_sectors"]
+    for name in ("domain_companies", "domain_groups", "global_sectors"):
+        assert sp[name]["boolean"]["global_outlet"]["available"] is True
+    assert "global_outlet" not in sp["stock_next_open"]["boolean"]
+    # no story reached a global outlet: the split's true side is empty, so it has no p and says why
+    g = sp["domain_groups"]["boolean"]["global_outlet"]
+    assert (g["n"], g["false"], g["perm_p"], g["note"]) == (0, 2, None, nis.ONE_SIDED)
+    assert nis.ONE_SIDED in nis.render(doc)
+
+
+def test_unmapped_orphan_waits_by_this_runs_resolver(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o1", at(d1, 8))
+    maps = write_mappings(tmp_path / "maps.sqlite", {})
+    doc = run(st, market_db, maps)
+    assert doc["status"] == "waiting: 1 stories unmapped (domain 0, global 0, orphan 1)"
+    assert doc["meta"]["stories_by_kind"]["all"] == {"orphan": 1, "stock": 1}
+    # aliases that read the name (as an older copy's might have) resolve it: a stock story, nothing to wait on
+    doc = nis.run("A", st.path, market_db, maps, AS_OF, etfs=frozenset(), themes={},
+                  supplement={"Unlisted Co": "X"})
+    assert doc["status"] == "complete"
+    assert doc["hypotheses"]["stock_next_open"]["stories"] == 2
+    assert "stories_unresolved" not in doc["hypotheses"]["stock_next_open"]["drops"]
+    assert doc["meta"]["stories_by_kind"]["all"] == {"stock": 2}
+
+
+def test_orphan_without_a_headline_is_unmappable_and_never_waits(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o0", at(d1, 8), headline="   ")
+    doc = run(st, market_db, write_mappings(tmp_path / "maps.sqlite", {}))
+    assert doc["status"] == "complete"
+    assert doc["meta"]["unmappable"] == 1
+    assert doc["meta"]["stories_by_kind"]["sample_window"]["orphan"] == 1
+
+
+def test_counts_only_shows_orphans_as_their_own_kind(tmp_path, market_db, d1):
+    st = State(tmp_path / "state.db")
+    st.stock("sx1", "X", at(d1, 8))
+    st.orphan("o1", at(d1, 8))
+    st.call(at(d1, 8), [_score("weak", "stock", 0.8, 0.5, "order_win")], {"weak": "Unlisted Co in talks"})
+    c = nis.counts_only("A", st.path, market_db, AS_OF, etfs=frozenset(), themes={})
+    # an immaterial story naming no symbol is not an orphan
+    assert c["stories_by_kind"]["sample"] == {"orphan": 1, "stock": 2}
+    assert c["windows"]["sample"]["stock_next_open"]["drops"]["stories_unresolved"] == 1
+
+
+def test_mapped_pairs_read_orphans_with_domain_stories_and_label_origin(sessions, d1):
+    o = story("o", at(d1, 8))                                            # a material stock story
+    dm = story("dm", at(d1, 8), scope="sector", event_type="sector_policy")
+    gl = story("gl", at(d1, 8), scope="market", event_type="global_market")
+    placed = nis.place([o, dm, gl], sessions)
+    maps = {"o": (1, [["AUTO", 1], ["METAL", 1]], []), "dm": (1, [["BANK", 1], ["METAL", 1]], []),
+            "gl": (1, [["IT", 1]], [])}
+    orphans = frozenset({"o"})
+    plus, minus, counts = nis.mapped_pairs(placed, maps, (d1, d1), nis.DOMAIN_KINDS, "groups", None, orphans)
+    sig, conflicts = nis.mapped_signals(plus, minus)
+    assert {s.key: nis.origin(s, orphans) for s in sig} == {"AUTO": "orphan", "BANK": "domain", "METAL": "mixed"}
+    assert counts["stories"] == 2 and conflicts == 0
+    # the global hypothesis reads only global stories
+    plus, _, counts = nis.mapped_pairs(placed, maps, (d1, d1), nis.GLOBAL_KINDS, "groups", None, orphans)
+    assert set(plus) == {("IT", d1)} and counts["stories"] == 1
+    # a stock story that is not an orphan is never read
+    plus, _, _ = nis.mapped_pairs(placed, maps, (d1, d1), nis.DOMAIN_KINDS, "groups", None, frozenset())
+    assert set(plus) == {("BANK", d1), ("METAL", d1)}
+    # an orphan unmapped is waited on by its own kind; one without a headline only counted
+    nohead = nic.Story("nh", at(d1, 8), "call", "m", "stock", "order_win", 0.8, 0.9, (), None)
+    placed = nis.place([o, dm, nohead], sessions)
+    windows = ((d1, d1),)
+    assert nis.unmapped(placed, {}, windows, frozenset({"o", "nh"})) == {"orphan": 1, "domain": 1}
+    assert nis.unmappable(placed, {}, windows, frozenset({"o", "nh"})) == 1
+
+
+# --------------------------------------------------------------------------- the global-outlet split
+def news_db(rows: list[tuple[str, str, datetime]]) -> duckdb.DuckDBPyConnection:
+    conn = duckdb.connect()
+    conn.execute("SET TimeZone='Asia/Kolkata'")
+    conn.execute("CREATE TABLE news (headline_id TEXT PRIMARY KEY, title TEXT NOT NULL, source_domain TEXT NOT NULL, "
+                 "url TEXT NOT NULL, published_at TIMESTAMPTZ NOT NULL, cluster_id TEXT, untrusted BOOLEAN NOT NULL "
+                 "DEFAULT TRUE, ingested_at TIMESTAMPTZ NOT NULL)")
+    conn.executemany("INSERT INTO news (headline_id, title, source_domain, url, published_at, cluster_id, ingested_at) "
+                     "VALUES (?, 't', ?, 'u', ?, ?, ?)", [(uuid.uuid4().hex, dom, w, cid, w) for cid, dom, w in rows])
+    return conn
+
+
+def test_global_outlet_reads_members_ingested_by_the_first_score(d1):
+    t = at(d1, 8)
+    conn = news_db([
+        ("g1", "moneycontrol.com", t - timedelta(hours=1)),
+        ("g1", "reuters.com", t + timedelta(minutes=1)),           # after the first score: does not count
+        ("g2", "economictimes.indiatimes.com", t - timedelta(hours=1)),
+        ("g2", "bloomberg.com", t),                                # ingested at the first score: counts
+    ])
+    news = nis.load_news_domains(conn, ["g1", "g2", "g3"])
+    s1, s2, s3 = (story(c, t, scope="market", event_type="global_market") for c in ("g1", "g2", "g3"))
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s1,)), news) is False
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s2,)), news) is True
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s1, s2)), news) is True       # any of the signal's stories
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s3,)), news) is False         # a cluster without rows
+    # a later story of the same cluster sees the late member
+    late = story("g1", t + timedelta(minutes=5), scope="market", event_type="global_market")
+    assert nis.global_outlet(nis.Signal("BANK", d1, (late,)), news) is True
+    # a copy without a news table leaves the split unavailable
+    assert nis.global_outlet(nis.Signal("BANK", d1, (s2,)), None) is None
+    assert nis.load_news_domains(duckdb.connect(), ["g1"]) is None
+    assert "reuters.com" not in nic.INDIAN_NEWS_DOMAINS and "moneycontrol.com" in nic.INDIAN_NEWS_DOMAINS
+    assert len(nic.INDIAN_NEWS_DOMAINS) == 11
+
+
+def test_one_sided_split_reports_no_p(sessions, d1):
+    s = sessions[sessions.index(d1):][:12]
+    rows = [(nis.Signal("K", d, ()), nic.Trade("K", d, d, d, float(i), 0.0, float(i), float(i) - 0.5))
+            for i, d in enumerate(s)]
+    for value, n in ((False, 0), (True, 12)):
+        rep = nis.split_report(rows, [{"global_outlet": value} for _ in rows], ("global_outlet",), ())
+        b = rep["boolean"]["global_outlet"]
+        assert (b["n"], b["perm_p"], b["note"]) == (n, None, nis.ONE_SIDED)
+    rep = nis.split_report(rows, [{"global_outlet": i % 2 == 0} for i in range(12)], ("global_outlet",), ())
+    assert rep["boolean"]["global_outlet"]["perm_p"] is not None and "note" not in rep["boolean"]["global_outlet"]
+    # a category holding every trade is one-sided too
+    rep = nis.split_report(rows, [{"origin": "domain"} for _ in rows], (), ("origin",))
+    assert rep["origin"]["tested"]["domain"]["perm_p"] is None and rep["origin"]["tested"]["domain"]["note"]
+
+
+def test_run_refuses_without_the_registered_supplement(monkeypatch, tmp_path, market_db, d1, capsys):
+    monkeypatch.setattr(nic, "frozen_alias_supplement", _FROZEN_SUPPLEMENT)
+    sup = tmp_path / "aliases_extra.yaml"
+    sup.write_text("aliases:\n  Unlisted Co: X\n", encoding="utf-8")
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_PATH", sup)
+    st = State(tmp_path / "state.db")
+    st.orphan("o1", at(d1, 8))
+    args = ["--sample", "A", "--db", str(market_db), "--state-db", str(st.path), "--mappings",
+            str(tmp_path / "absent.sqlite"), "--as-of", AS_OF.isoformat(), "--counts-only"]
+    assert nis.main(args, etfs=frozenset(), themes={}) == 2                  # not the registered digest
+    assert "REFUSED" in (out := capsys.readouterr().out) and "alias supplement" in out
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_SHA256", hashlib.sha256(sup.read_bytes()).hexdigest())
+    assert nis.main(args, etfs=frozenset(), themes={}) == 0
+    assert "stories by kind (sample): stock 1" in capsys.readouterr().out      # the supplement resolved it
+    sup.write_text("aliases:\n  Unlisted Co: x\n", encoding="utf-8")        # malformed and re-signed: refused
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_SHA256", hashlib.sha256(sup.read_bytes()).hexdigest())
+    assert nis.main(args, etfs=frozenset(), themes={}) == 2

@@ -57,6 +57,9 @@ open questions. Built work is described by the code. When an item here ships, de
   next-open fills, spread-inclusive CNC costs and the margin floor; net ≤ the cost floor at both ⇒ retired; clears ⇒
   owner review. Fewer than 1 admitted signal per 20 sessions across the first 60 triggers an early owner check-in.
   The same 2026-11-09 wording-only News Analyst change applies here.
+- **Global feeds (owner, 2026-11-11):** the engine reads seven global outlets from 2026-11-11 01:37 IST. The `cat` v2
+  verdict cohort formed before then, with its 20th signal on 2026-11-04, so it is untouched. `cat_reversal` readings
+  split there, as at the earlier feed additions.
 - **Waiting on the `cat` v2 verdict (owner, 2026-09-24):** wiring the results line items (`revenue`, `pat`) into the
   News Analyst and the three resolver alias fixes (`engineers`, `dalmia bharat`, `pfizer`) land together right after
   it. Switching the clusterer's `cat.max_event_age_days` from calendar days to sessions is also decided after it.
@@ -417,13 +420,20 @@ pipeline." The motivating case is the 2026-10-29 → 11-06 turn (memory `macro-t
 - **Promotion:** a supported hypothesis earns nothing automatically. Using it as a recommendation source needs its own
   owner decision, plan and the research registration bar.
 
-**News impact study (proposed 2026-11-10; registered by the commit that adds its six trial rows, after the owner
-signs off the thresholds and the mapper prompt).** The owner's thesis: events hit particular stocks, so
-recommendations should start from news, with supporting data and the following sessions' prices deciding entry and
-exit. Owner, 2026-11-10: "Go ahead with the recommended way to test them", widened in the same message:
+**News impact study (owner signed off the rules 2026-11-11; registered by the commit that adds its six trial
+rows).** The owner's thesis: events hit particular stocks, so recommendations should start from news, with supporting
+data and the following sessions' prices deciding entry and exit. Owner, 2026-11-10: "Go ahead with the recommended
+way to test them", widened in the same message:
 - news about a sector or a type of business reaches the companies in that domain, not only the companies it names
   ("government's push into EV future could mean good news for companies in the car electric wiring harness work");
 - global events (Fed rate changes, war, oil) reach particular sectors or the whole Indian market.
+
+With the sign-off on 2026-11-11 the owner asked whether stock stories that name no listed company can be used, and
+asked for a global news channel. Three amendments answer those questions; each was made before any outcome was
+computed:
+- an alias supplement and a series-code rule, so that listed companies named by short names resolve;
+- orphan stories, the ones that still resolve to no symbol, go to the mapper;
+- the engine's new global feeds are part of B.
 
 The market-wide effect of news tone is the macro mood study's forward test, so it is not repeated here. Evidence
 only; nothing is wired into the engine. The `cat` v2 shadow verdict (one gated slice of the stock hypothesis) stays
@@ -447,6 +457,11 @@ separate and is unaffected.
     hypotheses, because ex-dividend drops are not in the stored bars.
   - Liquid universe as of D−1: the macro mood study's rule (median close × volume ≥ ₹10 cr over the 20 sessions to
     D−1, ETFs out, a corporate-action ex-date on D−1 out).
+    - The engine's own pool goes lower: NIFTY Total Market members that are MIS-eligible, out of surveillance and at
+      or above ₹5 cr.
+    - The ₹10 cr floor stays. Of A's 542 material positive signals, 32 sat between ₹5 cr and ₹10 cr at D−1, and
+      only 3 of those were in the engine's eligible set that day.
+    - This was counted on 2026-11-11 from D−1 liquidity alone, with no outcome.
   - Sector snapshot: the `sector_map` snapshot of 2026-11-08 for every D−1 before that date, and the snapshot in force
     on D−1 after it.
     - Earlier snapshots used an 11-label scheme until 2026-09-21 and left most names `UNCLASSIFIED` (641 of 804 on
@@ -477,12 +492,45 @@ separate and is unaffected.
     texts. The resolver uses the alias table and `sector_map` of the database copy the run reads, and no universe
     filter (liquidity is applied after). Alias fixes made since are therefore applied backwards, a correction rather than
     an outcome-driven choice. Every resolved liquid symbol is a candidate.
+  - **Short names (amended 2026-11-11).** The engine's alias table holds mostly full legal names ("titan company",
+    "punjab national bank"). Of a random 120 of A's 558 unresolved material positive stock stories, 57 named a
+    listed company by the name the press uses: Titan, PNB, Sun Pharma, HCLTech, Paytm, Lupin and others. The study's
+    resolver therefore adds two things to the copy's table:
+    - **The series-code rule.** An alias whose symbols are one company under several series codes (`X` and `X-BE`,
+      `-BZ`, `-SM` or `-ST`) resolves to `X`, when `X` itself is among them. The rule collapses 465 aliases in the
+      2026-11-09 copy that the resolver otherwise drops as ambiguous, such as "bodal chemicals" with BODALCHEM and
+      BODALCHEM-BE.
+    - **Effect, counted on 2026-11-09 with no outcome:** A's stock stories with no symbol fall from 7,495 to 5,021,
+      and the material positive ones from 538 to 295. A review of every newly matched headline for the risky short
+      names found them almost all right. One `titan` match is a "tech titan" phrase in an immaterial story.
+    - **The frozen supplement** `config/research/news_impact/aliases_extra.yaml`, with its sha256 pinned in
+      `news_impact_common.py`.
+      - It was built from the entity names of A's and the excluded window's unresolved stock stories. An LLM proposed
+        the listed company for each name, checked against NSE's EQ list. The manager reviewed every risky entry and
+        dropped names that also mean something else.
+      - It covers only names that denote one listed company itself. Left out: subsidiaries, groups, foreign and
+        unlisted companies, people, exchanges, and brokerages that headlines cite as the source of a view (Motilal
+        Oswal, Kotak, Nuvama).
+      - It overrides the table for its own alias strings and skips the engine's stoplist. The stoplist guards seed
+        aliases derived from every company name in every headline; here only stock-scope stories and mapped company
+        names are resolved.
+      - It was built from headlines and NSE's list alone, with no outcome.
+    - The engine's resolver is unchanged; its alias fixes wait for the `cat` v2 verdict.
   - Mapped companies: their names go through the same resolver as extra texts with an empty headline. An unmatched or
     ambiguous name is dropped and counted; the resolver never guesses.
 - **Mapper (the owner's domain and global points):** stories whose first score has materiality ≥ 0.6 and one of:
   - **domain:** scope `sector` or `theme`, or scope `market` with event type `govt_program`, `sector_policy` or
     `regulatory_policy`;
-  - **global:** scope `market` with event type `global_market`, `macro_data` or `disruption`.
+  - **global:** scope `market` with event type `global_market`, `macro_data` or `disruption`;
+  - **orphan** (amended 2026-11-11, at the owner's question): a stock story, any event type the stock arms take,
+    with materiality ≥ 0.6, that resolves to no symbol at all, even with the short names.
+    - Most are unlisted Indian companies (startups, firms heading for an IPO, subsidiaries such as Adani Airports),
+      foreign companies (Microsoft, TSMC), business groups and NSE's own IPO.
+    - A resolved symbol that is merely illiquid does not make an orphan.
+    - The run's own resolver decides, so the mapper takes the database copy it resolves with (`--market-db`). A story
+      the verdict run's copy finds orphaned but the mapper never sent holds the look waiting until it is mapped.
+    - Orphans join the domain path. The mapper says which listed companies and groups the story helps or hurts. For
+      example, a foreign chipmaker's capex plan may reach Indian suppliers.
 
   Mapping rules:
   - The prompt is `config/research/news_impact/mapper_prompt.md`, used verbatim. It sees only the headline, never a
@@ -502,8 +550,9 @@ separate and is unaffected.
   - A story without a readable headline cannot be mapped. It is reported as unmappable and never holds a look.
   - Each call is stored append-only with its time, model, prompt sha256 and raw output in
     `data/research/news_impact.sqlite`, never in `agent_calls`.
-  - Expected use: about 80 calls for sample A and about as many for sample B. A look stays "waiting" while any story
-    it needs is unmapped.
+  - Expected use: about 100 calls for A and the excluded window with the orphans, and about as many for B. The first
+    40, on the night of 2026-11-10, mapped 800 of A's stories. A look stays "waiting" while any story it needs is
+    unmapped.
 - **Hypotheses:**
   - **News reading carries information:** across all stock-story observations, the Spearman rank correlation between
     x and the 10-session sector excess y is above 0.
@@ -522,10 +571,10 @@ separate and is unaffected.
     - Hold 10 sessions from the fill session, judged on sector excess. The peers are measured from that session's
       open, an approximation stated in the report.
     - Fills happen only on pullbacks, so the arm mixes timing and selection, as in the brk20 entry study.
-  - **Domain news, named companies:** each company a domain story maps +1 ⇒ buy at D's open, hold 10, judged on
-    β-excess. A company that another domain story for the same D maps −1 is skipped.
-  - **Domain news, groups:** each group that a domain story for D maps +1, and none maps −1 ⇒ buy the group's liquid
-    members equal-weight at D's open, hold 10, judged on β-excess.
+  - **Domain news, named companies:** each company a domain or orphan story maps +1 ⇒ buy at D's open, hold 10,
+    judged on β-excess. A company that another domain or orphan story for the same D maps −1 is skipped.
+  - **Domain news, groups:** each group that a domain or orphan story for D maps +1, and none maps −1 ⇒ buy the
+    group's liquid members equal-weight at D's open, hold 10, judged on β-excess.
   - **Global news, sectors:** each group that a global story for D maps +1, and none maps −1 ⇒ buy the group's liquid
     members equal-weight at D's open, hold 5, judged on β-excess.
 - **Samples:**
@@ -541,6 +590,9 @@ separate and is unaffected.
   - **B** (forward confirmation): entry sessions 2026-11-11 → 2027-02-26, judged once after the last hold ends, on a
     fresh whole-file database copy. B judges every hypothesis A did not refute. The final label is B's. A hypothesis A
     refutes stops there.
+    - From 2026-11-11 01:37 IST the engine also reads seven global feeds, at the owner's request the same day:
+      Bloomberg markets and economics, CNBC world and energy, FT international, BBC world, and the Federal Reserve's
+      monetary releases. Their stories feed B like any other source; A predates them.
 - **Verdict per trade hypothesis, on each sample** (the macro mood study's rule at this family's N):
   - **Supported** iff all of these hold:
     - at least 30 trades;
@@ -575,14 +627,19 @@ separate and is unaffected.
     stock stories, and the β-excess of companies and groups mapped −1, each with a session-block CI.
   - For global stories, the event-type split, and the rank correlation between the mapped market direction and the
     NIFTY's open(D) → close(D+4).
+  - The origin split for both domain hypotheses: signals from domain stories, from orphans, or from both.
+  - The global-outlet split for the domain and global hypotheses: whether any story behind a signal had a headline
+    from outside the engine's Indian outlets when first scored. This tells whether the global feeds added anything;
+    in A it is all one side.
   - The pullback arm's fill rate; the excluded window's results; per-hypothesis counts of dropped stories, unresolved
     names and voided legs.
 - **Tools and records:**
-  - `scripts/news_impact_map.py` runs the mapper over the stories a sample needs.
+  - `scripts/news_impact_map.py` runs the mapper over the stories a sample needs, resolving orphans with the
+    database copy given as `--market-db`.
   - `scripts/news_impact_study.py` computes a sample's verdicts and diagnostics. It is read-only, exits 0, and writes
     `data/reports/news_impact_<sample>_<stamp>.{json,md}` through `research_common.write_reports`.
-  - The registering commit adds six `config/research_trials.yaml` rows with result `registered`, and the mapper prompt
-    is frozen from then on. Each row takes A's label when A lands and B's when B lands. Verdicts go to memory, and this
+  - The registering commit adds six `config/research_trials.yaml` rows with result `registered`. The mapper prompt
+    and the alias supplement are frozen from then on. Each row takes A's label when A lands and B's when B lands. Verdicts go to memory, and this
     entry is deleted once B lands.
   - Tests pin the timing (t, D, P0), the pullback fill, the non-overlap rule, the benchmarks, the cost application and
     the mapper parser's vocabulary and caps.

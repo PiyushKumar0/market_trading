@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import duckdb
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -130,6 +131,22 @@ def story(cid: str, *, scope: str = "sector", event: str = "sector_policy", head
     return nic.Story(cid, at, "call-" + cid, "m", scope, event, 0.5, materiality, (), headline)
 
 
+def market_copy(path: Path, aliases: list[tuple[str, str]] | None = None) -> Path:
+    """A ``market.duckdb`` copy holding only the resolver's tables."""
+    conn = duckdb.connect(str(path))
+    conn.execute("CREATE TABLE entity_aliases (alias TEXT, tradingsymbol TEXT, source TEXT, added_at TIMESTAMPTZ)")
+    conn.execute("CREATE TABLE sector_map (as_of DATE, symbol TEXT, sector TEXT)")
+    conn.execute("CREATE TABLE theme_map (theme TEXT, keywords TEXT[], symbols TEXT[], updated_at TIMESTAMPTZ)")
+    conn.executemany("INSERT INTO entity_aliases (alias, tradingsymbol, source) VALUES (?, ?, 'seed')",
+                     aliases or [("infosys", "INFY")])
+    conn.close()
+    return path
+
+
+def resolver(tmp_path: Path, supplement: dict[str, str] | None = None) -> Any:
+    return nim.open_resolver(market_copy(tmp_path / "copy.duckdb"), supplement or {})
+
+
 def run(db, todo, llm, *, now=NIGHT, clock=None):
     return asyncio.run(nim.run_night(db, todo, llm, now, "SYSTEM PROMPT", clock=clock or (lambda: now)))
 
@@ -155,9 +172,34 @@ def test_prompt_hash_pinned():
 
 def test_main_exits_2_on_prompt_hash_mismatch(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(nim, "MAPPER_PROMPT_SHA256", "0" * 64)
-    assert nim.main(["--sample", "A", "--db", str(tmp_path / "x.sqlite"), "--dry-run"]) == 2
+    assert nim.main(["--sample", "A", "--db", str(tmp_path / "x.sqlite"), "--dry-run", "--market-db",
+                     str(tmp_path / "copy.duckdb")]) == 2
     assert "prompt" in capsys.readouterr().out
     assert not (tmp_path / "x.sqlite").exists()
+
+
+def test_main_requires_market_db(capsys):
+    with pytest.raises(SystemExit) as exc:
+        nim.main(["--sample", "A", "--dry-run"], supplement={})
+    assert exc.value.code == 2 and "--market-db" in capsys.readouterr().err
+
+
+def test_main_exits_2_without_the_registered_supplement(monkeypatch, tmp_path, capsys):
+    sup = tmp_path / "aliases_extra.yaml"
+    sup.write_text("aliases:\n  Titan: TITAN\n", encoding="utf-8")
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_PATH", sup)
+    monkeypatch.setattr(nim.nic, "load_first_scores", lambda *a: pytest.fail("a refusal reads nothing"))
+    args = ["--sample", "A", "--dry-run", "--db", str(tmp_path / "map.sqlite"), "--market-db",
+            str(market_copy(tmp_path / "copy.duckdb"))]
+    assert nim.main(args) == 2                                       # not the registered digest
+    assert "alias supplement" in capsys.readouterr().out
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_PATH", tmp_path / "absent.yaml")
+    assert nim.main(args) == 2
+    assert not (tmp_path / "map.sqlite").exists()
+    # a copy that cannot be opened refuses too
+    monkeypatch.setattr(nim.nic, "load_first_scores", lambda *a: ([], {}))
+    assert nim.main([*args[:-1], str(tmp_path / "absent.duckdb")], supplement={}) == 2
+    assert "unreadable input" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- the parser
@@ -216,12 +258,36 @@ def test_stories_to_map_window():
         story("last_in", at=datetime(2026, 10, 23, 8, 59, 59, tzinfo=IST)),         # enters 10-23, A's last day
         story("after", at=datetime(2026, 10, 23, 9, 0, tzinfo=IST)),                # enters 10-26: excluded window
     ]
-    got = nim.stories_to_map(stories, sessions, "A")
+    got = nim.stories_to_map(stories, sessions, "A", frozenset())
     assert [s.cluster_id for s in got] == ["early", "dom", "glob", "mkt_domain", "last_in"]   # oldest first
-    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "excluded")] == ["after"]
+    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "excluded", frozenset())] == ["after"]
     assert lo <= nic.entry_session(got[0].at, sessions) <= hi
     with pytest.raises(KeyError):
-        nim.stories_to_map(stories, sessions, "Z")
+        nim.stories_to_map(stories, sessions, "Z", frozenset())
+
+
+def test_stories_to_map_takes_orphans_in_window(tmp_path):
+    cal = nic.load_calendar()
+    sessions = nic.regular_sessions(cal, date(2026, 7, 1), date(2026, 12, 31))
+    wed = datetime(2026, 8, 5, 12, 0, tzinfo=IST)
+    stories = [
+        story("orphan", scope="stock", event="order_win", headline="Unlisted Co wins order", at=wed),
+        story("resolved", scope="stock", event="order_win", headline="Infosys wins order", at=wed),
+        story("weak", scope="stock", event="order_win", headline="Unlisted Co in talks", materiality=0.5, at=wed),
+        story("dividend", scope="stock", event="dividend_corp_action", headline="Unlisted Co dividend", at=wed),
+        story("late", scope="stock", event="order_win", headline="Unlisted Co wins again",
+              at=datetime(2026, 10, 23, 9, 0, tzinfo=IST)),                       # enters 10-26: excluded window
+        story("dom", at=wed),
+    ]
+    orphans = nic.orphan_ids(stories, resolver(tmp_path))
+    assert orphans == frozenset({"orphan", "late"})
+    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == ["dom", "orphan"]
+    assert [s.cluster_id for s in nim.stories_to_map(stories, sessions, "excluded", orphans)] == ["late"]
+    # the orphan set is the resolver's: aliases that read the name leave a stock story the mapper never sees
+    orphans = nic.orphan_ids(stories, nim.open_resolver(market_copy(tmp_path / "c2.duckdb"),
+                                                        {"Unlisted Co": "UNLISTED"}))
+    assert orphans == frozenset() and [s.cluster_id for s in nim.stories_to_map(stories, sessions, "A", orphans)] == [
+        "dom"]
 
 
 # --------------------------------------------------------------------------- the night
@@ -401,7 +467,8 @@ def test_dry_run_reports_without_calling(monkeypatch, tmp_path, capsys):
     db = tmp_path / "map.sqlite"
     wed = datetime(2026, 8, 5, 12, 0, tzinfo=IST)
     stories = [story("d1", at=wed), story("d2", at=wed), story("g1", scope="market", event="global_market", at=wed),
-               story("nh", headline=None, at=wed), story("st", scope="stock", event="results", at=wed)]
+               story("nh", headline=None, at=wed), story("st", scope="stock", event="results", at=wed),
+               story("inf", scope="stock", event="results", headline="Infosys results", at=wed)]
     seen = {}
 
     def fake_load(state_db, limit):
@@ -416,12 +483,16 @@ def test_dry_run_reports_without_calling(monkeypatch, tmp_path, capsys):
                           (datetime.now(IST).isoformat(), "m", "h", "[]"))
         con.execute("INSERT INTO mappings VALUES ('d1', ?, 1, '[]', '[]')", (cur.lastrowid,))
     con.close()
-    assert nim.main(["--sample", "A", "--dry-run", "--db", str(db), "--state-db", str(tmp_path / "state.db")]) == 0
+    assert nim.main(["--sample", "A", "--dry-run", "--db", str(db), "--state-db", str(tmp_path / "state.db"),
+                     "--market-db", str(market_copy(tmp_path / "copy.duckdb"))], supplement={}) == 0
     out = capsys.readouterr().out
     assert seen["limit"].tzinfo is not None
+    assert "sample A: 5 domain, global and orphan stories" in out
     assert "domain: mapped 1, unmapped 2 (1 without a headline), batches needed 1" in out
     assert "global: mapped 0, unmapped 1 (0 without a headline), batches needed 1" in out
-    assert "calls left tonight: 39" in out
+    # the material stock story names no alias of the copy: an orphan; the resolved one is never mapped
+    assert "orphan: mapped 0, unmapped 1 (0 without a headline), batches needed 1" in out
+    assert "batches needed 3; calls left tonight: 39" in out
     assert "beyond_calendar 0" in out
     assert rows(db, "SELECT count(*) FROM llm_calls") == [(1,)]
 
@@ -445,22 +516,26 @@ def test_sample_b_maps_up_to_the_last_calendar_year(monkeypatch, tmp_path, capsy
                story("last_day", at=datetime(2026, 12, 31, 8, 0, tzinfo=IST)),
                story("beyond", at=datetime(2026, 12, 31, 18, 0, tzinfo=IST)),
                story("beyond_glob", scope="market", event="global_market", at=datetime(2026, 12, 31, 20, 0, tzinfo=IST)),
-               story("beyond_stock", scope="stock", event="results", at=datetime(2026, 12, 31, 18, 0, tzinfo=IST))]
+               story("beyond_stock", scope="stock", event="results", headline="Infosys results",
+                     at=datetime(2026, 12, 31, 18, 0, tzinfo=IST)),
+               story("beyond_orphan", scope="stock", event="results", headline="Unlisted Co results",
+                     at=datetime(2026, 12, 31, 19, 0, tzinfo=IST))]
     real = nic.load_calendar()
     monkeypatch.setattr(nim.nic, "load_first_scores", lambda state_db, limit: (stories, {}))
     monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2027))
     monkeypatch.setattr(nim.mml, "StudyLLM", lambda **kw: pytest.fail("a dry run must not build the LLM"))
-    todo, beyond = nim._todo_for("B", tmp_path / "state.db", now)
+    todo, beyond = nim._todo_for("B", tmp_path / "state.db", now, resolver(tmp_path))
     assert [s.cluster_id for s in todo] == ["in_b", "last_day"]
-    assert beyond == 2                                             # the stock story is never mapped anyway
+    assert beyond == 3                                             # the resolved stock story is never mapped
     assert nim.main(["--sample", "B", "--dry-run", "--db", str(tmp_path / "map.sqlite"), "--state-db",
-                     str(tmp_path / "state.db")], clock=lambda: now) == 0
+                     str(tmp_path / "state.db"), "--market-db", str(tmp_path / "copy.duckdb")], clock=lambda: now,
+                    supplement={}) == 0
     out = capsys.readouterr().out
-    assert "beyond_calendar 2" in out and "domain: mapped 0, unmapped 2" in out
+    assert "beyond_calendar 3" in out and "domain: mapped 0, unmapped 2" in out
     # a range that starts in a year without a calendar still refuses
     monkeypatch.setattr(nim.nic, "load_calendar", lambda: CalendarWithout(real, 2026))
     with pytest.raises(nic.Unavailable):
-        nim._todo_for("B", tmp_path / "state.db", now)
+        nim._todo_for("B", tmp_path / "state.db", now, nim.open_resolver(tmp_path / "copy.duckdb", {}))
 
 
 def test_main_rejects_max_calls_above_ceiling(capsys):

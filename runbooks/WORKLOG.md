@@ -4,6 +4,32 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-11 01:29 — Global news feeds live (owner: "Add global news channel"); engine restarted
+
+- **Change:** seven RSS feeds were added to `settings.yaml` `news.feeds.rss` (commit 419f5db):
+  - `bloomberg_markets`, `bloomberg_economics`;
+  - `cnbc_world`, `cnbc_energy`;
+  - `ft_world`, `bbc_world`;
+  - `fed_monetary`.
+
+  They were chosen from a 34-feed probe for live RSS 2.0 items that the engine's parser reads, and total about 160
+  items a day.
+- **Restart:** `Restart-Service mt-engine` at 01:29:09, with the engine idle (news polls and health checks only).
+  - `engine_ready` at 01:35:50, then `boot_contract_ok` (130.8 s).
+  - Startup report: integrity OK, no login needed, 0 jobs caught up, nothing frozen.
+  - At boot every instrument logged `tick_timestamp_implausible` (epoch 0): off-hours snapshot ticks.
+- **First poll after boot:** 01:37:38, all 16 RSS feeds plus GDELT and the NSE feed. 678 fetched, 162 inserted, no
+  feed error.
+- **Scoring:** the News Analyst made no call after 21:48 on 11-10. Its tick self-gates, and it scores in the morning
+  windows and in the pre-open chain's forced batch.
+  - **To check after the 11-11 pre-open:** global-domain clusters scored with no failed calls, and News Analyst calls
+    per day against the 35–60 baseline.
+- **Registered tests protected:** the macro mood study's two headline forward hypotheses now count only clusters that
+  held a headline from the registered Indian outlets (commit bc929a6). The amendment landed before any forward outcome
+  existed. The content capture keeps its frozen feed list.
+- **News impact mapper, night 1:** 40 Sonnet 5.5 calls between 01:15 and 01:29 mapped 800 of sample A's 1,413 domain
+  and global stories, with 0 omitted, malformed or unparsed. Stopped at the night's cap.
+
 ## 2026-11-10 20:23 — Study tasks moved to the background session by the owner; validated
 
 - **Change:** the owner ran the COMMANDS.md no-password route. Both `MT-NewsContentCapture` and `MT-NewsContentScore`

@@ -8,6 +8,7 @@ config copy's (2026: 11-10 and 11-24 are holidays, 11-08 a Sunday muhurat sessio
 from __future__ import annotations
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -690,6 +691,154 @@ def test_resolver_refuses_a_copy_without_aliases():
     conn.execute("DELETE FROM entity_aliases")
     with pytest.raises(nic.Unavailable):
         nic.build_resolver(conn)
+
+
+# --------------------------------------------------------------------------- the alias supplement
+def write_supplement(path: Path, text: str) -> tuple[Path, str]:
+    path.write_text(text, encoding="utf-8")
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_alias_supplement_loads_normalized(tmp_path):
+    assert nic.ALIAS_SUPPLEMENT_PATH == _ROOT / "config" / "research" / "news_impact" / "aliases_extra.yaml"
+    # the registered file is pinned by its digest and loads
+    assert nic.ALIAS_SUPPLEMENT_SHA256 == hashlib.sha256(nic.ALIAS_SUPPLEMENT_PATH.read_bytes()).hexdigest()
+    assert nic.frozen_alias_supplement()["titan"] == "TITAN"
+    path, digest = write_supplement(tmp_path / "a.yaml", "aliases:\n  \"Sun Pharma's\": SUNPHARMA\n  Titan: TITAN\n"
+                                                         "  M&M Fin: M&MFIN\n  Bajaj-Auto: BAJAJ-AUTO\n")
+    assert nic.load_alias_supplement(path, digest) == {"sun pharma s": "SUNPHARMA", "titan": "TITAN",
+                                                       "m m fin": "M&MFIN", "bajaj auto": "BAJAJ-AUTO"}
+    path, digest = write_supplement(tmp_path / "empty.yaml", "aliases: {}\n")
+    assert nic.load_alias_supplement(path, digest) == {}
+
+
+@pytest.mark.parametrize("text, match", [
+    ("aliases:\n  Sun Pharma: SUNPHARMA\n  sun-pharma: SUNPHARMA\n", "another alias"),     # one form, two keys
+    ("aliases:\n  Titan: TITAN\n  Titan: TITAN\n", "twice"),                               # a repeated key
+    ("aliases:\n  Titan: titan\n", "NSE trading symbol"),
+    ("aliases:\n  Titan: TITAN LTD\n", "NSE trading symbol"),
+    ("aliases:\n  Titan: 500114\n", "NSE trading symbol"),                                 # not a string
+    ("aliases:\n  Titan: [TITAN, TITANBE]\n", "NSE trading symbol"),                       # one symbol only
+    ("aliases:\n  '...': TITAN\n", "no word"),
+    ("aliases:\n  12: TITAN\n", "not a string"),
+    ("- Titan: TITAN\n", "top level"),
+    ("aliases:\n  Titan: TITAN\nextra: 1\n", "top level"),
+    ("alias:\n  Titan: TITAN\n", "top level"),
+    ("aliases: [Titan]\n", "top level"),
+    ("aliases:\n", "top level"),
+    ("aliases: {Titan: TITAN\n", "not YAML"),
+])
+def test_alias_supplement_refuses_malformed(tmp_path, text, match):
+    path, digest = write_supplement(tmp_path / "bad.yaml", text)
+    with pytest.raises(ValueError, match=match):
+        nic.load_alias_supplement(path, digest)
+
+
+def test_alias_supplement_refuses_unregistered_file(tmp_path, monkeypatch):
+    path, digest = write_supplement(tmp_path / "a.yaml", "aliases:\n  Titan: TITAN\n")
+    with pytest.raises(nic.Unavailable, match="sha256"):
+        nic.load_alias_supplement(path, "0" * 64)
+    with pytest.raises(nic.Unavailable, match="PENDING"):
+        nic.load_alias_supplement(path, "PENDING")
+    with pytest.raises(nic.Unavailable, match="unreadable"):
+        nic.load_alias_supplement(tmp_path / "absent.yaml", digest)
+    # the frozen loader reads the module's path and digest when called; a malformed file refuses as Unavailable
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_PATH", path)
+    with pytest.raises(nic.Unavailable, match="sha256"):        # another file than the registered one
+        nic.frozen_alias_supplement()
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_SHA256", digest)
+    assert nic.frozen_alias_supplement() == {"titan": "TITAN"}
+    bad, bad_digest = write_supplement(tmp_path / "bad.yaml", "aliases:\n  Titan: titan\n")
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_PATH", bad)
+    monkeypatch.setattr(nic, "ALIAS_SUPPLEMENT_SHA256", bad_digest)
+    with pytest.raises(nic.Unavailable, match="NSE trading symbol"):
+        nic.frozen_alias_supplement()
+
+
+def test_resolver_with_supplement():
+    conn = resolver_db()
+    conn.executemany("INSERT INTO entity_aliases (alias, tradingsymbol, source) VALUES (?, ?, 'seed')",
+                     [("hfcl", "HFCL"), ("hfcl", "HFCLTELE")])
+    plain = nic.build_resolver(conn)
+    headline = story(headline="HFCL bags order; Sun Pharma and Trent rally", entities=())
+    assert nic.stock_symbols(plain, headline) == frozenset()                 # hfcl ambiguous, the rest unknown
+    r = nic.build_resolver(conn, {"Sun Pharma": "SUNPHARMA", "hfcl": "HFCL", "trent": "TRENT"})
+    # a short alias resolves, an entry overrides an ambiguous seed alias, and the engine's stoplist (which holds
+    # "trent") does not apply to the reviewed supplement
+    assert nic.stock_symbols(r, headline) == frozenset({"SUNPHARMA", "HFCL", "TRENT"})
+    assert nic.company_symbols(r, ["Sun Pharma", "HFCL Ltd"]) == (["SUNPHARMA", "HFCL"], 0)
+    assert nic.stock_symbols(nic.build_resolver(conn, {"tata": "TATASTEEL"}),
+                             story(headline="Tata stocks rally", entities=())) == frozenset({"TATASTEEL"})
+    # every other alias is the table's
+    assert nic.stock_symbols(r, story(headline="Reliance and Infosys", entities=())) == frozenset({"RELIANCE", "INFY"})
+    # the index sees the supplement
+    assert nic.stock_symbols(nic.indexed_resolver(nic.build_resolver(conn, {"sun pharma": "SUNPHARMA"})),
+                             story(headline="Sun Pharma up", entities=())) == frozenset({"SUNPHARMA"})
+    for empty in (None, {}):
+        assert nic.build_resolver(conn, empty)._aliases == plain._aliases
+    with pytest.raises(ValueError):
+        nic.build_resolver(conn, {"Sun Pharma": "sun pharma"})
+
+
+@pytest.mark.parametrize("syms, expect", [
+    (("X", "X-BE"), ("X",)),
+    (("X", "X-BE", "X-BZ"), ("X",)),
+    (("X-SM", "X-ST"), ("X-SM", "X-ST")),                   # the base is not one of the alias's symbols
+    (("NATCO-RE-BE", "NATCOPHARM"), ("NATCO-RE-BE", "NATCOPHARM")),   # the bases differ
+    (("A", "B"), ("A", "B")),
+    (("X-BE",), ("X-BE",)),                                 # one symbol: unchanged
+    (("X",), ("X",)),
+    (("BAJAJ-AUTO", "BAJAJ-AUTO-BE"), ("BAJAJ-AUTO",)),     # a hyphen inside the base is not a series code
+    (("X", "X-EQ"), ("X", "X-EQ")),                         # not a listed series code
+])
+def test_collapse_series(syms, expect):
+    assert nic.SERIES_SUFFIXES == ("BE", "BZ", "SM", "ST")
+    table, n = nic.collapse_series({"a": syms})
+    assert table == {"a": expect} and n == (expect != syms)
+
+
+def test_resolver_collapses_series_duplicates():
+    conn = resolver_db()
+    conn.executemany("INSERT INTO entity_aliases (alias, tradingsymbol, source) VALUES (?, ?, ?)", [
+        ("bodal chemicals", "BODALCHEM", "seed"), ("bodal chemicals", "BODALCHEM-BE", "seed"),
+        # the curated-only rule applies first: a curated series symbol alone is kept as it is
+        ("acme", "ACME", "seed"), ("acme", "ACME-BE", "curated"),
+    ])
+    r = nic.build_resolver(conn)
+    assert nic.stock_symbols(r, story(headline="Bodal Chemicals wins order", entities=())) == frozenset({"BODALCHEM"})
+    assert nic.stock_symbols(r, story(headline="Acme results", entities=())) == frozenset({"ACME-BE"})
+    assert nic.stock_symbols(r, story(headline="Tata stocks rally", entities=())) == frozenset()   # still ambiguous
+    assert nic.company_symbols(r, ["Bodal Chemicals Ltd"]) == (["BODALCHEM"], 0)
+
+
+# --------------------------------------------------------------------------- orphans
+def test_orphan_ids():
+    r = nic.build_resolver(resolver_db())
+    stories = [
+        story(cluster_id="orphan", headline="Unlisted Co wins a large order", entities=("Unlisted Co",)),
+        # resolves to a symbol: whether it is liquid is decided later, in the stock arms
+        story(cluster_id="resolved", headline="Infosys bags deal", entities=()),
+        story(cluster_id="via_entity", headline="Unlisted Co ties up", entities=("HDFC Bank",)),
+        story(cluster_id="ambiguous", headline="Tata stocks rally", entities=()),          # no single symbol
+        story(cluster_id="weak", headline="Unlisted Co wins", materiality=0.59),
+        story(cluster_id="edge", headline="Unlisted Co wins", materiality=0.6),
+        story(cluster_id="sector", scope="sector", event_type="sector_policy", headline="Unlisted Co"),
+        story(cluster_id="market", scope="market", event_type="global_market", headline="Unlisted Co"),
+        story(cluster_id="dividend", event_type="dividend_corp_action", headline="Unlisted Co dividend"),
+        story(cluster_id="pump", event_type="pump_promo_suspect", headline="Unlisted Co multibagger"),
+        story(cluster_id="nohead", headline=None, entities=()),
+    ]
+    assert nic.orphan_ids(stories, r) == frozenset({"orphan", "ambiguous", "edge", "nohead"})
+    by = {s.cluster_id: s for s in stories}
+    orphans = nic.orphan_ids(stories, r)
+    assert {c: nic.map_kind(s, orphans) for c, s in by.items()} == {
+        "orphan": "orphan", "resolved": None, "via_entity": None, "ambiguous": "orphan", "weak": None,
+        "edge": "orphan", "sector": "domain", "market": "global", "dividend": None, "pump": None, "nohead": "orphan"}
+    # symbols already resolved by the same resolver are reused
+    assert nic.orphan_ids([by["orphan"]], r, symbols={"orphan": frozenset({"X"})}) == frozenset()
+    assert nic.orphan_ids([], r) == frozenset()
+    # a non-stock story is never an orphan, whatever set it is looked up in
+    assert nic.map_kind(by["sector"], {"sector"}) == "domain" and nic.map_kind(by["dividend"], {"dividend"}) is None
 
 
 # --------------------------------------------------------------------------- the verdict

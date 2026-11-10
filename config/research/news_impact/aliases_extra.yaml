@@ -1,0 +1,445 @@
+# Research-only short-name aliases for the news impact study, frozen at its registration (sha256 pinned in
+# scripts/news_impact_common.py; any edit, comments included, changes the digest and the study refuses).
+#
+# The engine's alias table holds mostly full legal names, so headlines that use the press's short names
+# (Titan, Sun Pharma, HCLTech, Paytm) resolve to nothing. Each entry maps a name taken from the News Analyst's
+# entities in A's and the excluded window's unresolved stock stories to the one NSE EQ symbol it denotes.
+# Proposed per name by an LLM against NSE's EQ list of 2026-11-09, reviewed by the manager on 2026-11-11.
+# Left out: subsidiaries, groups, foreign and unlisted companies, people, exchanges, brokerages cited as the
+# source of a view, and short names that also mean something else. Built from headlines and NSE's list only.
+# The trailing comment is the number of unresolved stories that carried the name, then the company.
+# The engine's resolver does not read this file.
+aliases:
+  "aadhar housing finance": "AADHARHFC"  # 3; Aadhar Housing Finance Ltd.
+  "abd": "ABDL"  # 5; Allied Blenders and Distillers
+  "acme solar": "ACMESOLAR"  # 12; ACME Solar Holdings Ltd.
+  "adani ent": "ADANIENT"  # 1; Adani Enterprises
+  "aditya birla fashion and retail": "ABFRL"  # 3; Aditya Birla Fashion and Retail Ltd.
+  "aditya birla lifestyle": "ABLBL"  # 2; Aditya Birla Lifestyle Brands Ltd.
+  "aditya birla real estate": "ABREL"  # 6; Aditya Birla Real Estate Ltd.
+  "aditya birla sun life amc": "ABSLAMC"  # 8; Aditya Birla Sun Life AMC Ltd.
+  "adroit industries": "ADROITIND"  # 12; Adroit Industries I
+  "advait energy": "ADVAIT"  # 2; Advait Enrgy Transition L
+  "aegis vopak": "AEGISVOPAK"  # 2; Aegis Vopak Terminals Ltd.
+  "afcons": "AFCONS"  # 2; Afcons Infrastructure Ltd.
+  "afcons infra": "AFCONS"  # 6; Afcons Infrastructure Ltd.
+  "airtel": "BHARTIARTL"  # 17; Bharti Airtel
+  "ajmera realty": "AJMERA"  # 5; Ajmera Realty Inf I
+  "akums": "AKUMS"  # 1; Akums Drugs and Pharmaceuticals
+  "alkem labs": "ALKEM"  # 3; Alkem Laboratories Ltd.
+  "alkyl amines": "ALKYLAMINE"  # 2; Alkyl Amines Chemicals Ltd.
+  "allied blenders": "ABDL"  # 3; Allied Blenders and Distillers Ltd.
+  "amagi media": "AMAGI"  # 2; Amagi Media Labs Ltd.
+  "amara raja": "ARE&M"  # 5; Amara Raja Energy and Mobility
+  "amara raja energy": "ARE&M"  # 2; Amara Raja Energy & Mobility Ltd.
+  "amber enterprises": "AMBER"  # 4; Amber Enterprises India Ltd.
+  "ambuja cement": "AMBUJACEM"  # 2; Ambuja Cements Ltd.
+  "anand rathi share and stock brokers": "ARSSBL"  # 2; Anand Rathi Sh N Stk Br L
+  "anup engineering": "ANUP"  # 2; The Anup Engineering
+  "apollo hospital": "APOLLOHOSP"  # 4; Apollo Hospitals Enterprise Ltd.
+  "apollo hospitals": "APOLLOHOSP"  # 16; Apollo Hospitals Enterprise Ltd.
+  "apollo micro": "APOLLO"  # 3; Apollo Micro Systems Ltd.
+  "arcil": "ARCIL"  # 9; Asset Reconstruc Co I L
+  "artemis medicare": "ARTEMISMED"  # 2; Artemis Med Service
+  "aster": "ASTERDM"  # 1; Aster DM Healthcare
+  "aster dm": "ASTERDM"  # 7; Aster DM Quality Care Ltd.
+  "ather": "ATHERENERG"  # 7; Ather Energy
+  "au sfb": "AUBANK"  # 1; AU Small Finance Bank Ltd.
+  "aurobindo": "AUROPHARMA"  # 2; Aurobindo Pharma
+  "authum investment": "AIIL"  # 2; Authum Investment & Infrastructure Ltd.
+  "avalon tech": "AVALON"  # 2; Avalon Technologies Ltd.
+  "awfis": "AWFIS"  # 3; Awfis Space Solutions
+  "awl agri": "AWL"  # 2; AWL Agri Business Ltd.
+  "axiscades": "AXISCADES"  # 6; AXISCADES Technologies Ltd.
+  "bajaj consumer": "BAJAJCON"  # 2; Bajaj Consumer Care Ltd.
+  "bajaj electricals": "BAJAJELEC"  # 5; Bajaj Elect
+  "balkrishna industries": "BALKRISIND"  # 4; Balkrishna Industries Ltd.
+  "balrampur chini": "BALRAMCHIN"  # 5; Balrampur Chini Mills Ltd.
+  "behari lal engineering": "BLEL"  # 19; Behari Lal Engineering L
+  "berger paints": "BERGEPAINT"  # 7; Berger Paints India Ltd.
+  "bikaji": "BIKAJI"  # 4; Bikaji Foods Intern
+  "bkt": "BALKRISIND"  # 2; Balkrishna Industries; BKT is its tyre brand
+  "bls international": "BLS"  # 8; BLS International Services Ltd.
+  "blue cloud": "BLUECLOUDS"  # 2; Blue Cloud Softech Solutions
+  "blue dart": "BLUEDART"  # 4; Blue Dart Express
+  "bluestone": "BLUESTONE"  # 4; BlueStone Jewellery and Lifestyle Ltd.
+  "bluestone jewellery": "BLUESTONE"  # 6; BlueStone Jewellery and Lifestyle Ltd.
+  "bombay burmah": "BBTC"  # 2; Bombay Burmah Trading Cor
+  "bombay burmah trading": "BBTC"  # 2; Bombay Burmah Trading Cor
+  "bonfiglioli": "BONFIG"  # 9; Bonfiglioli Trans
+  "bpcl": "BPCL"  # 25; Bharat Petroleum Corporation Ltd.
+  "brigade enterprises": "BRIGADE"  # 11; Brigade Enterprises Ltd.
+  "brigade hotel ventures": "BRIGHOTEL"  # 2; Brigade Hotel Venture
+  "caliber mining": "CMLL"  # 3; Caliber Mining And Log L
+  "cams": "CAMS"  # 2; Computer Age Management Services
+  "canara hsbc life": "CANHLIFE"  # 2; Canara HSBC Life Insurance Company Ltd.
+  "capacit e infraprojects": "CAPACITE"  # 4; Capacite Infraproject
+  "capri global": "CGCL"  # 4; Capri Global Capital Ltd.
+  "ccl products": "CCL"  # 3; CCL Products (I) Ltd.
+  "cdsl": "CDSL"  # 13; Central Depository Services (India) Ltd.
+  "century plyboards": "CENTURYPLY"  # 6; Century Plyboards I
+  "cg power": "CGPOWER"  # 11; CG Power and Industrial Solutions Ltd.
+  "chennai petroleum": "CHENNPETRO"  # 4; Chennai Petroleum Corporation Ltd.
+  "clean max": "CLEANMAX"  # 15; Clean Max Enviro Energy Solutions Ltd.
+  "cleanmax": "CLEANMAX"  # 7; Clean Max Enviro Energy Solutions Ltd.
+  "cohance": "COHANCE"  # 1; Cohance Lifesciences
+  "colgate": "COLPAL"  # 11; Colgate-Palmolive India; Indian business headline
+  "colgate india": "COLPAL"  # 3; Colgate Palmolive (India) Ltd.
+  "concor": "CONCOR"  # 3; Container Corporation of India
+  "coromandel": "COROMANDEL"  # 2; Coromandel International
+  "coromandel international": "COROMANDEL"  # 1; Coromandel International Ltd.
+  "cpcl": "CHENNPETRO"  # 3; Chennai Petroleum
+  "crompton": "CROMPTON"  # 3; Crompton Greaves Consumer Electricals
+  "crompton greaves": "CROMPTON"  # 9; Crompton Greaves Consumer Electricals; CG Power is the old parent
+  "crompton greaves consumer": "CROMPTON"  # 2; Crompton Greaves Consumer Electricals Ltd.
+  "d mart": "DMART"  # 4; Avenue Supermarts; D-Mart is its retail chain
+  "deccan gold": "DECNGOLD"  # 2; Deccan Gold Mines
+  "devyani": "DEVYANI"  # 2; Devyani International
+  "diageo india": "UNITDSPR"  # 3; United Spirits, Diageo's Indian arm; headlines on Indian brands
+  "diamond power infrastructure": "DIACABS"  # 5; Diamond Power Infrastructure Ltd.
+  "divi s lab": "DIVISLAB"  # 1; Divi's Laboratories Ltd.
+  "divi s labs": "DIVISLAB"  # 4; Divi's Laboratories Ltd.
+  "divis labs": "DIVISLAB"  # 4; Divi's Laboratories Ltd.
+  "dixon": "DIXON"  # 2; Dixon Technologies (India) Ltd.
+  "dixon tech": "DIXON"  # 16; Dixon Technologies (India) Ltd.
+  "dixon technologies": "DIXON"  # 11; Dixon Technologies (India) Ltd.
+  "dmart": "DMART"  # 12; Avenue Supermarts; DMart is its retail chain
+  "dr agarwal": "AGARWALEYE"  # 2; Dr Agarwal's Health Care
+  "dr agarwals": "AGARWALEYE"  # 1; Dr Agarwal's Health Care
+  "dr lal pathlabs": "LALPATHLAB"  # 9; Dr. Lal Path Labs Ltd.
+  "dr reddy": "DRREDDY"  # 35; Dr. Reddy's Laboratories Ltd.
+  "dr reddys": "DRREDDY"  # 5; Dr. Reddy's Laboratories Ltd.
+  "eaaa india alternatives": "EDELALTS"  # 10; Eaaa India Alternatives L
+  "easemytrip": "EASEMYTRIP"  # 6; Easy Trip Planners
+  "edelweiss financial services": "EDELWEISS"  # 2; Edelweiss Financial Services Ltd.
+  "eil": "ENGINERSIN"  # 4; Engineers India
+  "eki energy": "EKI"  # 2; Eki Energy Services
+  "elecon": "ELECON"  # 6; Elecon Engineering Co. Ltd.
+  "elitecon": "ELITECON"  # 2; Elitecon International L
+  "emcure": "EMCURE"  # 19; Emcure Pharmaceuticals Ltd.
+  "emmvee": "EMMVEE"  # 4; Emmvee Photovoltaic Power Ltd.
+  "endurance tech": "ENDURANCE"  # 2; Endurance Technologies Ltd.
+  "endurance technologies": "ENDURANCE"  # 2; Endurance Technologies Ltd.
+  "entero": "ENTERO"  # 3; Entero Healthcare Solutions Ltd.
+  "equitas": "EQUITASBNK"  # 2; Equitas Small Finance Bank
+  "equitas sfb": "EQUITASBNK"  # 14; Equitas Small Finance Bank Ltd.
+  "equitas small finance bank": "EQUITASBNK"  # 10; Equitas Small Finance Bank Ltd.
+  "esaf small finance bank": "ESAFSFB"  # 2; Esaf Small Finance Bank L
+  "esds": "ESDS"  # 60; Esds Software Solution L
+  "eternal": "ETERNAL"  # 53; Eternal Ltd.
+  "eveready": "EVEREADY"  # 4; Eveready Inds Ind
+  "firstcry": "FIRSTCRY"  # 3; Brainbees Solutions
+  "firstsource": "FSL"  # 6; Firstsource Solutions Ltd.
+  "five star business finance": "FIVESTAR"  # 2; Five-Star Business Finance Ltd.
+  "fortis": "FORTIS"  # 14; Fortis Healthcare
+  "fredun pharma": "FREDUN"  # 2; Fredun Pharmaceuticals L
+  "fredun pharmaceuticals": "FREDUN"  # 2; Fredun Pharmaceuticals L
+  "fsn e commerce": "NYKAA"  # 2; FSN E-Commerce Ventures Ltd.
+  "fujiyama power systems": "UTLSOLAR"  # 4; Fujiyama Power Systems Ltd.
+  "g r infra": "GRINFRA"  # 1; G R Infraprojects
+  "gaja alternative": "GAJA"  # 23; Gaja Alt Asset Mgt
+  "garden reach": "GRSE"  # 5; Garden Reach Shipbuilders & Engineers Ltd.
+  "garuda construction": "GARUDA"  # 2; Garuda Construct N Eng L
+  "gcpl": "GODREJCP"  # 3; Godrej Consumer Products Ltd.
+  "ge shipping": "GESHIP"  # 7; Great Eastern Shipping
+  "genesys international": "GENESYS"  # 2; Genesys Intl Corpn
+  "german green steel": "GERMAN"  # 8; German Green Steel N Pw L
+  "gic re": "GICRE"  # 4; General Insurance Corporation of India
+  "glass wall systems": "GLASSWALL"  # 21; Glass Wall System I
+  "glenmark": "GLENMARK"  # 10; Glenmark Pharmaceuticals Ltd.
+  "gmdc": "GMDCLTD"  # 3; Gujarat Mineral Development Corporation
+  "godavari biorefineries": "GODAVARIB"  # 6; Godavari Biorefineries L
+  "godawari power": "GPIL"  # 2; Godawari Power & Ispat Ltd.
+  "godfrey phillips": "GODFRYPHLP"  # 4; Godfrey Phillips India Ltd.
+  "godrej consumer": "GODREJCP"  # 29; Godrej Consumer Products Ltd.
+  "gpt infra": "GPTINFRA"  # 6; Gpt Infraprojects
+  "grse": "GRSE"  # 6; Garden Reach Shipbuilders & Engineers Ltd.
+  "gsfc": "GSFC"  # 3; Gujarat State Fertilizers & Chemicals Ltd.
+  "gujarat fluorochemicals": "FLUOROCHEM"  # 3; Gujarat Fluorochemicals Ltd.
+  "gujarat themis": "GUJTHEM"  # 1; Gujarat Themis Biosyn
+  "gulf oil": "GULFOILLUB"  # 2; Gulf Oil Lubricants India
+  "gulf oil lubricants": "GULFOILLUB"  # 2; Gulf Oil Lub Ind
+  "hal": "HAL"  # 32; Hindustan Aeronautics
+  "happiest minds": "HAPPSTMNDS"  # 7; Happiest Minds Technologies Ltd.
+  "hcc": "HCC"  # 2; Hindustan Construction Company
+  "hcltech": "HCLTECH"  # 30; HCL Technologies Ltd.
+  "hd fire": "HDFIRE"  # 2; HD Fire Protect
+  "hdb financial": "HDBFS"  # 10; HDB Financial Services Ltd.
+  "hdfc life": "HDFCLIFE"  # 13; HDFC Life Insurance Company Ltd.
+  "heg": "HEGAM"  # 3; HEG Advanced Materials
+  "heg advanced materials": "HEGAM"  # 6; HEG Advanced Materials Ltd.
+  "hexaware": "HEXT"  # 11; Hexaware Technologies Ltd.
+  "hg infra": "HGINFRA"  # 2; H.G. Infra Engineering Ltd.
+  "himadri": "HSCL"  # 10; Himadri Speciality Chemical
+  "home first": "HOMEFIRST"  # 4; Home First Finance Company India Ltd.
+  "honasa": "HONASA"  # 33; Honasa Consumer Ltd.
+  "horizon industrial parks": "HORIZONIND"  # 25; Horizon Industrial Prks L
+  "horizon parks": "HORIZONIND"  # 2; Horizon Industrial Parks
+  "hpcl": "HINDPETRO"  # 16; Hindustan Petroleum Corporation Ltd.
+  "hudco": "HUDCO"  # 7; Housing & Urban Development Corporation Ltd.
+  "hyundai": "HYUNDAI"  # 22; Hyundai Motor India; headlines on Indian car business
+  "icici life": "ICICILIFE"  # 4; ICICI Life Insurance Ltd.
+  "icici lombard": "ICICIGI"  # 12; ICICI Lombard General Insurance Company Ltd.
+  "icici prudential life": "ICICILIFE"  # 2; ICICI Life Insurance
+  "idbi": "IDBI"  # 4; IDBI Bank
+  "ideaforge": "IDEAFORGE"  # 8; Ideaforge Techno
+  "iex": "IEX"  # 13; Indian Energy Exchange
+  "igl": "IGL"  # 15; Indraprastha Gas
+  "ihcl": "INDHOTEL"  # 18; Indian Hotels Company
+  "iifl fin": "IIFL"  # 1; IIFL Finance
+  "imagicaaworld": "IMAGICAA"  # 2; Imagicaaworld Ent
+  "india cements": "INDIACEM"  # 4; India Cements Ltd.
+  "indiamart": "INDIAMART"  # 2; Indiamart Intermesh Ltd.
+  "indian hotels": "INDHOTEL"  # 10; Indian Hotels Co. Ltd.
+  "indigo": "INDIGO"  # 61; InterGlobe Aviation Ltd.
+  "indo borax": "INDOBORAX"  # 1; Indo Borax Chemical
+  "info edge": "NAUKRI"  # 18; Info Edge (India) Ltd.
+  "inox green": "INOXGREEN"  # 2; Inox
+  "insecticides india": "INSECTICID"  # 2; Insecticides I
+  "intellect": "INTELLECT"  # 3; Intellect Design Arena
+  "interarch": "INTERARCH"  # 5; Interarch Bldng Soltn
+  "ioc": "IOC"  # 7; Indian Oil; IOC also the Olympic committee
+  "iocl": "IOC"  # 4; Indian Oil Corporation
+  "iol chemicals": "IOLCP"  # 2; Iol Chem And Pharma
+  "ipca labs": "IPCALAB"  # 3; Ipca Laboratories Ltd.
+  "irb infra": "IRB"  # 8; IRB Infrastructure Developers Ltd.
+  "irb infrastructure developers": "IRB"  # 2; IRB Infrastructure Developers Ltd.
+  "ircon": "IRCON"  # 3; IRCON International Ltd.
+  "irctc": "IRCTC"  # 8; Indian Railway Catering And Tourism Corporation Ltd.
+  "ireda": "IREDA"  # 9; Indian Renewable Energy Development Agency Ltd.
+  "irfc": "IRFC"  # 5; Indian Railway Finance Corporation Ltd.
+  "ixigo": "IXIGO"  # 9; Le Travenues Technology
+  "jain irrigation": "JISLJALEQS"  # 2; Jain Irrigation Systems
+  "jaiprakash power": "JPPOWER"  # 9; Jaiprakash Power Ventures Ltd.
+  "jana sfb": "JSFB"  # 1; Jana Small Finance Bank Ltd.
+  "jana small finance bank": "JSFB"  # 2; Jana Small Finance Bank Ltd.
+  "jio financial": "JIOFIN"  # 22; Jio Financial Services Ltd.
+  "jio platform": "JPL"  # 1; Jio Platforms
+  "jsw infra": "JSWINFRA"  # 5; JSW Infrastructure Ltd.
+  "juniper green": "JNPR"  # 2; Juniper Green Energy
+  "just dial": "JUSTDIAL"  # 8; Justdial Ltd.
+  "jyoti cnc": "JYOTICNC"  # 2; Jyoti CNC Automation Ltd.
+  "kanohar": "KANOHAR"  # 2; Kanohar Electricals
+  "kansai nerolac": "KANSAINER"  # 2; Kansai Nerolac Paints Ltd.
+  "karamtara": "KARAMTARA"  # 17; Karamtara Engineering L
+  "kaynes tech": "KAYNES"  # 4; Kaynes Technology India Ltd.
+  "kaynes technology": "KAYNES"  # 6; Kaynes Technology India Ltd.
+  "kec international": "KEC"  # 14; Kec International Ltd.
+  "kfin tech": "KFINTECH"  # 2; Kfin Technologies Ltd.
+  "kfintech": "KFINTECH"  # 2; Kfin Technologies Ltd.
+  "kims": "KIMS"  # 6; Krishna Institute of Medical Sciences
+  "kirloskar ferrous": "KIRLFER"  # 4; Kirloskar
+  "kirloskar oil engines": "KIRLOSENG"  # 4; Kirloskar Oil Eng Ltd.
+  "kirloskar pneumatic": "KIRLPNU"  # 3; Kirloskar Pneumatic Company Ltd.
+  "kissht": "KISSHT"  # 3; OnEMI Technology Solutions
+  "knowledge marine": "KMEW"  # 5; Knowledge Marine & Engineering Works Ltd.
+  "knr constructions": "KNRCON"  # 1; KNR Constructions Ltd.
+  "kolte patil": "KOLTEPATIL"  # 14; Kolte Patil Dev
+  "kpil": "KPIL"  # 6; Kalpataru Projects International Ltd.
+  "kpit tech": "KPITTECH"  # 4; KPIT Technologies Ltd.
+  "krn heat exchanger": "KRN"  # 2; KRN HEAT EXCHANGER AND REFRIGERATION Ltd.
+  "krystal integrated services": "KRYSTAL"  # 4; Krystal Integrated Ser L
+  "kwality wall": "KWIL"  # 2; Kwality Wall's (India)
+  "lalithaa jewellery": "LALITHAA"  # 26; Lalithaa Jewellery Mart L
+  "leela hotels": "THELEELA"  # 2; Leela Palaces Hotels and Resorts
+  "leela palaces": "THELEELA"  # 2; Leela Palaces Hotels & Resorts Ltd.
+  "lemon tree": "LEMONTREE"  # 2; Lemon Tree Hotels
+  "lenskart": "LENSKART"  # 41; Lenskart Solutions Ltd.
+  "lg india": "LGEINDIA"  # 2; LG Electronics India
+  "lic": "LICI"  # 49; Life Insurance Corporation of India
+  "lloyds engineering": "LLOYDSENGG"  # 4; Lloyds Engineering Works Ltd.
+  "ltimindtree": "LTM"  # 3; LTM Ltd, formerly LTIMindtree
+  "ltts": "LTTS"  # 3; L&T Technology Services; not in master by name
+  "lumax auto": "LUMAXTECH"  # 5; Lumax Auto Technologies Ltd.
+  "lupin": "LUPIN"  # 27; Lupin Ltd.
+  "m k sons fine jewels": "MKJEWELS"  # 5; Mk Sons Fine Jewels
+  "mahindra finance": "M&MFIN"  # 6; Mahindra and Mahindra Financial Services
+  "mahindra lifespace": "MAHLIFE"  # 8; Mahindra Lifespace Devltd
+  "mamaearth": "HONASA"  # 6; Honasa Consumer; Mamaearth is its core brand
+  "mamaearth parent": "HONASA"  # 1; Honasa Consumer
+  "man industries": "MANINDS"  # 4; Man Industries I
+  "man infraconstruction": "MANINFRA"  # 2; Man Infra
+  "manali petrochemicals": "MANALIPETC"  # 1; Manali Petrochemicals Lt
+  "manappuram": "MANAPPURAM"  # 3; Manappuram Finance Ltd.
+  "mangalore refinery": "MRPL"  # 1; Mangalore Refinery & Petrochemicals Ltd.
+  "manipal health": "MANIPALHOS"  # 14; Manipal Health Enterpri L
+  "manipal health enterprises": "MANIPALHOS"  # 14; Manipal Health Enterpri L
+  "manipal hospitals": "MANIPALHOS"  # 6; Manipal Health Enterprises
+  "manipal payment": "MPIMANIPAL"  # 11; Manipal Payment Ide S L
+  "manipal payment and identity solutions": "MPIMANIPAL"  # 4; Manipal Payment Ide S L
+  "mapmyindia": "MAPMYINDIA"  # 3; C.E. Info Systems
+  "marine electricals": "MARINE"  # 2; Marine Electrical I
+  "maruti": "MARUTI"  # 9; Maruti Suzuki India
+  "max financial": "MFSL"  # 5; Max Financial Services Ltd.
+  "max financial services": "MFSL"  # 2; Max Financial Services Ltd.
+  "max healthcare": "MAXHEALTH"  # 12; Max Healthcare Institute Ltd.
+  "mazagon dock": "MAZDOCK"  # 15; Mazagoan Dock Shipbuilders Ltd.
+  "mcx": "MCX"  # 41; Multi Commodity Exchange of India; also names the venue
+  "medanta": "MEDANTA"  # 3; Global Health Ltd
+  "medplus": "MEDPLUS"  # 2; MedPlus Health Services
+  "metropolis": "METROPOLIS"  # 3; Metropolis Healthcare
+  "mobikwik": "MOBIKWIK"  # 10; One Mobikwik Systems
+  "molbio": "MOLBIO"  # 2; Molbio Diagnostics
+  "mold tek": "MOLDTKPAC"  # 1; Mold-Tek Packaging
+  "mom s belief": "MOMSBELIEF"  # 3; Rays Of Belief
+  "motherson sumi wiring": "MSUMI"  # 4; Motherson Sumi Wiring India Ltd.
+  "motilal oswal financial services": "MOTILALOFS"  # 3; Motilal Oswal Financial Services Ltd.
+  "mrs bectors": "BECTORFOOD"  # 2; Mrs. Bectors Food Specialities Ltd.
+  "mtar tech": "MTARTECH"  # 7; MTAR Technologies Ltd.
+  "mtnl": "MTNL"  # 4; Mahanagar Telephone Nigam
+  "nalco": "NATIONALUM"  # 8; National Aluminium
+  "natco pharma": "NATCOPHARM"  # 13; NATCO Pharma Ltd.
+  "navin fluorine": "NAVINFLUOR"  # 12; Navin Fluorine International Ltd.
+  "nazara": "NAZARA"  # 4; Nazara Technologies Ltd.
+  "nazara tech": "NAZARA"  # 5; Nazara Technologies Ltd.
+  "nestl india": "NESTLEIND"  # 5; Nestle India Ltd.
+  "netweb": "NETWEB"  # 9; Netweb Technologies India Ltd.
+  "network18": "NETWORK18"  # 2; Network18 Media & Investments Ltd.
+  "neuland laboratories": "NEULANDLAB"  # 5; Neuland Laboratories Ltd.
+  "neuland labs": "NEULANDLAB"  # 4; Neuland Laboratories Ltd.
+  "new india assurance": "NIACL"  # 4; The New India Assurance Company Ltd.
+  "newgen software": "NEWGEN"  # 4; Newgen Software Technologies Ltd.
+  "nippon india amc": "NAM-INDIA"  # 2; Nippon Life India Asset Management
+  "nityas gems": "NITYAS"  # 10; Nityas Gems N Jewellery L
+  "niva bupa": "NIVABUPA"  # 2; Niva Bupa Health Insurance Company Ltd.
+  "nuvoco": "NUVOCO"  # 2; Nuvoco Vistas Corporation Ltd.
+  "nykaa": "NYKAA"  # 31; FSN E-Commerce Ventures
+  "ofss": "OFSS"  # 2; Oracle Financial Services Software
+  "ola electric": "OLAELEC"  # 50; Ola Electric Mobility Ltd.
+  "one point one solutions": "ONEPOINT"  # 2; One Point One Sol
+  "one97": "PAYTM"  # 2; One 97 Communications
+  "onemi": "KISSHT"  # 2; OnEMI Technology Solutions
+  "onemi technology": "KISSHT"  # 2; OnEMI Technology Solutions Ltd.
+  "onesource specialty pharma": "ONESOURCE"  # 2; Onesource Specialty Pharma Ltd.
+  "ongc": "ONGC"  # 34; Oil & Natural Gas Corporation Ltd.
+  "optiemus": "OPTIEMUS"  # 2; Optiemus Infracom
+  "oracle financial services": "OFSS"  # 3; Oracle Financial Services Software Ltd.
+  "oracle financial services software": "OFSS"  # 2; Oracle Financial Services Software Ltd.
+  "oriental hotels": "ORIENTHOT"  # 6; Oriental Hotels Ltd
+  "p g health": "PGHL"  # 2; Procter and Gamble Health
+  "paras defence": "PARAS"  # 4; Paras Defence and Space Technologies Ltd.
+  "paytm": "PAYTM"  # 72; One 97 Communications Ltd.
+  "pc jewellers": "PCJEWELLER"  # 3; PC Jeweller Ltd.
+  "pearl global": "PGIL"  # 8; Pearl Global Industries Ltd.
+  "petronet": "PETRONET"  # 2; Petronet LNG
+  "pfc": "PFC"  # 4; Power Finance Corporation
+  "physics wallah": "PWL"  # 1; Physicswallah
+  "pnb": "PNB"  # 20; Punjab National Bank
+  "pnb housing": "PNBHOUSING"  # 10; PNB Housing Finance Ltd.
+  "pnc infra": "PNCINFRA"  # 2; PNC Infratech Ltd.
+  "pngs reva": "PNGSREVA"  # 2; Pngs Reva Diamond Jewel L
+  "policybazaar": "POLICYBZR"  # 7; PB Fintech; PolicyBazaar is its core brand
+  "powergrid": "POWERGRID"  # 2; Power Grid Corporation of India Ltd.
+  "prestige estates": "PRESTIGE"  # 18; Prestige Estates Projects Ltd.
+  "prince pipes": "PRINCEPIPE"  # 1; Prince Pipes Fittings
+  "pvr": "PVRINOX"  # 2; PVR INOX
+  "quality power": "QPOWER"  # 2; QUALITY POWER ELECTRICAL EQUIPMENTS Ltd.
+  "r systems": "RSYSTEMS"  # 2; R Sys International
+  "raghav productivity": "RPEL"  # 2; Raghav Productivity Enh L
+  "railtel": "RAILTEL"  # 12; Railtel Corporation Of India Ltd.
+  "rainbow children s": "RAINBOW"  # 2; Rainbow Childrens Medicare Ltd.
+  "ramco cements": "RAMCOCEM"  # 5; The Ramco Cements Ltd.
+  "rategain": "RATEGAIN"  # 2; Rategain Travel Technologies Ltd.
+  "ratnamani": "RATNAMANI"  # 1; Ratnamani Metals & Tubes Ltd.
+  "restaurant brands asia": "RBA"  # 2; Restaurant Brands Asia Ltd.
+  "reva diamonds": "PNGSREVA"  # 2; PNGS Reva Diamond Jewellery
+  "rir power electronics": "RIR"  # 4; Rir Power Electronics L
+  "royal enfield": "EICHERMOT"  # 12; Eicher Motors; Royal Enfield is its core business
+  "rr kabel": "RRKABEL"  # 5; R R Kabel Ltd.
+  "rvnl": "RVNL"  # 13; Rail Vikas Nigam Ltd.
+  "saatvik": "SAATVIKGL"  # 2; Saatvik Green Energy
+  "sahajanand medical": "SMT"  # 3; Sahajanand Medical Tech L
+  "sahajanand medical technologies": "SMT"  # 5; Sahajanand Medical Tech L
+  "sai life": "SAILIFE"  # 1; Sai Life Sciences
+  "sail": "SAIL"  # 15; Steel Authority of India
+  "samvardhana motherson": "MOTHERSON"  # 13; Samvardhana Motherson International Ltd.
+  "sarda energy": "SARDAEN"  # 2; Sarda Energy and Minerals Ltd.
+  "savita oil tech": "SOTL"  # 2; Savita Oil Technolo
+  "schneider electric infrastructure": "SCHNEIDER"  # 2; Schneider Electric Infrastructure Ltd.
+  "sfc environmental technologies": "SFCTECH"  # 5; Sfc Environmental Tech L
+  "shadowfax": "SHADOWFAX"  # 3; Shadowfax Technologies Ltd.
+  "shah investor s home": "SHAHINVEST"  # 9; Shah Investors Home
+  "shakti pumps": "SHAKTIPUMP"  # 8; Shakti Pumps (India) Ltd.
+  "shanti gold": "SHANTIGOLD"  # 2; Shanti Gold Internation L
+  "share india securities": "SHAREINDIA"  # 2; Share India Securities Ltd.
+  "shipping corp": "SCI"  # 3; Shipping Corporation of India
+  "shyam metalics": "SHYAMMETL"  # 7; Shyam Metalics and Energy Ltd.
+  "signature global": "SIGNATURE"  # 9; Signatureglobal (India) Ltd.
+  "silver touch technologies": "SILVERTUC"  # 2; Silver Touch Techno
+  "sky gold": "SKYGOLD"  # 4; SKY GOLD AND DIAMONDS Ltd.
+  "skyways": "SKYWAYS"  # 2; Skyways Air Services
+  "skyways air": "SKYWAYS"  # 6; Skyways Air Services
+  "smartworks": "SMARTWORKS"  # 5; Smartworks Coworking Spaces
+  "solar industries": "SOLARINDS"  # 27; Solar Industries India Ltd.
+  "solara active pharma": "SOLARA"  # 2; Solara Active Pha Sci
+  "som distilleries": "SDBL"  # 3; Som Dist Brew
+  "sona blw": "SONACOMS"  # 11; Sona BLW Precision Forgings Ltd.
+  "sona blw precision": "SONACOMS"  # 4; Sona BLW Precision Forgings Ltd.
+  "sona comstar": "SONACOMS"  # 4; Sona BLW Precision Forgings Ltd.
+  "spandana sphoorty": "SPANDANA"  # 3; Spandana Sphoorty Fin
+  "sparc": "SPARC"  # 2; Sun Pharma Advanced Research Company
+  "spr auto": "SHRIPISTON"  # 3; SPR Auto Technologies Ltd.
+  "srg housing finance": "SRGHFL"  # 2; Srg Housing Finance L
+  "sri lotus developers": "LOTUSDEV"  # 3; SRI LOTUS DEVELOPERS AND REALTY Ltd.
+  "star health": "STARHEALTH"  # 3; Star Health and Allied Insurance Company Ltd.
+  "sterling and wilson renewable energy": "SWSOLAR"  # 4; Sterling and Wilson Renewable Energy Ltd.
+  "sterlite tech": "STLNETWORK"  # 20; STL Networks, formerly Sterlite Technologies
+  "strides pharma": "STAR"  # 3; Strides Pharma Science
+  "sudarshan chemical": "SUDARSCHEM"  # 2; Sudarshan Chemical Industries Ltd.
+  "sudarshan pharma": "SUDARSHAN"  # 2; Sudarshan Pharma Ind
+  "sun pharma": "SUNPHARMA"  # 43; Sun Pharmaceutical Industries Ltd.
+  "sun pharma advanced research": "SPARC"  # 0; Sun Pharma Advanced Research Company (added in review)
+  "sun tv": "SUNTV"  # 12; Sun TV Network Ltd.
+  "suryoday sfb": "SURYODAY"  # 2; Suryoday Small Fin Bk
+  "suryoday small finance bank": "SURYODAY"  # 2; Suryoday Small Fin Bk
+  "suzlon": "SUZLON"  # 16; Suzlon Energy Ltd.
+  "swelect": "SWELECTES"  # 2; Swelect Energy Sys
+  "swsolar": "SWSOLAR"  # 1; Sterling and Wilson Renewable Energy
+  "symbiotec": "SYMBIOTEC"  # 6; Symbiotec Pharmalab
+  "syrma sgs": "SYRMA"  # 8; Syrma SGS Technology Ltd.
+  "tajgvk": "TAJGVK"  # 2; Taj Gvk Hotels Resorts
+  "tamilnad mercantile bank": "TMB"  # 5; Tamilnad Mercantile Bank Ltd.
+  "tamilnadu petroproducts": "TNPETRO"  # 3; Tamilnadu Petroproducts L
+  "tanishq": "TITAN"  # 2; Titan; Tanishq is its jewellery business
+  "tata consultancy services": "TCS"  # 2; Tata Consultancy Services Ltd.
+  "tata consumer": "TATACONSUM"  # 21; Tata Consumer Products Ltd.
+  "tata teleservices maharashtra": "TTML"  # 2; Tata Teleservices (Maharashtra) Ltd.
+  "tempsens": "TEMPSENS"  # 27; Tempsens Inst
+  "texmaco rail": "TEXRAIL"  # 6; Texmaco Rail & Eng. Ltd.
+  "thyrocare": "THYROCARE"  # 6; Thyrocare Technologies Ltd.
+  "titagarh rail": "TITAGARH"  # 2; Titagarh Rail Systems Ltd.
+  "titan": "TITAN"  # 49; Titan Company Ltd.
+  "torrent pharma": "TORNTPHARM"  # 6; Torrent Pharmaceuticals Ltd.
+  "transformers and rectifiers": "TARIL"  # 8; Transformers And Rectifiers (India) Ltd.
+  "transformers rectifiers": "TARIL"  # 4; Transformers And Rectifiers (India) Ltd.
+  "transrail": "TRANSRAILL"  # 2; Transrail Lighting
+  "trent": "TRENT"  # 51; Trent Ltd.
+  "tube investments": "TIINDIA"  # 6; Tube Investments of India Ltd.
+  "turtlemint": "TURTLEMINT"  # 6; Turtlemint Fintech Sols L
+  "tvs motor": "TVSMOTOR"  # 36; TVS Motor Company Ltd.
+  "tvs supply chain solutions": "TVSSCS"  # 3; TVS Supply Chain Solutions Ltd.
+  "ubl": "UBL"  # 6; United Breweries
+  "ujjivan sfb": "UJJIVANSFB"  # 5; Ujjivan Small Finance Bank Ltd.
+  "ujjivan small finance bank": "UJJIVANSFB"  # 3; Ujjivan Small Finance Bank Ltd.
+  "ultratech": "ULTRACEMCO"  # 15; UltraTech Cement Ltd.
+  "unimech": "UNIMECH"  # 2; Unimech Aerospace and Manufacturing Ltd.
+  "union bank": "UNIONBANK"  # 7; Union Bank of India
+  "uti amc": "UTIAMC"  # 2; UTI Asset Management Company Ltd.
+  "utkarsh sfb": "UTKARSHBNK"  # 3; Utkarsh Small Fin Bank L
+  "utkarsh small finance bank": "UTKARSHBNK"  # 5; Utkarsh Small Fin Bank L
+  "v guard": "VGUARD"  # 4; V-Guard Industries Ltd.
+  "v mart": "VMART"  # 4; V-Mart Retail Ltd.
+  "veegaland": "VEEGALAND"  # 15; Veegaland Developers
+  "venus pipes": "VENUSPIPES"  # 2; Venus Pipes Tubes
+  "waaree renewable": "WAAREERTL"  # 4; Waaree Renewable Technologies Ltd.
+  "waaree renewable technologies": "WAAREERTL"  # 5; Waaree Renewable Technologies Ltd.
+  "wakefit": "WAKEFIT"  # 3; Wakefit Innovations Ltd.
+  "wework india": "WEWORK"  # 7; WeWork India Management Ltd.
+  "whirlpool india": "WHIRLPOOL"  # 2; Whirlpool of India Ltd.
+  "yatharth": "YATHARTH"  # 10; Yatharth Hospital & Trauma Care Services Ltd.
+  "zaggle": "ZAGGLE"  # 11; Zaggle Prepaid Ocean Services Ltd.
+  "zee entertainment": "ZEEL"  # 22; Zee Entertainment Enterprises Ltd.
+  "zetwerk": "ZETWERK"  # 20; Zetwerk Manufacturing B L
+  "zomato": "ETERNAL"  # 19; Eternal, formerly Zomato
+  "zudio": "TRENT"  # 3; Trent; Zudio is its value fashion chain
+  "zydus life": "ZYDUSLIFE"  # 5; Zydus Lifesciences Ltd.
