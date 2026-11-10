@@ -310,7 +310,9 @@ def test_cli_writes_reports_and_refuses_a_missing_manifest(tmp_path, monkeypatch
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert set(doc["hypotheses"]) == {"us_rebound", "us_follow", "oil_drop", "fii_short_cover",
                                       "breadth_thrust", "combined"}
-    assert out.with_suffix(".md").exists()
+    md = out.with_suffix(".md").read_text(encoding="utf-8")
+    assert "unlisted OI on disk 0, 404 missing 0, fetch errors 0" in md
+    assert doc["meta"]["manifest"]["oi_unlisted_on_disk"] == 0
     (ext / "manifest.json").unlink()
     assert msm.main(["--db", str(db), "--external", str(ext), "--etf-list", str(etf), "--out", str(out)]) == 2
     assert "manifest" in capsys.readouterr().err
@@ -324,6 +326,18 @@ def test_cli_refuses_a_file_that_differs_from_its_manifest(tmp_path, monkeypatch
     (ext / "yahoo" / "BZ=F.json").write_bytes(b"{}")
     assert msm.main(["--db", str(db), "--external", str(ext), "--etf-list", str(etf)]) == 2
     assert "sha256" in capsys.readouterr().err
+
+
+def test_cli_refuses_an_oi_file_the_manifest_does_not_list(tmp_path, monkeypatch, capsys):
+    # a fetch killed between manifest saves leaves files on disk that fii_long_share would read unverified
+    monkeypatch.setattr(rc, "market_hours_refusal", lambda *a: None)
+    (db, ext), _, _ = _seen_world(tmp_path)
+    etf = tmp_path / "etf.csv"
+    etf.write_text("Symbol\nNIFTYBEES\n", encoding="utf-8")
+    (ext / "nse_oi" / "fao_participant_oi_04012010.csv").write_bytes(oi_csv(0.4))
+    assert msm.main(["--db", str(db), "--external", str(ext), "--etf-list", str(etf)]) == 2
+    err = capsys.readouterr().err
+    assert "not in the manifest" in err and "--resume" in err
 
 
 def test_refuses_live_store_path(tmp_path, monkeypatch, capsys):
@@ -375,14 +389,18 @@ def test_nsei_gate_overlap_mismatch_makes_us_hypotheses_insufficient(tmp_path):
     for tag, yahoo_post in (("match", None), ("mismatch", bad)):
         db, ext = build_world(tmp_path / tag, pre=pre, post=post, yahoo_post=yahoo_post, spx=spx)
         ctx = context(db, ext)
-        results[tag] = {n: msm.hypothesis(n, ctx) for n in ("us_rebound", "us_follow", "combined", "oil_drop")}
+        results[tag] = {n: msm.hypothesis(n, ctx) for n in msm.HYPOTHESES}
     ok, bad_r = results["match"], results["mismatch"]
     assert ok["us_rebound"]["verdict"]["n"] == 33
-    assert ok["us_rebound"]["label"] != "insufficient" and ok["us_rebound"]["gate_failed"] is False
+    assert ok["us_rebound"]["label"] != "insufficient"
+    assert not any(r["gate_failed"] for r in ok.values())
     assert bad_r["us_rebound"]["verdict"]["n"] == 33                    # the metrics are still shown
-    for n in ("us_rebound", "us_follow", "combined"):
+    # every hypothesis with confirm sessions priced from Yahoo ^NSEI is gated; breadth (bars_1d only) is not
+    for n in ("us_rebound", "us_follow", "oil_drop", "fii_short_cover", "combined"):
         assert bad_r[n]["label"] == "insufficient" and bad_r[n]["gate_failed"] is True
-    assert bad_r["oil_drop"]["gate_failed"] is False
+    assert all(a["gate_failed"] for a in bad_r["combined"]["arms"].values())
+    assert bad_r["combined"]["combining_helps"] is None
+    assert bad_r["breadth_thrust"]["gate_failed"] is False
 
 
 # ----------------------------------------------------------------------------- data coverage and diagnostics

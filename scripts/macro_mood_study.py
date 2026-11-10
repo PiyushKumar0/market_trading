@@ -47,8 +47,9 @@ Window = tuple[date | None, date | None]
 
 HYPOTHESES = ("us_rebound", "us_follow", "oil_drop", "fii_short_cover", "breadth_thrust", "combined")
 ARMS = {"combined_arm_us": "us", "combined_arm_oil": "oil", "combined_arm_fii": "fii"}
-#: Hypotheses whose verdict the ^NSEI overlap check gates: their samples end 2022-07-13, all on Yahoo opens.
-GATED = frozenset({"us_rebound", "us_follow", "combined"})
+#: Hypotheses whose confirm samples hold sessions before 2022-07-12, priced from Yahoo ^NSEI: a failed overlap
+#: check makes each insufficient. breadth_thrust starts 2022-07-14 on bars_1d alone.
+GATED = frozenset({"us_rebound", "us_follow", "oil_drop", "fii_short_cover", "combined"})
 SEEN_KEY = "seen (not evidence)"
 
 INDEX_SYMBOL = "NIFTY 50"
@@ -126,14 +127,20 @@ def verify_manifest(external: Path) -> dict[str, Any]:
             bad.append(f"{rel}: sha256 differs from the manifest")
     if bad:
         raise Refusal(f"{len(bad)} manifest file(s) fail verification, e.g. {bad[:5]}")
+    # fii_long_share reads the whole directory, so an unlisted file would feed the signal unverified
     oi_dir = ext / "nse_oi"
-    on_disk = {f"nse_oi/{p.name}" for p in oi_dir.iterdir()} if oi_dir.is_dir() else set()
+    on_disk = {f"nse_oi/{p.name}" for p in oi_dir.iterdir()
+               if p.is_file() and p.suffix.lower() == ".csv"} if oi_dir.is_dir() else set()
+    unlisted = sorted(on_disk - set(files))
+    if unlisted:
+        raise Refusal(f"{len(unlisted)} OI file(s) on disk are not in the manifest, e.g. {unlisted[:5]}; "
+                      f"run scripts\\fetch_macro_external.py --out {ext} --resume")
     errors = manifest.get("errors") or {}
     return {"path": str(mpath), "sha256": hashlib.sha256(raw).hexdigest(),
             "created_at": manifest.get("created_at"), "period1": manifest.get("period1"),
             "period2": manifest.get("period2"), "files": len(files),
             "oi_files": sum(r.startswith("nse_oi/") for r in files),
-            "oi_unlisted_on_disk": len(on_disk - set(files)),
+            "oi_unlisted_on_disk": len(unlisted),
             "missing_404": len(manifest.get("missing") or []), "errors": len(errors),
             "error_sample": dict(sorted(errors.items())[:10])}
 
@@ -497,6 +504,11 @@ def hypothesis(name: str, ctx: StudyContext) -> dict[str, Any]:
     if name in GATED and not ctx.gate["ok"]:
         out["label"], out["gate_failed"] = "insufficient", True
         out["label_reason"] = "data gate: ^NSEI opens differ from bars_1d over the overlap (or no overlap)"
+        if name == "combined":
+            out["combining_helps"] = None
+    if name == "combined":
+        for arm in out["arms"].values():
+            arm["gate_failed"] = out["gate_failed"]
     seen = mm.SAMPLES[name]["seen"]
     if seen is None:
         out[SEEN_KEY] = None
@@ -775,6 +787,14 @@ def _trade_list(rows: list[dict[str, Any]]) -> str:
     return ", ".join(f"{t['entry_date']}->{t['exit_date']} {t['net']:+.2f}" for t in rows) or "none"
 
 
+def _manifest_line(mf: dict[str, Any] | None) -> str:
+    if mf is None:
+        return "MANIFEST: not verified (context built without verify_manifest)"
+    return (f"MANIFEST: {mf['files']} files verified (sha256 {mf['sha256'][:12]}), OI files {mf['oi_files']}, "
+            f"unlisted OI on disk {mf['oi_unlisted_on_disk']}, 404 missing {mf['missing_404']}, "
+            f"fetch errors {mf['errors']}")
+
+
 def render(doc: dict[str, Any]) -> str:
     m, data = doc["meta"], doc["data"]
     g = data["nsei_gate"]
@@ -783,7 +803,7 @@ def render(doc: dict[str, Any]) -> str:
            f"N={m['family_n']} alpha={m['alpha']} fold_pass_min={m['fold_pass_min']:.0%} "
            f"min_trades={m['min_trades']}  round trip MIS {m['cost_round_trip_pct']['MIS']:.4f}% "
            f"CNC {m['cost_round_trip_pct']['CNC']:.4f}% at Rs {m['notional_inr']}",
-           f"NIFTY: {m['nifty_source']}", "",
+           f"NIFTY: {m['nifty_source']}", _manifest_line(m["manifest"]), "",
            f"DATA GATE (^NSEI): ok={g['ok']}  overlap {g['overlap_days']} days ({g['overlap_first']} -> "
            f"{g['overlap_last']}), {g['mismatches']} open mismatches; failed years {g['failed_years'] or 'none'}"]
     for s in g["mismatch_sample"][:5]:
