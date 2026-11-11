@@ -675,6 +675,23 @@ resolve which stock stories are orphans, so any recent copy serves.
 .venv\Scripts\python.exe scripts\news_impact_study.py --sample B --db data\research\full_market_<date>.duckdb --as-of <date>
 ```
 
+## Pool widening study (registered 2026-11-11) — research copy; the study runs outside 09:15–15:30
+
+The rules are in IMPLEMENTATION_PLAN.md "Pool widening study". Nothing here spends LLM quota.
+- The spread rounds call Kite's quote API with the day's login: three requests a round, 1.5 s apart, inside
+  09:20–15:20 only.
+- The study reads the whole-file copy and refuses the live store.
+
+```powershell
+# band spreads from live quotes (rounds every 20 minutes); --summary reprints the per-band table from the CSV
+.venv\Scripts\python.exe scripts\pool_widening_spreads.py --db data\research\full_market_2026-11-09.duckdb --as-of 2026-11-09 --out data\research\pool_widening\spreads.csv --rounds 7 --interval-min 20
+.venv\Scripts\python.exe scripts\pool_widening_spreads.py --db data\research\full_market_2026-11-09.duckdb --as-of 2026-11-09 --out data\research\pool_widening\spreads.csv --summary
+# pipeline check with no returns: funnels and per-cell trade counts; writes no report
+.venv\Scripts\python.exe scripts\pool_widening_study.py --db data\research\full_market_2026-11-09.duckdb --counts-only
+# the verdict run. Report: data\reports\pool_widening_<date>.{json,md}
+.venv\Scripts\python.exe scripts\pool_widening_study.py --db data\research\full_market_2026-11-09.duckdb
+```
+
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 
 ```powershell
