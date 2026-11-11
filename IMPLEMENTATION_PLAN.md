@@ -817,6 +817,57 @@ rows), which gives about 150 earlier periods.
     ADANIENT and CESC (`long_exclude_unrecorded_actions.txt`); it decides nothing.
   - The name rule drops every symbol that contains a hyphen, so BAJAJ-AUTO and MCDOWELL-N are in no universe, in
     either sample.
+- **Verdicts on this sample, run 2026-11-12 (`data/reports/factor_portfolio_long_2026-11-09.json`, 150 periods,
+  2011-02 to 2023-07, judged at 0.05/6):**
+  - **Momentum: supported.** Mean e +1.03% a month (median +1.02%); bootstrap share 0.0020 and t-test p 0.0029
+    against 0.0083; +1.17% and +0.88% in the two halves; +0.73% with the 3 best months removed. Net 23.6% a year
+    against 8.8% for the benchmark, worst drawdown −37%, costs 0.6% a year.
+  - **Low volatility: null** (mean e +0.12% a month). **Composite: null** (+0.75%; bootstrap 0.023, t-test p 0.025).
+  - The sensitivity run without the four names gives the same three labels (momentum +1.08%, p 0.0020).
+  - The first sample recomputed from this store (39 periods, a diagnostic): momentum +0.77% a month, low volatility
+    −0.76%, composite −0.13%.
+  - Diagnostics: 10, 20 and 30 names +1.00%, +0.83%, +0.61%; a 500-name universe +1.70%; six-month momentum +0.75%;
+    12-month without the volatility divisor +0.78%; the engine's 20-session `mom` ranking −0.31% with a −72%
+    drawdown; the 52-week-high portfolio +0.14%. The trend overlay cuts momentum's drawdown to −28% and its return to
+    15.6% a year. The top 15 names beat random 15-name draws in 90 of 150 months.
+- **Read after the outcome (`data/reports/factor_portfolio_long_2026-11-09_robustness.txt`); these decide nothing:**
+  - Against NIFTYBEES the momentum book's excess is +0.90% a month with t 1.98, which would not pass the family
+    threshold. The registered benchmark returned 8.8% a year and NIFTYBEES 11.5%.
+  - The excess is earned when the market falls: +2.73% a month in the 61 months the benchmark fell, −0.14% in the 89
+    it rose. The book's beta to the benchmark is 0.76.
+  - By third of the sample: +1.72%, +0.61%, +0.81% a month. The 36-month rolling mean of e is above zero in 98% of
+    windows.
+  - The 35% rule zeroed three returns of held names, all splits. Fifteen holdings closed at their last value: five
+    were mergers, renames or a delisting at an offer price; ten were holes in the bars, of which seven came back
+    lower (BOMDYEING at 0.44 of its last value) and three higher (WOCKPHARMA at 1.57).
+  - A stress that counts those three splits as losses, marks every hole down to the price it came back at, credits
+    no hole that came back higher and halves the three names that never traded again leaves +0.81% a month (t 2.17).
+  - Not modelled: tax on short-term gains (20% of realised gains), which an index fund held for years does not pay;
+    brokerage before 2015; dividends on both sides.
+
+**Momentum portfolio leg (proposed 2026-11-12 after the long-history verdict; not built, the owner's decision).**
+The only construct this project has measured that beat a matched benchmark over a long sample is the monthly 15-name
+momentum book. The engine cannot hold it today.
+
+- **What it is:** at each month-end close, rank the 200 most traded stocks on 12-month return skipping the last
+  month, divided by volatility. Hold the top 15 at equal weight, bought at the next open. Sell a holding only when its
+  rank is worse than 30. No stop, no target, no analyst.
+- **First step, if approved:** a paper book only, beside the present legs, plus the month-end list to the owner. The
+  study script already reports the same book as a forward sample from the 2026-11-30 formation.
+- **Where the engine conflicts with it:**
+  - The sector cap of 2 positions and the same-sector correlation cap would refuse most of a momentum book, which
+    clusters by sector.
+  - `max_new_trades_day` 5 cannot open 15 positions on the first rebalance.
+  - The cost gate needs a per-trade `expected_edge_pct`. The study measures the book, not a trade, so this leg needs
+    a book-level rule: its own kill rule on the forward excess, not a registered per-trade edge.
+  - Paper positions exit at session 20. This leg exits on rank.
+  - Sizing is by stop distance. This leg sizes at equal weight.
+  The caps live in `limits.yaml`, so each change is an owner-signed patch.
+- **What it has to beat:** a momentum index fund the owner could simply hold (NSE's Nifty200 Momentum 30 has listed
+  funds), after the book's costs and tax. The forward reading should carry that fund's return beside the equal-weight
+  benchmark.
+- **Risks to state with it:** a −37% drawdown in the long sample and −16% in one month (January 2025); the excess
+  came in falling months; 2023–2026 is positive but unproven.
 
 ## Known defects and test gaps
 
@@ -826,6 +877,13 @@ rows), which gives about 150 earlier periods.
   where the sharpest risers were.
 - A re-keyed rename can leave the same history under the old and the new symbol in research copies (five liquid pairs
   on the 2026-11-09 copy), so cross-sectional studies count that company twice.
+- A whole day's daily-file write fails when one integer in it exceeds 2,147,483,647 and falls outside the sample the
+  bulk write infers its column types from (`MarketStore._bulk_write`; reproduced in memory). The long-history
+  download lost four dates on which IDEA traded 2.4 to 3.4 billion shares. The live store kept those dates because
+  IDEA's bar arrives from Kite in a small batch; a stock Kite does not cover would lose the market's bars for the day.
+- NSE's corporate-actions route files a company's past actions under its present symbol, so a renamed company's old
+  symbol has no split, bonus or demerger rows (95 such actions in 2010–2023 on the long-history store), and some
+  demergers are classed `other`.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
 - The 08:40 `token_check` sends a "token invalid, re-login" page when a login lands while its probe is in flight;
   the mid-day breaker ignores such a superseded token, this job does not.
