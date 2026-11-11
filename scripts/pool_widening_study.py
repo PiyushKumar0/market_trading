@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Pool widening study (``edge/pool_widening``, registered 2026-11-11): do the live swing legs hold beyond the core?
 
-The registration entry in IMPLEMENTATION_PLAN.md is the spec of record; this docstring summarises it.
+This docstring, the constants and the report's notes are the record of the registered rules. The verdicts (all four
+NOT SHOWN, 2026-11-11) are in ``config/research_trials.yaml``.
 
 * **Stocks.** Every ``bars_1d`` symbol of the whole-market research copy except the index rows and ETFs (the hvol
   study's test: NSE's ETF list plus ``(BEES|ETF|IETF)$``). Historical bhavcopy files hold names that later delisted.

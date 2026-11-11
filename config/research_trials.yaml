@@ -494,8 +494,8 @@ trials:
     population: "whole-market bhavcopy stocks (ETFs out, delisted names in), band W1 on the signal day by the median traded value of the 20 sessions before it; signals from 2023-08-01, bars to 2026-11-09"
     construct: "limit fill within 5 sessions, exit close(fill+20); fees at Rs 20,000 CNC plus W1's measured spread; seven criteria incl. clustered t > 2, excess CI above 0, CPCV at N=4, held-out excess > 0"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/pool_widening_2026-11-11.json"
   - id: "edge-pool_widening_brk20_w2-20261111"
     date: "2026-11-11"
     family: "edge/pool_widening"
@@ -503,8 +503,8 @@ trials:
     population: "as the brk20 W1 row, band W2"
     construct: "as the brk20 W1 row, with W2's measured spread"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/pool_widening_2026-11-11.json"
   - id: "edge-pool_widening_ins_w1-20261111"
     date: "2026-11-11"
     family: "edge/pool_widening"
@@ -512,8 +512,8 @@ trials:
     population: "as the brk20 W1 row"
     construct: "fill open(y+1), exit close at T+20; fees plus W1's measured spread; the seven criteria"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/pool_widening_2026-11-11.json"
   - id: "edge-pool_widening_ins_w2-20261111"
     date: "2026-11-11"
     family: "edge/pool_widening"
@@ -521,5 +521,5 @@ trials:
     population: "as the brk20 W1 row, band W2"
     construct: "as the ins W1 row, with W2's measured spread"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/pool_widening_2026-11-11.json"

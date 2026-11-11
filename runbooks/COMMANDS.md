@@ -675,9 +675,9 @@ resolve which stock stories are orphans, so any recent copy serves.
 .venv\Scripts\python.exe scripts\news_impact_study.py --sample B --db data\research\full_market_<date>.duckdb --as-of <date>
 ```
 
-## Pool widening study (registered 2026-11-11) — research copy; the study runs outside 09:15–15:30
+## Pool widening study (verdicts 2026-11-11: no leg widens) — research copy; the study runs outside 09:15–15:30
 
-The rules are in IMPLEMENTATION_PLAN.md "Pool widening study". Nothing here spends LLM quota.
+The rules are in the study script's docstring and constants. Nothing here spends LLM quota.
 - The spread rounds call Kite's quote API with the day's login: three requests a round, 1.5 s apart, inside
   09:20–15:20 only.
 - The study reads the whole-file copy and refuses the live store.
