@@ -4,15 +4,17 @@ beat the equal-weight return of its liquid universe after costs?
 
 This docstring, the constants and the report's notes are the record of the registered rules.
 
-* **Sessions.** The dates on which NIFTY 50 has a bar. Bars on other dates are dropped (counted). A session on which a
-  stock has no bar contributes nothing to it: values carry and its next return runs from its last bar.
+* **Sessions.** The dates on which NIFTY 50 has a bar (``--session-min-symbols N``: the dates on which at least N
+  symbols have a bar). Bars on other dates are dropped (counted). A session on which a stock has no bar contributes
+  nothing to it: values carry and its next return runs from its last bar.
 * **Clean daily return.** ``close / close(the stock's previous bar) - 1``, set to 0 and counted when a structural
   ex-date (``hi52.UNADJUSTED_KINDS``) falls after the previous bar and on or before the session (the stored series is
   not re-adjusted), or, failing that, when its absolute value is above 35% (an unrecorded action or a bad row).
 * **Formation and trading.** Formation ``f`` is the last session of each calendar month whose next session ``r`` is in
   a later month; the first is the first month-end with 253 sessions of history. Every input is known at ``f``'s
-  close; trades fill at ``open(r)``. A period runs from ``open(r_k)`` to ``open(r_k+1)``; formations from
-  ``FORWARD_FROM`` are the forward sample, earlier ones the history the verdicts read.
+  close; trades fill at ``open(r)``. A period runs from ``open(r_k)`` to ``open(r_k+1)``. The sample is frozen: a
+  period ending on or before ``HISTORY_END`` is history (the verdicts read only these); one formed on or after
+  ``FORWARD_FROM`` is forward; any other is between, reported and deciding nothing.
 * **Universe at f.** A bar on ``f``, bars on at least 200 of the 252 sessions to ``f``, a bar on or before session
   ``f - 252``, not an ETF (the hvol study's ``is_etf``), no ``-`` series suffix, no index row (a space in the
   symbol); the ``UNIVERSE_SIZE`` with the highest median ``close x volume`` over the 126 sessions to ``f`` (descending,
@@ -25,17 +27,19 @@ This docstring, the constants and the report's notes are the record of the regis
   than 30 is sold; names ranked 1..30 not held are bought in rank order until 15 are held, each at ``cash / buys
   needed`` (fixed before buying) in whole shares at ``open(r)``; a name without a bar on ``r`` or priced above its
   allocation is skipped. A sale without a bar on ``r`` fills at the stock's next open; after 5 sessions without a bar
-  it closes at its last value. Position value follows clean returns; a sale's overnight leg under the ex-date or 35%
-  rule fills at the last value.
+  it closes at its last value. Position value follows clean returns; on a trade session a kept holding moves by the
+  open's overnight ratio and then the session's open-to-close ratio, the two pieces the benchmark uses. A sale's
+  overnight leg under the ex-date or 35% rule fills at the last value.
 * **Costs and equity.** Equity is cash plus every position's value less ``CostModel.round_trip(value, "CNC")``; a sale
   credits value less its round trip. A period's net return is the change in that equity measured at ``open(r)``
   before trades.
 * **Benchmark.** The equal-weight clean-return path of the universe names with a bar on ``r_k`` from ``open(r_k)`` to
   ``open(r_k+1)``, no costs. e = net - benchmark.
-* **Verdict per construct** (N = 3, threshold ``registration_alpha(3)``): supported iff >= 30 periods, mean and median
-  e > 0, mean net > 0, a circular moving-block bootstrap (blocks of 3, 10,000 draws) puts fewer than alpha of its means
-  at or below 0, mean e > 0 in both halves and with the 3 best periods removed; refuted iff >= 30 periods and mean
-  e <= 0; insufficient below 30; otherwise null.
+* **Verdict per construct** (threshold ``registration_alpha(N)``, N = 3 for the first sample): supported iff >= 30
+  periods, mean and median e > 0, mean net > 0, a circular moving-block bootstrap (blocks of 3, 10,000 draws) puts
+  fewer than alpha of its means at or below 0, a one-sided Newey-West t-test (3 lags, floored at the ordinary standard
+  error, Student's t at K - 1) gives p below alpha, mean e > 0 in both halves and with the 3 best periods removed;
+  refuted iff >= 30 periods and mean e <= 0; insufficient below 30; otherwise null.
 
 Read-only against a research snapshot; refuses the live store, and the full run refuses market hours. Exit codes: 0 ran,
 2 refused.
@@ -44,6 +48,7 @@ Read-only against a research snapshot; refuses the live store, and the full run 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import sys
 import time
@@ -64,6 +69,7 @@ from engine.core.clock import IST  # noqa: E402
 from engine.core.config import repo_root  # noqa: E402
 from engine.learning.multiplicity import registration_alpha  # noqa: E402
 from engine.strategy.cost_model import CostModel  # noqa: E402
+from scipy.stats import t as student_t  # noqa: E402
 
 bb = rc.bb
 hv = rc._load_script("backtest_hvol")
@@ -100,13 +106,17 @@ BOOT_DRAWS = 10_000
 SEED = 20261112
 TRIM_BEST = 3
 RANDOM_DRAWS = 2_000
+NW_LAGS = 3
+#: The frozen first sample: a period is history iff it ends (its next trade session) on or before this date.
+HISTORY_END = date(2026, 11, 9)
 FORWARD_FROM = date(2026, 11, 30)
 FORWARD_MIN_PERIODS = 24
 THIN_SESSION_STOCKS = 100
+DROP_LO, DROP_HI = -0.35, -0.15     # unzeroed returns counted per year as possible unrecorded actions
 
 REGISTERED: tuple[str, ...] = ("momentum", "lowvol", "composite")
 SUPPORTED, REFUTED, INSUFFICIENT, NULL = "supported", "refuted", "insufficient", "null"
-HISTORY, FORWARD = "history", "forward"
+HISTORY, BETWEEN, FORWARD = "history", "between", "forward"
 DECIDES_NOTHING = "diagnostic: decides nothing"
 
 
@@ -131,19 +141,24 @@ class Panel:
     present: np.ndarray
     open: np.ndarray
     high: np.ndarray
+    low: np.ndarray
     close: np.ndarray
     volume: np.ndarray
     R: np.ndarray
+    zero_struct: np.ndarray      # R zeroed by the ex-date rule
+    zero_jump: np.ndarray        # R zeroed by the 35% rule
     ON: np.ndarray
     on_zeroed: np.ndarray
     ER: np.ndarray
     er_zeroed: np.ndarray
     first_bar: np.ndarray
     struct_cum: np.ndarray       # structural ex-dates on or before each session
-    stock: np.ndarray            # name rules: not an index row, not an ETF, no series suffix
+    stock: np.ndarray            # name rules: not an index row, not an ETF, no series suffix, not listed
     name_rule: dict[str, np.ndarray]
     counts: dict[str, int]
-    off_calendar_inside: list[date] = field(default_factory=list)   # bar dates without a NIFTY 50 bar
+    off_calendar_inside: list[date] = field(default_factory=list)   # bar dates off the session calendar
+    market: str = INDEX_SYMBOL   # the trend flag's and the first information column's symbol
+    session_rule: str = f"dates with a {INDEX_SYMBOL} bar"
 
     @property
     def n_sessions(self) -> int:
@@ -152,7 +167,8 @@ class Panel:
 
 def load_bars(conn, as_of: date | None) -> pd.DataFrame:
     sql = ('SELECT symbol, d, CAST("open" AS DOUBLE) AS open, CAST(high AS DOUBLE) AS high, '
-           'CAST("close" AS DOUBLE) AS close, CAST(volume AS DOUBLE) AS volume FROM bars_1d')
+           'CAST(low AS DOUBLE) AS low, CAST("close" AS DOUBLE) AS close, CAST(volume AS DOUBLE) AS volume '
+           'FROM bars_1d')
     args: list[Any] = []
     if as_of is not None:
         sql += " WHERE d <= ?"
@@ -161,15 +177,25 @@ def load_bars(conn, as_of: date | None) -> pd.DataFrame:
 
 
 def build_panel(bars: pd.DataFrame, structural: Mapping[str, Sequence[date]],
-                etf_symbols: frozenset[str] | set[str]) -> Panel:
-    """``bars``: one row per (symbol, d) with open, high, close, volume."""
+                etf_symbols: frozenset[str] | set[str], *, session_min_symbols: int | None = None,
+                market_symbol: str = INDEX_SYMBOL, exclude: frozenset[str] | None = None) -> Panel:
+    """``bars``: one row per (symbol, d) with open, high, low, close, volume.
+
+    Sessions are the dates with a ``NIFTY 50`` bar, or with ``session_min_symbols`` given, the dates on which at
+    least that many symbols have a bar. ``exclude`` (upper-case symbols) fails the name rule as ``excluded_list``."""
     if bars.empty:
         raise rc.Refusal("bars_1d is empty")
     dvals = pd.to_datetime(bars["d"]).to_numpy().astype("datetime64[D]")
     syms = bars["symbol"].astype(str).to_numpy()
-    sessions = np.unique(dvals[syms == INDEX_SYMBOL])
+    if session_min_symbols is None:
+        sessions = np.unique(dvals[syms == INDEX_SYMBOL])
+        rule = f"dates with a {INDEX_SYMBOL} bar"
+    else:
+        days, per_day = np.unique(dvals, return_counts=True)
+        sessions = days[per_day >= session_min_symbols]
+        rule = f"dates on which at least {session_min_symbols} symbols have a bar"
     if sessions.size == 0:
-        raise rc.Refusal(f"no {INDEX_SYMBOL} bars: no session calendar")
+        raise rc.Refusal(f"no session calendar ({rule})")
     S = sessions.size
     pos = np.searchsorted(sessions, dvals)
     on_cal = (pos < S) & (sessions[np.minimum(pos, S - 1)] == dvals)
@@ -187,12 +213,13 @@ def build_panel(bars: pd.DataFrame, structural: Mapping[str, Sequence[date]],
         return out
 
     o, h, c, v = grid("open"), grid("high"), grid("close"), grid("volume")
+    lo = grid("low") if "low" in bars.columns else np.full(shape, np.nan)
     with _quiet():
         has_row = np.zeros(shape, dtype=bool)
         has_row[pos, cols] = True
         present = has_row & np.isfinite(o) & np.isfinite(c) & (o > 0) & (c > 0)
     counts["unusable_rows"] = int((has_row & ~present).sum())
-    for a in (o, h, c, v):
+    for a in (o, h, lo, c, v):
         a[~present] = np.nan
 
     sidx = np.arange(S)[:, None]
@@ -229,12 +256,15 @@ def build_panel(bars: pd.DataFrame, structural: Mapping[str, Sequence[date]],
         "etf": np.array([hv.is_etf(s, etf_symbols) for s in symbols], dtype=bool),
         "series_suffix": np.array(["-" in s for s in symbols], dtype=bool),
     }
-    stock = ~(rules["index_row"] | rules["etf"] | rules["series_suffix"])
+    if exclude is not None:
+        rules["excluded_list"] = np.array([s.strip().upper() in exclude for s in symbols], dtype=bool)
+    stock = ~np.logical_or.reduce(list(rules.values()))
     counts["zeroed_structural"] = int(struct_hit[:, stock].sum())
     counts["zeroed_jump"] = int(jump[:, stock].sum())
     dates = [d.astype(object) for d in sessions]
-    return Panel(dates, [str(s) for s in symbols], col, present, o, h, c, v, R, ON, on_zeroed, ER, er_zeroed,
-                 first_bar, struct_cum, stock, rules, counts, [d.astype(object) for d in inside])
+    return Panel(dates, [str(s) for s in symbols], col, present, o, h, lo, c, v, R, struct_hit, jump, ON, on_zeroed,
+                 ER, er_zeroed, first_bar, struct_cum, stock, rules, counts, [d.astype(object) for d in inside],
+                 market_symbol, rule)
 
 
 # =============================================================================== formations + universe
@@ -329,8 +359,9 @@ def rank_order(cols: np.ndarray, sc: np.ndarray) -> np.ndarray:
 
 
 def trend_on(panel: Panel, f: int) -> bool:
-    """NIFTY 50's close at ``f`` above the mean of its last 200 closes; fewer than 200 closes = invested."""
-    j = panel.col.get(INDEX_SYMBOL)
+    """The market symbol's last close on or before ``f`` above the mean of its last 200 closes; no bars or fewer than
+    200 closes = invested."""
+    j = panel.col.get(panel.market)
     if j is None:
         return True
     c = panel.close[:f + 1, j]
@@ -386,6 +417,7 @@ class SimResult:
     realized_cost: np.ndarray
     trades: list[tuple[int, int, str, float, float]] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    held_cols: list[list[int]] = field(default_factory=list)   # per formation: the book at r's close
 
 
 def _bump(counts: dict[str, int], key: str, by: int = 1) -> None:
@@ -409,8 +441,9 @@ def simulate(panel: Panel, formations: Sequence[Formation], *, n: int, cost: Cal
     for key in ("skipped_buy_price", "skipped_buy_no_bar", "deferred_sales", "deferred_sales_filled",
                 "deferred_sales_closed_at_last_value", "sales_at_previous_value", "entry_ratio_zeroed",
                 "short_book_formations", "short_book_names", "sold_left_universe", "sold_unranked",
-                "sold_out_of_band", "sold_trend_overlay"):
+                "sold_out_of_band", "sold_trend_overlay", "buys_high_equals_low"):
         counts[key] = 0
+    res.held_cols = [[] for _ in range(K)]
     cash = float(capital)
     pos: dict[int, Position] = {}
     present, ON, onz = panel.present, panel.ON, panel.on_zeroed
@@ -491,6 +524,8 @@ def simulate(panel: Panel, formations: Sequence[Formation], *, n: int, cost: Cal
                     cash -= qty * px
                     pos[j] = Position(qty, qty * px, s)
                     res.trades.append((s, j, "buy", qty, px))
+                    if panel.high[s, j] == panel.low[s, j]:
+                        _bump(counts, "buys_high_equals_low")
                     bought += 1
                 res.buys[k] = bought
                 if bought < need:
@@ -504,10 +539,14 @@ def simulate(panel: Panel, formations: Sequence[Formation], *, n: int, cost: Cal
                     if panel.er_zeroed[s, j]:
                         _bump(counts, "entry_ratio_zeroed")
                     p.value *= panel.ER[s, j]
+                elif k is not None:   # a trade session: through its open, then its close, as the benchmark
+                    p.value *= ON[s, j] * panel.ER[s, j]
                 else:
                     p.value *= 1.0 + panel.R[s, j]
             eq += p.value - cost(p.value)
         res.close_equity[s], res.cash[s] = eq, cash
+        if k is not None:
+            res.held_cols[k] = sorted(pos)
     return res
 
 
@@ -578,17 +617,45 @@ def _pos(x: float | None) -> bool:
     return x is not None and math.isfinite(x) and x > 0.0
 
 
-def verdict(e: Sequence[float], net: Sequence[float], *, seed: int = SEED) -> dict[str, Any]:
-    """The registered criteria on the history sample, unrounded. Halves split at ``K // 2`` (an odd middle period is
-    in the second half)."""
+def hac_t(e: Sequence[float], *, lags: int = NW_LAGS) -> dict[str, Any]:
+    """One-sided t-test of mean e > 0. Newey-West variance with ``min(lags, K - 1)`` lags (Bartlett weights
+    ``1 - l / (L + 1)``, autocovariances divided by K), floored at the sample variance (ddof=1);
+    ``se = sqrt(var / K)``, ``t = mean / se``, ``p`` from Student's t at K - 1 degrees of freedom."""
+    x = np.asarray(e, dtype="float64")
+    K = x.size
+    out: dict[str, Any] = {"t": None, "se": None, "p": None, "lags": None, "hac_variance": None,
+                           "sample_variance": None}
+    if K < 2:
+        return out
+    L = min(lags, K - 1)
+    d = x - x.mean()
+    hac = float(d @ d) / K + 2.0 * sum((1.0 - lag / (L + 1)) * float(d[lag:] @ d[:-lag]) / K
+                                       for lag in range(1, L + 1))
+    var = float(d @ d) / (K - 1)
+    se = math.sqrt(max(hac, var) / K)
+    mean = float(x.mean())
+    if se > 0:
+        t = mean / se
+    else:
+        t = math.inf if mean > 0 else (-math.inf if mean < 0 else math.nan)
+    out.update({"t": t, "se": se, "lags": L, "hac_variance": hac, "sample_variance": var,
+                "p": None if math.isnan(t) else float(student_t.sf(t, K - 1))})
+    return out
+
+
+def verdict(e: Sequence[float], net: Sequence[float], *, alpha: float = ALPHA, seed: int = SEED) -> dict[str, Any]:
+    """The registered criteria as amended, unrounded. Halves split at ``K // 2`` (an odd middle period is in the
+    second half). Both the bootstrap (5a) and the t-test (5b) must pass."""
     e = [float(v) for v in e]
     K = len(e)
     h = K // 2
     trimmed = sorted(e)[:-TRIM_BEST] if K > TRIM_BEST else []
     p = bootstrap_p(e, seed=seed)
+    tt = hac_t(e)
     vals = {
         "periods": K, "mean_e": _mean(e), "median_e": _median(e), "mean_net": _mean(net), "bootstrap_p": p,
-        "alpha": ALPHA, "mean_e_first_half": _mean(e[:h]), "mean_e_second_half": _mean(e[h:]),
+        "t_stat": tt["t"], "t_se": tt["se"], "t_p": tt["p"], "t_lags": tt["lags"],
+        "alpha": alpha, "mean_e_first_half": _mean(e[:h]), "mean_e_second_half": _mean(e[h:]),
         "mean_e_without_best_3": _mean(trimmed),
     }
     rows = [
@@ -596,7 +663,8 @@ def verdict(e: Sequence[float], net: Sequence[float], *, seed: int = SEED) -> di
         (2, "mean e > 0", _pos(vals["mean_e"])),
         (3, "median e > 0", _pos(vals["median_e"])),
         (4, "mean net portfolio return > 0", _pos(vals["mean_net"])),
-        (5, f"bootstrap share of means <= 0 below {ALPHA:.6f}", p is not None and p < ALPHA),
+        ("5a", f"bootstrap share of means <= 0 below {alpha:.6f}", p is not None and p < alpha),
+        ("5b", f"Newey-West t-test of mean e > 0: p below {alpha:.6f}", tt["p"] is not None and tt["p"] < alpha),
         (6, "mean e > 0 in both halves", _pos(vals["mean_e_first_half"]) and _pos(vals["mean_e_second_half"])),
         (7, f"mean e > 0 with the {TRIM_BEST} best periods removed", _pos(vals["mean_e_without_best_3"])),
     ]
@@ -625,10 +693,28 @@ class Run:
     periods: list[dict[str, Any]]
 
 
+def sample_label(formation: date, next_trade: date, *, history_end: date = HISTORY_END,
+                 forward_from: date = FORWARD_FROM) -> str:
+    """``history`` iff the period ends on or before ``history_end``; ``forward`` iff formed on or after
+    ``forward_from``; otherwise ``between`` (reported, in no verdict and no forward reading)."""
+    if next_trade <= history_end:
+        return HISTORY
+    return FORWARD if formation >= forward_from else BETWEEN
+
+
+def zeroed_count(panel: Panel, a: int, b: int, cols: Sequence[int] | np.ndarray) -> int:
+    """Clean returns zeroed by either rule over sessions ``a .. b - 1`` among ``cols``."""
+    cols = np.asarray(cols, dtype=np.int64)
+    if cols.size == 0:
+        return 0
+    return int((panel.zero_struct[a:b][:, cols] | panel.zero_jump[a:b][:, cols]).sum())
+
+
 def period_rows(panel: Panel, formations: Sequence[Formation], sim: SimResult,
-                bench: Mapping[int, tuple[float | None, int]]) -> list[dict[str, Any]]:
-    """One row per period ``r_k -> r_k+1``. ``trend_benchmark`` is the benchmark under the trend overlay (0 when
-    NIFTY 50 is at or below its 200-session mean at ``f``)."""
+                bench: Mapping[int, tuple[float | None, int]], *, history_end: date = HISTORY_END,
+                forward_from: date = FORWARD_FROM) -> list[dict[str, Any]]:
+    """One row per period ``r_k -> r_k+1``. ``trend_benchmark`` is the benchmark under the trend overlay (0 when the
+    market symbol is at or below its 200-session mean at ``f``)."""
     rows = []
     for k in range(len(formations) - 1):
         fm, b = formations[k], formations[k + 1].r
@@ -638,33 +724,38 @@ def period_rows(panel: Panel, formations: Sequence[Formation], sim: SimResult,
         eq_r = sim.close_equity[fm.r]
         rows.append({
             "k": k, "formation": panel.dates[fm.f], "trade": panel.dates[fm.r], "next_trade": panel.dates[b],
-            "sample": FORWARD if panel.dates[fm.f] >= FORWARD_FROM else HISTORY,
+            "sample": sample_label(panel.dates[fm.f], panel.dates[b], history_end=history_end,
+                                   forward_from=forward_from),
             "invested": fm.invest, "universe_n": int(fm.universe.size), "ranked_n": int(fm.ranked.size),
             "bench_n": bn, "equity_before": sim.equity_before[k], "equity_next": sim.equity_before[k + 1],
             "net": net, "benchmark": bm, "e": None if bm is None else net - bm, "trend_on": trend,
             "trend_benchmark": None if bm is None else (bm if trend else 0.0),
-            "nifty50": single_path(panel, INDEX_SYMBOL, fm.r, b),
+            "market": single_path(panel, panel.market, fm.r, b),
             "niftybees": single_path(panel, INDEX_ETF_SYMBOL, fm.r, b),
             "buys": sim.buys[k], "sells": sim.sells[k], "held_after": sim.held_after[k],
             "cash_share_close_r": float(sim.cash[fm.r] / eq_r) if eq_r > 0 else None,
+            "universe_zeroed": zeroed_count(panel, fm.r, b, fm.universe),
+            "held_zeroed": zeroed_count(panel, fm.r, b, sim.held_cols[k]),
         })
     return rows
 
 
 def run_construct(panel: Panel, universes: Mapping[int, np.ndarray], bench: Mapping[int, tuple[float | None, int]],
                   construct: str, *, n: int, cost: Callable[[float], float], overlay: bool = False,
-                  name: str | None = None) -> Run:
+                  name: str | None = None, history_end: date = HISTORY_END,
+                  forward_from: date = FORWARD_FROM) -> Run:
     fms = build_formations(panel, universes, construct, overlay=overlay)
     sim = simulate(panel, fms, n=n, cost=cost)
-    return Run(name or construct, fms, sim, period_rows(panel, fms, sim, bench))
+    return Run(name or construct, fms, sim,
+               period_rows(panel, fms, sim, bench, history_end=history_end, forward_from=forward_from))
 
 
-def summary(panel: Panel, run: Run, sample: str = HISTORY, *,
+def summary(panel: Panel, run: Run, samples: Sequence[str] = (HISTORY,), *,
             bench_key: str = "benchmark") -> dict[str, Any]:
-    """Descriptive statistics of ``run`` over the periods of ``sample`` with a benchmark."""
-    rows = [p for p in run.periods if p["sample"] == sample and p[bench_key] is not None]
+    """Descriptive statistics of ``run`` over the periods labelled one of ``samples`` with a benchmark."""
+    rows = [p for p in run.periods if p["sample"] in samples and p[bench_key] is not None]
     out: dict[str, Any] = {"periods": len(rows), "periods_without_benchmark":
-                           sum(p["sample"] == sample and p[bench_key] is None for p in run.periods)}
+                           sum(p["sample"] in samples and p[bench_key] is None for p in run.periods)}
     if not rows:
         return out
     net = [p["net"] for p in rows]
@@ -699,7 +790,7 @@ def summary(panel: Panel, run: Run, sample: str = HISTORY, *,
 
 
 def forward_block(panel: Panel, run: Run) -> dict[str, Any]:
-    s = summary(panel, run, FORWARD)
+    s = summary(panel, run, (FORWARD,))
     return {"label": None, "note": f"no label before {FORWARD_MIN_PERIODS} forward periods", **{
         k: s.get(k) for k in ("periods", "mean_net", "mean_benchmark", "mean_e", "median_e", "compounded_net",
                               "compounded_benchmark")}}
@@ -716,65 +807,118 @@ def benchmarks(panel: Panel, universes: Mapping[int, np.ndarray]) -> dict[int, t
     return out
 
 
-def counts_doc(panel: Panel) -> dict[str, Any]:
-    """Outcome-free facts only: no return, score or portfolio is computed."""
+def zeroed_by_year(panel: Panel, universes: Mapping[int, np.ndarray]) -> dict[str, dict[str, int]]:
+    """Per calendar year, among the universe in force on each session (formation k's from ``r_k`` to the session
+    before ``r_k+1``; the last formation's to the final session): the clean returns, those zeroed as structural and as
+    jump, and the unzeroed ones in ``[DROP_LO, DROP_HI]``. Counts only."""
+    fs = sorted(universes)
+    years = np.array([d.year for d in panel.dates])
+    keys = ("returns", "zeroed_structural", "zeroed_jump", "unzeroed_minus35_to_minus15")
+    out: dict[str, dict[str, int]] = {}
+    for i, f in enumerate(fs):
+        a = f + 1
+        b = fs[i + 1] + 1 if i + 1 < len(fs) else panel.n_sessions
+        cols = np.asarray(universes[f], dtype=np.int64)
+        if cols.size == 0 or a >= b:
+            continue
+        zs, zj, r = panel.zero_struct[a:b][:, cols], panel.zero_jump[a:b][:, cols], panel.R[a:b][:, cols]
+        with _quiet():
+            drop = ~zs & ~zj & (r >= DROP_LO) & (r <= DROP_HI)
+        per_row = {"returns": np.isfinite(r).sum(axis=1), "zeroed_structural": zs.sum(axis=1),
+                   "zeroed_jump": zj.sum(axis=1), "unzeroed_minus35_to_minus15": drop.sum(axis=1)}
+        ys = years[a:b]
+        for y in np.unique(ys):
+            row = out.setdefault(str(int(y)), dict.fromkeys(keys, 0))
+            for key in keys:
+                row[key] += int(per_row[key][ys == y].sum())
+    return dict(sorted(out.items()))
+
+
+def counts_doc(panel: Panel, *, history_end: date = HISTORY_END, forward_from: date = FORWARD_FROM,
+               list_universe: Sequence[date] = ()) -> dict[str, Any]:
+    """Outcome-free facts only: no return, score or portfolio is computed. ``list_universe``: for each date, the
+    formation on or before it and its universe symbols in liquidity order (names only)."""
     fs = formation_indices(panel)
     per = []
     funnel: dict[str, int] = {}
-    for f in fs:
+    universes: dict[int, np.ndarray] = {}
+    for i, f in enumerate(fs):
         u, funnel = universe_at(panel, f, UNIVERSE_SIZE)
+        universes[f] = u
+        sample = ("no period" if i + 1 == len(fs) else
+                  sample_label(panel.dates[f], panel.dates[fs[i + 1] + 1], history_end=history_end,
+                               forward_from=forward_from))
         per.append({"formation": panel.dates[f], "trade": panel.dates[f + 1], "universe": int(u.size),
-                    "eligible": funnel["eligible"],
-                    "sample": FORWARD if panel.dates[f] >= FORWARD_FROM else HISTORY})
+                    "eligible": funnel["eligible"], "sample": sample})
     stocks_per_session = panel.present[:, panel.stock].sum(axis=1)
     thin = [panel.dates[i] for i in np.flatnonzero(stocks_per_session < THIN_SESSION_STOCKS)]
+    listed = []
+    for d in list_universe:
+        f = max((f for f in fs if panel.dates[f] <= d), default=None)
+        listed.append({"date": d, "formation": None if f is None else panel.dates[f],
+                       "symbols": [] if f is None else [panel.symbols[j] for j in universes[f]]})
     return {
         "sessions": panel.n_sessions, "first_session": panel.dates[0], "last_session": panel.dates[-1],
+        "session_rule": panel.session_rule, "market_symbol": panel.market,
         "symbols": len(panel.symbols), "stock_symbols": int(panel.stock.sum()),
-        "formations": per, "history_periods_possible": sum(p["sample"] == HISTORY for p in per[:-1]),
+        "history_end": history_end, "forward_from": forward_from,
+        "formations": per, "periods_by_sample": {s: sum(p["sample"] == s for p in per)
+                                                 for s in (HISTORY, BETWEEN, FORWARD)},
         "counters": dict(panel.counts), "off_calendar_dates_inside_range": panel.off_calendar_inside,
         "last_formation_funnel": funnel,
         "thin_sessions": {"threshold_stocks": THIN_SESSION_STOCKS, "count": len(thin), "dates": thin},
+        "zeroed_by_year": zeroed_by_year(panel, universes),
+        "list_universe": listed,
     }
 
 
-def run_study(panel: Panel, *, cm: CostModel) -> dict[str, Any]:
+def run_study(panel: Panel, *, cm: CostModel, history_end: date = HISTORY_END, forward_from: date = FORWARD_FROM,
+              family_n: int = FAMILY_N) -> dict[str, Any]:
     t0 = time.monotonic()
+    if forward_from <= history_end:
+        raise rc.Refusal(f"forward_from {forward_from} must be after history_end {history_end}")
     fs = formation_indices(panel)
     if not fs:
         raise rc.Refusal(f"no formation: fewer than {WINDOW + 1} sessions before a month-end")
+    alpha = registration_alpha(family_n)
+    labels = {"history_end": history_end, "forward_from": forward_from}
 
     def cost(v: float) -> float:
         return round_trip_cost(cm, v)
 
     uni = {size: {f: universe_at(panel, f, size)[0] for f in fs} for size in (UNIVERSE_SIZE, DIAG_UNIVERSE_SIZE)}
     bench = {size: benchmarks(panel, u) for size, u in uni.items()}
-    main_runs = {c: run_construct(panel, uni[UNIVERSE_SIZE], bench[UNIVERSE_SIZE], c, n=N_NAMES, cost=cost)
+    main_runs = {c: run_construct(panel, uni[UNIVERSE_SIZE], bench[UNIVERSE_SIZE], c, n=N_NAMES, cost=cost, **labels)
                  for c in REGISTERED}
     constructs: dict[str, Any] = {}
     for c, run in main_runs.items():
         hist = [p for p in run.periods if p["sample"] == HISTORY and p["e"] is not None]
         constructs[c] = {
-            "verdict": verdict([p["e"] for p in hist], [p["net"] for p in hist]),
+            "verdict": verdict([p["e"] for p in hist], [p["net"] for p in hist], alpha=alpha),
             "summary": summary(panel, run),
             "forward": forward_block(panel, run),
             "counters": run.sim.counts,
             "periods": run.periods,
         }
+        if any(p["sample"] == BETWEEN for p in run.periods):
+            constructs[c]["between"] = {"label": DECIDES_NOTHING, **summary(panel, run, (BETWEEN,))}
+            constructs[c]["pooled"] = {"label": DECIDES_NOTHING, **summary(panel, run, (HISTORY, BETWEEN))}
 
     diag_runs: list[tuple[Run, dict[str, Any]]] = []
     for c in REGISTERED:
         for n in DIAG_N:
             diag_runs.append((run_construct(panel, uni[UNIVERSE_SIZE], bench[UNIVERSE_SIZE], c, n=n, cost=cost,
-                                            name=f"{c} n={n}"), {"construct": c, "n": n, "universe": UNIVERSE_SIZE}))
+                                            name=f"{c} n={n}", **labels),
+                              {"construct": c, "n": n, "universe": UNIVERSE_SIZE}))
     for c in REGISTERED:
         diag_runs.append((run_construct(panel, uni[DIAG_UNIVERSE_SIZE], bench[DIAG_UNIVERSE_SIZE], c, n=N_NAMES,
-                                        cost=cost, name=f"{c} universe={DIAG_UNIVERSE_SIZE}"),
+                                        cost=cost, name=f"{c} universe={DIAG_UNIVERSE_SIZE}", **labels),
                           {"construct": c, "n": N_NAMES, "universe": DIAG_UNIVERSE_SIZE}))
     for c, label in (("mom6_1", "momentum 6-1 / sigma"), ("mom12_1_raw", "momentum 12-1 without sigma"),
                      ("mom20", "engine mom control (20-session return)"), ("hi52", "52-week-high proximity")):
         diag_runs.append((run_construct(panel, uni[UNIVERSE_SIZE], bench[UNIVERSE_SIZE], c, n=N_NAMES, cost=cost,
-                                        name=label), {"construct": c, "n": N_NAMES, "universe": UNIVERSE_SIZE}))
+                                        name=label, **labels),
+                          {"construct": c, "n": N_NAMES, "universe": UNIVERSE_SIZE}))
     diagnostics: dict[str, Any] = {"label": DECIDES_NOTHING, "runs": {}}
     for run, params in diag_runs:
         diagnostics["runs"][run.name] = {**params, "summary": summary(panel, run), "counters": run.sim.counts}
@@ -782,7 +926,7 @@ def run_study(panel: Panel, *, cm: CostModel) -> dict[str, Any]:
     trend: dict[str, Any] = {}
     for c in REGISTERED:
         run = run_construct(panel, uni[UNIVERSE_SIZE], bench[UNIVERSE_SIZE], c, n=N_NAMES, cost=cost, overlay=True,
-                            name=f"{c} trend overlay")
+                            name=f"{c} trend overlay", **labels)
         trend[run.name] = {"summary": summary(panel, run),
                            "summary_vs_trend_benchmark": summary(panel, run, bench_key="trend_benchmark"),
                            "counters": run.sim.counts}
@@ -806,14 +950,16 @@ def run_study(panel: Panel, *, cm: CostModel) -> dict[str, Any]:
             if v is not None:
                 vals.append(v)
         pct[c] = {"periods": len(vals), "mean_percentile": _mean(vals), "periods_above_50": sum(v > 0.5 for v in vals)}
-    diagnostics["random_draw_percentile"] = pct
+    diagnostics["top_ranked_random_draw_percentile"] = pct
 
     return {
         "meta": {
             "script": "scripts/factor_portfolio_study.py", "registration": f"factor portfolio, registered {REGISTERED_ON}",
-            "family": FAMILY, "family_n": FAMILY_N, "alpha": ALPHA,
+            "family": FAMILY, "family_n": family_n, "alpha": alpha,
             "generated_at": datetime.now(IST).isoformat(timespec="seconds"),
-            "sessions": {"n": panel.n_sessions, "first": panel.dates[0], "last": panel.dates[-1]},
+            "sessions": {"n": panel.n_sessions, "first": panel.dates[0], "last": panel.dates[-1],
+                         "rule": panel.session_rule},
+            "market_symbol": panel.market,
             "formations": len(fs), "first_formation": panel.dates[fs[0]], "last_formation": panel.dates[fs[-1]],
             "params": {
                 "capital_inr": CAPITAL, "names": N_NAMES, "hold_band": 2 * N_NAMES, "universe_size": UNIVERSE_SIZE,
@@ -821,18 +967,21 @@ def run_study(panel: Panel, *, cm: CostModel) -> dict[str, Any]:
                 "momentum": f"returns f-{MOM12_FROM}..f-{MOM_SKIP} / sigma", "jump_limit": JUMP_LIMIT,
                 "deferred_sale_sessions": DEFERRED_SALE_SESSIONS, "product": PRODUCT, "z_clip": Z_CLIP,
                 "min_periods": MIN_PERIODS, "boot_block": BOOT_BLOCK, "boot_draws": BOOT_DRAWS, "seed": SEED,
-                "trim_best": TRIM_BEST, "random_draws": RANDOM_DRAWS, "forward_from": FORWARD_FROM,
+                "nw_lags": NW_LAGS, "trim_best": TRIM_BEST, "random_draws": RANDOM_DRAWS,
+                "history_end": history_end, "forward_from": forward_from,
                 "trend_sessions": TREND_SESSIONS, "diag_n": list(DIAG_N), "diag_universe_size": DIAG_UNIVERSE_SIZE,
                 "cost_spread_pct": float(cm.spread_pct),
             },
             "data_counters": dict(panel.counts),
+            "zeroed_by_year": zeroed_by_year(panel, uni[UNIVERSE_SIZE]),
             "runtime_seconds": round(time.monotonic() - t0, 1),
         },
         "constructs": constructs,
         "diagnostics": diagnostics,
         "notes": [
-            "Verdicts read the history sample only; the forward sample carries no label before "
-            f"{FORWARD_MIN_PERIODS} periods.",
+            f"Verdicts read the history sample only (periods ending on or before {history_end}); periods ending later "
+            f"but formed before {forward_from} are 'between' and decide nothing; the forward sample carries no label "
+            f"before {FORWARD_MIN_PERIODS} periods.",
             "Known optimism: fills at the open assume it is reachable; a delisted holding closes at its last value; "
             "names under surveillance are included; the spread is the cost file's single figure.",
             "Diagnostics decide nothing.",
@@ -859,18 +1008,27 @@ def _f(v: Any, spec: str = "+.4f") -> str:
 
 def render_counts(doc: Mapping[str, Any]) -> str:
     out = ["FACTOR PORTFOLIO STUDY: COUNTS ONLY (no returns, scores or portfolios computed)",
-           f"sessions {doc['sessions']}  {doc['first_session']} -> {doc['last_session']}  symbols "
-           f"{doc['symbols']} (stocks by name rule {doc['stock_symbols']})",
+           f"sessions {doc['sessions']}  {doc['first_session']} -> {doc['last_session']}  ({doc['session_rule']})  "
+           f"symbols {doc['symbols']} (stocks by name rule {doc['stock_symbols']})  market symbol "
+           f"{doc['market_symbol']}",
            f"data counters {doc['counters']}",
-           f"bar dates without a {INDEX_SYMBOL} bar inside the session range: "
+           "bar dates off the session calendar inside its range: "
            f"{[str(d) for d in doc['off_calendar_dates_inside_range']]}",
            f"thin sessions (< {doc['thin_sessions']['threshold_stocks']} stocks with a bar): "
            f"{doc['thin_sessions']['count']} {[str(d) for d in doc['thin_sessions']['dates']]}",
-           f"formations {len(doc['formations'])}; history periods possible {doc['history_periods_possible']}",
+           f"formations {len(doc['formations'])}; periods by sample {doc['periods_by_sample']} (history ends on or "
+           f"before {doc['history_end']}; forward formed from {doc['forward_from']})",
            "  formation   trade       universe  eligible  sample"]
     out += [f"  {p['formation']}  {p['trade']}  {p['universe']:>8}  {p['eligible']:>8}  {p['sample']}"
             for p in doc["formations"]]
     out.append(f"last formation funnel (each rule counted after the earlier ones): {doc['last_formation_funnel']}")
+    out.append("per year, universe in force: counts of (returns, zeroed structural, zeroed jump, unzeroed in "
+               f"[{DROP_LO}, {DROP_HI}])")
+    out += [f"  {y}  {r['returns']:>8}  {r['zeroed_structural']:>5}  {r['zeroed_jump']:>5}  "
+            f"{r['unzeroed_minus35_to_minus15']:>5}" for y, r in doc["zeroed_by_year"].items()]
+    for item in doc["list_universe"]:
+        out.append(f"universe in force on {item['date']}: formation {item['formation']}, {len(item['symbols'])} names")
+        out += [f"  {', '.join(item['symbols'][i:i + 10])}" for i in range(0, len(item["symbols"]), 10)]
     return rc.ascii_text("\n".join(out))
 
 
@@ -891,7 +1049,10 @@ def render_text(doc: Mapping[str, Any]) -> str:
     out = [f"FACTOR PORTFOLIO STUDY ({m['registration']}, {m['family']}, N={m['family_n']}, alpha {m['alpha']:.6f})",
            f"sessions {m['sessions']['n']}  {m['sessions']['first']} -> {m['sessions']['last']}  formations "
            f"{m['formations']} ({m['first_formation']} -> {m['last_formation']})",
-           f"data counters {m['data_counters']}", ""]
+           f"sessions rule: {m['sessions']['rule']}; market symbol {m['market_symbol']}; history ends on or before "
+           f"{m['params']['history_end']}; forward formed from {m['params']['forward_from']}",
+           f"data counters {m['data_counters']}",
+           f"per-year counts in the universe in force: {m['zeroed_by_year']}", ""]
     for c, b in doc["constructs"].items():
         v = b["verdict"]
         out.append(f"[{c}] VERDICT {v['label'].upper()}")
@@ -901,13 +1062,17 @@ def render_text(doc: Mapping[str, Any]) -> str:
         out += [_SUM_HDR, _summary_line(c, b["summary"])]
         out.append("  by year: " + "; ".join(f"{y} K={r['periods']} net {_f(r['net'])} bm {_f(r['benchmark'])}"
                                              for y, r in b["summary"].get("by_year", {}).items()))
+        for key in ("between", "pooled"):
+            if key in b:
+                out.append(_summary_line(f"{c} {key} ({DECIDES_NOTHING})", b[key]))
         out.append(f"  forward: {b['forward']}")
         out.append(f"  counters {b['counters']}")
-        out.append("    k  formation   trade       next        sample    net       bm        e         nifty50   "
-                   "bees      buys sells held")
+        out.append("    k  formation   trade       next        sample    net       bm        e         market    "
+                   "bees      buys sells held  u0  h0")
         out += [f"  {p['k']:>3}  {p['formation']}  {p['trade']}  {p['next_trade']}  {p['sample']:<8} "
-                f"{_f(p['net']):>9} {_f(p['benchmark']):>9} {_f(p['e']):>9} {_f(p['nifty50']):>9} "
-                f"{_f(p['niftybees']):>9} {p['buys']:>4} {p['sells']:>5} {p['held_after']:>4}" for p in b["periods"]]
+                f"{_f(p['net']):>9} {_f(p['benchmark']):>9} {_f(p['e']):>9} {_f(p['market']):>9} "
+                f"{_f(p['niftybees']):>9} {p['buys']:>4} {p['sells']:>5} {p['held_after']:>4} "
+                f"{p['universe_zeroed']:>3} {p['held_zeroed']:>3}" for p in b["periods"]]
         out.append("")
     d = doc["diagnostics"]
     out += [f"DIAGNOSTICS ({d['label']})", _SUM_HDR]
@@ -918,7 +1083,7 @@ def render_text(doc: Mapping[str, Any]) -> str:
             out.append(_summary_line(name + " vs trend bm", r["summary_vs_trend_benchmark"]))
         else:
             out.append(f"  {name}: {r}")
-    out.append(f"  random-draw percentile: {d['random_draw_percentile']}")
+    out.append(f"  top-ranked names vs random draws, percentile: {d['top_ranked_random_draw_percentile']}")
     out += [""] + list(doc["notes"])
     return rc.ascii_text("\n".join(out))
 
@@ -932,6 +1097,25 @@ def _as_of(text: str) -> date:
     return date.fromisoformat(text)
 
 
+@dataclass(frozen=True)
+class ExcludeList:
+    path: str
+    sha256: str
+    symbols: frozenset[str]
+
+
+def load_exclude_list(path: Path) -> ExcludeList:
+    """One symbol per line; ``#`` starts a comment; blank lines ignored; symbols upper-cased. Unreadable REFUSES."""
+    p = Path(path)
+    try:
+        raw = p.read_bytes()
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise rc.Refusal(f"exclusion list unreadable: {p} ({type(exc).__name__}: {exc})") from exc
+    syms = frozenset(s for s in (line.split("#", 1)[0].strip().upper() for line in text.splitlines()) if s)
+    return ExcludeList(str(p), hashlib.sha256(raw).hexdigest(), syms)
+
+
 def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     ap = argparse.ArgumentParser(prog="factor_portfolio_study", description=__doc__.splitlines()[0])
     ap.add_argument("--db", type=Path, default=repo_root() / DEFAULT_DB_REL, help="whole-market research snapshot")
@@ -940,31 +1124,65 @@ def main(argv: list[str] | None = None, *, now: datetime | None = None) -> int:
     ap.add_argument("--out", type=Path, default=None, help="JSON path; the .md is written beside it")
     ap.add_argument("--counts-only", action="store_true",
                     help="outcome-free facts: sessions, formations, universe sizes, counters; nothing written")
+    ap.add_argument("--session-min-symbols", type=int, default=None,
+                    help=f"sessions = dates on which at least N symbols have a bar (default: dates with a "
+                         f"{INDEX_SYMBOL} bar)")
+    ap.add_argument("--market-symbol", default=INDEX_SYMBOL,
+                    help="symbol of the trend flag and the first information column")
+    ap.add_argument("--history-end", type=_as_of, default=HISTORY_END,
+                    help="YYYY-MM-DD: a period is history iff it ends on or before it")
+    ap.add_argument("--forward-from", type=_as_of, default=FORWARD_FROM,
+                    help="YYYY-MM-DD: a period is forward iff formed on or after it")
+    ap.add_argument("--family-n", type=int, default=FAMILY_N, help="trials in the family: alpha = 0.05 / N")
+    ap.add_argument("--exclude-symbols", type=Path, default=None,
+                    help="file of symbols failing the name rule (one per line, # comments)")
+    ap.add_argument("--list-universe", default=None,
+                    help="with --counts-only: D1,D2,... list the universe in force on each date (names only)")
+    ap.add_argument("--tag", default=None, help="default report name factor_portfolio_<TAG>_<date>.json")
     args = ap.parse_args(argv)
     try:
+        if args.list_universe and not args.counts_only:
+            raise rc.Refusal("--list-universe is a --counts-only option")
+        if args.forward_from <= args.history_end:
+            raise rc.Refusal(f"--forward-from {args.forward_from} must be after --history-end {args.history_end}")
+        if args.family_n < 1:
+            raise rc.Refusal(f"--family-n must be >= 1, got {args.family_n}")
+        if args.session_min_symbols is not None and args.session_min_symbols < 1:
+            raise rc.Refusal(f"--session-min-symbols must be >= 1, got {args.session_min_symbols}")
+        try:
+            listed = [date.fromisoformat(s.strip()) for s in (args.list_universe or "").split(",") if s.strip()]
+        except ValueError as exc:
+            raise rc.Refusal(f"--list-universe: {exc}") from exc
         if not args.counts_only and (reason := rc.market_hours_refusal(now)):
             raise rc.Refusal(reason)
         etf = hv.load_etf_list(args.etf_list)
+        excl = load_exclude_list(args.exclude_symbols) if args.exclude_symbols else None
         conn = rc.open_snapshot(args.db)
         try:
             bars = load_bars(conn, args.as_of)
             structural = bb.load_structural_ex_dates(conn)
         finally:
             conn.close()
-        panel = build_panel(bars, structural, etf.symbols)
+        panel = build_panel(bars, structural, etf.symbols, session_min_symbols=args.session_min_symbols,
+                            market_symbol=args.market_symbol, exclude=None if excl is None else excl.symbols)
         del bars
         if args.counts_only:
-            print(render_counts(counts_doc(panel)))
+            print(render_counts(counts_doc(panel, history_end=args.history_end, forward_from=args.forward_from,
+                                           list_universe=listed)))
             return 0
-        doc = run_study(panel, cm=CostModel.from_config())
+        doc = run_study(panel, cm=CostModel.from_config(), history_end=args.history_end,
+                        forward_from=args.forward_from, family_n=args.family_n)
     except rc.Refusal as exc:
         print(f"factor_portfolio_study: REFUSED: {rc.ascii_text(str(exc))}", file=sys.stderr)
         return 2
-    doc["meta"].update({"db": str(args.db), "as_of": args.as_of or panel.dates[-1],
-                        "etf_list": {"path": etf.path, "sha256": etf.sha256}})
+    doc["meta"].update({"db": str(args.db), "as_of": args.as_of or panel.dates[-1], "tag": args.tag,
+                        "etf_list": {"path": etf.path, "sha256": etf.sha256},
+                        "exclude_list": None if excl is None else {"path": excl.path, "sha256": excl.sha256,
+                                                                    "symbols": len(excl.symbols)}})
     doc = _clean(doc)
-    tag = (args.as_of or panel.dates[-1]).isoformat()
-    out = args.out or rc.default_out(args.db, "factor_portfolio").with_name(f"factor_portfolio_{tag}.json")
+    stamp = (args.as_of or panel.dates[-1]).isoformat()
+    name = f"factor_portfolio_{args.tag}_{stamp}.json" if args.tag else f"factor_portfolio_{stamp}.json"
+    out = args.out or rc.default_out(args.db, "factor_portfolio").with_name(name)
     md = rc.write_reports(doc, render_markdown(doc), out)
     print(render_text(doc))
     print(f"JSON -> {out}\nMD   -> {md}")

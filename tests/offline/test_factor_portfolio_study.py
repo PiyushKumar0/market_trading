@@ -42,8 +42,8 @@ def _weekdays(start: date, n: int) -> list[date]:
 
 
 def _frame(dates: list[date], series: dict[str, dict]) -> pd.DataFrame:
-    """``series``: symbol -> {"open", "close", optional "high", "volume", "absent" (session indices)}; NIFTY 50 is
-    added flat at 20,000 on every date unless given."""
+    """``series``: symbol -> {"open", "close", optional "high", "low", "volume", "absent" (session indices)}; NIFTY 50
+    is added flat at 20,000 on every date unless given."""
     series = {"NIFTY 50": {"open": 20_000.0, "close": 20_000.0}, **series}
     rows = []
     for sym, s in series.items():
@@ -51,10 +51,11 @@ def _frame(dates: list[date], series: dict[str, dict]) -> pd.DataFrame:
         o = np.broadcast_to(np.asarray(s["open"], dtype=float), (n,))
         c = np.broadcast_to(np.asarray(s["close"], dtype=float), (n,))
         h = np.broadcast_to(np.asarray(s.get("high", np.maximum(o, c)), dtype=float), (n,))
+        lo = np.broadcast_to(np.asarray(s.get("low", np.minimum(o, c) * 0.99), dtype=float), (n,))
         v = np.broadcast_to(np.asarray(s.get("volume", 100_000.0), dtype=float), (n,))
         absent = set(s.get("absent", ()))
-        rows += [(sym, d, o[i], h[i], c[i], v[i]) for i, d in enumerate(dates) if i not in absent]
-    return pd.DataFrame(rows, columns=["symbol", "d", "open", "high", "close", "volume"])
+        rows += [(sym, d, o[i], h[i], lo[i], c[i], v[i]) for i, d in enumerate(dates) if i not in absent]
+    return pd.DataFrame(rows, columns=["symbol", "d", "open", "high", "low", "close", "volume"])
 
 
 def _panel(dates, series, structural=None, etf=frozenset()):
@@ -110,8 +111,8 @@ def test_structural_ex_date_and_unexplained_jump_are_zeroed():
 def test_bars_off_the_index_calendar_are_dropped_and_listed():
     dates = _weekdays(date(2024, 1, 1), 10)
     frame = _frame(dates, {"A": {"open": 100.0, "close": 100.0}})
-    extra = pd.DataFrame([("A", date(2024, 1, 6), 300.0, 300.0, 300.0, 1.0),
-                          ("A", date(2023, 12, 29), 300.0, 300.0, 300.0, 1.0)], columns=frame.columns)
+    extra = pd.DataFrame([("A", date(2024, 1, 6), 300.0, 300.0, 300.0, 300.0, 1.0),
+                          ("A", date(2023, 12, 29), 300.0, 300.0, 300.0, 300.0, 1.0)], columns=frame.columns)
     p = fps.build_panel(pd.concat([frame, extra], ignore_index=True), {}, frozenset())
     assert p.n_sessions == 10 and p.off_calendar_inside == [date(2024, 1, 6)]
     assert p.counts["off_calendar_rows"] == 2 and p.counts["off_calendar_dates_inside_range"] == 1
@@ -364,7 +365,6 @@ def test_verdict_labels():
 # ----------------------------------------------------------------------------- CLI end to end
 def _write_db(path: Path, dates: list[date], series: dict[str, dict], corp: list[tuple]) -> None:
     frame = _frame(dates, series)
-    frame["low"] = frame[["open", "close"]].min(axis=1)
     frame["volume"] = frame["volume"].astype("int64")
     frame["src"] = "synthetic"
     con = duckdb.connect(str(path))
@@ -381,19 +381,25 @@ def _write_db(path: Path, dates: list[date], series: dict[str, dict], corp: list
         con.close()
 
 
-@pytest.fixture(scope="module")
-def synthetic_db(tmp_path_factory) -> tuple[Path, Path, list[date]]:
-    root = tmp_path_factory.mktemp("fps")
+def _build_synthetic(root: Path) -> tuple[Path, Path, list[date]]:
     dates, series = _random_market(420, 40, seed=11)
+    idx = 20_000.0 * np.exp(np.cumsum(np.random.default_rng(12).normal(0.0003, 0.008, len(dates))))
+    series["NIFTY 50"] = {"open": idx, "close": idx}
     series["XBEES"] = {"open": 10.0, "close": 10.0, "volume": 10**8}
-    series["NIFTYBEES"] = {"open": 200.0, "close": 200.0}
-    for s in series.values():
-        s["absent"] = [300]                                            # a session with no stock bars
+    series["NIFTYBEES"] = {"open": idx / 100, "close": idx / 100}
+    for sym, s in series.items():
+        if sym != "NIFTY 50":
+            s["absent"] = [300]                                        # a session with no stock bars
     db = root / "synthetic.duckdb"
     _write_db(db, dates, series, [("S01", dates[350], "split", 2.0, None), ("S02", dates[340], "dividend", None, 5.0)])
     etf = root / "etf.csv"
     etf.write_text("Symbol,Underlying Asset\nNIFTYBEES,Nifty 50\n", encoding="utf-8")
     return db, etf, dates
+
+
+@pytest.fixture(scope="module")
+def synthetic_db(tmp_path_factory) -> tuple[Path, Path, list[date]]:
+    return _build_synthetic(tmp_path_factory.mktemp("fps"))
 
 
 def test_counts_only_prints_no_returns(synthetic_db, capsys, monkeypatch):
@@ -428,7 +434,7 @@ def test_full_run_writes_reports(synthetic_db, tmp_path, capsys):
     for c in fps.REGISTERED:
         b = doc["constructs"][c]
         assert b["verdict"]["label"] == fps.INSUFFICIENT
-        assert len(b["verdict"]["criteria"]) == 7
+        assert [r["id"] for r in b["verdict"]["criteria"]] == [1, 2, 3, 4, "5a", "5b", 6, 7]
         assert b["periods"] and all(p["sample"] == fps.HISTORY for p in b["periods"])
         assert b["verdict"]["values"]["periods"] == len(b["periods"])
         assert b["summary"]["worst_drawdown"] <= 0
@@ -436,7 +442,7 @@ def test_full_run_writes_reports(synthetic_db, tmp_path, capsys):
     assert d["label"] == fps.DECIDES_NOTHING
     assert len(d["runs"]) == 3 * len(fps.DIAG_N) + 3 + 4
     assert "benchmark trend overlay" in d["trend_overlay"]
-    assert set(d["random_draw_percentile"]) == set(fps.REGISTERED)
+    assert set(d["top_ranked_random_draw_percentile"]) == set(fps.REGISTERED)
     assert doc["meta"]["db"] == str(db) and doc["meta"]["alpha"] == pytest.approx(0.05 / 3)
     assert "VERDICT INSUFFICIENT" in capsys.readouterr().out
 
@@ -454,3 +460,339 @@ def test_full_run_refuses_in_market_hours(synthetic_db, capsys):
     db, etf, _ = synthetic_db
     assert fps.main(["--db", str(db), "--etf-list", str(etf)], now=datetime(2026, 11, 12, 10, 0, tzinfo=IST)) == 2
     assert "market hours" in capsys.readouterr().err
+
+
+# ----------------------------------------------------------------------------- review fixes
+def _boundary_panel():
+    """A: a +50% close-to-close return zeroed by the jump rule while its overnight (+25%) and intraday (+20%) legs
+    are not (session 5); a 40% opening gap zeroed while the session's close-to-close +20% is not (8); a structural
+    ex-date with a +10% intraday move (11)."""
+    dates = _weekdays(date(2024, 1, 1), 16)
+    o = np.array([100.0] * 5 + [125.0, 150.0, 150.0] + [210.0, 180.0, 180.0] + [90.0] + [99.0] * 4)
+    c = np.array([100.0] * 5 + [150.0] * 3 + [180.0] * 3 + [99.0] * 5)
+    return dates, {"A": {"open": o, "close": c}}, {"A": [dates[11]]}
+
+
+def test_kept_holding_on_trade_sessions_matches_the_benchmark():
+    dates, series, structural = _boundary_panel()
+    p = _panel(dates, series, structural)
+    a = p.col["A"]
+    assert p.zero_jump[5, a] and not p.on_zeroed[5, a] and not p.er_zeroed[5, a]
+    assert p.on_zeroed[8, a] and not p.zero_jump[8, a] and p.R[8, a] == pytest.approx(0.2)
+    assert p.zero_struct[11, a] and p.ER[11, a] == pytest.approx(1.1)
+    fs = [1, 4, 7, 10, 13]
+    fms = [_fm(p, f, ["A"]) for f in fs]
+    bench = fps.benchmarks(p, {f: fm.universe for f, fm in zip(fs, fms, strict=True)})
+    sim = fps.simulate(p, fms, n=1, cost=_free, capital=1000.0)
+    rows = fps.period_rows(p, fms, sim, bench)
+    assert len(rows) == 4 and sim.buys == [1, 0, 0, 0, 0]
+    for r in rows:
+        assert r["e"] == pytest.approx(0.0, abs=1e-12)
+    assert [r["universe_zeroed"] for r in rows] == [0, 1, 0, 1]   # sessions r_k .. r_k+1 - 1
+    assert [r["held_zeroed"] for r in rows] == [0, 1, 0, 1]
+
+
+def test_zeroed_counters_split_universe_and_held():
+    dates, series, structural = _boundary_panel()
+    b = np.array([100.0] * 6 + [150.0] * 10)                         # +50% on session 6
+    p = _panel(dates, {**series, "B": {"open": b, "close": b}}, structural)
+    fms = [_fm(p, f, ["A", "B"]) for f in (1, 4, 7)]
+    bench = fps.benchmarks(p, {fm.f: fm.universe for fm in fms})
+    rows = fps.period_rows(p, fms, fps.simulate(p, fms, n=1, cost=_free, capital=1000.0), bench)
+    assert rows[1]["universe_zeroed"] == 2 and rows[1]["held_zeroed"] == 1
+
+
+def _hand_hac(e: list[float], lags: int) -> tuple[float, float, float]:
+    K = len(e)
+    m = sum(e) / K
+    d = [x - m for x in e]
+    L = min(lags, K - 1)
+    gam = [sum(d[t] * d[t - lag] for t in range(lag, K)) / K for lag in range(L + 1)]
+    hac = gam[0] + 2 * sum((1 - lag / (L + 1)) * gam[lag] for lag in range(1, L + 1))
+    var = sum(x * x for x in d) / (K - 1)
+    se = math.sqrt(max(hac, var) / K)
+    t = m / se
+    from scipy.stats import t as student_t
+    return t, se, float(student_t.sf(t, K - 1))
+
+
+def test_newey_west_t_test_matches_a_hand_computation():
+    e = [0.01, 0.03, -0.02, 0.04, 0.0, 0.02]
+    got = fps.hac_t(e)
+    t, se, p = _hand_hac(e, 3)
+    assert got["lags"] == 3 and got["t"] == pytest.approx(t) and got["se"] == pytest.approx(se)
+    assert got["p"] == pytest.approx(p)
+    assert fps.hac_t([0.01, 0.02, 0.04])["lags"] == 2                  # K - 1 lags at most
+    assert fps.hac_t([0.01])["p"] is None
+
+
+def test_newey_west_floor_applies_on_negative_autocorrelation():
+    e = [0.02, -0.01] * 10
+    got = fps.hac_t(e)
+    assert got["hac_variance"] < got["sample_variance"]
+    assert got["se"] == pytest.approx(math.sqrt(got["sample_variance"] / 20))
+
+
+def test_verdict_needs_both_tests(monkeypatch):
+    good = list(0.02 + np.random.default_rng(5).uniform(0, 0.01, 40))
+    assert fps.verdict(good, [0.01] * 40)["label"] == fps.SUPPORTED
+    monkeypatch.setattr(fps, "hac_t", lambda e: {"t": 0.1, "se": 1.0, "p": 0.4, "lags": 3})
+    v = fps.verdict(good, [0.01] * 40)
+    assert v["label"] == fps.NULL and [r["id"] for r in v["criteria"] if not r["pass"]] == ["5b"]
+    monkeypatch.undo()
+    monkeypatch.setattr(fps, "bootstrap_p", lambda e, seed=fps.SEED: 0.5)
+    v = fps.verdict(good, [0.01] * 40)
+    assert v["label"] == fps.NULL and [r["id"] for r in v["criteria"] if not r["pass"]] == ["5a"]
+    assert v["values"]["t_p"] < fps.ALPHA and v["values"]["t_lags"] == 3
+
+
+def test_sample_labels_history_between_forward():
+    he, ff = date(2026, 11, 9), date(2026, 11, 30)
+    assert fps.sample_label(date(2026, 9, 30), date(2026, 11, 2), history_end=he, forward_from=ff) == fps.HISTORY
+    assert fps.sample_label(date(2026, 9, 30), he, history_end=he, forward_from=ff) == fps.HISTORY
+    assert fps.sample_label(date(2026, 10, 30), date(2026, 12, 1), history_end=he, forward_from=ff) == fps.BETWEEN
+    assert fps.sample_label(date(2026, 11, 30), date(2027, 1, 1), history_end=he, forward_from=ff) == fps.FORWARD
+    assert fps.sample_label(date(2026, 10, 30), date(2026, 12, 1)) == fps.BETWEEN    # registered defaults
+
+
+def test_sale_at_previous_value_on_ex_date_and_gap():
+    dates = _weekdays(date(2024, 1, 1), 8)
+    a = np.array([100.0] * 5 + [50.0] * 3)                            # split, ex-date on r = 5
+    b = np.array([100.0] * 5 + [160.0] * 3)                           # +60% gap on r = 5, nothing recorded
+    p = _panel(dates, {"A": {"open": a, "close": a}, "B": {"open": b, "close": b}}, {"A": [dates[5]]})
+    sim = fps.simulate(p, [_fm(p, 1, ["A", "B"]), _fm(p, 4, [], universe=[])], n=2, cost=_free, capital=1000.0)
+    sales = [t for t in sim.trades if t[2] == "sell"]
+    assert [t[3] for t in sales] == [500.0, 500.0]
+    assert sim.counts["sales_at_previous_value"] == 2 and sim.cash[5] == pytest.approx(1000.0)
+
+
+def test_entry_ratio_zeroing_and_locked_buy_counter():
+    dates = _weekdays(date(2024, 1, 1), 6)
+    a_open = np.array([100.0] * 6)
+    a_close = np.array([100.0, 100.0, 150.0, 150.0, 150.0, 150.0])  # +50% open to close on the entry session
+    p = _panel(dates, {"A": {"open": a_open, "close": a_close},
+                       "B": {"open": 100.0, "close": 100.0, "high": 100.0, "low": 100.0}})
+    sim = fps.simulate(p, [_fm(p, 1, ["A", "B"])], n=2, cost=_free, capital=1000.0)
+    assert sim.counts["entry_ratio_zeroed"] == 1 and sim.counts["buys_high_equals_low"] == 1
+    assert sim.close_equity[2] == pytest.approx(1000.0)               # A held at its entry value
+
+
+def test_benchmark_skips_a_name_without_a_bar_and_holds_a_delisting():
+    dates = _weekdays(date(2024, 1, 1), 10)
+    c_close = np.array([100.0, 100.0, 110.0] + [110.0] * 7)
+    p = _panel(dates, {"A": {"open": 100.0, "close": 100.0}, "B": {"open": 100.0, "close": 300.0, "absent": [2]},
+                       "C": {"open": 100.0, "close": c_close, "absent": list(range(4, 10))}})
+    fm = _fm(p, 1, ["A", "B", "C"])
+    bm, n = fps.benchmark(p, fm, 7)
+    assert n == 2 and bm == pytest.approx(0.05)                       # A 0, C +10% then its last value
+
+
+def test_first_formation_index_on_a_constructed_calendar():
+    for start, expect in ((date(2023, 9, 30) - timedelta(days=252), 252),
+                          (date(2023, 9, 30) - timedelta(days=251), 282)):
+        dates = [start + timedelta(days=i) for i in range(320)]
+        p = _panel(dates, {})
+        f = fps.formation_indices(p)[0]
+        assert f == expect and dates[f] in (date(2023, 9, 30), date(2023, 10, 31))
+
+
+def test_universe_bar_count_and_first_bar_boundaries():
+    dates = [date(2023, 1, 11) + timedelta(days=i) for i in range(300)]
+    flat = {"open": 100.0, "close": 100.0}
+    p = _panel(dates, {"FIRST10": {**flat, "absent": list(range(10))},
+                       "FIRST11": {**flat, "absent": list(range(11))},
+                       "IN200": {**flat, "absent": list(range(20, 72))},
+                       "OUT199": {**flat, "absent": list(range(20, 73))}})
+    f = fps.formation_indices(p)[0]
+    assert f == 262 and dates[f] == date(2023, 9, 30)
+    u, funnel = fps.universe_at(p, f, 10)
+    assert {p.symbols[j] for j in u} == {"FIRST10", "IN200"}
+    assert funnel["first_bar_after_f_minus_252"] == 1 and funnel["under_200_bars_in_252"] == 1
+
+
+def test_summary_on_a_hand_computable_path():
+    nan = float("nan")
+    fms = [fps.Formation(0, 0, np.array([], dtype=np.int64), np.array([], dtype=np.int64)),
+           fps.Formation(3, 4, np.array([], dtype=np.int64), np.array([], dtype=np.int64))]
+    sim = fps.SimResult(0, [100.0, 121.0], [0.0, 1.0], [2, 1], [0, 1], [2, 2],
+                        np.array([100.0, 120.0, 90.0, 110.0, nan]), np.array([10.0, 10.0, 10.0, 10.0, nan]),
+                        np.array([2.0, 0.0, 0.0, 0.0, 0.0]))
+    periods = [{"k": 0, "sample": fps.HISTORY, "net": 0.21, "benchmark": 0.1, "trade": date(2024, 1, 1),
+                "next_trade": date(2024, 1, 5)}]
+    s = fps.summary(None, fps.Run("x", fms, sim, periods))
+    path = np.array([100.0, 100.0, 120.0, 90.0, 110.0, 121.0])
+    years = 4 / 252
+    assert s["annualised_return"] == pytest.approx(1.21 ** (1 / years) - 1)
+    assert s["worst_drawdown"] == pytest.approx(-0.25)
+    assert s["cost_share_of_mean_equity_per_year"] == pytest.approx(3.0 / path.mean() / years)
+    assert s["annualised_volatility"] == pytest.approx(np.std(path[1:] / path[:-1] - 1, ddof=1) * math.sqrt(252))
+    assert s["mean_cash_share"] == pytest.approx(np.mean([0.1, 10 / 120, 10 / 90, 10 / 110]))
+    assert s["mean_e"] == pytest.approx(0.11) and s["mean_names_replaced"] is None
+
+
+def test_trend_benchmark_is_zero_in_an_off_period():
+    dates = _weekdays(date(2024, 1, 1), 230)
+    idx = np.concatenate([np.full(215, 20_000.0), np.full(15, 15_000.0)])
+    a = np.array([100.0] * 211 + [110.0] * 19)
+    a_open = np.array([100.0] * 212 + [110.0] * 18)
+    p = _panel(dates, {"NIFTY 50": {"open": idx, "close": idx}, "A": {"open": a_open, "close": a}})
+    fms = [_fm(p, 210, ["A"]), _fm(p, 220, ["A"])]
+    bench = fps.benchmarks(p, {fm.f: fm.universe for fm in fms})
+    row = fps.period_rows(p, fms, fps.simulate(p, fms, n=1, cost=_free, capital=1000.0), bench)[0]
+    assert row["trend_on"] is False and row["benchmark"] == pytest.approx(0.10) and row["trend_benchmark"] == 0.0
+
+
+def test_zeroed_by_year_counts():
+    dates = _weekdays(date(2023, 12, 27), 10)                         # sessions 0-2 in 2023, 3-9 in 2024
+    px = np.array([100.0, 100.0, 100.0, 80.0, 80.0, 40.0, 40.0, 40.0, 40.0, 40.0])
+    p = _panel(dates, {"A": {"open": px, "close": px}}, {"A": [dates[7]]})
+    got = fps.zeroed_by_year(p, {0: np.array([p.col["A"]])})
+    assert got == {"2023": {"returns": 2, "zeroed_structural": 0, "zeroed_jump": 0, "unzeroed_minus35_to_minus15": 0},
+                   "2024": {"returns": 7, "zeroed_structural": 1, "zeroed_jump": 1, "unzeroed_minus35_to_minus15": 1}}
+
+
+# ----------------------------------------------------------------------------- long-history options
+#: Per-period (net, benchmark, e) of the default run on ``_build_synthetic``, recorded after the review fixes and
+#: before the long-history options were added.
+GOLDEN = {
+    "momentum": [(0.06359484083333355, 0.038705090904461656, 0.0248897499288719),
+                 (0.03920945432629086, 0.01661404405361146, 0.0225954102726794),
+                 (-0.012058050324395886, 0.012898213491536335, -0.02495626381593222),
+                 (0.009028030501748052, 0.0078854431125539, 0.001142587389194153),
+                 (0.021471103977850348, 0.024185895209470697, -0.002714791231620349),
+                 (0.02815069426603478, 0.0219064184472728, 0.006244275818761982),
+                 (0.016263708441955238, 0.00798317617061769, 0.008280532271337548)],
+    "lowvol": [(0.020696317500000116, 0.038705090904461656, -0.01800877340446154),
+               (0.0038018335458529506, 0.01661404405361146, -0.01281221050775851),
+               (0.014677816557636003, 0.012898213491536335, 0.0017796030660996685),
+               (0.018541950958669506, 0.0078854431125539, 0.010656507846115607),
+               (0.034344690562877034, 0.024185895209470697, 0.010158795353406337),
+               (0.001973638041594228, 0.0219064184472728, -0.01993278040567857),
+               (0.00704339751590366, 0.00798317617061769, -0.00093977865471403)],
+    "composite": [(0.035531108333333616, 0.038705090904461656, -0.0031739825711280395),
+                  (0.039735684586265974, 0.01661404405361146, 0.023121640532654513),
+                  (0.005738533675370583, 0.012898213491536335, -0.007159679816165752),
+                  (0.026298805389654678, 0.0078854431125539, 0.01841336227710078),
+                  (0.01307931464029255, 0.024185895209470697, -0.011106580569178147),
+                  (0.011014765377872049, 0.0219064184472728, -0.01089165306940075),
+                  (0.0011678406278059494, 0.00798317617061769, -0.0068153355428117405)],
+}
+
+
+def _run(synthetic_db, tmp_path, *extra: str) -> dict:
+    db, etf, _ = synthetic_db
+    out = tmp_path / f"run{len(list(tmp_path.iterdir()))}.json"
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--out", str(out), *extra], now=AFTER_HOURS) == 0
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _gold(doc: dict) -> dict:
+    return {c: [(p["net"], p["benchmark"], p["e"]) for p in doc["constructs"][c]["periods"]] for c in fps.REGISTERED}
+
+
+def test_default_run_matches_the_recorded_periods(synthetic_db, tmp_path):
+    got = _gold(_run(synthetic_db, tmp_path))
+    for c in fps.REGISTERED:
+        assert len(got[c]) == len(GOLDEN[c])
+        for g, want in zip(got[c], GOLDEN[c], strict=True):
+            assert g == pytest.approx(want, rel=1e-12, abs=1e-15)
+    explicit = _gold(_run(synthetic_db, tmp_path, "--market-symbol", "NIFTY 50", "--history-end", "2026-11-09",
+                          "--forward-from", "2026-11-30", "--family-n", "3"))
+    assert explicit == got
+
+
+def test_session_min_symbols_option(synthetic_db, capsys):
+    dates = _weekdays(date(2024, 1, 1), 10)
+    p = fps.build_panel(_frame(dates, {"A": {"open": 1.0, "close": 1.0, "absent": [3]}}), {}, frozenset(),
+                        session_min_symbols=2)
+    assert p.n_sessions == 9 and dates[3] not in p.dates and p.counts["off_calendar_rows"] == 1
+    assert "at least 2 symbols" in p.session_rule
+    db, etf, _ = synthetic_db
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--counts-only", "--session-min-symbols", "30"]) == 0
+    out = capsys.readouterr().out
+    assert "sessions 419 " in out and "at least 30 symbols" in out
+
+
+def test_market_symbol_option(synthetic_db, tmp_path):
+    dates = _weekdays(date(2024, 1, 1), 230)
+    idx = np.concatenate([np.full(215, 20_000.0), np.full(15, 15_000.0)])
+    frame = _frame(dates, {"PROXY": {"open": idx, "close": idx}})
+    assert fps.trend_on(fps.build_panel(frame, {}, frozenset(), market_symbol="PROXY"), 220) is False
+    assert fps.trend_on(fps.build_panel(frame, {}, frozenset(), market_symbol="NONE"), 220) is True
+    doc = _run(synthetic_db, tmp_path, "--market-symbol", "NIFTYBEES")
+    assert doc["meta"]["market_symbol"] == "NIFTYBEES"
+    rows = doc["constructs"]["momentum"]["periods"]
+    assert all(r["market"] == r["niftybees"] and r["market"] is not None for r in rows)
+    doc = _run(synthetic_db, tmp_path, "--market-symbol", "NOPE")
+    assert all(r["market"] is None and r["trend_on"] is True for r in doc["constructs"]["momentum"]["periods"])
+
+
+def test_history_end_and_forward_from_options(synthetic_db, tmp_path):
+    _, _, dates = synthetic_db
+    he, ff = dates[330], dates[350]
+    doc = _run(synthetic_db, tmp_path, "--history-end", str(he), "--forward-from", str(ff))
+    for c in fps.REGISTERED:
+        b = doc["constructs"][c]
+        rows = b["periods"]
+        for r in rows:
+            want = fps.sample_label(date.fromisoformat(r["formation"]), date.fromisoformat(r["next_trade"]),
+                                    history_end=he, forward_from=ff)
+            assert r["sample"] == want
+        n = {s: sum(r["sample"] == s for r in rows) for s in (fps.HISTORY, fps.BETWEEN, fps.FORWARD)}
+        assert n[fps.HISTORY] > 0 and n[fps.BETWEEN] > 0 and n[fps.FORWARD] > 0
+        assert b["verdict"]["values"]["periods"] == n[fps.HISTORY]
+        assert b["between"]["label"] == fps.DECIDES_NOTHING and b["between"]["periods"] == n[fps.BETWEEN]
+        assert b["pooled"]["periods"] == n[fps.HISTORY] + n[fps.BETWEEN]
+        assert b["forward"]["periods"] == n[fps.FORWARD]
+    assert fps.main(["--db", str(synthetic_db[0]), "--etf-list", str(synthetic_db[1]), "--history-end", "2024-05-01",
+                     "--forward-from", "2024-05-01"], now=AFTER_HOURS) == 2
+
+
+def test_family_n_option(synthetic_db, tmp_path):
+    doc = _run(synthetic_db, tmp_path, "--family-n", "6")
+    assert doc["meta"]["family_n"] == 6 and doc["meta"]["alpha"] == pytest.approx(0.05 / 6)
+    assert doc["constructs"]["lowvol"]["verdict"]["values"]["alpha"] == pytest.approx(0.05 / 6)
+
+
+def test_exclude_symbols_option(synthetic_db, tmp_path, capsys):
+    db, etf, _ = synthetic_db
+    lst = tmp_path / "exclude.txt"
+    lst.write_text("S00  # a fund\n# a comment line\n\ns01\n", encoding="utf-8")
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--counts-only", "--exclude-symbols", str(lst)]) == 0
+    assert "'excluded_list': 2" in capsys.readouterr().out
+    doc = _run(synthetic_db, tmp_path, "--exclude-symbols", str(lst))
+    assert doc["meta"]["exclude_list"]["symbols"] == 2 and len(doc["meta"]["exclude_list"]["sha256"]) == 64
+    assert doc["constructs"]["momentum"]["periods"][0]["universe_n"] == 38
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--counts-only", "--exclude-symbols",
+                     str(tmp_path / "missing.txt")]) == 2
+
+
+def test_list_universe_option(synthetic_db, capsys):
+    db, etf, dates = synthetic_db
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--counts-only", "--list-universe",
+                     f"{dates[300]},2020-01-01"]) == 0
+    out = capsys.readouterr().out
+    assert "universe in force on 2020-01-01: formation None, 0 names" in out
+    line = next(ln for ln in out.splitlines() if ln.startswith(f"universe in force on {dates[300]}"))
+    assert line.endswith("40 names")
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--list-universe", str(dates[300])],
+                    now=AFTER_HOURS) == 2
+
+
+def test_zeroed_by_year_in_counts_and_meta(synthetic_db, tmp_path, capsys):
+    db, etf, _ = synthetic_db
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--counts-only"]) == 0
+    out = capsys.readouterr().out
+    assert "per year, universe in force" in out and "\n  2024 " in out
+    doc = _run(synthetic_db, tmp_path)
+    years = doc["meta"]["zeroed_by_year"]
+    assert set(years) == {"2024"} and years["2024"]["zeroed_structural"] == 1   # first trade 2024-01-01; S01 split
+
+
+def test_tag_option(synthetic_db, tmp_path, monkeypatch):
+    db, etf, dates = synthetic_db
+    monkeypatch.setattr(fps.rc, "default_out", lambda db_, prefix: tmp_path / f"{prefix}_unused.json")
+    assert fps.main(["--db", str(db), "--etf-list", str(etf), "--tag", "deep"], now=AFTER_HOURS) == 0
+    assert (tmp_path / f"factor_portfolio_deep_{dates[-1]}.json").exists()
+    assert fps.main(["--db", str(db), "--etf-list", str(etf)], now=AFTER_HOURS) == 0
+    assert (tmp_path / f"factor_portfolio_{dates[-1]}.json").exists()
