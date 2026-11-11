@@ -4,6 +4,37 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-12 03:09 — Deploy: hi52 demoted to shadow, rsi2 and mom parked (owner: "complete control of the system")
+
+- **Why:** the owner asked for a critical review of why the engine makes no profit. Two of its findings were acted on
+  the same night.
+- **hi52 demoted (4cdbaa7).** The engine was stopped at 03:08:28 and `scripts\hi52_forward_verdict.py` read the live
+  store: DEMOTE, n=20, median net T+20 −7.07%, hit 20% (`data\reports\hi52_forward_2026-11-12.json`). hi52 is now in
+  `NO_EDGE_SHADOW_STRATEGIES` and its `expected_edge_pct` key is gone. The seven open hi52 paper positions run to
+  their exit sessions.
+- **rsi2 and mom parked (2b95a45).** rsi2 has no registered edge and no target; mom ships no stop, so every candidate
+  was dropped as unsizeable.
+- **Restart:** started 03:09:03, `engine_ready` 03:09:35, off for 72 s. Selftest all PASS, mode RECOMMEND, risk state
+  NORMAL, protected stores OK. The gate was green on the deployed tree (4,263 passed).
+- **Gate was red before tonight:** `test_kite_connect_construction_sites_are_pinned` had failed since the 11-11 spread
+  probe added a `KiteConnect` site that was not on the pinned list. The probe reads quotes only; it is pinned (23e9be9).
+- **Expect fewer recommendations.** With hi52 shadow, `ins` is the only leg that can recommend until the index regime
+  turns up for brk20 (NIFTY above its 50-session average since 11-02; the average must also be above its value 20
+  sessions earlier, about a week away at current prices).
+- **Rollback:** `git revert 4cdbaa7` (and `2b95a45` for the parks) plus a restart. Re-promoting hi52 is an owner
+  decision under the research bar, not a revert of convenience.
+
+## 2026-11-12 02:45 — Long-history research store started (separate from the live data)
+
+- **What:** `data\research\deep_history\` holds its own `market.duckdb` and `state.db`, created with `MT_DATA_DIR`
+  pointing there. `scripts\backfill_bhavcopy.py --from 2010-01-01 --to 2026-11-09 --pace-s 1.0` fills it from NSE's
+  archive at one request a second. The live engine never opens it, so the download runs with the engine up.
+- **Why:** the engine's own history starts 2022-07, about 39 monthly periods, too few to confirm a portfolio result.
+  The factor portfolio study's long-history sample is registered against this store.
+- **Probe before the run:** the 2010-01-04 and 2015-06-15 daily files parsed with the live parser, and the 2012 and
+  2017 corporate-action windows returned rows.
+- **Resume or check:** COMMANDS "Factor portfolio study". The run is checkpointed and safe to interrupt.
+
 ## 2026-11-11 13:04 — Host sleep on mains power set to Never (owner approved: "Go with the recommended options")
 
 - `powercfg /change standby-timeout-ac 0` on the active scheme, "HP Optimized (Modern Standby)". The AC sleep timeout

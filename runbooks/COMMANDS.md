@@ -483,7 +483,7 @@ never a knob on v1: report the two side by side, never pooled; `fold_pass_min(2)
 Since the 2026-09-12 promotion the v1 path scans `hi52.V1_PARAMS` (the live defaults with the three
 v2 thresholds neutralized) — v1 stays reproducible while the LIVE rule gates on them.
 
-## hi52 forward-test verdict (2026-09-12 promotion) — the kill criterion, engine OFF
+## hi52 forward-test verdict (read DEMOTE 2026-11-12; hi52 is shadow) — engine OFF
 
 ```powershell
 .venv\Scripts\python.exe scripts\hi52_forward_verdict.py                                        # as of today
@@ -503,16 +503,14 @@ drawn-down snapshot anywhere in the window gives a smaller notional and a HIGHER
 only make DEMOTE easier; `--equity` overrides the equity and `--notional` skips the derivation
 outright and prints OVERRIDE, and the derivation prints with the verdict either way, so check which
 notional and floor it used before quoting a number). T+5 and T+10 print as DIAGNOSTICS and are
-labelled on their own rows — only T+20 votes. The registered `hi52.expected_edge_pct` (1.53 since 2026-09-24; 1.47 before) comes
-from the SAME derivation in this script (`registered_edge_pct()`, charged at the `equity_floor_rung`
-book) and a unit test pins the two together, so re-deriving by hand is never necessary.
+labelled on their own rows — only T+20 votes. `registered_edge_pct()` in this script (charged at the
+`equity_floor_rung` book) is the derivation a registered hi52 edge would use; none is registered since the demotion.
 The 2026-09-14 boundary is an
 ASSUMPTION about the deploy date, printed as such — pass `--from` if the change shipped later. **Rule: DEMOTE if n ≥ 20 AND
-(median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** Run it
-at 20 and at 40 signals. A DEMOTE is two edits in one commit:
-re-add `hi52` to `NO_EDGE_SHADOW_STRATEGIES` **and** delete `hi52.expected_edge_pct` from
-`settings.yaml`. First-20-signal outcomes are validation, not income — nothing else moves in
-response to them.
+(median net at T+20 ≤ 0 OR hit rate at T+20 < 50%); HOLD otherwise; INSUFFICIENT below 20.** It read DEMOTE at
+20 signals on 2026-11-12 (`data\reports\hi52_forward_2026-11-12.json`) and both demotion edits are made: `hi52` is in
+`NO_EDGE_SHADOW_STRATEGIES` and `hi52.expected_edge_pct` is gone from `settings.yaml`. The tool still reads the
+shadow population.
 
 ## No-stop verdict (2026-10-15) — read-only, safe with the engine running
 
@@ -703,6 +701,27 @@ whole-file copy, refuses the live store and spends no LLM quota. The verdict run
 # the verdict run. Report: data\reports\swing_timing_<date>.{json,md}
 .venv\Scripts\python.exe scripts\swing_timing_study.py --db data\research\full_market_2026-11-09.duckdb
 ```
+
+## Factor portfolio study (registered 2026-11-12) — research copies; the study runs outside 09:15–15:30
+
+The rules are in the study script's docstring and constants. Nothing here spends LLM quota. The study refuses the live
+store. The long-history store is a separate data directory, so its download runs with the engine up.
+
+```powershell
+# pipeline check with no returns: sessions, formations, universe sizes, zeroed-return counts; writes no report
+.venv\Scripts\python.exe scripts\factor_portfolio_study.py --counts-only
+# the verdict run on the first sample. Report: data\reports\factor_portfolio_<date>.{json,md}
+.venv\Scripts\python.exe scripts\factor_portfolio_study.py
+
+# long-history store: fill (resumable, one request a second, about two hours from empty) and check progress
+$env:MT_DATA_DIR = (Join-Path (Get-Location) "data\research\deep_history")
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2010-01-01 --to 2026-11-09 --pace-s 1.0
+.venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status
+Remove-Item Env:MT_DATA_DIR      # always clear it: the next command in this shell would otherwise read the wrong store
+```
+
+A first-time store needs its empty `market.duckdb` created under the same `MT_DATA_DIR`:
+`.venv\Scripts\python.exe -c "import engine; from engine.core.clock import Clock; from engine.core.config import load_settings; from engine.marketdata.store import MarketStore; MarketStore.from_settings(load_settings(), Clock()).open().close()"`.
 
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 

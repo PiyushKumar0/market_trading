@@ -34,8 +34,6 @@ open questions. Built work is described by the code. When an item here ships, de
 
 ## Pending verdicts and owner decisions
 
-- **hi52 forward test.** Mechanical verdict: `scripts/hi52_forward_verdict.py` (kill rule and pins in the script and
-  `settings.yaml` `hi52`).
 - **Paper no-stop exit test** (hi52, ins, brk20 paper positions carry no stop and exit at session 20). Verdict at the
   pinned looks 20 and 40: `scripts/no_stop_verdict.py`; operation and rollback in RUNBOOK "No-stop exit test". From
   the registration date below, brk20 recs are regime-ON only and use the 5-session retest window, and there is no
@@ -63,9 +61,8 @@ open questions. Built work is described by the code. When an item here ships, de
 - **Waiting on the `cat` v2 verdict (owner, 2026-09-24):** wiring the results line items (`revenue`, `pat`) into the
   News Analyst and the three resolver alias fixes (`engineers`, `dalmia bharat`, `pfizer`) land together right after
   it. Switching the clusterer's `cat.max_event_age_days` from calendar days to sessions is also decided after it.
-- **Exit-geometry study (run 2026-10-07):** every shipped stop turned its strategy's measured edge negative. Owner work:
-  hi52's switch to a 2.5×ATR14 catastrophe stop (its +0.22% median net would not clear the cost check once the edge is
-  re-derived). brk20 and ins came out `neither`: no change.
+- **Exit-geometry study (run 2026-10-07):** every shipped stop turned its strategy's measured edge negative. brk20 and
+  ins came out `neither`: no change. hi52's catastrophe-stop switch lapsed with its demotion.
 - **Regime-filter study (run 2026-10-07):** brk20 `supported`; the 2026 held-out slice contradicts it. From the
   registration date it applies at brk20 origination in the batch sweep (`settings.yaml` `brk20.regime_filter`; `false`
   plus a restart rolls it back), and resting levels are not re-judged. Blocked crossings are journalled in
@@ -161,7 +158,8 @@ deploy after 09:15 IST on 2026-11-09 moves it to 2026-11-11 (11-10 is a holiday)
 
 **Conditional specs (build only on their trigger).**
 - **ADVISORY build** (trigger: the analyst verdict reads ADVISORY).
-  - For hi52 and ins, an analyst no_action or a failed call no longer ends the candidate.
+  - For ins (the one leg with a registered edge since hi52's demotion), an analyst no_action or a failed call no
+    longer ends the candidate.
   - The pipeline builds the proposal deterministically and the gate judges it unchanged. The proposal:
     - enters at MARKET;
     - takes the rule's stop re-anchored at the live mark (`_reanchored_stop`);
