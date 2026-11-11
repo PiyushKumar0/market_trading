@@ -360,8 +360,8 @@ strategy:
     # learner may never move a cap that decides which strategies get evaluated at all].
     # `default` binds any strategy without its own line, and at 16 = 33% of max_candidates_per_day
     # it STRUCTURALLY prevents any single strategy — including one added later — from taking more
-    # than a third of the day's slots. The sub-caps SUM to 63 > 48: the day cap is the aggregate
-    # bound, these decide the MIX.
+    # than a third of the day's slots. With rsi2 and mom parked the live sub-caps sum to 27 < 48,
+    # so the sub-caps bind and the day cap is a backstop for a strategy on the default.
     # If orb is ever re-enabled, cap it near 7 = floor(TTL_INTRADAY_MIN 20 / FORWARD_PACING_MIN 3) + 1,
     # the largest burst the pacing can fully serve (expiry never re-arms the day slot), and diagnose
     # its saturated score (many fires at exactly 1.0, so ranked admission degenerates to emission order) first.
@@ -374,10 +374,16 @@ strategy:
                                  # 0 = admit nothing, charge no slot, one
                                  # prescreen_strategy_disabled line a day, and no arm levels in the
                                  # sweep verdict (a parked strategy can never arm).
-      rsi2: 16
+      rsi2: 0                    # parked, on the orb park's terms: no registered edge and a null
+                                 # target, so the cost gate can pass it only on a target the analyst
+                                 # invents; it failed under next-open fills and the spread. It spent up
+                                 # to 16 analyst forwards a day whenever the index regime was up.
       trend: 0                   # parked: no validated edge; re-enable only behind a
                                  # pre-registered hypothesis, on the orb park's terms.
-      mom: 8
+      mom: 0                     # parked: it ships no stop, so the pipeline drops every candidate as
+                                 # unsizeable before the analyst, and the slot stayed spent. Its rank is
+                                 # a 20-session return over two names; the factor portfolio study tests
+                                 # the diversified 12-month form.
       brk20: 12
       ins: 8                     # a rare, EOD-batch event — ~13-18 fresh
                                  # in-universe filings a day yield few crossings, so this is a

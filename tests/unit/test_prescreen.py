@@ -599,6 +599,16 @@ def test_shipped_settings_park_trend():
     assert caps["default"] >= 1                          # the park is per strategy, not platform-wide
 
 
+def test_shipped_settings_park_rsi2_and_mom():
+    """Neither leg can produce a recommendation: rsi2 has no registered edge and no target, and mom ships no stop."""
+    from engine.core.config import load_settings
+
+    caps = load_settings().strategy.prescreen.max_per_strategy_day
+    assert isinstance(caps, dict)
+    assert caps["rsi2"] == 0
+    assert caps["mom"] == 0
+
+
 # ======================================================================== funnel counters
 def test_funnel_counters_track_raw_published_and_suppressed():
     """Raw (scanner output) vs published (cleared dedupe/caps) tops the funnel."""
