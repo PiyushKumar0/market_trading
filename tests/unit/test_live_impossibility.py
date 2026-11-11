@@ -56,7 +56,8 @@ def test_mutating_kite_methods_are_called_only_in_the_broker_facade_paper_and_om
 @pytest.mark.parametrize(
     ("callee", "sites"),
     [
-        ("KiteConnect", {"src/engine/broker/session.py", "scripts/kite_candle_adjustment_check.py", "scripts/kite_candle_latency_probe.py"}),
+        ("KiteConnect", {"src/engine/broker/session.py", "scripts/kite_candle_adjustment_check.py",
+                         "scripts/kite_candle_latency_probe.py", "scripts/pool_widening_spreads.py"}),
         ("kite_connect", {"src/engine/ops/main.py", "scripts/backfill.py"}),
     ],
 )
