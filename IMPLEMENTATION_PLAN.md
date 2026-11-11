@@ -704,6 +704,24 @@ data, at the account's size and costs. Evidence only; nothing is wired into the 
   - Stated before the run: 39 periods can confirm only an information ratio above about 1.2, and published factor
     premia sit near 0.5, so a true premium most likely reads **null**. The study can refute; it can show the sign,
     the cost drag, the drawdown and the behaviour in 2026; it cannot confirm.
+- **Amended 2026-11-12 after the independent review of the script, before any return was computed:**
+  - The review measured the block bootstrap's false-positive rate at about 3% where it claims 1.7% (39 periods,
+    normal tails). **Supported** now also needs a one-sided t-test of mean e to give p below the same threshold:
+    a Newey–West standard error with 3 lags, never below the ordinary one, and Student's t at K − 1 degrees of
+    freedom. Both tests must pass.
+  - The sample is frozen. A period counts only if it ends on or before 2026-11-09, the copy's last session. The
+    period formed on 2026-10-30 ends after it, so it is reported apart and enters neither a verdict nor the forward
+    reading, on this copy or a later one.
+  - A holding kept through a trade session is valued through that session's open and then its close, the two pieces
+    the benchmark uses. Before the fix the zeroing rules could move e at a period boundary.
+  - The random-draw diagnostic compares the 15 top-ranked names, not the held book, and is named for that.
+  - Each period reports how many universe returns and held returns the clean-return rule zeroed.
+  - No REIT or InvIT unit is in the store: none appears by instrument name, and the daily-file parser keeps
+    ordinary shares only.
+  - Known and left as registered: returns exclude dividends, which works against the low-volatility book;
+    whole shares at about Rs 8,000 a name skip high-priced stocks the benchmark holds; fills at the open assume a
+    name locked at its upper price band could be bought, which flatters momentum. The run counts the skipped buys
+    and the buys on sessions whose high equals their low.
 - **Seen before registration:** the forward outcomes of hi52, brk20 and ins signals from September 2026 (hi52, a
   momentum-like rule, lagged the equal-weight universe); the anatomy of the November 2026 rally; and published reports
   that NSE's Nifty200 Momentum 30 index fell about 30% from 2024-09-27 into spring 2025 and stood about 19% below that
@@ -759,8 +777,8 @@ rows), which gives about 150 earlier periods.
     reports, per year, the count of zeroed returns of each kind and the count of unexplained returns between −35%
     and −15%; if the latter is far above its 2022–2026 rate, the affected years are reported with and without the
     names concerned.
-- **Verdict:** the registered criteria on this sample's periods. A pooled reading over both samples, and the first
-  sample recomputed from this store, are diagnostics.
+- **Verdict:** the registered criteria as amended above, both tests included, on this sample's periods. A pooled
+  reading over both samples, and the first sample recomputed from this store, are diagnostics.
 - **Tools:** the study script gains three options before this store is read by it: the session rule, the market
   proxy symbol and the formation bounds.
 
