@@ -4,6 +4,16 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-12 04:58 — Long-history research store filled
+
+- **Result:** 4,180 dates from 2010-01-04 to 2026-11-09, 6.70 million daily rows, 37,209 corporate-action rows, in
+  2 h 14 min with the engine running. The script exited 1 because four dates failed.
+- **The four dates** (2025-11-03, 2025-12-31, 2026-01-01, 2026-01-09): IDEA traded more than 2,147,483,647 shares and
+  the store's bulk write failed the whole day. The defect is in `IMPLEMENTATION_PLAN.md`; the live store has those
+  dates. They were not re-fetched: the long-history sample ends in 2023.
+- **Copy for studies:** `data\research\market_deep_2026-11-09.duckdb`, byte-identical (research scripts refuse a file
+  named `market.duckdb`).
+
 ## 2026-11-12 03:09 — Deploy: hi52 demoted to shadow, rsi2 and mom parked (owner: "complete control of the system")
 
 - **Why:** the owner asked for a critical review of why the engine makes no profit. Two of its findings were acted on
