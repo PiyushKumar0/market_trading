@@ -90,6 +90,8 @@ holds the host awake on its own (`audio=` column), so a span with long audio pro
 ..\mt_build_notes\section3\engaged_spans.ps1 -Since 2026-11-06
 # In-session minutes asleep per weekday:
 ..\mt_build_notes\section3\session_sleep.ps1 -Since 2026-11-06
+# Minutes asleep inside the 08:10-09:15 pre-open per weekday (keep-awake does not cover it):
+..\mt_build_notes\section3\preopen_sleep.ps1 -Since 2026-10-01
 # The engine's own view: engage/release, lapses and their repair, the state every ~5 min
 Select-String -Path data\logs\engine.log -Pattern '"event": "keep_awake_' | ForEach-Object { $_.Line }
 ```

@@ -4,6 +4,26 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-11 13:00 — Keep-awake verdict: it holds on AC; the pre-open is uncovered
+
+- **Verdict (pending since 11-05):** `engaged_spans.ps1 -Since 2026-11-06` covers the 11-06, 11-09 and 11-11
+  sessions.
+  - On AC with the lid open, every idle timeout only turned the screen off: 25 spans, 0 minutes asleep.
+  - Every sleep while engaged had a physical cause:
+    - the lid closed (11-06 15:12; 11-09 10:07 and 14:24);
+    - battery power (11-11 10:48–11:30), including 19.8 min of "Austerity Batt" sleep from 11:06.
+  - After the battery sleeps the re-arm logged `keep_awake_lapsed` and restored the request at 11:25.
+- **Gap:** keep-awake engages only from 09:15 to 15:30, and the engine cannot assert it while the host sleeps.
+  - Since 10-01 the host slept inside 08:10–09:15 on 21 of 30 weekdays, holidays included, and through all
+    65 minutes on 15 (`preopen_sleep.ps1`).
+  - On 11-11 it slept from 05:36 to 09:48, except for a brief wake around 08:33 in which every DNS lookup failed.
+    No News Analyst call ran between 01:49 and 09:54, so the forced pre-open batch was lost.
+  - Overnight stories were therefore first scored after the open, and their news-study entry moves to the next
+    session. That adds no look-ahead, but the entries are staler.
+- **09:48 restart:** a clean owner stop (`reason: owner`), off for 38 s. The Kite calls succeeded from 09:49:55.
+- **Proposed owner action:** set AC sleep to "Never" (the screen can still turn off). That also covers special
+  sessions.
+
 ## 2026-11-11 02:30 — Found: 11-08 evening News Analyst outage was host standby, not the login
 
 - **What failed:** every News Analyst call on 11-08 from 19:06:11 to 21:59:42 (`agent_calls`):
