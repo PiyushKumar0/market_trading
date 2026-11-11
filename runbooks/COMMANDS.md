@@ -692,6 +692,18 @@ The rules are in the study script's docstring and constants. Nothing here spends
 .venv\Scripts\python.exe scripts\pool_widening_study.py --db data\research\full_market_2026-11-09.duckdb
 ```
 
+## Swing timing study (verdicts 2026-11-11: nothing adopted) — research copy; runs outside 09:15–15:30
+
+The rules are in the study script's docstring and constants and in `scripts/candle_patterns.py`. The study reads the
+whole-file copy, refuses the live store and spends no LLM quota. The verdict run takes about 4 minutes.
+
+```powershell
+# pipeline check with no returns: funnels and per-trial trade counts; writes no report
+.venv\Scripts\python.exe scripts\swing_timing_study.py --db data\research\full_market_2026-11-09.duckdb --counts-only
+# the verdict run. Report: data\reports\swing_timing_<date>.{json,md}
+.venv\Scripts\python.exe scripts\swing_timing_study.py --db data\research\full_market_2026-11-09.duckdb
+```
+
 ## Replay smoke after a prompt change — outside market hours (it spends quota)
 
 ```powershell

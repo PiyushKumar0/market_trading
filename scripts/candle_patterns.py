@@ -1,9 +1,19 @@
-"""Candlestick pattern rules for the swing timing study.
+"""Candlestick pattern rules for the swing timing study (registered 2026-11-11).
 
-Implements the study's registered candle rules (the "Swing timing study" entry in
-IMPLEMENTATION_PLAN.md): 21 bullish and 17 bearish patterns on one stock's own daily bars.
-The vague words (long, small, doji, short shadow, equal, near) use TA-Lib's default candle
-settings, as registered. A flag at bar d reads only bars <= d.
+21 bullish and 17 bearish patterns on one stock's own daily bars; the code below is the record
+of the registered rules.
+
+* Shapes follow the owner's two pages: Groww's "candlestick patterns" blog and Investopedia's
+  "5 most powerful candlestick patterns". Investopedia refused automated access, so its five
+  (bullish three-line strike, two black gapping, three black crows, evening star, bullish
+  abandoned baby) were taken from the article as known.
+* Where the pages disagree, Investopedia's version is used. Three black candles then a white
+  one closing above the first's high is bullish, and three black crows need an uptrend.
+* The vague words (long, small, doji, long shadow, short shadow, no shadow, equal, near) take
+  TA-Lib's default candle settings over the 10 bars before candle 1 (AR5 over 5).
+* A trend before the pattern (C[f-1] against C[f-6]) applies only where a page states one.
+
+A flag at bar d reads only bars <= d.
 """
 
 from __future__ import annotations

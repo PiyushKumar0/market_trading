@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """Swing timing study (``edge/swing_timing``, registered 2026-11-11): candle timing and brk20 add-ons on the live legs.
 
-This docstring, the constants and the report's notes are the record of the registered rules. The harness is the pool
-widening study's (``pool_widening_study.py``), imported and unchanged unless stated here.
+This docstring, the constants, ``candle_patterns.py`` and the report's notes are the record of the registered rules
+(amended once, from the independent review, before any outcome). The verdicts (2026-11-11: nothing adopted) are in
+``config/research_trials.yaml``. The harness is the pool widening study's (``pool_widening_study.py``), imported and
+unchanged unless stated here.
 
 * **Data and mechanics.** As the pool study: every non-ETF ``bars_1d`` stock of the research copy, delisted names in,
   signals from ``SIGNALS_FROM``; market sessions; brk20's regime gate at ``y``; the ins floor of Rs 1 cr; the AMIORG

@@ -530,8 +530,8 @@ trials:
     population: "pool widening harness; brk20 on bands C0 and W1 (rank <= 500 or >= Rs 5 cr); the first repeat signal per kept trade; signals from 2023-08-01, bars to 2026-11-09"
     construct: "its own limit fill within 5 sessions, exit close(fill+20); fees at Rs 20,000 CNC plus the band's spread; the seven criteria at N=7"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_brk20_candle_entry-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -539,8 +539,8 @@ trials:
     population: "as the add-on row; the live rule's admitted signals"
     construct: "exit close(fill+20); relative: mean excess above the live rule's (bootstrap CI above 0) and above the 95th percentile of a random-day entry control; absolute: the seven criteria"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "refuted"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_ins_candle_entry-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -548,8 +548,8 @@ trials:
     population: "pool widening harness; ins on band C0 at the Rs 1 cr floor"
     construct: "exit close at T+20; as the brk20 candle-entry row"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "refuted"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_brk20_candle_exit-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -557,8 +557,8 @@ trials:
     population: "the live rule's kept brk20 trades, bands C0 and W1"
     construct: "paired per-trade excess difference, CI above 0, and above the 95th percentile of a random-day exit control; absolute: the seven criteria"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "refuted"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_ins_candle_exit-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -566,8 +566,8 @@ trials:
     population: "the live rule's kept ins trades, band C0"
     construct: "as the brk20 candle-exit row"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "null"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_five_entry-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -575,8 +575,8 @@ trials:
     population: "brk20 and ins admitted signals pooled"
     construct: "as the candle-entry rows with the two-rule set; comparator the pooled live cells"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "insufficient"
+    report: "data/reports/swing_timing_2026-11-11.json"
   - id: "edge-swing_timing_five_exit-20261111"
     date: "2026-11-11"
     family: "edge/swing_timing"
@@ -584,5 +584,5 @@ trials:
     population: "brk20 and ins kept trades pooled"
     construct: "as the candle-exit rows with the three-rule set"
     variants: 1
-    result: "registered"
-    report: "pending"
+    result: "refuted"
+    report: "data/reports/swing_timing_2026-11-11.json"
