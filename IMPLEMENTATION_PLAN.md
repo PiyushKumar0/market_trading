@@ -856,6 +856,32 @@ The study's rules:
   - Verdicts go to the ledger rows and to memory, and then this entry is deleted.
 - **Promotion:** an ADOPT earns nothing automatically. Any live change is the owner's decision, whether a candle entry,
   a candle exit or a second position per stock (which `per_stock_exposure` hard-rejects today).
+- **Amendments from the independent review (2026-11-11), made before any outcome.** Only `--counts-only` had run.
+  - **Add-on, held at the repeat signal.** The repeat signal must come on or after the kept trade's fill session
+    (`signal_before_first_fill` otherwise). A repeat while the first order is still resting is not an add-on.
+  - **Add-on, first by fill.** Among a kept trade's repeats that qualify, the add-on is the one that fills first, with
+    ties going to the earlier signal; picking by signal order needed knowledge of later fills.
+  - **No pattern across a structural ex-date.** A rule's flag on bar d is cleared when a structural ex-date
+    (`corp_actions` plus the AMIORG supplement) falls after the first bar the rule reads and on or before d. The first
+    bar read is the first of candle 1's 10 reference bars. Unadjusted prices across a split or bonus fake candles.
+  - **Entry control voids.** A day with an own bar and a next-session bar stays eligible. If its trade fails the
+    lock, exit-bar or usability check, it is void in a draw that picks it, as registered; it is not dropped from the
+    eligible days.
+  - **Forward window.** It runs through y + 5 + the leg's exit sessions: y + 25 for brk20 and y + 24 for ins, as
+    written.
+  - **Matched-timing control.** This is added to the relative test, which now needs the variant to beat both
+    controls. The registered uniform control spreads days evenly, while candle days cluster early (the bearish set
+    exits almost every trade within days), so beating it could reflect only "exit early" or "enter early".
+    - Each of 1,000 draws (seed 20261111) permutes the variant's own timing offsets across its trades.
+      - Entry offsets: market sessions from y to the pattern day, over all variant trades.
+      - Exit offsets: market sessions from the fill session to the pattern bar, over the trades exited early.
+    - A trade takes its drawn offset when that day is eligible for it: for entry, an own bar there and on the next
+      session; for exit, an own bar from the fill bar through the bar before the exit bar. Otherwise the trade is void
+      in that draw.
+    - The statistic is the cell's mean excess.
+  - **Stated choices:**
+    - the exit trials leave out trades the live rule voids, because the paired test needs both arms;
+    - the add-on diagnostic compares against all kept brk20 trades, labelled as such.
 
 ## Known defects and test gaps
 

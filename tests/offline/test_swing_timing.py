@@ -63,6 +63,9 @@ class FakePat:
         on = self.flags.get((sym, j), ())
         return tuple(n for n in names if n in on)
 
+    def masked(self, sym, j, names):
+        return 0
+
 
 SETS = {"bullish": ("b1", "b2", "b9"), "bearish": ("x1", "x2", "x3"), "five_entry": ("b9",), "five_exit": ("x3",)}
 
@@ -80,9 +83,10 @@ def test_registered_constants():
     assert sts.FAMILY == "edge/swing_timing" and sts.FAMILY_N == 7 and len(sts.TRIALS) == 7
     assert sts.TRIALS == ("brk20_addon", "brk20_candle_entry", "ins_candle_entry", "brk20_candle_exit",
                           "ins_candle_exit", "five_entry", "five_exit")
-    assert sts.FORWARD_SESSIONS == 25 and sts.ENTRY_SCAN_SESSIONS == 5
+    assert sts.FORWARD_SESSIONS == {"brk20": 25, "ins": 24} and sts.ENTRY_SCAN_SESSIONS == 5
     assert sts.POPULATION == {"brk20": (pw.C0, pw.W1), "ins": (pw.C0,)}
-    assert sts.BOOTSTRAP_SEED == sts.CONTROL_SEED == 20261111
+    assert sts.BOOTSTRAP_SEED == sts.CONTROL_SEED == 20261111 and sts.MATCHED_SEED == (20261111, 1)
+    assert sts.CANDLE_REF_BARS == 10 and sts.FIRST_POSITIONS_LABEL == "all kept brk20 trades (first positions)"
     assert sts.BOOTSTRAP_REPS == 2000 and sts.CONTROL_DRAWS == 1000 and sts.CONTROL_PCT == 95.0
     assert sts.MIN_N == 100 and sts.HELD_OUT_FROM == date(2026, 1, 1)
     assert sts.EXIT_SESSIONS == {"brk20": 20, "ins": 19}
@@ -123,27 +127,87 @@ def test_patterns_pack_flags_from_keep_from():
         bad.hits("A", 60, ("p1",))
 
 
+def _split_series(sym: str, ex_idx: int) -> sts.Series:
+    s = _series(sym)
+    for arr in (s.open, s.high, s.low, s.close):
+        arr[ex_idx:] /= 2.0                                         # a 1:2 split, unadjusted
+    return s
+
+
+def test_ex_date_window_spans_the_reference_bars_through_completion():
+    dates = DATES[:40]
+    w1 = sts.ex_date_window(dates, [DATES[20]], 1)                  # reads bars d - 10 .. d
+    assert np.flatnonzero(w1).tolist() == list(range(20, 30))       # d - 10 < 20 <= d
+    w3 = sts.ex_date_window(dates, [DATES[20]], 3)                  # reads bars d - 12 .. d
+    assert np.flatnonzero(w3).tolist() == list(range(20, 32))
+    early = sts.ex_date_window(dates, [DATES[5]], 1)               # first bar would be before bar 0
+    assert not early[:10].any() and early[10:15].all() and not early[15:].any()
+    assert not sts.ex_date_window(dates, [], 2).any()
+    assert not sts.ex_date_window(dates, [DATES[45]], 2).any()      # after the series
+
+
+def test_patterns_clear_flags_across_a_structural_ex_date():
+    s = _split_series("A", 20)
+    on = {"p1": [20, 25, 30], "p3": [31, 33]}
+
+    def detect(o, h, lo, c, names):
+        f = {n: np.zeros(len(o), dtype=bool) for n in names}
+        for n, idx in on.items():
+            f[n][idx] = True
+        return f
+
+    pat = sts.Patterns({"A": s}, detect, ("p1", "p3"), lengths={"p1": 1, "p3": 3}, structural={"A": [DATES[20]]},
+                       keep_from=DATES[0])
+    assert [pat.hits("A", j, ("p1", "p3")) for j in (20, 25, 30, 31, 33)] == [(), (), ("p1",), (), ("p3",)]
+    assert [pat.masked("A", j, ("p1", "p3")) for j in (20, 25, 30, 31, 33)] == [1, 1, 0, 1, 0]
+    assert pat.masked("A", 31, ("p1",)) == 0
+    plain = sts.Patterns({"A": s}, detect, ("p1", "p3"), keep_from=DATES[0])        # no structural table
+    assert plain.hits("A", 20, ("p1",)) == ("p1",) and plain.masked("A", 20, ("p1",)) == 0
+    with pytest.raises(ValueError, match="candle count"):
+        sts.Patterns({"A": s}, detect, ("p1", "p3"), lengths={"p1": 1}, structural={"A": [DATES[20]]})
+
+
+def test_scans_count_masked_flags(monkeypatch):
+    s = _split_series("A", 18)
+    g = _world(monkeypatch, s)
+
+    def detect(o, h, lo, c, names):
+        f = {n: np.zeros(len(o), dtype=bool) for n in names}
+        f["p1"][[26, 27, 28, 40]] = True
+        return f
+
+    pat = sts.Patterns({"A": s}, detect, ("p1",), lengths={"p1": 1}, structural={"A": [DATES[18]]},
+                       keep_from=DATES[0])
+    counts: dict[str, int] = {}
+    e = sts.candle_entry(_adm(s, g, 25), g, pat, ("p1",), counts)
+    assert e.day == 28 and e.event.fill_idx == 29 and counts == {"masked_ex_date": 2}   # 26 and 27 read bar 18
+    c = sts.live_candidate(_adm(s, g, 25), g, {})
+    counts = {}
+    assert sts.candle_exit_day(c, pat, ("p1",), counts) == (28, ("p1",)) and counts == {"masked_ex_date": 2}
+
+
 # ----------------------------------------------------------------------------- admission
-def test_admission_window_is_shared_by_both_legs(monkeypatch):
+@pytest.mark.parametrize("leg, span", [("brk20", 25), ("ins", 24)])
+def test_admission_window_runs_through_y_plus_5_plus_the_hold(monkeypatch, leg, span):
     monkeypatch.setattr(pw, "CORE_RANK", 5)
     s = _series("A")
     g = pws.Grid.build({"A": s}, {})
     atr = rc._atr(s)
-    for leg in sts.LEGS:
-        counts: dict[str, int] = {}
-        assert sts._gate(leg, "A", s, 70 - 26, g, atr, counts) is not None    # y + 25 is the last session
-        assert sts._gate(leg, "A", s, 70 - 25, g, atr, counts) is None
-        assert counts == {"short_forward_window": 1}
-    assert pws._gate("ins", "A", s, 70 - 25, g, atr, {}) is not None          # the pool study's ins span was 20
+    counts: dict[str, int] = {}
+    assert sts._gate(leg, "A", s, 70 - span - 1, g, atr, counts) is not None    # y + span is the last session
+    assert sts._gate(leg, "A", s, 70 - span, g, atr, counts) is None
+    assert counts == {"short_forward_window": 1}
+    # the latest candle fill (y + 5) with its exit at the leg's hold is the last session the window keeps
+    assert 5 + sts.EXIT_SESSIONS[leg] == span
 
 
 def test_admission_window_counts_market_sessions():
-    gap = _gappy("G", {50, 51})                                     # 68 own bars: own-bar counting would drop 44
+    gap = _gappy("G", {50, 51})                                     # 68 own bars: own-bar counting would drop 45
     s = _series("F")
     g = pws.Grid.build({"F": s, "G": gap}, {})
     counts: dict[str, int] = {}
-    assert sts._gate("ins", "G", gap, 44, g, rc._atr(gap), counts) is not None   # grid 44 + 25 = 69 < 70
-    assert sts._gate("ins", "G", gap, 45, g, rc._atr(gap), counts) is None
+    assert sts._gate("ins", "G", gap, 45, g, rc._atr(gap), counts) is not None   # grid 45 + 24 = 69 < 70
+    assert sts._gate("ins", "G", gap, 46, g, rc._atr(gap), counts) is None
     assert counts == {"short_forward_window": 1}
 
 
@@ -171,7 +235,7 @@ class _Store:
 def test_ins_admitted_uses_the_shared_window_and_defers_the_fill(monkeypatch):
     monkeypatch.setattr(pw, "CORE_RANK", 5)
     monkeypatch.setattr(sts.rc, "store_reader", lambda conn: _Store())
-    monkeypatch.setattr(sts.es, "insider_buy_events", lambda sessions, filings, threshold: [25, 45])
+    monkeypatch.setattr(sts.es, "insider_buy_events", lambda sessions, filings, threshold: [25, 46])
     full = _series("F")
     gap = _gappy("G", {26})                                         # no bar on y + 1: the live rule's drop
     g = pws.Grid.build({"F": full, "G": gap}, {})
@@ -347,22 +411,36 @@ def _cand(s, sig: int, fill: int, exit_idx: int) -> pws.Candidate:
                          exit_idx=exit_idx)
 
 
-def test_addons_first_only_filled_after_exit_and_extra_repeat():
+def test_addons_held_at_the_signal_first_by_fill():
     a, b = _series("A"), _series("B")
-    k1 = _cand(a, 5, 6, 26)
-    first = _cand(a, 10, 11, 31)                                    # fills before k1's exit: the add-on
-    extra = _cand(a, 12, 13, 33)                                    # a second one on k1: not taken
-    late = _cand(a, 20, 26, 46)                                     # fills on k1's exit session
-    k2 = _cand(a, 26, 27, 47)                                       # signal on k1's exit date: kept
-    after_k2 = _cand(a, 28, 30, 50)                                 # k2's own add-on
+    k1 = _cand(a, 5, 8, 28)                                         # its limit rests 3 sessions, fills on bar 8
+    resting = _cand(a, 6, 9, 29)                                    # signalled while k1's order still rested
+    slow = _cand(a, 10, 15, 35)                                     # qualifies, fills on bar 15
+    fast = _cand(a, 12, 13, 33)                                     # signalled later, fills first: the add-on
+    late = _cand(a, 20, 28, 48)                                     # fills on k1's exit session
+    k2 = _cand(a, 28, 29, 49)                                       # signal on k1's exit date: kept
+    tie_first = _cand(a, 30, 32, 52)                                # ties on fill: the earlier signal wins
+    tie_second = _cand(a, 31, 32, 52)
     other = _cand(b, 10, 11, 31)
-    cands = [after_k2, other, late, k2, extra, first, k1]
+    cands = [tie_second, other, late, k2, fast, slow, resting, tie_first, k1]
     counts: dict[str, int] = {}
     kept = pws.one_position_per_symbol(cands, counts)
-    assert kept == [k1, k2, other] and counts == {"held_overlap": 4}
+    assert kept == [k1, k2, other] and counts == {"held_overlap": 6}
     got = sts.addons(cands, kept, counts)
-    assert got == [first, after_k2]
-    assert counts == {"held_overlap": 4, "filled_after_exit": 1, "extra_repeat": 1}
+    assert got == [fast, tie_first]
+    assert counts == {"held_overlap": 6, "signal_before_first_fill": 1, "filled_after_exit": 1, "extra_repeat": 2}
+
+
+def test_addon_signalled_on_the_first_fill_session_qualifies():
+    a = _series("A")
+    k = _cand(a, 5, 8, 28)
+    on_fill = _cand(a, 8, 9, 29)
+    before = _cand(a, 7, 8, 28)                                     # fills on k's fill bar, signalled before it
+    for c, want, key in ((on_fill, [on_fill], None), (before, [], "signal_before_first_fill")):
+        counts: dict[str, int] = {}
+        kept = pws.one_position_per_symbol([k, c], counts)
+        assert sts.addons([k, c], kept, counts) == want
+        assert counts.get(key, 0) == (1 if key else 0)
 
 
 # ----------------------------------------------------------------------------- controls
@@ -381,33 +459,96 @@ def test_draw_means_is_deterministic_and_moves_only_the_redrawn():
         sts.draw_means([], [np.array([])])
 
 
-def test_entry_options_cover_the_eligible_days(monkeypatch):
-    s = _series("A")
-    s.close[46] = 110.0                                             # the day-27 fill exits here (fill + 19)
-    g = _world(monkeypatch, s)
-    a = _adm(s, g, 25)
-    t = sts.walk_close(sts.candle_entry(a, g, FakePat({("A", 25): ("b1",)}), SETS["bullish"], {}), g, {}, FEES, {})
-    opts = sts.entry_options(t, a, g, {}, FEES)
-    assert len(opts) == 5 and np.allclose(opts, 0.0)                # own stock alone in its band: excess 0
-    voided = sts.entry_options(t, a, g, {"A": [DATES[48]]}, FEES)   # fills 26..30 exit 45..49: last two hold it
-    assert np.isnan(voided).tolist() == [False, False, False, True, True]
-    s.high[28] = s.low[28] = 100.0                                  # a locked fill day is not eligible
-    assert len(sts.entry_options(t, a, g, {}, FEES)) == 4
+def _entry_world(monkeypatch, pattern_day: int = 25):
+    a_, b_ = _series("A"), _series("B")
+    a_.close[49] = 120.0                                            # only the day-29 entry (fill 30) exits here
+    g = _world(monkeypatch, a_, b_)
+    adm = _adm(a_, g, 25)
+    t = sts.walk_close(sts.candle_entry(adm, g, FakePat({("A", pattern_day): ("b1",)}), SETS["bullish"], {}),
+                       g, {}, FEES, {})
+    return a_, g, adm, t
 
 
-def test_exit_options_and_control_leave_untouched_trades(monkeypatch):
+def test_entry_table_keeps_failing_and_void_days_eligible(monkeypatch):
+    s, g, a, t = _entry_world(monkeypatch)
+    tab = sts.entry_table(t, a, g, {}, FEES)
+    assert tab.offsets.tolist() == [0, 1, 2, 3, 4] and tab.own == 0 and t.trigger == 25
+    # fills 26..30 exit 45..49; B flat in the band: excess = gross / 2
+    assert tab.vals == pytest.approx([0.0, 0.0, 0.0, 0.0, 10.0])
+    voided = sts.entry_table(t, a, g, {"A": [DATES[48]]}, FEES)     # inside the holds of the last two fills
+    assert voided.offsets.tolist() == [0, 1, 2, 3, 4]
+    assert np.isnan(voided.vals).tolist() == [False, False, False, True, True]
+    s.high[28] = s.low[28] = 100.0                                  # the day-27 entry is locked: void, still eligible
+    locked = sts.entry_table(t, a, g, {}, FEES)
+    assert locked.offsets.tolist() == [0, 1, 2, 3, 4] and np.isnan(locked.vals).tolist() == [False, False, True,
+                                                                                             False, False]
+
+
+def test_entry_table_offsets_skip_days_without_a_next_session_bar(monkeypatch):
+    gap = _gappy("G", {28})
+    g = _world(monkeypatch, _series("F"), gap)
+    a = _adm(gap, g, 25)
+    t = sts.walk_close(sts.candle_entry(a, g, FakePat({("G", 28): ("b1",)}), SETS["bullish"], {}), g, {}, FEES, {})
+    tab = sts.entry_table(t, a, g, {}, FEES)
+    assert tab.offsets.tolist() == [0, 1, 4] and tab.own == 4       # own bar 28 is market session y + 4
+
+
+def test_uniform_entry_control_p95_is_pinned(monkeypatch):
+    _, g, a, t = _entry_world(monkeypatch)
+    ctrl = sts.entry_control([t], {("ins", "A", 25): a}, g, {}, FEES, t.excess)
+    u, m = ctrl["uniform"], ctrl["matched"]
+    # each draw picks one of [0, 0, 0, 0, 10] uniformly: 10 in about a fifth of draws, so the 95th percentile is 10
+    assert u["p95"] == pytest.approx(10.0) and u["n_redrawn"] == 1 and u["seed"] == 20261111
+    assert u["variant_share_of_draws_below"] == 0.0 and u["void_per_draw"] == {"mean": 0.0, "min": 0, "max": 0}
+    # one trade: the permutation always returns its own offset
+    assert m["p95"] == pytest.approx(0.0) and m["seed"] == [20261111, 1]
+
+
+def test_matched_draws_permute_the_offsets():
+    flat = [sts.Table(np.arange(5), np.arange(5, dtype=float), own) for own in (0, 1, 1, 4)]
+    means, void = sts.matched_draws([], flat)
+    assert np.allclose(means, 1.5) and not void.any()               # every draw uses the multiset {0, 1, 1, 4}
+    two = [sts.Table(np.arange(5), np.arange(5, dtype=float), 0), sts.Table(np.arange(5), 100.0 * np.arange(5), 4)]
+    m2, _ = sts.matched_draws([], two)
+    assert set(np.round(m2, 9)) == {200.0, 2.0}                     # kept (0 + 400) / 2 or swapped (4 + 0) / 2
+    assert np.array_equal(m2, sts.matched_draws([], two)[0])        # seeded
+    assert not np.array_equal(m2, sts.matched_draws([], two, seed=(1, 2))[0])
+
+
+def test_matched_draws_void_an_ineligible_offset_and_keep_untouched_trades():
+    tabs = [sts.Table(np.array([0]), np.array([1.0]), 0), sts.Table(np.array([3]), np.array([5.0]), 3)]
+    means, void = sts.matched_draws([7.0], tabs)
+    swapped = void == 2                                             # each gets an offset it has no bar for
+    assert set(void.tolist()) == {0, 2} and swapped.any() and (~swapped).any()
+    assert np.allclose(means[~swapped], (7.0 + 1.0 + 5.0) / 3) and np.allclose(means[swapped], 7.0)
+    void_val = [sts.Table(np.array([0, 1]), np.array([np.nan, 2.0]), 0)]
+    assert np.isnan(sts.matched_draws([], void_val)[0]).all()      # eligible but void: void in the draw
+    assert np.allclose(sts.matched_draws([4.0], [])[0], 4.0)
+
+
+def test_exit_table_and_control_leave_untouched_trades(monkeypatch):
     s, b = _series("A"), _series("B")
     s.open[27:45] = np.linspace(101.0, 118.0, 18)
     g = _world(monkeypatch, s, b)
     t = _live(s, g)
-    opts = sts.exit_options(t, g, {}, FEES, sts.OpenBenchmark(g))
-    assert len(opts) == t.cand.exit_idx - t.cand.event.fill_idx == 19
     v = sts.candle_exit(t, FakePat({("A", 30): ("x1",)}), SETS["bearish"], g, {}, FEES, sts.OpenBenchmark(g), {})
+    tab = sts.exit_table(v, g, {}, FEES, sts.OpenBenchmark(g))
+    assert tab.offsets.tolist() == list(range(19)) and tab.own == 4 and v.trigger == 30
+    assert tab.vals[4] == pytest.approx(v.excess)
     untouched = dataclass_replace(t, excess=7.0)
     ctrl = sts.exit_control([v, untouched], g, {}, FEES, sts.OpenBenchmark(g), 1.0)
-    assert ctrl["n_redrawn"] == 1 and ctrl["draws"] == sts.CONTROL_DRAWS
-    means = sts.draw_means([7.0], [opts])
-    assert ctrl["p95"] == pytest.approx(float(np.percentile(means, 95)))
+    assert ctrl["uniform"]["n_redrawn"] == ctrl["matched"]["n_redrawn"] == 1
+    assert ctrl["uniform"]["p95"] == pytest.approx(float(np.percentile(sts.draw_means([7.0], [tab.vals]), 95)))
+    assert ctrl["matched"]["p95"] == pytest.approx((7.0 + v.excess) / 2)   # one moved trade keeps its own offset
+
+
+def test_exit_table_offsets_count_market_sessions(monkeypatch):
+    gap = _gappy("G", {31, 32})
+    g = _world(monkeypatch, _series("F"), gap)
+    t = _live(gap, g)
+    v = sts.candle_exit(t, FakePat({("G", 31): ("x1",)}), SETS["bearish"], g, {}, FEES, sts.OpenBenchmark(g), {})
+    tab = sts.exit_table(v, g, {}, FEES, sts.OpenBenchmark(g))
+    assert tab.own == 33 - 26 and 5 not in tab.offsets.tolist() and 6 not in tab.offsets.tolist()
 
 
 def dataclass_replace(t, **kw):
@@ -451,7 +592,7 @@ PASSING = {
     "cpcv_promotable": True, "top1_dropped_mean_net": 0.4, "held_out_mean_excess": 0.2,
 }
 CI_UP = {"diff": 0.3, "ci_lo": 0.05, "ci_hi": 0.6}
-CTRL = {"p95": 0.3}
+CTRL = {"uniform": {"p95": 0.3}, "matched": {"p95": 0.4}}
 
 
 def _timing(m, live=0.2, ci=CI_UP, ctrl=CTRL):
@@ -497,15 +638,21 @@ def test_timing_labels():
     assert _timing(PASSING, live=0.6) == sts.REFUTED
     assert _timing({**PASSING, "mean_excess": -0.1, "excess_ci_lo": -0.2}, live=-0.3) == sts.NOT_SHOWN
     assert _timing(PASSING, ci={**CI_UP, "ci_lo": 0.0}) == sts.NOT_SHOWN      # CI touches 0
-    assert _timing(PASSING, ctrl={"p95": 0.5}) == sts.NOT_SHOWN               # equal to the control's p95
-    assert _timing(PASSING, ctrl={"p95": None}) == sts.NOT_SHOWN              # a missing control fails
+    assert _timing(PASSING, ctrl={**CTRL, "uniform": {"p95": 0.5}}) == sts.NOT_SHOWN   # equal to the uniform p95
+    assert _timing(PASSING, ctrl={**CTRL, "matched": {"p95": 0.5}}) == sts.NOT_SHOWN   # equal to the matched p95
+    assert _timing(PASSING, ctrl={**CTRL, "matched": {"p95": 0.6}}) == sts.NOT_SHOWN   # beats uniform only
+    assert _timing(PASSING, ctrl={**CTRL, "uniform": {"p95": 0.6}}) == sts.NOT_SHOWN   # beats matched only
+    assert _timing(PASSING, ctrl={**CTRL, "matched": {"p95": None}}) == sts.NOT_SHOWN  # a missing control fails
+    assert _timing(PASSING, ctrl={"uniform": {"p95": 0.3}}) == sts.NOT_SHOWN
+    assert _timing({**PASSING, "cpcv_promotable": False}, ctrl={**CTRL, "matched": {"p95": 0.6}}) == sts.NOT_SHOWN
     assert _timing(PASSING, live=None) == sts.NOT_SHOWN
     assert _timing({**PASSING, "held_out_mean_excess": None}, ci={**CI_UP, "degenerate": True}) == sts.NOT_SHOWN
 
 
 def test_relative_flags():
     r = sts.relative(0.5, 0.2, CI_UP, CTRL)
-    assert r["pass"] and r["beats_live"] and r["ci_above_0"] and r["beats_control"]
+    assert r["pass"] and r["beats_live"] and r["ci_above_0"] and r["beats_uniform"] and r["beats_matched"]
+    assert (r["uniform_p95"], r["matched_p95"]) == (0.3, 0.4)
     assert not sts.relative(0.5, 0.5, CI_UP, CTRL)["beats_live"]
     assert not sts.relative(None, 0.2, CI_UP, CTRL)["pass"]
     assert not sts.relative(0.5, 0.2, {"ci_lo": None}, CTRL)["ci_above_0"]
@@ -525,6 +672,64 @@ def test_measure_cell_on_no_trades_is_insufficient():
 def test_measure_cell_cost_is_the_mean_of_the_trades():
     ts = [dataclass_replace(_st(0.1, DATES[k]), cost=c) for k, c in enumerate((0.34, 0.37, 0.37))]
     assert sts.measure_cell(ts)["cost_pct"] == pytest.approx((0.34 + 0.37 + 0.37) / 3)
+
+
+def test_measure_cell_runs_cpcv_at_n_7_with_the_mean_cost(monkeypatch):
+    seen = []
+
+    def fake_cpcv(trades, n_trials, cost):
+        seen.append((len(trades), n_trials, cost, [t.net for t in trades]))
+        return {"promotable": True, "fold_pass_fraction": 1.0, "cv_method": "fake", "reasons": []}
+
+    monkeypatch.setattr(sts.rc, "cpcv", fake_cpcv)
+    ts = [dataclass_replace(_st(0.1, DATES[k]), cost=c, net=0.2 * k) for k, c in enumerate((0.34, 0.37, 0.41))]
+    m = sts.measure_cell(ts)
+    ((n, n_trials, cost, nets),) = seen
+    assert n == 3 and n_trials == 7 and cost == pytest.approx((0.34 + 0.37 + 0.41) / 3) and nets == [0.0, 0.2, 0.4]
+    assert m["cpcv_promotable"] is True and m["cpcv_method"] == "fake"
+
+
+def _naive_cluster(dates_a, vals_a, dates_b, vals_b, union, reps, seed):
+    """Per rep: draw union dates with replacement (the implementation's integer stream); each cell's mean over its
+    trades on the drawn dates, a date drawn twice counting twice. A rep leaving a cell empty is NaN (dropped)."""
+    draws = np.random.default_rng(seed).integers(0, len(union), size=(reps, len(union)))
+    out = []
+    for row in draws:
+        drawn = [union[k] for k in row]
+        a = [v for d in drawn for da, v in zip(dates_a, vals_a, strict=True) if da == d]
+        b = [v for d in drawn for db, v in zip(dates_b, vals_b, strict=True) if db == d] if dates_b else None
+        if not a or b == []:
+            out.append(np.nan)
+            continue
+        out.append(sum(a) / len(a) - (sum(b) / len(b) if b is not None else 0.0))
+    out = np.array(out)
+    return out[np.isfinite(out)]
+
+
+def test_joint_bootstrap_equals_a_naive_date_resample():
+    d = DATES
+    var = [_st(1.0, d[0]), _st(-0.5, d[0]), _st(2.0, d[1]), _st(0.25, d[3])]
+    live = [_st(0.5, d[1]), _st(-1.0, d[2]), _st(0.0, d[2]), _st(1.5, d[3]), _st(None, d[4])]
+    got = sts.joint_bootstrap(var, live, reps=300, seed=7)
+    union = [d[0], d[1], d[2], d[3]]                                # the unbenchmarked trade's date is out
+    naive = _naive_cluster([t.signal_date for t in var], [t.excess for t in var],
+                           [t.signal_date for t in live[:4]], [t.excess for t in live[:4]], union, 300, 7)
+    lo, hi = np.percentile(naive, [2.5, 97.5])
+    assert got["n_dates"] == 4 and got["diff"] == pytest.approx(0.6875 - 0.25)
+    assert got["ci_lo"] == pytest.approx(lo, abs=1e-12) and got["ci_hi"] == pytest.approx(hi, abs=1e-12)
+
+
+def test_paired_bootstrap_equals_a_naive_date_resample():
+    d = DATES
+    live = [_st(0.0, d[0]), _st(1.0, d[0]), _st(0.5, d[2]), _st(-0.5, d[5])]
+    var = [dataclass_replace(lv, excess=lv.excess + inc) for lv, inc in zip(live, (0.3, -0.1, 0.8, 0.2), strict=True)]
+    got = sts.paired_bootstrap(list(zip(live, var, strict=True)))
+    union = [d[0], d[2], d[5]]
+    naive = _naive_cluster([t.signal_date for t in live], [0.3, -0.1, 0.8, 0.2], [], [], union,
+                           sts.BOOTSTRAP_REPS, sts.BOOTSTRAP_SEED)
+    lo, hi = np.percentile(naive, [2.5, 97.5])
+    assert got["diff"] == pytest.approx(0.3) and got["n_dates"] == 3
+    assert got["ci_lo"] == pytest.approx(lo, abs=1e-12) and got["ci_hi"] == pytest.approx(hi, abs=1e-12)
 
 
 # ----------------------------------------------------------------------------- the whole evaluation
@@ -558,12 +763,15 @@ def test_counts_only_returns_no_return_bearing_key(monkeypatch):
 
     walk(doc)
     t = doc["trials"]
-    assert t["brk20_addon"] == {"variant_n": 1, "first_position_n": 1, "filled_after_exit": 0, "extra_repeat": 0}
+    assert t["brk20_addon"] == {"variant_n": 1, "first_positions_n": 1, "signal_before_first_fill": 0,
+                                "filled_after_exit": 0, "extra_repeat": 0}
     assert t["brk20_candle_entry"] == {"variant_n": 1, "live_n": 1, "no_pattern": 1, "no_fill_session": 0,
-                                       "held_overlap": 0}
+                                       "held_overlap": 0, "masked_ex_date": 0}
     assert t["five_entry"]["variant_n"] == 1 and t["five_entry"]["no_pattern"] == 2
-    assert t["brk20_candle_exit"] == {"variant_n": 1, "live_n": 1, "early_exits": 1, "late_open_exits": 0}
-    assert t["five_exit"]["early_exits"] == 1 and t["ins_candle_exit"]["early_exits"] == 1
+    assert t["brk20_candle_exit"] == {"variant_n": 1, "live_n": 1, "early_exit": 1, "late_open_exit": 0,
+                                      "masked_ex_date": 0}
+    assert t["five_exit"]["early_exit"] == 1 and t["ins_candle_exit"]["early_exit"] == 1
+    assert doc["rules"]["exit_bearish/ins"] == {"early_exit": 1}
 
 
 def test_evaluate_full_run_shape(monkeypatch):
@@ -578,10 +786,13 @@ def test_evaluate_full_run_shape(monkeypatch):
     assert list(five["diagnostics"]["per_pattern"]) == ["x3"] and five["diagnostics"]["per_pattern"]["x3"]["n"] == 1
     # brk20's x3 on bar 35 sells at open(36) = 100 against the 99.5 limit fill; the band (all flat) is 0
     assert five["diagnostics"]["per_pattern"]["x3"]["mean_excess"] == pytest.approx(0.502513)
-    assert five["control"]["n_redrawn"] == 1 and five["relative"]["bootstrap"]["n_pairs"] == 2
+    assert five["controls"]["uniform"]["n_redrawn"] == five["controls"]["matched"]["n_redrawn"] == 1
+    assert five["relative"]["bootstrap"]["n_pairs"] == 2 and "matched_p95" in five["relative"]
     entry = doc["trials"]["brk20_candle_entry"]
     assert entry["measures"]["n"] == 1 and entry["diagnostics"]["per_pattern"]["b1"]["n"] == 1
-    assert entry["control"]["n_redrawn"] == 1
+    assert entry["controls"]["matched"]["n_redrawn"] == 1
+    addon = doc["trials"]["brk20_addon"]["diagnostics"]
+    assert addon["comparator"] == sts.FIRST_POSITIONS_LABEL and addon["first_positions_all_kept_brk20"]["n"] == 1
     assert doc["live_cells"]["brk20"]["trial"] is False and len(doc["live_cells"]["ins"]["rows"]) == 7
     assert doc["rules"]["exit_bearish/ins"] == {"early_exit": 1}
     sts.render_text({"meta": {"registration": "r", "family": sts.FAMILY, "family_n": 7, "fold_pass_min": 0.6,

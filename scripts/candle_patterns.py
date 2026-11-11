@@ -563,6 +563,9 @@ _RULES: dict[str, tuple[int, Callable]] = {
     "two_black_gapping": (3, _two_black_gapping),
 }
 
+#: Candles per rule (m): candle 1 of a rule completing on bar d is bar d - m + 1.
+LENGTH: dict[str, int] = {name: m for name, (m, _rule) in _RULES.items()}
+
 
 def detect(o, h, l, c, names: Sequence[str]) -> dict[str, np.ndarray]:  # noqa: E741
     """One stock's own daily bars, ascending, as equal-length float arrays (numpy or list).

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from scripts.candle_patterns import BEARISH, BULLISH, FIVE_ENTRY, FIVE_EXIT, detect
+from scripts.candle_patterns import BEARISH, BULLISH, FIVE_ENTRY, FIVE_EXIT, LENGTH, detect
 
 REF_BARS = 10
 SLOPE = {"up": 1.0, "down": -1.0, "flat": 0.0}
@@ -499,6 +499,14 @@ def test_names_and_the_five():
     assert BEARISH[0] == "bearish_engulfing" and BEARISH[-1] == "two_black_gapping"
     assert set(FIVE_ENTRY) <= set(BULLISH)
     assert set(FIVE_EXIT) <= set(BEARISH)
+
+
+def test_length_is_the_registered_candle_count():
+    # the registration's rule texts: candles 1..m
+    bull = [2, 1, 3, 2, 2, 3, 1, 1, 3, 3, 3, 2, 2, 5, 4, 2, 1, 4, 5, 2, 4]
+    bear = [2, 1, 3, 1, 3, 3, 1, 2, 2, 3, 2, 2, 3, 3, 5, 2, 3]
+    assert LENGTH == dict(zip(BULLISH + BEARISH, bull + bear, strict=True))
+    assert len(LENGTH) == 38
 
 
 def test_unknown_name_raises_keyerror():

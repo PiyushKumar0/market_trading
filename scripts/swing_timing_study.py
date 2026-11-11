@@ -9,10 +9,14 @@ widening study's (``pool_widening_study.py``), imported and unchanged unless sta
   supplement; voids; late exits; fees at Rs 20,000 CNC plus the band's spread; the band's EW benchmark.
 * **Populations, as live.** brk20 on bands C0 and W1 (band at ``y``), ins on C0. Other bands drop as
   ``out_of_population``. hi52 is not a leg.
-* **Admission.** Every gate up to the fill, with one forward window for both legs: ``FILL_WINDOW_SESSIONS +
-  rc.HORIZON`` market sessions after ``y`` (``short_forward_window``), so every rule of a leg reads one admitted set.
+* **Admission.** Every gate up to the fill, with the forward window ``FILL_WINDOW_SESSIONS + EXIT_SESSIONS[leg]``
+  market sessions after ``y`` (y+25 brk20, y+24 ins; ``short_forward_window``), so every rule of a leg reads one
+  admitted set.
 * **Live rule (the comparator).** brk20: the limit at the level over ``y+1 .. y+5``, exit ``close(fill+20)``; ins:
   ``open(y+1)``, exit at T+20. One position per stock per leg.
+* **Candle flags.** A rule's flag on own bar ``d`` is cleared when a structural ex-date (``corp_actions`` plus the
+  AMIORG supplement) falls in ``(dates[d - m + 1 - 10], dates[d]]``: after the first of candle 1's 10 reference bars
+  and on or before ``d`` (``masked_ex_date`` counts the cleared flags each scan met).
 * **Candle entry.** The first own bar ``d`` on market sessions ``y .. y+4`` that completes a pattern of the set and
   whose stock trades on market session ``pos(d)+1``; buy at that bar's open. None: ``no_pattern`` (``no_fill_session``
   when a pattern completed but never with a next-session bar). Then the live rule's lock, exit-bar and usability
@@ -20,15 +24,23 @@ widening study's (``pool_widening_study.py``), imported and unchanged unless sta
 * **Candle exit.** On each kept, non-void live trade, the first own bar from the fill bar through the bar before
   the exit bar that completes a pattern of the set; sell at the open of the next own bar (late when that bar is not
   on the next market session). No such bar: the live exit stands. The benchmark of an open exit runs to the open of
-  the exit session.
-* **Add-on (brk20).** A live brk20 fill that one-position drops (``held_overlap``) and that fills before the exit
-  session of the kept trade it follows; the first per kept trade. Walked as its own trade.
-* **Random-timing controls.** ``CONTROL_DRAWS`` draws, seed ``CONTROL_SEED``; each draw moves only timing (entry:
-  a uniform eligible day in ``y .. y+4``; exit: a uniform own bar from the fill bar through the bar before the exit
-  bar, for the trades the candle rule exits only). A void draw drops that trade from that draw's mean excess.
+  the exit session. Trades the live rule voids are out of both arms.
+* **Add-on (brk20).** A live brk20 fill that one-position drops (``held_overlap``), signalled on or after the fill
+  session of the kept trade it follows (``signal_before_first_fill`` otherwise) and filling before that trade's exit
+  session (``filled_after_exit`` otherwise). Per kept trade the earliest fill is the add-on (ties: the earlier
+  signal); the rest are ``extra_repeat``. Walked as its own trade.
+* **Random-timing controls**, ``CONTROL_DRAWS`` draws each; each draw moves only timing, and a void pick drops that
+  trade from that draw's mean excess.
+  - Uniform (seed ``CONTROL_SEED``): entry, a uniform day among the own bars on ``y .. y+4`` with a next-session bar
+    (a day whose trade fails the lock, exit-bar or usability check, or is void, is void when picked); exit, for the
+    trades the candle rule exits only, a uniform own bar from the fill bar through the bar before the exit bar.
+  - Matched (seed ``MATCHED_SEED``): a uniform permutation of the variant's own offsets across its trades (entry:
+    sessions from ``y`` to the pattern day, all variant trades; exit: sessions from the fill session to the pattern
+    bar, the trades exited early). A trade whose drawn day is not eligible for it, or whose trade is void, is void.
 * **Verdict** (``FAMILY_N`` = 7 trials): the pool study's seven criteria with criterion 2 = median net > 0 and CPCV
-  at the cell's mean cost; the timing trials add the relative test (beats the live rule with the 95% CI of the
-  difference above 0, and beats the control's 95th percentile). Unrounded values; a missing value fails.
+  at the cell's mean cost; the timing trials add the relative test (mean excess above the live rule's with the 95% CI
+  of the difference above 0, and above the 95th percentile of BOTH controls). Unrounded values; a missing value
+  fails.
 
 Read-only against a research snapshot; refuses the live store and market hours. Exit codes: 0 ran, 2 refused.
 """
@@ -74,8 +86,10 @@ LEGS: tuple[str, ...] = pws.LEGS
 SIGNALS_FROM = pws.SIGNALS_FROM
 EXIT_SESSIONS = pws.EXIT_SESSIONS
 FILL_WINDOW_SESSIONS = pws.FILL_WINDOW_SESSIONS
-#: Market sessions after ``y`` every admitted signal needs: the latest candle fill (``y+5``) plus the hold.
-FORWARD_SESSIONS = FILL_WINDOW_SESSIONS + rc.HORIZON
+#: Market sessions after ``y`` every admitted signal needs: the latest candle fill (``y+5``) plus the leg's hold.
+FORWARD_SESSIONS: dict[str, int] = {leg: FILL_WINDOW_SESSIONS + EXIT_SESSIONS[leg] for leg in LEGS}
+#: Own bars before candle 1 that a candle rule reads (its reference bars).
+CANDLE_REF_BARS = 10
 #: The candle entry scans market sessions ``y .. y + ENTRY_SCAN_SESSIONS - 1``.
 ENTRY_SCAN_SESSIONS = 5
 POPULATION: dict[str, tuple[str, ...]] = {"brk20": (pw.C0, pw.W1), "ins": (pw.C0,)}
@@ -88,6 +102,8 @@ TOP_TAIL_FRAC = pws.TOP_TAIL_FRAC
 HELD_OUT_FROM = pws.HELD_OUT_FROM
 CONTROL_DRAWS = 1000
 CONTROL_SEED = 20261111
+#: The matched-timing control's generator: the registered seed on its own stream.
+MATCHED_SEED: tuple[int, int] = (20261111, 1)
 CONTROL_PCT = 95.0
 #: The candle module's set sizes, as registered.
 N_BULLISH, N_BEARISH, N_FIVE_ENTRY, N_FIVE_EXIT = 21, 17, 2, 3
@@ -111,6 +127,7 @@ TIMING_TRIALS: dict[str, tuple[str, tuple[str, ...], str]] = {
 TRIALS: tuple[str, ...] = (ADDON, "brk20_candle_entry", "ins_candle_entry", "brk20_candle_exit", "ins_candle_exit",
                            "five_entry", "five_exit")
 ENTRY_SETS, EXIT_SETS = ("bullish", "five_entry"), ("bearish", "five_exit")
+FIRST_POSITIONS_LABEL = "all kept brk20 trades (first positions)"
 
 _PCT_Q = Decimal("0.000001")
 _HUNDRED = Decimal("100")
@@ -119,20 +136,42 @@ _bump = pws._bump
 
 
 # =============================================================================== candle flags
+def ex_date_window(dates: Sequence[date], ex: Sequence[date], length: int) -> np.ndarray:
+    """Per own bar ``d``: whether a structural ex-date lies in ``(dates[d - length + 1 - CANDLE_REF_BARS], dates[d]]``,
+    the bars a ``length``-candle rule completing on ``d`` reads after its first one. False where that first bar
+    does not exist (the rule cannot complete there)."""
+    n = len(dates)
+    out = np.zeros(n, dtype=bool)
+    if not ex or not n:
+        return out
+    exd = np.array(sorted(ex), dtype="datetime64[D]")
+    le = np.searchsorted(exd, np.array(dates, dtype="datetime64[D]"), side="right")   # ex-dates <= dates[d]
+    first = np.arange(n) - length + 1 - CANDLE_REF_BARS
+    ok = first >= 0
+    out[ok] = le[ok] - le[first[ok]] > 0
+    return out
+
+
 class Patterns:
     """Per-stock completion flags from the candle module's ``detect``, packed one bit per rule per own bar and kept
-    from ``keep_from`` on (no scan reads an earlier bar)."""
+    from ``keep_from`` on (no scan reads an earlier bar). A flag whose bars span a structural ex-date
+    (:func:`ex_date_window`) is cleared and kept apart so the scans can count it."""
 
     def __init__(self, series: Mapping[str, Series], detector: Callable[..., Mapping[str, Any]],
-                 names: Sequence[str], keep_from: date = SIGNALS_FROM) -> None:
+                 names: Sequence[str], *, lengths: Mapping[str, int] | None = None,
+                 structural: Mapping[str, Sequence[date]] | None = None, keep_from: date = SIGNALS_FROM) -> None:
         if len(names) > 64 or len(set(names)) != len(names):
             raise ValueError("pattern names must be distinct and at most 64")
+        structural = structural or {}
+        if structural and (lengths is None or set(names) - set(lengths)):
+            raise ValueError("every rule needs its candle count to mask structural ex-dates")
         self._series, self._detector, self._names = series, detector, tuple(names)
+        self._lengths, self._structural = lengths or {}, structural
         self._bit = {n: k for k, n in enumerate(self._names)}
         self._keep_from = keep_from
-        self._masks: dict[str, tuple[int, np.ndarray]] = {}
+        self._masks: dict[str, tuple[int, np.ndarray, np.ndarray | None]] = {}
 
-    def _mask(self, sym: str) -> tuple[int, np.ndarray]:
+    def _mask(self, sym: str) -> tuple[int, np.ndarray, np.ndarray | None]:
         hit = self._masks.get(sym)
         if hit is None:
             s = self._series[sym]
@@ -140,26 +179,38 @@ class Patterns:
                                  np.asarray(s.low, dtype="float64"), np.asarray(s.close, dtype="float64"),
                                  self._names)
             k0 = bisect_left(s.dates, self._keep_from)
+            ex = self._structural.get(sym)
             m = np.zeros(len(s) - k0, dtype=np.uint64)
+            mc = np.zeros(len(s) - k0, dtype=np.uint64) if ex else None
             for n in self._names:
                 f = np.asarray(raw[n], dtype=bool)
                 if f.shape != (len(s),):
                     raise ValueError(f"{sym} {n}: {f.shape} flags for {len(s)} bars")
-                m |= f[k0:].astype(np.uint64) << np.uint64(self._bit[n])
-            hit = (k0, m)
+                bit = np.uint64(self._bit[n])
+                if ex:
+                    span = ex_date_window(s.dates, ex, self._lengths[n])
+                    mc |= (f & span)[k0:].astype(np.uint64) << bit
+                    f = f & ~span
+                m |= f[k0:].astype(np.uint64) << bit
+            hit = (k0, m, mc)
             self._masks[sym] = hit
         return hit
 
-    def _bits(self, sym: str, j: int) -> int:
-        k0, m = self._mask(sym)
+    def _bits(self, sym: str, j: int) -> tuple[int, int]:
+        k0, m, mc = self._mask(sym)
         if j < k0:
             raise IndexError(f"{sym}: bar {j} precedes the kept flags ({k0})")
-        return int(m[j - k0])
+        return int(m[j - k0]), 0 if mc is None else int(mc[j - k0])
 
     def hits(self, sym: str, j: int, names: Sequence[str]) -> tuple[str, ...]:
         """The rules of ``names`` completing on own bar ``j``, in ``names`` order."""
-        b = self._bits(sym, j)
+        b = self._bits(sym, j)[0]
         return tuple(n for n in names if b >> self._bit[n] & 1) if b else ()
+
+    def masked(self, sym: str, j: int, names: Sequence[str]) -> int:
+        """How many rules of ``names`` completed on own bar ``j`` but were cleared for a structural ex-date."""
+        b = self._bits(sym, j)[1]
+        return sum(b >> self._bit[n] & 1 for n in names) if b else 0
 
 
 # =============================================================================== admission
@@ -178,15 +229,17 @@ class Admitted:
 
 @dataclass(frozen=True)
 class Entry(Candidate):
-    """A candle-entry candidate: the rules that completed on the chosen day."""
+    """A candle-entry candidate: the chosen day (own bar ``day``, the fill is ``day + 1``) and the rules that
+    completed on it."""
 
     patterns: tuple[str, ...] = ()
+    day: int = -1
 
 
 def _gate(leg: str, sym: str, s: Series, i: int, grid, atr: np.ndarray,
           counts: dict[str, int]) -> tuple[str, int, float] | None:
-    """The pool study's band and forward-window admission with the leg's population and one forward window of
-    ``FORWARD_SESSIONS`` market sessions for both legs; ``None`` = dropped (counted)."""
+    """The pool study's band and forward-window admission with the leg's population and the forward window of
+    ``FORWARD_SESSIONS[leg]`` market sessions; ``None`` = dropped (counted)."""
     code, rank, liq = grid.band_at(sym, s.dates[i])
     if code == pws.NO_BAND:
         _bump(counts, "no_band")
@@ -195,7 +248,7 @@ def _gate(leg: str, sym: str, s: Series, i: int, grid, atr: np.ndarray,
     if band not in POPULATION[leg]:
         _bump(counts, "out_of_population")
         return None
-    if int(grid.own_pos[sym][i]) + FORWARD_SESSIONS >= len(grid.dates):
+    if int(grid.own_pos[sym][i]) + FORWARD_SESSIONS[leg] >= len(grid.dates):
         _bump(counts, "short_forward_window")
         return None
     if not np.isfinite(atr[i]):
@@ -281,17 +334,24 @@ def _entry_at(a: Admitted, d: int, grid, counts: dict[str, int], patterns: tuple
     if c is None:
         return None
     return Entry(c.leg, c.event, c.band, c.rank, c.liquidity, exit_idx=c.exit_idx, exit_late=c.exit_late,
-                 patterns=patterns)
+                 patterns=patterns, day=d)
+
+
+def _count_masked(pat: Patterns, sym: str, j: int, names: Sequence[str], counts: dict[str, int] | None) -> None:
+    if counts is not None and (n := pat.masked(sym, j, names)):
+        counts["masked_ex_date"] = counts.get("masked_ex_date", 0) + n
 
 
 def candle_entry(a: Admitted, grid, pat: Patterns, names: Sequence[str], counts: dict[str, int]) -> Entry | None:
-    """The first own bar on sessions ``y .. y+4`` completing a rule of ``names`` with a next-session bar."""
+    """The first own bar on sessions ``y .. y+4`` completing a rule of ``names`` with a next-session bar. Flags
+    cleared for an ex-date on the bars scanned are counted (``masked_ex_date``)."""
     s, gp = a.series, grid.own_pos[a.symbol]
     last = int(gp[a.idx]) + ENTRY_SCAN_SESSIONS - 1
     seen = False
     for d in range(a.idx, len(s)):
         if gp[d] > last:
             break
+        _count_masked(pat, a.symbol, d, names, counts)
         got = pat.hits(a.symbol, d, names)
         if not got:
             continue
@@ -303,12 +363,13 @@ def candle_entry(a: Admitted, grid, pat: Patterns, names: Sequence[str], counts:
 
 
 def addons(cands: Sequence[Candidate], kept: Sequence[Candidate], counts: dict[str, int]) -> list[Candidate]:
-    """The live brk20 fills one-position dropped that fill before the exit session of the kept trade they follow;
-    the first per kept trade. ``kept`` must be ``one_position_per_symbol(cands)``."""
+    """The live brk20 fills one-position dropped (each follows the kept trade ``k`` on its stock before it) that are
+    signalled on or after ``k``'s fill session (``signal_before_first_fill`` otherwise) and fill before ``k``'s exit
+    session (``filled_after_exit`` otherwise). Per ``k`` the add-on is the earliest of these fills, ties to the
+    earlier signal; the rest are ``extra_repeat``. ``kept`` must be ``one_position_per_symbol(cands)``."""
     kept_ids = {id(c) for c in kept}
     last: dict[str, Candidate] = {}
-    used: set[int] = set()
-    out: list[Candidate] = []
+    follows: dict[int, list[Candidate]] = defaultdict(list)
     for c in sorted(cands, key=lambda c: (c.event.symbol, c.event.signal_date)):
         sym = c.event.symbol
         if id(c) in kept_ids:
@@ -317,19 +378,28 @@ def addons(cands: Sequence[Candidate], kept: Sequence[Candidate], counts: dict[s
         k = last.get(sym)
         if k is None:
             raise AssertionError(f"{sym} {c.event.signal_date}: dropped with no kept trade before it")
-        if c.event.fill_date >= k.exit_date:
+        if c.event.signal_date < k.event.fill_date:
+            _bump(counts, "signal_before_first_fill")
+        elif c.event.fill_date >= k.exit_date:
             _bump(counts, "filled_after_exit")
-        elif id(k) in used:
-            _bump(counts, "extra_repeat")
         else:
-            used.add(id(k))
-            out.append(c)
+            follows[id(k)].append(c)
+    out: list[Candidate] = []
+    for k in sorted(kept, key=lambda c: (c.event.symbol, c.event.signal_date)):
+        reps = sorted(follows.get(id(k), ()), key=lambda c: (c.event.fill_date, c.event.signal_date))
+        if reps:
+            out.append(reps[0])
+            for _ in reps[1:]:
+                _bump(counts, "extra_repeat")
     return out
 
 
-def candle_exit_day(c: Candidate, pat: Patterns, names: Sequence[str]) -> tuple[int, tuple[str, ...]] | None:
-    """``(own bar, rules)`` of the first completion from the fill bar through the bar before the exit bar."""
+def candle_exit_day(c: Candidate, pat: Patterns, names: Sequence[str],
+                    counts: dict[str, int] | None = None) -> tuple[int, tuple[str, ...]] | None:
+    """``(own bar, rules)`` of the first completion from the fill bar through the bar before the exit bar. Flags
+    cleared for an ex-date on the bars scanned are counted in ``counts`` (``masked_ex_date``)."""
     for j in range(c.event.fill_idx, c.exit_idx):
+        _count_masked(pat, c.event.symbol, j, names, counts)
         got = pat.hits(c.event.symbol, j, names)
         if got:
             return j, got
@@ -340,7 +410,9 @@ def candle_exit_day(c: Candidate, pat: Patterns, names: Sequence[str]) -> tuple[
 @dataclass(frozen=True, eq=False)
 class STrade:
     """One walked trade. Returns are PERCENT. ``exit_day`` = market sessions from the fill session to the exit
-    session; ``cand`` is the candidate it was walked from (the live one for an open exit)."""
+    session; ``cand`` is the candidate it was walked from (the live one for an open exit); ``trigger`` is the own bar
+    whose pattern timed it (the entry's pattern day, or the bar an open exit sells after), ``None`` for the live
+    rule."""
 
     leg: str
     band: str
@@ -360,6 +432,7 @@ class STrade:
     exit_day: int
     cand: Any = None
     patterns: tuple[str, ...] = ()
+    trigger: int | None = None
 
 
 @dataclass
@@ -396,7 +469,7 @@ def walk_close(c: Candidate, grid, structural, fees_pct: Decimal, counts: dict[s
     return STrade(t.leg, t.band, t.symbol, t.signal_date, t.fill_date, t.exit_date, t.gross, t.net,
                   float(pws.band_cost(c.band, fees_pct)), t.benchmark, t.bench_n, t.excess, t.exit_late,
                   t.locked_exit, "close", int(gp[c.exit_idx] - gp[c.event.fill_idx]), c,
-                  getattr(c, "patterns", ()))
+                  getattr(c, "patterns", ()), getattr(c, "day", None))
 
 
 def open_exit(c: Candidate, j: int, grid, structural, fees_pct: Decimal, obench: OpenBenchmark,
@@ -418,13 +491,13 @@ def open_exit(c: Candidate, j: int, grid, structural, fees_pct: Decimal, obench:
     g = float(gross)
     return STrade(c.leg, c.band, ev.symbol, ev.signal_date, f, xd, g, float(gross - cost), float(cost), bench, n,
                   None if bench is None else g - bench, int(gp[x] - gp[j] - 1),
-                  float(s.high[x]) == float(s.low[x]), "open", int(gp[x] - gp[ev.fill_idx]), c, patterns)
+                  float(s.high[x]) == float(s.low[x]), "open", int(gp[x] - gp[ev.fill_idx]), c, patterns, j)
 
 
 def candle_exit(t: STrade, pat: Patterns, names: Sequence[str], grid, structural, fees_pct: Decimal,
                 obench: OpenBenchmark, counts: dict[str, int]) -> STrade | None:
     """The live trade ``t`` under the candle exit: itself when no rule completes; ``None`` = void (counted)."""
-    hit = candle_exit_day(t.cand, pat, names)
+    hit = candle_exit_day(t.cand, pat, names, counts)
     if hit is None:
         return t
     _bump(counts, "early_exit")
@@ -531,72 +604,125 @@ def paired_bootstrap(pairs: Sequence[tuple[STrade, STrade | None]]) -> dict[str,
 
 
 # =============================================================================== random-timing controls
-def draw_means(fixed: Sequence[float | None], options: Sequence[np.ndarray], *, draws: int = CONTROL_DRAWS,
-               seed: int = CONTROL_SEED) -> np.ndarray:
-    """Per draw, the mean excess of ``fixed`` trades plus one uniform pick from each ``options`` row. NaN (void or
-    no benchmark) drops that trade from that draw; a draw with nothing left is NaN."""
+@dataclass(frozen=True, eq=False)
+class Table:
+    """One redrawn trade's alternatives, computed once: per eligible day its offset (market sessions from the
+    trade's anchor: ``y`` for an entry, the fill session for an exit, ascending) and the excess of the trade timed
+    there (NaN when void, when it fails the live rule's checks, or unbenchmarked); ``own`` is the variant's offset."""
+
+    offsets: np.ndarray
+    vals: np.ndarray
+    own: int
+
+
+def _draw_stats(fixed: Sequence[float | None], vals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per draw (row of ``vals``): the mean excess over ``fixed`` and the drawn trades, NaN dropping a trade from
+    that draw (a draw with nothing left is NaN), and the number of drawn trades dropped."""
     fx = np.array([np.nan if v is None else v for v in fixed], dtype="float64")
     fin = np.isfinite(fx)
     fs, fc = float(fx[fin].sum()), int(fin.sum())
-    if not options:
-        return np.full(draws, fs / fc if fc else np.nan)
+    ok = np.isfinite(vals)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        means = (np.where(ok, vals, 0.0).sum(axis=1) + fs) / (ok.sum(axis=1) + fc)
+    return means, (~ok).sum(axis=1)
+
+
+def uniform_draws(fixed: Sequence[float | None], options: Sequence[np.ndarray], *, draws: int = CONTROL_DRAWS,
+                  seed: int = CONTROL_SEED) -> tuple[np.ndarray, np.ndarray]:
+    """The uniform control: each draw picks one entry of each ``options`` row uniformly (every eligible day,
+    whatever its outcome)."""
     highs = np.array([len(o) for o in options], dtype=np.int64)
     if (highs < 1).any():
         raise ValueError("a redrawn trade has no eligible day")
-    m = np.full((len(options), int(highs.max())), np.nan)
+    m = np.full((len(options), int(highs.max()) if len(options) else 0), np.nan)
     for r, o in enumerate(options):
         m[r, :len(o)] = o
     idx = np.random.default_rng(seed).integers(0, highs, size=(draws, len(options)))
-    vals = m[np.arange(len(options)), idx]
-    ok = np.isfinite(vals)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        return (np.where(ok, vals, 0.0).sum(axis=1) + fs) / (ok.sum(axis=1) + fc)
+    return _draw_stats(fixed, m[np.arange(len(options)), idx])
+
+
+def draw_means(fixed: Sequence[float | None], options: Sequence[np.ndarray], *, draws: int = CONTROL_DRAWS,
+               seed: int = CONTROL_SEED) -> np.ndarray:
+    return uniform_draws(fixed, options, draws=draws, seed=seed)[0]
+
+
+def matched_draws(fixed: Sequence[float | None], tables: Sequence[Table], *, draws: int = CONTROL_DRAWS,
+                  seed: Sequence[int] = MATCHED_SEED) -> tuple[np.ndarray, np.ndarray]:
+    """The matched control: each draw permutes the variant's own offsets uniformly across its trades; a trade takes
+    the drawn offset when that day is eligible for it, else it is void in that draw."""
+    own = np.array([t.own for t in tables], dtype=np.int64)
+    width = int(max([own.max(initial=0)] + [t.offsets.max(initial=0) for t in tables])) + 1
+    w = np.full((len(tables), width), np.nan)
+    for r, t in enumerate(tables):
+        w[r, t.offsets] = t.vals
+    drawn = np.random.default_rng(list(seed)).permuted(np.tile(own, (draws, 1)), axis=1)
+    return _draw_stats(fixed, w[np.arange(len(tables)), drawn])
 
 
 def _excess_or_nan(t: STrade | None) -> float:
     return np.nan if t is None or t.excess is None else float(t.excess)
 
 
-def entry_options(t: STrade, a: Admitted, grid, structural, fees_pct: Decimal) -> np.ndarray:
-    """Excess of the trade on each eligible entry day (NaN when void or unbenchmarked). Eligible: a day of
-    ``entry_days`` whose trade passes the live rule's lock, exit-bar and usability checks."""
-    out = []
-    for d in entry_days(a, grid):
+def entry_table(t: STrade, a: Admitted, grid, structural, fees_pct: Decimal) -> Table:
+    """Every day of ``entry_days`` (own bar there and on the next market session) with the trade bought there; a
+    day whose trade fails the lock, exit-bar or usability check, or is void, stays eligible with NaN."""
+    gp = grid.own_pos[a.symbol]
+    y = int(gp[a.idx])
+    days = entry_days(a, grid)
+    vals = []
+    for d in days:
         c = _entry_at(a, d, grid, {})
-        if c is not None:
-            out.append(_excess_or_nan(walk_close(c, grid, structural, fees_pct, {})))
-    return np.array(out, dtype="float64")
+        vals.append(np.nan if c is None else _excess_or_nan(walk_close(c, grid, structural, fees_pct, {})))
+    return Table(np.array([int(gp[d]) - y for d in days], dtype=np.int64), np.array(vals, dtype="float64"),
+                 int(gp[t.trigger]) - y)
 
 
-def exit_options(t: STrade, grid, structural, fees_pct: Decimal, obench: OpenBenchmark) -> np.ndarray:
-    """Excess of the live trade sold at the next own bar's open after each own bar from the fill bar through the
-    bar before the exit bar."""
+def exit_table(t: STrade, grid, structural, fees_pct: Decimal, obench: OpenBenchmark) -> Table:
+    """Every own bar from the fill bar through the bar before the exit bar, with the live trade sold at the next own
+    bar's open after it."""
     c = t.cand
-    return np.array([_excess_or_nan(open_exit(c, j, grid, structural, fees_pct, obench))
-                     for j in range(c.event.fill_idx, c.exit_idx)], dtype="float64")
+    gp = grid.own_pos[c.event.symbol]
+    f = int(gp[c.event.fill_idx])
+    js = range(c.event.fill_idx, c.exit_idx)
+    return Table(np.array([int(gp[j]) - f for j in js], dtype=np.int64),
+                 np.array([_excess_or_nan(open_exit(c, j, grid, structural, fees_pct, obench)) for j in js],
+                          dtype="float64"),
+                 int(gp[t.trigger]) - f)
 
 
-def control_summary(means: np.ndarray, variant_mean: float | None, n_redrawn: int) -> dict[str, Any]:
+def control_summary(stats: tuple[np.ndarray, np.ndarray], variant_mean: float | None, n_redrawn: int,
+                    seed: Any) -> dict[str, Any]:
+    means, void = stats
     fin = means[np.isfinite(means)]
     p95 = float(np.percentile(fin, CONTROL_PCT)) if fin.size else None
     below = (float(np.mean(fin < variant_mean)) if fin.size and variant_mean is not None else None)
-    return {"draws": int(means.size), "seed": CONTROL_SEED, "finite_draws": int(fin.size), "n_redrawn": n_redrawn,
-            "mean": _mean(fin), "p95": p95, "variant_share_of_draws_below": below}
+    return {"draws": int(means.size), "seed": list(seed) if isinstance(seed, tuple | list) else seed,
+            "finite_draws": int(fin.size), "n_redrawn": n_redrawn, "mean": _mean(fin), "p95": p95,
+            "variant_share_of_draws_below": below,
+            "void_per_draw": {"mean": _mean(void), "min": int(void.min()) if void.size else None,
+                              "max": int(void.max()) if void.size else None}}
+
+
+def controls(fixed: Sequence[float | None], tables: Sequence[Table], variant_mean: float | None) -> dict[str, Any]:
+    """Both random-timing controls over the same option tables."""
+    return {"uniform": control_summary(uniform_draws(fixed, [t.vals for t in tables]), variant_mean, len(tables),
+                                       CONTROL_SEED),
+            "matched": control_summary(matched_draws(fixed, tables), variant_mean, len(tables), MATCHED_SEED)}
 
 
 def entry_control(trades: Sequence[STrade], lookup: Mapping[tuple[str, str, int], Admitted], grid, structural,
                   fees_pct: Decimal, variant_mean: float | None) -> dict[str, Any]:
-    opts = [entry_options(t, lookup[(t.leg, t.symbol, t.cand.event.signal_idx)], grid, structural, fees_pct)
-            for t in trades]
-    return control_summary(draw_means([], opts), variant_mean, len(opts))
+    tables = [entry_table(t, lookup[(t.leg, t.symbol, t.cand.event.signal_idx)], grid, structural, fees_pct)
+              for t in trades]
+    return controls([], tables, variant_mean)
 
 
 def exit_control(trades: Sequence[STrade], grid, structural, fees_pct: Decimal, obench: OpenBenchmark,
                  variant_mean: float | None) -> dict[str, Any]:
+    """Only the trades the candle rule exits early are redrawn; the rest keep the live exit."""
     moved = [t for t in trades if t.exit_kind == "open"]
     fixed = [t.excess for t in trades if t.exit_kind != "open"]
-    opts = [exit_options(t, grid, structural, fees_pct, obench) for t in moved]
-    return control_summary(draw_means(fixed, opts), variant_mean, len(opts))
+    return controls(fixed, [exit_table(t, grid, structural, fees_pct, obench) for t in moved], variant_mean)
 
 
 # =============================================================================== verdict
@@ -622,17 +748,21 @@ def absolute(m: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def relative(variant_mean: float | None, live_mean: float | None, ci: Mapping[str, Any],
-             control: Mapping[str, Any]) -> dict[str, Any]:
-    """Beats the live rule (mean excess above it, the 95% CI of the difference above 0) AND beats the control's
-    95th percentile."""
-    beats_live = variant_mean is not None and _gt(variant_mean - live_mean if live_mean is not None else None, 0.0)
+             ctrl: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Beats the live rule (mean excess above it, the 95% CI of the difference above 0) AND beats the 95th
+    percentile of both the uniform and the matched control."""
+    def above(x: float | None) -> bool:
+        return variant_mean is not None and x is not None and _gt(variant_mean - x, 0.0)
+
+    beats_live = above(live_mean)
     ci_above_0 = _gt(ci.get("ci_lo"), 0.0) and not ci.get("degenerate", False)
-    p95 = control.get("p95")
-    beats_control = variant_mean is not None and p95 is not None and _gt(variant_mean - p95, 0.0)
+    up95, mp95 = ctrl.get("uniform", {}).get("p95"), ctrl.get("matched", {}).get("p95")
+    beats_uniform, beats_matched = above(up95), above(mp95)
     return {"variant_mean_excess": variant_mean, "live_mean_excess": live_mean, "diff": ci.get("diff"),
-            "ci_lo": ci.get("ci_lo"), "ci_hi": ci.get("ci_hi"), "control_p95": p95,
-            "beats_live": bool(beats_live), "ci_above_0": bool(ci_above_0), "beats_control": bool(beats_control),
-            "pass": bool(beats_live and ci_above_0 and beats_control)}
+            "ci_lo": ci.get("ci_lo"), "ci_hi": ci.get("ci_hi"), "uniform_p95": up95, "matched_p95": mp95,
+            "beats_live": bool(beats_live), "ci_above_0": bool(ci_above_0), "beats_uniform": bool(beats_uniform),
+            "beats_matched": bool(beats_matched),
+            "pass": bool(beats_live and ci_above_0 and beats_uniform and beats_matched)}
 
 
 def addon_label(m: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
@@ -751,8 +881,9 @@ def evaluate(admitted: Mapping[str, tuple[list[Admitted], dict[str, int]]], grid
     first = live["brk20"]
     label = addon_label(m, rows)
     trials[ADDON] = {"measures": _rt(m), "rows": rows, "verdict": label, "ledger": LEDGER[label],
-                     "diagnostics": {"first_position_cell": _rt(_brief(first)),
-                                     "addon_minus_first_position": _rt(joint_bootstrap(addon_trades, first)),
+                     "diagnostics": {"comparator": FIRST_POSITIONS_LABEL,
+                                     "first_positions_all_kept_brk20": _rt(_brief(first)),
+                                     "addon_minus_first_positions": _rt(joint_bootstrap(addon_trades, first)),
                                      "by_year": _rt(by_year(addon_trades)), "funnel": dict(sorted(addon_counts.items()))}}
     for name, (kind, legs, st) in TIMING_TRIALS.items():
         live_cell = [t for leg in legs for t in live[leg]]
@@ -761,7 +892,7 @@ def evaluate(admitted: Mapping[str, tuple[list[Admitted], dict[str, int]]], grid
             var = [t for leg in legs for t in entries[(leg, st)]]
             m = measure_cell(var)
             ci = joint_bootstrap(var, live_cell)
-            control = entry_control(var, lookup, grid, structural, fees_pct, m["mean_excess"])
+            ctrl = entry_control(var, lookup, grid, structural, fees_pct, m["mean_excess"])
             diag = {"no_pattern": sum(funnels[f"entry_{st}/{leg}"].get("no_pattern", 0) for leg in legs),
                     "no_fill_session": sum(funnels[f"entry_{st}/{leg}"].get("no_fill_session", 0) for leg in legs)}
         else:
@@ -769,13 +900,13 @@ def evaluate(admitted: Mapping[str, tuple[list[Admitted], dict[str, int]]], grid
             var = [v for _, v in pairs if v is not None]
             m = measure_cell(var)
             ci = paired_bootstrap(pairs)
-            control = exit_control(var, grid, structural, fees_pct, obench, m["mean_excess"])
+            ctrl = exit_control(var, grid, structural, fees_pct, obench, m["mean_excess"])
             diag = exit_profile(var)
         rows = absolute(m)
-        rel = relative(m["mean_excess"], live_mean, ci, control)
+        rel = relative(m["mean_excess"], live_mean, ci, ctrl)
         label = timing_label(m, rows, rel)
         trials[name] = {"kind": kind, "legs": list(legs), "candle_set": st, "measures": _rt(m), "rows": rows,
-                        "relative": _rt({**rel, "bootstrap": ci}), "control": _rt(control), "verdict": label,
+                        "relative": _rt({**rel, "bootstrap": ci}), "controls": _rt(ctrl), "verdict": label,
                         "ledger": LEDGER[label],
                         "diagnostics": _rt({**diag, "live_n": len(live_cell), "per_pattern": per_pattern(var, sets[st]),
                                             "by_year": by_year(var)})}
@@ -799,30 +930,30 @@ def _counts(live_kept, addon_cands, entry_kept, funnels, grid, structural, pat, 
     live = {leg: nonvoid(live_kept[leg], funnels[f"live/{leg}"]) for leg in LEGS}
     addon = nonvoid(addon_cands, funnels["addon/brk20"])
     entries = {k: nonvoid(v, funnels[f"entry_{k[1]}/{k[0]}"]) for k, v in entry_kept.items()}
-    early: dict[tuple[str, str], tuple[int, int]] = {}
     for st in EXIT_SETS:
         for leg in LEGS:
-            n_early = n_late = 0
+            counts: dict[str, int] = {}
             for c in live[leg]:
-                hit = candle_exit_day(c, pat, sets[st])
+                hit = candle_exit_day(c, pat, sets[st], counts)
                 if hit is not None:
-                    n_early += 1
+                    _bump(counts, "early_exit")
                     gp = grid.own_pos[c.event.symbol]
-                    n_late += int(gp[hit[0] + 1] - gp[hit[0]] - 1 > 0)
-            early[(leg, st)] = (n_early, n_late)
-    trials: dict[str, Any] = {ADDON: {"variant_n": len(addon), "first_position_n": len(live["brk20"]),
+                    if gp[hit[0] + 1] - gp[hit[0]] - 1 > 0:
+                        _bump(counts, "late_open_exit")
+            funnels[f"exit_{st}/{leg}"] = counts
+    trials: dict[str, Any] = {ADDON: {"variant_n": len(addon), "first_positions_n": len(live["brk20"]),
                                       **{k: funnels["addon/brk20"].get(k, 0)
-                                         for k in ("filled_after_exit", "extra_repeat")}}}
+                                         for k in ("signal_before_first_fill", "filled_after_exit", "extra_repeat")}}}
     for name, (kind, legs, st) in TIMING_TRIALS.items():
         live_n = sum(len(live[leg]) for leg in legs)
         if kind == "entry":
             trials[name] = {"variant_n": sum(len(entries[(leg, st)]) for leg in legs), "live_n": live_n,
                             **{k: sum(funnels[f"entry_{st}/{leg}"].get(k, 0) for leg in legs)
-                               for k in ("no_pattern", "no_fill_session", "held_overlap")}}
+                               for k in ("no_pattern", "no_fill_session", "held_overlap", "masked_ex_date")}}
         else:
             trials[name] = {"variant_n": live_n, "live_n": live_n,
-                            "early_exits": sum(early[(leg, st)][0] for leg in legs),
-                            "late_open_exits": sum(early[(leg, st)][1] for leg in legs)}
+                            **{k: sum(funnels[f"exit_{st}/{leg}"].get(k, 0) for leg in legs)
+                               for k in ("early_exit", "late_open_exit", "masked_ex_date")}}
     return {"rules": {k: dict(sorted(v.items())) for k, v in funnels.items()}, "trials": trials}
 
 
@@ -878,7 +1009,10 @@ def run_study(conn, *, db_path: Path, etf, counts_only: bool = False,
     admitted = {"brk20": brk20_admitted(series, grid, ex, structural, index),
                 "ins": ins_admitted(conn, series, grid, structural)}
     names = tuple(dict.fromkeys(sets["bullish"] + sets["bearish"]))
-    pat = Patterns(series, cp.detect, names)
+    lengths = dict(getattr(cp, "LENGTH", {}))
+    if set(names) - set(lengths):
+        raise rc.Refusal(f"candle_patterns.LENGTH lacks {sorted(set(names) - set(lengths))}")
+    pat = Patterns(series, cp.detect, names, lengths=lengths, structural=structural)
     body = evaluate(admitted, grid, structural, fees_pct, pat, sets, counts_only=counts_only)
     return {
         "meta": {
@@ -901,8 +1035,11 @@ def run_study(conn, *, db_path: Path, etf, counts_only: bool = False,
             "constants": {"min_n": MIN_N, "clustered_t_min": CLUSTERED_T_MIN, "bootstrap_reps": BOOTSTRAP_REPS,
                           "bootstrap_seed": BOOTSTRAP_SEED, "ci_level": CI_LEVEL, "top_tail_frac": TOP_TAIL_FRAC,
                           "held_out_from": str(HELD_OUT_FROM), "control_draws": CONTROL_DRAWS,
-                          "control_seed": CONTROL_SEED, "control_percentile": CONTROL_PCT},
-            "candle_module": {"path": str(getattr(cp, "__file__", "")), **{k: list(v) for k, v in sets.items()}},
+                          "uniform_control_seed": CONTROL_SEED,
+                          "matched_control_seed": "numpy default_rng(" + str(list(MATCHED_SEED)) + ")",
+                          "control_percentile": CONTROL_PCT, "candle_ref_bars": CANDLE_REF_BARS},
+            "candle_module": {"path": str(getattr(cp, "__file__", "")), **{k: list(v) for k, v in sets.items()},
+                              "length": {n: lengths[n] for n in names}},
             "corp_actions_coverage": bb.corp_actions_coverage(conn),
             "runtime_seconds": round(time.monotonic() - t0, 1),
         },
@@ -919,7 +1056,11 @@ NOTES: list[str] = [
     "session locked all day is dropped; one position per stock is per leg, from kept trades.",
     "Sessions are market sessions; an exit bar the stock did not trade moves to its next own bar (late).",
     "Random-timing controls keep the variant's trades as they are: they are not re-filtered by one position per "
-    "stock.",
+    "stock. The uniform control draws on seed 20261111, the matched control on numpy default_rng([20261111, 1]).",
+    "The exit trials leave out trades the live rule voids, because the paired test needs both arms.",
+    "A candle flag whose bars (the first of candle 1's 10 reference bars through the completion bar) span a "
+    "structural ex-date is cleared: unadjusted prices across a split or bonus fake candles.",
+    "The add-on diagnostic compares against " + FIRST_POSITIONS_LABEL + ", not only those that received an add-on.",
     "An early (candle) exit does not free the stock for new signals: one position per stock is decided on the live "
     "rule's exits.",
     "The candle entry buys at the open after the pattern and can chase a move the live limit would not.",
@@ -949,21 +1090,27 @@ def render_text(doc: dict[str, Any]) -> str:
         out += [f"  {name:<20} {c}" for name, c in doc["trials"].items()]
         return rc.ascii_text("\n".join(out))
     hdr = ("  trial                    n  med net  mean net     t  mean exc  live exc  diff CI             "
-           "ctrl p95  CPCV  held-out  verdict")
+           "unif p95  mtch p95  CPCV  held-out  verdict")
     out.append(hdr)
     for name, t in doc["trials"].items():
         x, r = t["measures"], t.get("relative", {})
         ci = f"[{_fmt(r.get('ci_lo'))}, {_fmt(r.get('ci_hi'))}]" if r else "-"
         out.append(f"  {name:<20} {x['n']:>5} {_fmt(x['median_net']):>8} {_fmt(x['mean_net']):>9} "
                    f"{_fmt(x['t_net'], '.2f'):>5} {_fmt(x['mean_excess']):>9} {_fmt(r.get('live_mean_excess')):>9} "
-                   f"{ci:<19} {_fmt(r.get('control_p95')):>9} {str(x['cpcv_promotable']):>5} "
+                   f"{ci:<19} {_fmt(r.get('uniform_p95')):>9} {_fmt(r.get('matched_p95')):>9} "
+                   f"{str(x['cpcv_promotable']):>5} "
                    f"{_fmt(x['held_out_mean_excess']):>9}  {t['verdict']} ({t['ledger']})")
         failed = [str(row["id"]) for row in t["rows"] if not row["pass"]]
         if failed:
             out.append(f"      failed criteria: {', '.join(failed)}")
         if r:
             out.append(f"      relative: beats live {r['beats_live']}, CI above 0 {r['ci_above_0']}, "
-                       f"beats control {r['beats_control']}")
+                       f"beats uniform {r['beats_uniform']}, beats matched {r['beats_matched']}")
+            for kind, c in t.get("controls", {}).items():
+                v, share = c["void_per_draw"], c["variant_share_of_draws_below"]
+                out.append(f"      {kind} control: p95 {_fmt(c['p95'])}  variant above {_fmt(share, '.1%')} of draws"
+                           f"  redrawn {c['n_redrawn']}  void per draw mean {_fmt(v['mean'], '.1f')} "
+                           f"[{v['min']}, {v['max']}]")
     out += ["", "Live cells (comparators, not trials):"]
     for leg, c in doc["live_cells"].items():
         x = c["measures"]
@@ -972,7 +1119,8 @@ def render_text(doc: dict[str, Any]) -> str:
                    f"{_fmt(x['mean_excess'])}  failed criteria: {', '.join(failed) or 'none'}")
     out += ["", "Criteria: 1 n>=" + str(MIN_N) + "; 2 median net > 0; 3 mean net > 0 and t > 2; 4 mean excess > 0 "
             "with CI above 0; 5 CPCV promotable at N=7; 6 top-1%-dropped mean net > 0; 7 held-out mean excess > 0.",
-            "Diagnostics (per pattern, add-on beside the first position, by year, exit profiles) are in the JSON."]
+            "Diagnostics (per pattern, the add-on beside " + FIRST_POSITIONS_LABEL + ", by year, exit profiles) are "
+            "in the JSON."]
     out += doc["notes"]
     return rc.ascii_text("\n".join(out))
 
