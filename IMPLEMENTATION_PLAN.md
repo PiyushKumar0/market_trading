@@ -654,6 +654,82 @@ separate and is unaffected.
     the mapper parser's vocabulary and caps.
 - **Promotion:** as for the macro mood study, a supported hypothesis earns nothing automatically.
 
+**Factor portfolio study (registered 2026-11-12 by the commit that adds this entry and its three trial rows).** The
+owner, 2026-11-12, asked for a critical review of why the engine makes no profit and gave complete control to fix it.
+The review's main finding: every live leg is a single-stock trigger judged trade by trade, and against a matched
+benchmark none shows stock-picking skill (the pool widening study's control cells; the forward outcomes since
+September). The engine has no leg that ranks the whole universe and holds a diversified book, which is the form the
+best-documented equity premia take (momentum, low volatility). Its only momentum rule, `mom`, ranks on a 20-session
+return, a horizon the literature finds reverses, and holds two names. This study measures the portfolio form on our own
+data, at the account's size and costs. Evidence only; nothing is wired into the engine.
+
+- **Family:** `edge/factor_portfolio`, three hypotheses, so N = 3: `registration_alpha(3)` = 0.05/3. Thresholds are
+  fixed by this entry; changing one is a new registration.
+- **Data:** `data/research/full_market_2026-11-09.duckdb`, read-only: whole-market `bars_1d` (delisted names included)
+  and `corp_actions`. Sessions are the dates on which NIFTY 50 has a bar.
+- **Clean daily returns:** close over the previous available close, minus 1. A return is set to 0 and counted when
+  - the date is an ex-date of a rescaling corporate action for the symbol (`hi52.UNADJUSTED_KINDS`), because the stored
+    series is not re-adjusted; or
+  - its absolute value is above 35% with no such action recorded (an unrecorded action or a bad row).
+- **Formation and trading:** formation f is the last session of each calendar month; every input is known at f's
+  close. Trades fill at the open of the next session r. The first formation is the first month-end with 253 sessions
+  of calendar history.
+- **Universe at f:** symbols with a bar on f and on at least 200 of the 252 sessions to f, first bar at least 252
+  sessions before f, not an ETF (the hvol study's `is_etf` test), no series suffix. Of these, the 200 with the highest
+  median close × volume over the 126 sessions to f.
+- **Scores, from clean returns:**
+  - σ = the standard deviation of the 252 daily returns to f, × √252.
+  - **Momentum:** the compounded return from close(f−252) to close(f−21), divided by σ. The last 21 sessions are
+    skipped because one-month returns reverse.
+  - **Low volatility:** −σ.
+  - **Composite:** the mean of the two scores' cross-sectional z-scores within the universe, each clipped to ±3.
+- **Portfolio:** long only, 15 names, starting capital Rs 120,000 (the live capital base).
+  - At each formation a holding is sold iff it left the universe or its rank is worse than 30; the highest-ranked
+    names not held are bought until 15 are held.
+  - Cash from sales (all cash at the start) is split equally across the buys. Quantities are whole shares; a name
+    whose price exceeds its allocation is skipped for the next-ranked one, and counted. Holdings kept are never
+    trimmed. Unspent cash earns nothing.
+  - A sale with no bar on r fills at the symbol's next open; after 5 sessions with no bar it closes at its last
+    value. A buy with no bar on r is skipped for the next-ranked name.
+  - Position value follows clean returns, so a split or bonus inside a hold neither gains nor loses.
+- **Costs:** `CostModel.round_trip` (CNC, spread included) on each position's value. Equity is cash plus every
+  position's value net of its round trip, so each purchase is charged in full by the next measurement.
+- **Benchmark:** the equal-weight return of the same 200-name universe over the same open-to-open period, clean
+  returns, no costs. NIFTY 50 and NIFTYBEES over the same periods are reported for information.
+- **Outcome:** e = the portfolio's net return minus the benchmark's, per period (open of r to the open of the next
+  r). The sample is every period that ends on or before the copy's last session, about 39.
+- **Verdict per hypothesis:**
+  - **Supported** iff all of these hold: at least 30 periods; mean e > 0 and median e > 0; mean net portfolio return
+    > 0; a moving-block bootstrap of e (blocks of 3 periods, 10,000 draws, fixed seed) puts fewer than 0.05/3 of its
+    means at or below 0; mean e > 0 in both halves of the sample; mean e > 0 with the 3 best periods removed.
+  - **Refuted** iff at least 30 periods and mean e ≤ 0. **Insufficient** below 30. Otherwise **null**.
+  - Stated before the run: 39 periods can confirm only an information ratio above about 1.2, and published factor
+    premia sit near 0.5, so a true premium most likely reads **null**. The study can refute; it can show the sign,
+    the cost drag, the drawdown and the behaviour in 2026; it cannot confirm.
+- **Seen before registration:** the forward outcomes of hi52, brk20 and ins signals from September 2026 (hi52, a
+  momentum-like rule, lagged the equal-weight universe); the anatomy of the November 2026 rally; and published reports
+  that NSE's Nifty200 Momentum 30 index fell about 30% from 2024-09-27 into spring 2025 and stood about 19% below that
+  peak in September 2026. No portfolio return of any of the three constructs had been computed on this data.
+- **Diagnostics (decide nothing):**
+  - 10, 20 and 30 names; a 500-name universe.
+  - Momentum over 6 months skipping one; 12-month momentum without the volatility divisor.
+  - The engine's `mom` definition (the 20-session return, 15 names) as a control the literature expects to lose.
+  - Proximity to the 252-session high, 15 names: the portfolio form of hi52.
+  - A market-trend overlay on each construct and on the benchmark: invested only when NIFTY 50's close at f is above
+    its 200-session average, otherwise in cash until the next formation.
+  - Each period's percentile of the portfolio's gross return among 2,000 random 15-name draws from the universe.
+  - Annualised return, volatility, worst drawdown on daily equity, names replaced per period, cost and cash drag;
+    calendar-year rows with 2026 shown apart; counts of zeroed returns, skipped buys and deferred sales.
+- **Forward tracking:** from the 2026-11-30 formation the same script reports the three constructs monthly as a
+  forward sample, separate from the history above. Twelve or twenty periods cannot settle a premium of this size, so
+  it carries no label before 24 periods; it shows whether the book behaves as modelled.
+- **Tools and records:** `scripts/factor_portfolio_study.py`, read-only, exit 0, writing
+  `data/reports/factor_portfolio_<date>.{json,md}` through `research_common.write_reports`. Tests pin the timing (no
+  input after f; fills at r's open), the clean-return rule, the hold band, whole-share sizing, the cost application
+  and the bootstrap's determinism. Each trial row takes its label when the run lands; the verdicts go to memory.
+- **Promotion:** nothing automatic. A portfolio leg in the engine (a monthly rebalance list to the owner, a paper
+  book) needs its own owner decision and plan.
+
 ## Known defects and test gaps
 
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
