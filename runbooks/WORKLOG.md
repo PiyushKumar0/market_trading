@@ -4,6 +4,16 @@ Newest first. About two weeks of entries are kept; older ones are in git history
 needs: deploys and restarts, protected-store changes, incidents and their causes, pending owner actions. Cleanups,
 refactors and doc or comment passes are not logged; git history has them.
 
+## 2026-11-11 13:04 — Host sleep on mains power set to Never (owner approved: "Go with the recommended options")
+
+- `powercfg /change standby-timeout-ac 0` on the active scheme, "HP Optimized (Modern Standby)". The AC sleep timeout
+  was 3,600 s and is now 0 (never).
+- Battery sleep stays at 180 s, and hibernate on AC was already off.
+- The screen still turns off. A lid close or battery power can still sleep the host.
+- **Check:** `preopen_sleep.ps1 -Since 2026-11-12` should show 0 minutes asleep on mornings the laptop stays plugged in
+  with the lid open.
+- **Rollback:** `powercfg /change standby-timeout-ac 60`.
+
 ## 2026-11-11 13:00 — Keep-awake verdict: it holds on AC; the pre-open is uncovered
 
 - **Verdict (pending since 11-05):** `engaged_spans.ps1 -Since 2026-11-06` covers the 11-06, 11-09 and 11-11
