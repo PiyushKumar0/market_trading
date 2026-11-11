@@ -661,9 +661,11 @@ async def _scan_world(conn, root: Path, *, news_quiet: bool) -> tuple[list[Signa
 
         bus.subscribe("signal.candidate", _capture)
         pre = SETTINGS.strategy.prescreen
+        # rsi2 is parked in the shipped settings; the scenario needs a non-cat leg that publishes.
+        caps = {**pre.max_per_strategy_day, "rsi2": 16}
         prescreen = SignalPreScreen(
             build_enabled_scanners(("orb", "rsi2", "trend", "mom")), provider, bus,
-            max_candidates_per_day=pre.max_candidates_per_day, max_per_strategy_day=pre.max_per_strategy_day,
+            max_candidates_per_day=pre.max_candidates_per_day, max_per_strategy_day=caps,
             admission_mode=pre.admission_mode, displacement_margin=pre.displacement_margin,
             cap_release_schedule=pre.cap_release_schedule,
         )
