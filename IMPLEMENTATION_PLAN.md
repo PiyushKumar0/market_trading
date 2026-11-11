@@ -730,6 +730,42 @@ data, at the account's size and costs. Evidence only; nothing is wired into the 
 - **Promotion:** nothing automatic. A portfolio leg in the engine (a monthly rebalance list to the owner, a paper
   book) needs its own owner decision and plan.
 
+**Factor portfolio study, long-history sample (registered 2026-11-12 by the commit that adds this entry and its
+three trial rows, while the data was still downloading and before any of it had been read).** The first sample above
+has about 39 periods and cannot confirm a premium. NSE's archive serves daily files and corporate actions back to
+2010 (probed 2026-11-12: a 2010 and a 2015 file parsed with the live parser; 2012 and 2017 action windows returned
+rows), which gives about 150 earlier periods.
+
+- **Hypotheses and rules:** the same three constructs, script, costs, benchmark, outcome and diagnostics as the entry
+  above. Only what follows differs. The three new trial rows take the family to N = 6, so this sample is judged at
+  `registration_alpha(6)` = 0.05/6; the first sample keeps the threshold it was registered with.
+- **Data:** `data/research/deep_history/market.duckdb`, a separate research store the engine never opens, filled by
+  `scripts/backfill_bhavcopy.py` under `MT_DATA_DIR` with daily files from 2010-01-01 to 2026-11-09 and corporate
+  actions from late 2008. Every price is as the exchange published it that day; nothing is adjusted, so the
+  clean-return rule carries every split and bonus.
+- **Sessions:** the dates on which at least 500 symbols have a bar. The archive holds no index series, so NIFTYBEES
+  stands in for NIFTY 50 in the information columns and in the market-trend diagnostic.
+- **Sample:** formations from the first month-end with 253 sessions of history through 2023-06-30. Its last period
+  ends at the open of 2023-08-01, where the first sample begins, so the two do not overlap.
+- **Costs:** today's rate card applied to every year. Delivery brokerage was not zero before about 2015, so the
+  early years are flattered by that much; stated, not modelled.
+- **Known limits, stated before the run:**
+  - A renamed company appears as one symbol ending and another starting. A holding then closes at its last value
+    after 5 sessions without a bar, and the new symbol is not eligible for 252 sessions.
+  - The ETF test uses NSE's 2026 list and the name suffixes. Before the run, the universe's member names are listed
+    for a handful of formations, with no return or score, and any that is not a company's ordinary share is added to
+    an exclusion list. That list is fixed before any return is computed.
+  - Corporate actions before 2021 come from the same NSE route as the later ones, but their completeness is not
+    known. An unrecorded bonus smaller than 1:2 passes the 35% rule and reads as a loss. That lowers the benchmark
+    more than a portfolio that avoids recent losers and volatile names, so it favours the hypotheses. The run
+    reports, per year, the count of zeroed returns of each kind and the count of unexplained returns between −35%
+    and −15%; if the latter is far above its 2022–2026 rate, the affected years are reported with and without the
+    names concerned.
+- **Verdict:** the registered criteria on this sample's periods. A pooled reading over both samples, and the first
+  sample recomputed from this store, are diagnostics.
+- **Tools:** the study script gains three options before this store is read by it: the session rule, the market
+  proxy symbol and the formation bounds.
+
 ## Known defects and test gaps
 
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
