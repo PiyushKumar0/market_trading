@@ -1,6 +1,7 @@
 """``hi52``'s registered edge: the derivation, and the live map that caps it at the current limits.
 
-``settings.yaml hi52.expected_edge_pct`` is the OUTPUT of this arithmetic at the registration
+``hi52`` is demoted to shadow and ``settings.yaml`` ships no ``hi52.expected_edge_pct``; a registered
+value would be the OUTPUT of this arithmetic at the registration
 inputs (``capital_base_inr`` 40,000, the ``equity_floor_rung``, ``per_trade_risk``). The cost
 floor it must clear RISES as the book shrinks, so a capital change (owner decision) can leave that constant
 stale-high. :class:`StrategyEdges` is the runtime guard: it hands the gate ``min(registered,

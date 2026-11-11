@@ -1560,7 +1560,8 @@ async def test_the_gate_and_the_pipeline_share_one_live_strategy_edges(
 def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, conn, clock) -> None:
     """The seam end to end on the real artefacts: the shipped limits.yaml through a ProtectedStore and
     LimitsEngine, the shipped settings map, the gate's kind of cost model. An owner update plus ONE
-    ``reload()`` moves the real tracker's base and lowers hi52's edge; ins is untouched."""
+    ``reload()`` moves the real tracker's base and lowers hi52's edge; ins is untouched. hi52 ships
+    unregistered, so the test injects the registry to keep the cap covered."""
     from engine.core.protected_store import ProtectedStore
     from engine.core.types import OwnerConfirmation
     from engine.risk.exposure import ExposureTracker
@@ -1582,8 +1583,8 @@ def test_one_limits_reload_reaches_the_real_base_and_the_hi52_edge(tmp_path, con
     store.register_initial("limits.yaml", owner)
     engine = LimitsEngine(store)
     tracker = ExposureTracker(conn, clock, opsmain._limits_capital_base(engine))
-    edges = StrategyEdges(_strategy_expected_edge_pct(load_settings()), table_fn=engine.load,
-                          cost_model=CostModel.from_config(edge_multiple_min=Decimal("2.0")))
+    edges = StrategyEdges({ins.STRATEGY_ID: Decimal("1.58"), hi52.STRATEGY_ID: Decimal("1.53")},
+                          table_fn=engine.load, cost_model=CostModel.from_config(edge_multiple_min=Decimal("2.0")))
     assert tracker.capital_base == Decimal("40000")
     assert (edges[hi52.STRATEGY_ID], edges[ins.STRATEGY_ID]) == (Decimal("1.53"), Decimal("1.58"))
 
@@ -4312,45 +4313,38 @@ async def test_the_batch_publishes_in_leg_order_never_in_cross_strategy_score_or
     assert [sid for i, sid in enumerate(legs) if i == 0 or legs[i - 1] != sid] == list(_PUBLICATION_LEG_ORDER)
 
 
-async def test_the_hi52_promotion_is_one_state_in_both_of_its_halves(
+async def test_the_hi52_demotion_is_one_state_in_both_of_its_halves(
     tmp_path, monkeypatch, migrated_db_template
 ) -> None:
-    """The hi52 promotion is TWO wirings (a demotion is two edits); either half alone leaves a half-promoted
-    rule (see `NO_EDGE_SHADOW_STRATEGIES`' docstring). Half one: hi52 is OUT of the unconditional-cost-gate-reject
-    set. Half two: an expected edge IS registered, else a targetless proposal is the gate's ordinary `_NO_TARGET`
-    reject and the rule never reaches RECOMMEND.
+    """The hi52 demotion is TWO wirings; either half alone leaves a half-demoted rule (see
+    `NO_EDGE_SHADOW_STRATEGIES`' docstring). Half one: hi52 IS in the unconditional-cost-gate-reject set.
+    Half two: no expected edge is registered for it, so the shipped settings carry no key and the gate's map
+    has no hi52 entry.
     """
-    assert hi52.STRATEGY_ID not in NO_EDGE_SHADOW_STRATEGIES
+    assert hi52.STRATEGY_ID in NO_EDGE_SHADOW_STRATEGIES
     live = load_settings()
-    assert live.hi52.expected_edge_pct is not None
-    # Asserted on the MAP the composition root hands the gate. hi52 1.53 = registered_edge_pct() under the 2.0x
-    # gap mult; the derivation is pinned in tests/unit/test_hi52_edge.py, this pins the WIRING.
-    assert _strategy_expected_edge_pct(live) == {
-        ins.STRATEGY_ID: Decimal("1.58"), hi52.STRATEGY_ID: Decimal("1.53"),
-    }
-    assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal"}
-    # The composed gate holds both halves through the live StrategyEdges wrapper (identity pinned in
-    # test_the_gate_and_the_pipeline_share_one_live_strategy_edges), which only ever lowers hi52.
+    assert live.hi52.expected_edge_pct is None
+    # Asserted on the MAP the composition root hands the gate: this pins the WIRING.
+    assert _strategy_expected_edge_pct(live) == {ins.STRATEGY_ID: Decimal("1.58")}
+    assert NO_EDGE_SHADOW_STRATEGIES == {"cat", "cat_reversal", "hi52"}
+    # The composed gate holds both halves (the edge map through the live StrategyEdges wrapper, identity
+    # pinned in test_the_gate_and_the_pipeline_share_one_live_strategy_edges).
     built: dict[str, list] = {}
     spy(monkeypatch,"RiskGate", built)
     async with composed_engine(tmp_path, monkeypatch, db_template=migrated_db_template):
         pass
     ((_, gate_kw, _),) = built["RiskGate"]
-    assert gate_kw["strategy_expected_edge_pct"][hi52.STRATEGY_ID] == Decimal("1.53")
+    assert hi52.STRATEGY_ID not in gate_kw["strategy_expected_edge_pct"]
     assert gate_kw["no_edge_shadow_strategies"] == NO_EDGE_SHADOW_STRATEGIES
 
 
-def test_deleting_the_settings_key_really_un_registers_the_hi52_edge(tmp_path) -> None:
-    """Deleting `hi52.expected_edge_pct` from settings.yaml (the kill criterion's second step) must BITE, not be
-    masked by a numeric model default. Loads the REAL settings.yaml with the `hi52:` block removed and asserts
-    the config value is None and the composition root's map has no hi52 entry; a targetless proposal with no
-    registered edge is the gate's ordinary `_NO_TARGET` reject, so the absence fails closed.
+def test_the_shipped_settings_register_no_hi52_edge() -> None:
+    """The shipped settings.yaml carries no `hi52.expected_edge_pct` (the demotion's second edit) and that must
+    BITE, not be masked by a numeric model default: the config value is None and the composition root's map has
+    no hi52 entry; a targetless proposal with no registered edge is the gate's ordinary `_NO_TARGET` reject, so
+    the absence fails closed.
     """
-    raw = yaml.safe_load((config_dir() / "settings.yaml").read_text(encoding="utf-8"))
-    assert raw.pop("hi52")                               # it IS there: the promotion is live
-    (tmp_path / "settings.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8")
-
-    demoted = load_settings(tmp_path)
+    demoted = load_settings()
     assert demoted.hi52.expected_edge_pct is None
     edges = _strategy_expected_edge_pct(demoted)
     assert hi52.STRATEGY_ID not in edges

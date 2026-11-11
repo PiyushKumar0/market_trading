@@ -98,7 +98,7 @@ trials:
     population: "hi52 prescreen_day_slots rows with d >= 2026-09-14"
     construct: "next-open entry, T+20 close exit, net of the live CNC round trip; no stop"
     variants: 1
-    result: "registered"
+    result: "refuted"
     report: "memory:hi52-promotion-forward-test"
   - id: "entry_mechanism-brk20-20260912"
     date: "2026-09-12"

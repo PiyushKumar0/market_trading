@@ -1,13 +1,12 @@
-"""``hi52`` — 52-week-high-proximity continuation, v2, a FORWARD TEST.
+"""``hi52`` — 52-week-high-proximity continuation, v2, DEMOTED to shadow.
 
-``settings.yaml`` registers ``hi52.expected_edge_pct`` and the composition root feeds it to the
-gate's ``strategy_expected_edge_pct`` map as it does ``ins``'s, so a candidate can reach RECOMMEND.
-That is NOT a claim of a validated edge: the v2 backtest is CPCV-promotable but its edge lives in
-the INDEX cell of a survivorship-tainted population proxy, so **RECOMMEND mode IS the forward soak**
-and it carries a written kill rule — ``scripts/hi52_forward_verdict.py`` measures the promoted
-population and DEMOTE is mechanical (n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit rate
-< 50%)). Demotion re-adds the id to ``ops.main.NO_EDGE_SHADOW_STRATEGIES`` and removes the settings
-key. This module touches neither gate; it only originates.
+The v2 backtest was CPCV-promotable but its edge lived in the INDEX cell of a survivorship-tainted
+population proxy, so it ran as a forward test under a written kill rule —
+``scripts/hi52_forward_verdict.py`` (n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit rate
+< 50%)) — and that rule read DEMOTE. The id is now in ``ops.main.NO_EDGE_SHADOW_STRATEGIES`` and
+``settings.yaml`` carries no ``hi52.expected_edge_pct``, so the gate rejects every candidate while the
+signals are still journalled and scored. Promoting it again is a new registration under the research
+bar. This module touches neither gate; it only originates.
 
 **v2 is the rule**: the three registered signal-time filters (smooth approach, no gap day, eligible
 population) are GATING. Their thresholds are frozen in :data:`DEFAULT_PARAMS`, owner-only — never
@@ -65,8 +64,8 @@ PINNED rule (long-only — NSE cash equities cannot be shorted overnight):
 * Levels: ``entry = round_to_tick(close(y))``; there is no "broken level" to retest. ``stop =
   round_to_tick(entry × (1 − stop_pct/100))``, default **6%**, a disaster stop sized like ``cat``'s
   (``per_trade_risk.overnight_gap_mult`` applies to a swing entry). ``target = None``: the drift was
-  MEASURED over a fixed horizon, never predicted to a level, so the gate consumes the REGISTERED
-  edge (``settings.hi52.expected_edge_pct``, the `ins` seam) instead of an invented target.
+  MEASURED over a fixed horizon, never predicted to a level, and no target is invented; with no
+  registered edge (``settings.hi52.expected_edge_pct`` is absent) the gate's cost check rejects it.
   Degenerate tick-rounding (``stop >= entry``) emits nothing, as for ``brk20``/``cat``.
 * Score = ``prox``, clamped to ``[0, 1]``. The scale does not agree with any other scanner's and is
   not meant to — cross-strategy STANDING is a per-strategy quantile at the analyst forward slot

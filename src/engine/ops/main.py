@@ -2076,12 +2076,12 @@ async def compose(
             #     single-shot by construction (cat.MAX_EVENT_AGE_SESSIONS = 1), so a story that loses
             #     the race on the day cap can never re-originate. Concatenating first lets _rank see all
             #     legs as one batch and a binding cap keeps the best of them, whatever leg produced it.
-            #     `hi52` is in it because a rule that can reach RECOMMEND must contest the same slots;
+            #     `hi52` is in it because a shadow leg still takes slots in the one ranked admission;
             #     its per-strategy cap (3) bounds it.
             #     Snapshot mint stays AFTER admit (a suppressed candidate never spends a snapshot
             #     write); without it the analyst's Rule 6 refuses every batch candidate unseen.
             #     ADMISSION is that one ranked call; PUBLICATION order is a separate consequence owned
-            #     by `_publication_order` (see it for why a promoted hi52 must not take the queue front).
+            #     by `_publication_order` (see it for why a shadow hi52 must not take the queue front).
             batch = _attach_feature_snapshots(
                 features,
                 _publication_order(prescreen.admit(
@@ -3447,15 +3447,12 @@ _CAT_REF_CLOSE_LOOKBACK_DAYS = 10
 #: ``cat`` is here because an analyst-volunteered ``target_price`` would defeat the indirect argument
 #: "ship no ``expected_edge_pct`` and rely on the cost check's targetless branch" (see
 #: ``cat_reversal``'s docstring).
-#: ``hi52`` is NOT here: it is a FORWARD TEST, not a validated edge (its backtest edge lives in an
-#: index cell labelled by CURRENT membership applied backwards), with a mechanical kill rule
-#: (``scripts/hi52_forward_verdict.py``: n >= 20 signals AND (median net at T+20 <= 0 OR T+20 hit
-#: rate < 50%) ⇒ DEMOTE). DEMOTION IS THIS LINE: re-add ``hi52.STRATEGY_ID`` here AND delete
-#: ``hi52.expected_edge_pct`` from settings.yaml — either alone leaves a half-promoted rule (the shadow
-#: set wins a contradiction, but a dangling edge key reads as a live registration). ``Hi52Cfg
-#: .expected_edge_pct`` defaults to ``None``, so deleting the key un-registers the edge in ``compose``.
+#: ``hi52`` is here because its forward kill rule read DEMOTE (``scripts/hi52_forward_verdict.py``): the
+#: backtest edge did not survive forward. Its ``expected_edge_pct`` key is gone from settings.yaml; the two
+#: go together, since the shadow set wins a contradiction but a dangling edge key reads as a live
+#: registration. Promoting it again is a new registration under the research bar, never a re-add.
 NO_EDGE_SHADOW_STRATEGIES: frozenset[str] = frozenset(
-    {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID}
+    {cat.STRATEGY_ID, cat_reversal.STRATEGY_ID, hi52.STRATEGY_ID}
 )
 
 
@@ -3468,13 +3465,12 @@ def _strategy_expected_edge_pct(settings: Settings) -> dict[str, Decimal]:
     predicted). Rather than invent a target, the strategy registers its validated T+20 NET drift
     (owner-set in ``settings.yaml``, never learner-movable). Used ONLY when ``target_price`` is None.
 
-    ``hi52``: registered on the SAME seam for the same reason (20-session time cap, MEASURED drift,
-    ``target=None``). Its number is a FORWARD-TEST edge, not a validated one (``settings.yaml`` carries
-    the derivation and the kill rule). CONDITIONAL on the key being PRESENT, unlike ``ins``'s:
-    ``Hi52Cfg.expected_edge_pct`` defaults to ``None`` so that deleting the ``settings.yaml`` key — the
-    second demotion edit — actually demotes; registering off a model default would make that edit a
-    no-op. A targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject,
-    so the absence fails closed.
+    ``hi52``: demoted to shadow by its kill rule, so ``settings.yaml`` ships no key for it. The
+    registration stays CONDITIONAL on the key being PRESENT, unlike ``ins``'s: ``Hi52Cfg
+    .expected_edge_pct`` defaults to ``None``, so a present key registers the edge and an absent one
+    does not (registering off a model default would make deleting the key a no-op). A targetless
+    proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject, so the absence fails
+    closed.
     """
     edges = {ins.STRATEGY_ID: Decimal(str(settings.ins.expected_edge_pct))}
     if settings.hi52.expected_edge_pct is not None:
@@ -3990,9 +3986,9 @@ def _publication_order(admitted: list) -> list:
     Raw scores are NOT comparable across strategies (``hi52`` ``prox`` in [0.95, 1.0], ``ins`` ~0.5,
     ``brk20`` ~0.5-0.6), which is why the forward slot ranks by per-strategy QUANTILE. Letting the
     cross-strategy sort also stamp ``fired_at`` would smuggle that incomparable scale back in through
-    the tie-break (the unvalidated hi52 forward test would head the queue). Publishing in LEG order
+    the tie-break (the shadow hi52 leg would head the queue). Publishing in LEG order
     means no strategy's score SCALE can buy queue priority: a fixed, auditable precedence — the
-    actionable legs by seniority, the forward test last.
+    actionable legs by seniority, the shadow leg last.
 
     ``sorted`` is stable, so within each leg the admit order (score descending) is untouched, and
     replay determinism holds — the key reads only ``strategy_id``, never a clock.

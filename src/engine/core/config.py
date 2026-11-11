@@ -348,10 +348,9 @@ class Hi52Cfg(BaseModel):
     thresholds — stay in ``hi52.DEFAULT_PARAMS`` where the pre-registration froze them; splitting
     them across two files would give the same threshold two homes and one of them would drift.
 
-    Promoted out of shadow as a FORWARD TEST with a written kill rule (the v2 backtest's edge sits in a
-    survivorship-tainted index population), so RECOMMEND mode IS the soak. Demotion = delete the
-    ``hi52.expected_edge_pct`` key from ``settings.yaml`` and re-add the id to
-    ``ops.main.NO_EDGE_SHADOW_STRATEGIES``.
+    Demoted to shadow by its written kill rule (the v2 backtest's edge sat in a survivorship-tainted
+    index population and did not survive forward): the key is absent from ``settings.yaml`` and the id is
+    in ``ops.main.NO_EDGE_SHADOW_STRATEGIES``. Promoting it again is a new registration.
 
     The default is ``None`` on purpose: any numeric default would make deleting the key a NO-OP, the
     gate consuming an edge no reader of ``settings.yaml`` can see. The composition root
@@ -359,8 +358,8 @@ class Hi52Cfg(BaseModel):
     targetless proposal with no registered edge is the gate's ordinary ``_NO_TARGET`` reject (fail-closed).
     """
 
-    #: ``None`` = NOT registered. The live value lives in ``settings.yaml`` with its derivation; the
-    #: learner never moves it.
+    #: ``None`` = NOT registered, which is the shipped state. A value, if one is ever registered, lives in
+    #: ``settings.yaml``; the learner never moves it.
     #:
     #: DERIVATION (one formula, one home: ``engine/strategy/hi52_edge.py``, which
     #: ``scripts/hi52_forward_verdict.py`` delegates to)::

@@ -60,9 +60,9 @@ def test_a_failing_derivation_keeps_the_registered_edge():
 
 
 def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
-    """The registered edge and the kill criterion's cost floor must come from one derivation: settings.yaml
-    carries only the output of `registered_edge_pct()`, and a change to limits.yaml, hi52's stop or the
-    cost tables fails here instead of leaving the gate on a stale edge."""
+    """The edge hi52 was registered at and the kill criterion's cost floor come from one derivation
+    (`registered_edge_pct()`), and a change to limits.yaml, hi52's stop or the cost tables fails here. hi52 is
+    demoted, so the shipped settings.yaml registers no edge."""
     import re
 
     from engine.core.config import load_settings
@@ -84,7 +84,7 @@ def test_the_registered_edge_is_this_script_s_derivation(tmp_path):
     )
     derived = fv.registered_edge_pct(limits_path=pinned)
     assert derived == Decimal("1.53")                                   # 2.0x gap mult
-    assert Decimal(str(load_settings().hi52.expected_edge_pct)) == derived
+    assert load_settings().hi52.expected_edge_pct is None               # demoted: the shipped key is absent
     # …and it IS gross-minus-floor, rounded DOWN: rounding an edge UP is the one direction that can
     # buy a candidate a cost-gate pass it did not earn.
     floor = fv.cost_floor_pct(Decimal("6000"))                          # Rs 36,000 x 2% / (2.0 x 6%)

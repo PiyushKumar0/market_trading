@@ -394,7 +394,7 @@ record: /taken BHEL 9 <price> · decline: /veto BHEL <market|price|size|trust|aw
 - **Stop:** hi52/ins re-anchor the stop to the delivered entry at the rule's percentage; the "re-anchored" tail
   shows the scanner's entry it moved from.
 - **Expected ₹:** shown only for a strategy with an edge on record, as notional × the edge the risk check uses: the
-  registered research edge, which for hi52 is capped by what costs allow at the current capital (the owner's dashboard capital change). It is not a forecast.
+  registered research edge (`ins` today; hi52 is demoted to shadow and has none). It is not a forecast.
 - **Cost line:** two forms. `edge Nx breakeven` for a strategy with a registered edge. `target distance D% = Nx
   breakeven (earned only if the target is hit; not an expected edge)` for a target-priced rec: a distance with no
   probability behind it. An exit or adjust carries neither.
@@ -438,7 +438,7 @@ new figures:
 - capital, the max deployed cap and the per-symbol CNC cap (both scale with the base);
 - equity, and risk per trade (a percent of equity);
 - the day-loss lines, and the equity floor and cumulative floor lines;
-- the hi52 edge the gate will use.
+- the hi52 edge the gate will use (`hi52_edge_pct`; None while hi52 is demoted and registers no edge).
 
 Confirm is offered only when the engine allows the exact amount.
 
@@ -476,9 +476,9 @@ Confirm is offered only when the engine allows the exact amount.
 - the paper book keeps its epoch and open positions;
 - Telegram gets a `CAPITAL_CHANGED` message;
 - `config_audit` records the full old → new table;
-- hi52's registered edge is capped by its derivation at the new base (`min(registered 1.53, derived)`).
-  - A cut lowers it automatically; raising the registered number stays an owner decision.
-  - Rec cards show this capped figure as "the edge the risk check uses".
+- hi52 is demoted and registers no edge, so there is nothing to cap at the new base. Were an edge ever
+  registered for it, the engine would cap it by its derivation (`min(registered, derived)`).
+  - A cut would lower it automatically; raising a registered number stays an owner decision.
 - the paper floors move with the base. For the no-stop test positions these floors (−10% go flat, −15% kill)
   are the only loss exit:
   - a raise widens the rupee drawdown the paper book may take before it is flattened;

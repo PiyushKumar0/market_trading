@@ -14,7 +14,7 @@ from engine.learning.multiplicity import load_trials
 def test_every_registered_edge_has_a_registered_or_grandfathered_entry():
     settings = yaml.safe_load((config_dir() / "settings.yaml").read_text(encoding="utf-8"))
     edged = {k for k, v in settings.items() if isinstance(v, dict) and "expected_edge_pct" in v}
-    assert edged >= {"hi52", "ins"}
+    assert edged == {"ins"}                              # hi52 is demoted: its key is gone
     covered = {t.family.removeprefix("edge/") for t in load_trials()
                if t.family.startswith("edge/") and t.result in ("registered", "grandfathered")}
     assert edged <= covered

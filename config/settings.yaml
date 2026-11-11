@@ -276,41 +276,11 @@ ins:
                                # adjudicates per candidate; small notionals may be shrunk or rejected,
                                # and that is the gate doing its job.
 
-# `hi52` — 52wk-high-proximity swing v2, a FORWARD TEST with a written kill rule
-# (`scripts/hi52_forward_verdict.py` is the verdict). The rule's own parameters (incl. v2's
-# smooth/gap thresholds) live in hi52.DEFAULT_PARAMS, frozen by pre-registration — only the edge is config.
-hi52:
-  expected_edge_pct: 1.53      # the cost-gate edge basis for a targetless proposal, the `ins` seam. NOT a
-                               # net-drift transcription: DERIVED, and by ONE formula that lives in
-                               # code — scripts/hi52_forward_verdict.py `registered_edge_pct()`,
-                               # which a unit test pins against THIS key, so the two cannot drift.
-                               #   edge = measured T+20 median GROSS - CostModel.breakeven_pct(N)
-                               #   N    = equity x per_trade_risk.swing_position_pct/100
-                               #          / (per_trade_risk.overnight_gap_mult x stop_pct/100)
-                               # GROSS = +2.0336% (v2 discrete run, n=1,794 —
-                               # data/reports/backtest_hi52_v2_2026-09-09.json, geometry block).
-                               # N is not chosen, it is implied by swing-position sizing: a swing position is
-                               # capped at 2.0% of equity charged at 2.0x the stop distance, and hi52's
-                               # stop is 6%, so N <= equity x 2% / (2.0 x 6%) = equity/6 — Rs 6,000 at the
-                               # equity_floor_rung (Rs 36,000, the
-                               # SMALLEST equity the risk table still lets a position be opened at:
-                               # below it the platform goes flat + CLOSE_ONLY). The floor RISES as
-                               # the book shrinks, and this key is a
-                               # constant read for months, so it is derived at the WORST permitted
-                               # book rather than at today's: 2.0336 - 0.4982 = 1.5354 => 1.53,
-                               # ROUNDED DOWN (rounding an edge up is the one direction that buys a
-                               # candidate a cost-gate pass it did not earn). Deliberately NOT the
-                               # backtest's own +1.71% net: it charged 0.3192% at a Rs 20,000
-                               # reference size this book never trades. OWNER-SET, NEVER
-                               # learner-movable (the `ins` pattern): this number is what the
-                               # cost-gate check multiplies against the cost floor, so a learner allowed to
-                               # raise it could buy any candidate a pass. DEMOTION under the kill
-                               # rule is TWO edits in one owner-visible commit, both or neither:
-                               # (1) re-add hi52.STRATEGY_ID to ops.main.NO_EDGE_SHADOW_STRATEGIES
-                               # and (2) DELETE this key. Either alone leaves a half-promoted rule.
-                               # Edit (2) BITES: Hi52Cfg.expected_edge_pct defaults to None, so an
-                               # absent key un-registers the edge instead of falling back to a
-                               # number in code.
+# `hi52` — 52wk-high-proximity swing v2. DEMOTED to shadow by its written kill rule
+# (`scripts/hi52_forward_verdict.py`): its signals are still journalled and scored, and the cost gate
+# rejects every one. No expected_edge_pct: Hi52Cfg defaults it to None, so the absence un-registers the
+# edge. The rule's own parameters live in hi52.DEFAULT_PARAMS.
+hi52: {}
 
 # `brk20` — the ENTRY MECHANISM, not the rule. The rule's own parameters live in
 # brk20.DEFAULT_PARAMS (frozen code defaults: envelope.yaml has no brk20 rows today; they are
@@ -401,9 +371,9 @@ strategy:
       hi52: 3                    # 52wk-high-proximity
                                  # fresh-crosses over the ELIGIBLE universe. Fresh-cross-only plus
                                  # the v2 smooth/gap filters keeps natural flow to a handful/day; 3
-                                 # caps analyst spend on a cluster day. Deliberately not widened — the
-                                 # forward test measures the rule, not a wider
-                                 # tap — and these candidates take REAL slots in the one ranked
+                                 # caps analyst spend on a cluster day (hi52 is shadow now, so this
+                                 # bounds spend on a leg that cannot recommend). Deliberately not
+                                 # widened — and these candidates take REAL slots in the one ranked
                                  # batch admission (scores ~0.95-1.0 rank above brk20's ~0.5-0.6,
                                  # so this cap is what bounds the displacement they can do). It does
                                  # NOT get publication priority with them: ops.main
