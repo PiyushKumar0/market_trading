@@ -51,12 +51,14 @@ def _series(sym: str, *, price: float = 100.0, vol: float = 1_000_000.0, n: int 
     return pws.Series(sym, (dates or DATES)[:n], o, h, lo, c, np.full(n, vol), [])
 
 
-@pytest.fixture
-def spreads(monkeypatch):
-    monkeypatch.setattr(pws, "BAND_SPREAD_PCT", {pw.C0: Decimal("0.04"), pw.W1: Decimal("0.06"),
-                                                 pw.W2: Decimal("0.11")})
-    monkeypatch.setattr(pws, "BAND_SPREAD_P75_PCT", {pw.C0: Decimal("0.05"), pw.W1: Decimal("0.09"),
-                                                     pw.W2: Decimal("0.14")})
+def test_registered_constants():
+    assert pws.BAND_SPREAD_PCT == {pw.C0: Decimal("0.04"), pw.W1: Decimal("0.07"), pw.W2: Decimal("0.11")}
+    assert pws.BAND_SPREAD_P75_PCT == {pw.C0: Decimal("0.05"), pw.W1: Decimal("0.09"), pw.W2: Decimal("0.14")}
+    assert pws.INS_FLOOR_INR == 10_000_000
+    assert pws.FILL_WINDOW_SESSIONS == 5
+    assert pws.EXIT_SESSIONS == {"brk20": 20, "ins": 19}
+    assert pws.LEGS == ("brk20", "ins") and pws.FAMILY_N == 4
+    assert pws.STRUCTURAL_SUPPLEMENT == {"AMIORG": (date(2025, 4, 25),)}
 
 
 # ----------------------------------------------------------------------------- bands
@@ -120,14 +122,122 @@ def test_benchmark_is_band_matched_and_drops_ex_dates(monkeypatch):
     assert n_w2 == 1 and mean_w2 == pytest.approx(100.0)
 
 
+def test_benchmark_runs_open_entry_to_close_exit_with_the_band_of_y(monkeypatch):
+    monkeypatch.setattr(pw, "CORE_RANK", 3)
+    a = _series("A", closes={45: 110.0})
+    a.open[26] = 50.0                                             # entry open differs from every close
+    b = _series("B")
+    late = _series("L", n=59, dates=[d for d in DATES if d != DATES[25]])   # no bar on y: not banded that day
+    late.close[44] = 300.0                                        # its DATES[45] bar
+    g = pws.Grid.build({"A": a, "B": b, "L": late}, {})
+    assert g.band_at("L", DATES[26])[0] == pws.BAND_CODE[pw.C0]   # banded on the entry day, not on y
+    mean, n = g.benchmark(pws.BAND_CODE[pw.C0], DATES[25], DATES[26], DATES[45])
+    assert n == 2 and mean == pytest.approx((120.0 + 0.0) / 2)    # A: 110 / open 50; close(entry) would give 10
+
+
+# ----------------------------------------------------------------------------- market sessions
+def _gappy(sym: str, missing: set[int], **kw) -> pws.Series:
+    keep = [d for i, d in enumerate(DATES) if i not in missing]
+    return _series(sym, n=len(keep), dates=keep, **kw)
+
+
+def _sig(s: pws.Series, idx: int, level: float):
+    return pws.bb.Signal(s.symbol, idx, s.dates[idx], level, level, 0.01, 0.01)
+
+
+def test_limit_fill_matches_fill_for_without_gaps_and_counts_market_sessions_with_them():
+    full = _series("F")
+    full.low[:] = 100.0
+    full.low[31] = 95.0                                           # touch on y + 6 only
+    g = pws.Grid.build({"F": full}, {})
+    for level, want in ((96.0, None), (99.5, None)):
+        assert pws.limit_fill(g, full, _sig(full, 25, level)) == pws.bb.fill_for(full, _sig(full, 25, level),
+                                                                                  pws.bb.VARIANT_LIMIT_5) == want
+    full.low[30] = 95.0                                           # touch on y + 5: fills
+    assert pws.limit_fill(g, full, _sig(full, 25, 96.0)) == (30, 96.0)
+    assert pws.bb.fill_for(full, _sig(full, 25, 96.0), pws.bb.VARIANT_LIMIT_5) == (30, 96.0)
+    gap = _gappy("G", {27, 28})                                   # out of EQ on y + 2 and y + 3
+    gap.low[:] = 100.0
+    gap.low[28] = 95.0                                            # own index 28 is DATES[30], y + 5: fills
+    gap.low[29] = 95.0                                            # DATES[31], y + 6
+    g2 = pws.Grid.build({"F": full, "G": gap}, {})
+    assert pws.limit_fill(g2, gap, _sig(gap, 25, 96.0)) == (28, 96.0)
+    gap.low[28] = 100.0
+    assert pws.limit_fill(g2, gap, _sig(gap, 25, 96.0)) is None   # own bars would still be inside 5
+    assert pws.bb.fill_for(gap, _sig(gap, 25, 96.0), pws.bb.VARIANT_LIMIT_5) == (29, 96.0)
+
+
+def test_exit_bar_counts_market_sessions_and_moves_late():
+    full = _series("F")
+    gap = _gappy("G", {45, 46, 47})                               # out of EQ DATES[45..47]
+    g = pws.Grid.build({"F": full, "G": gap}, {})
+    assert pws.exit_bar(g, full, 26, 19) == (45, 0)
+    assert pws.exit_bar(g, gap, 26, 10) == (36, 0)                # before the hole: own index = grid index
+    x, late = pws.exit_bar(g, gap, 26, 19)                        # due DATES[45]; next own bar is DATES[48]
+    assert gap.dates[x] == DATES[48] and late == 3
+    short = _series("S", n=40)
+    g3 = pws.Grid.build({"F": full, "S": short}, {})
+    assert pws.exit_bar(g3, short, 26, 19) is None                # no bar from DATES[45] on
+
+
+class _Store:
+    def get_insider_trades(self, symbol):
+        return []
+
+
+def test_ins_events_use_full_history_and_need_a_bar_on_the_next_session(monkeypatch):
+    monkeypatch.setattr(pw, "CORE_RANK", 5)
+    monkeypatch.setattr(pws.rc, "store_reader", lambda conn: _Store())
+    seen: list[int] = []
+
+    def events(sessions, filings, threshold):
+        seen.append(len(sessions))
+        assert threshold == pws.INS_FLOOR_INR
+        return [25]
+
+    monkeypatch.setattr(pws.es, "insider_buy_events", events)
+    full = _series("F")
+    gap = _gappy("G", {26})                                       # own index 25 is DATES[25]; next bar DATES[27]
+    g = pws.Grid.build({"F": full, "G": gap}, {})
+    cands, counts = pws.ins_candidates(None, {"F": full, "G": gap}, g, {})
+    assert seen == [60, 59]                                       # every session of each stock, not a cut window
+    (c,) = cands
+    assert c.event.symbol == "F" and c.event.fill_idx == 26 and float(c.event.fill_px) == full.open[26]
+    assert c.exit_date == DATES[45] and c.band == pw.C0
+    assert counts == {"signals_in_window": 2, "no_fill_session": 1}
+
+
+def _cand(s: pws.Series, sig: int, exit_idx: int, leg: str = "ins") -> pws.Candidate:
+    return pws.Candidate(leg, rc.Event(s.symbol, s, sig, sig + 1, rc.px(100.0), 1.0), pw.C0, 1, 1e8,
+                         exit_idx=exit_idx)
+
+
+def test_one_position_per_symbol_blocks_until_the_exit_date():
+    a, b = _series("A"), _series("B")
+    first, inside, on_exit, after = _cand(a, 5, 25), _cand(a, 20, 40), _cand(a, 25, 45), _cand(a, 30, 50)
+    other = _cand(b, 20, 40)
+    counts: dict[str, int] = {}
+    kept = pws.one_position_per_symbol([after, inside, other, on_exit, first], counts)
+    assert kept == [first, on_exit, other]                        # a dropped signal never extends the block
+    assert counts == {"held_overlap": 2}
+
+
+def test_voided_matches_the_walk():
+    a = _series("A")
+    c = _cand(a, 25, 45)
+    assert pws.voided(c, {"A": [DATES[45]]}) and not pws.voided(c, {"A": [DATES[26]]})
+    assert not pws.voided(c, {"A": [DATES[46]]}) and not pws.voided(c, {})
+
+
 # ----------------------------------------------------------------------------- walk
-def test_walk_time_only_net_and_excess(monkeypatch, spreads):
+def test_walk_time_only_net_and_excess(monkeypatch):
     monkeypatch.setattr(pw, "CORE_RANK", 2)
     a = _series("A", closes={45: 110.0})
     b = _series("B", closes={45: 100.0})
     g = pws.Grid.build({"A": a, "B": b}, {})
     ev = rc.Event("A", a, 25, 26, rc.px(a.open[26]), 1.0)
-    cand = pws.Candidate("ins", ev, pw.C0, 1, 1e8)
+    x, _ = pws.exit_bar(g, a, 26, pws.EXIT_SESSIONS["ins"])
+    cand = pws.Candidate("ins", ev, pw.C0, 1, 1e8, exit_idx=x)
     counts: dict[str, int] = {}
     fees = Decimal("0.30")
     (t,) = pws.walk_all([cand], g, {}, fees, counts)
@@ -136,19 +246,35 @@ def test_walk_time_only_net_and_excess(monkeypatch, spreads):
     assert t.net == pytest.approx(10.0 - 0.34)
     assert t.benchmark == pytest.approx(5.0) and t.bench_n == 2
     assert t.excess == pytest.approx(5.0)
-    brk = pws.Candidate("brk20", ev, pw.C0, 1, 1e8)
-    (t2,) = pws.walk_all([brk], g, {}, fees, counts)
+    x2, _ = pws.exit_bar(g, a, 26, pws.EXIT_SESSIONS["brk20"])
+    (t2,) = pws.walk_all([pws.Candidate("brk20", ev, pw.C0, 1, 1e8, exit_idx=x2)], g, {}, fees, counts)
     assert t2.exit_date == DATES[26 + 20]                         # brk20 exits close(fill + 20)
 
 
-def test_walk_voids_a_structural_ex_date_in_the_hold(spreads, monkeypatch):
+def test_walk_exits_at_the_late_bar(monkeypatch):
+    monkeypatch.setattr(pw, "CORE_RANK", 2)
+    full = _series("F")
+    gap = _gappy("G", {45, 46})                                   # own index 45 is DATES[47]
+    g = pws.Grid.build({"F": full, "G": gap}, {})
+    x, late = pws.exit_bar(g, gap, 26, 19)
+    ev = rc.Event("G", gap, 25, 26, rc.px(gap.open[26]), 1.0)
+    (t,) = pws.walk_all([pws.Candidate("ins", ev, pw.W1, 2, 1e8, exit_idx=x, exit_late=late)], g, {},
+                        Decimal("0.30"), {})
+    assert t.exit_date == DATES[47] and t.exit_late == 2 and t.gross == pytest.approx(0.0)
+    gap.close[45] = 120.0
+    (t,) = pws.walk_all([pws.Candidate("ins", ev, pw.W1, 2, 1e8, exit_idx=x, exit_late=late)], g, {},
+                        Decimal("0.30"), {})
+    assert t.gross == pytest.approx(20.0)
+
+
+def test_walk_voids_a_structural_ex_date_in_the_hold(monkeypatch):
     monkeypatch.setattr(pw, "CORE_RANK", 2)
     a = _series("A")
     g = pws.Grid.build({"A": a}, {})
     ev = rc.Event("A", a, 25, 26, rc.px(a.open[26]), 1.0)
     counts: dict[str, int] = {}
-    assert pws.walk_all([pws.Candidate("ins", ev, pw.C0, 1, 1e8)], g, {"A": [DATES[30]]}, Decimal("0.3"),
-                        counts) == []
+    assert pws.walk_all([pws.Candidate("ins", ev, pw.C0, 1, 1e8, exit_idx=45)], g, {"A": [DATES[30]]},
+                        Decimal("0.3"), counts) == []
     assert counts == {"void_ca": 1}
 
 
@@ -201,9 +327,16 @@ def test_verdict_refuted_and_insufficient():
     assert pws.verdict({**PASSING, "mean_excess": -0.3, "excess_ci_lo": -0.5})["verdict"] == pws.REFUTED
     assert pws.verdict({**PASSING, "n": 99})["verdict"] == pws.INSUFFICIENT
     assert pws.verdict({"n": 0})["verdict"] == pws.INSUFFICIENT
+    # too few trades outranks a negative excess
+    assert pws.verdict({**PASSING, "n": 99, "mean_excess": -0.3, "excess_ci_lo": -0.5})["verdict"] == pws.INSUFFICIENT
 
 
-def test_measure_cell_on_no_trades_is_insufficient(spreads):
+def test_verdict_n_boundary():
+    assert pws.verdict({**PASSING, "n": 100})["verdict"] == pws.WIDEN
+    assert [r["pass"] for r in pws.verdict({**PASSING, "n": 99})["rows"]][0] is False
+
+
+def test_measure_cell_on_no_trades_is_insufficient():
     m = pws.measure_cell([], 0.34)
     assert m["n"] == 0 and m["mean_net"] is None and m["cpcv_promotable"] is False
     assert pws.verdict(m)["verdict"] == pws.INSUFFICIENT

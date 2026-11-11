@@ -13,6 +13,10 @@ The registration entry in IMPLEMENTATION_PLAN.md is the spec of record; this doc
   ``close(fill+20)``; ins (``insider_net_buy`` at the live Rs 1 cr floor), fill ``open(y+1)``, exit at T+20.
   Time-only exits, no stop. Signals from ``SIGNALS_FROM``; the registered helpers' vetoes; a fill session whose high
   equals its low (locked all day) is unfillable and dropped. hi52 is not a leg (see ``LEGS``).
+* **Market sessions.** The fill window and the hold count sessions on the snapshot's market grid, not the stock's own
+  EQ bars (a stock out of EQ has no bars). ins needs a bar on ``y+1``; an exit session the stock did not trade in EQ
+  moves to its next EQ bar, counted as late. One position per stock per leg: a signal before the exit of the leg's
+  last kept trade on that stock is dropped (``held_overlap``).
 * **Cost.** Statutory fees at Rs 20,000 CNC (``CostModel.fee_breakeven_pct``) plus the band's measured spread.
 * **Benchmark.** Equal-weight mean gross ``open(entry) -> close(exit)`` of the stocks in the trade's band on ``y``
   with bars on both dates and no structural ex-date between them, the trade's own stock included.
@@ -65,6 +69,14 @@ SIGNALS_FROM = date(2023, 8, 1)
 #: exit_sim horizon = sessions after the fill session. T+20 counts the fill session as 1; brk20's registered exit is
 #: close(fill+20).
 EXIT_SESSIONS: dict[str, int] = {"brk20": rc.HORIZON, "ins": rc.HORIZON - 1}
+#: brk20's limit rests this many market sessions after y.
+FILL_WINDOW_SESSIONS = bb.FILL_WINDOW[bb.VARIANT_LIMIT_5]
+#: The ins floor, frozen. The live leg's ``ins.threshold_inr`` and the event study's
+#: ``filings.insider_min_value_inr`` must both equal it, or the run refuses.
+INS_FLOOR_INR = 10_000_000
+#: Unit changes missing from ``corp_actions``: AMIORG closed at 2,202.50 on 2025-04-24 and opened at 1,118.00 on
+#: 2025-04-25, half the price, beyond any price band.
+STRUCTURAL_SUPPLEMENT: dict[str, tuple[date, ...]] = {"AMIORG": (date(2025, 4, 25),)}
 PRODUCT = "CNC"
 NOTIONAL = Decimal("20000")
 #: Measured 2026-11-11 by ``pool_widening_spreads.py`` (eight rounds 13:07-15:08, bands as of 2026-11-09): per band
@@ -136,6 +148,7 @@ class Grid:
     close: np.ndarray
     ex_lt: np.ndarray           # structural ex-dates strictly before each session
     ex_le: np.ndarray           # structural ex-dates on or before each session
+    own_pos: dict[str, np.ndarray]   # per stock: the grid session of each of its own bars, ascending
     _bench: dict[tuple[int, int, int, int], tuple[float | None, int]] = field(default_factory=dict)
 
     @classmethod
@@ -147,9 +160,11 @@ class Grid:
         o, c, liq = (np.full(shape, np.nan) for _ in range(3))
         present = np.zeros(shape, dtype=bool)
         ex_lt, ex_le = np.zeros(shape, dtype=np.int32), np.zeros(shape, dtype=np.int32)
+        own_pos: dict[str, np.ndarray] = {}
         for j, sym in enumerate(symbols):
             s = series[sym]
             rows = np.searchsorted(grid, np.array(s.dates, dtype="datetime64[D]"))
+            own_pos[sym] = rows.astype(np.int64)
             o[rows, j], c[rows, j], liq[rows, j] = s.open, s.close, asof_liquidity(s)
             present[rows, j] = True
             ex = structural.get(sym)
@@ -164,7 +179,7 @@ class Grid:
         for g in range(len(dates)):
             band[g], rank[g] = band_row(liq[g], valid[g])
         return cls(dates, {d: i for i, d in enumerate(dates)}, symbols, {s: j for j, s in enumerate(symbols)},
-                   band, rank, liq, present, o, c, ex_lt, ex_le)
+                   band, rank, liq, present, o, c, ex_lt, ex_le, own_pos)
 
     def band_at(self, symbol: str, d: date) -> tuple[int, int, float]:
         """``(band code, rank, liquidity)`` of ``symbol`` on session ``d``."""
@@ -190,13 +205,20 @@ class Grid:
 # =============================================================================== leg populations
 @dataclass(frozen=True)
 class Candidate:
-    """One admitted signal with its fill, before the walk."""
+    """One admitted signal with its fill and its exit bar, before the walk. ``exit_late`` is how many market
+    sessions after the due session the exit bar falls (0 = on time)."""
 
     leg: str
     event: rc.Event
     band: str
     rank: int
     liquidity: float
+    exit_idx: int
+    exit_late: int = 0
+
+    @property
+    def exit_date(self) -> date:
+        return self.event.series.dates[self.exit_idx]
 
 
 def _bump(counts: dict[str, int], key: str) -> None:
@@ -213,12 +235,17 @@ def _in_window(d: date, counts: dict[str, int]) -> bool:
 
 def _gate(leg: str, sym: str, s: Series, i: int, grid: Grid, atr: np.ndarray,
           counts: dict[str, int]) -> tuple[str, int, float] | None:
-    """Band and forward-window admission shared by the legs; ``None`` = dropped (counted)."""
+    """Band and forward-window admission shared by the legs; ``None`` = dropped (counted). The forward window is
+    ``rc.SPAN[leg]`` MARKET sessions after ``y`` on the grid (the fill window plus the hold)."""
     code, rank, liq = grid.band_at(sym, s.dates[i])
     if code == NO_BAND:
         _bump(counts, "no_band")
         return None
-    if not rc._admitted(s, i, rc.SPAN[leg], atr, counts):
+    if int(grid.own_pos[sym][i]) + rc.SPAN[leg] >= len(grid.dates):
+        _bump(counts, "short_forward_window")
+        return None
+    if not np.isfinite(atr[i]):
+        _bump(counts, "no_atr14")
         return None
     return pw.BANDS[code], rank, liq
 
@@ -228,6 +255,44 @@ def _fillable(s: Series, fill_idx: int, counts: dict[str, int]) -> bool:
         _bump(counts, "locked_fill_session")
         return False
     return True
+
+
+def limit_fill(grid: Grid, s: Series, sig) -> tuple[int, float] | None:
+    """``bb.fill_for``'s 5-session limit on MARKET sessions: the first own bar on grid sessions ``y+1 .. y+5`` whose
+    low <= level, at ``min(open, level)``. Equal to ``bb.fill_for`` on a stock with a bar every session."""
+    gp = grid.own_pos[s.symbol]
+    last = int(gp[sig.idx]) + FILL_WINDOW_SESSIONS
+    for j in range(sig.idx + 1, len(s)):
+        if gp[j] > last:
+            break
+        if float(s.low[j]) <= sig.level:
+            return j, min(float(s.open[j]), sig.level)
+    return None
+
+
+def exit_bar(grid: Grid, s: Series, fill_idx: int, h: int) -> tuple[int, int] | None:
+    """``(own index, sessions late)`` of the exit: the first own bar on or after market session ``pos(fill) + h``.
+    ``None`` when the stock has no bar from there to the snapshot's end."""
+    gp = grid.own_pos[s.symbol]
+    due = int(gp[fill_idx]) + h
+    x = int(np.searchsorted(gp, due, side="left"))
+    return None if x >= len(s) else (x, int(gp[x]) - due)
+
+
+def _finish(leg: str, sym: str, s: Series, sig_idx: int, fill_idx: int, fill_px: float, atr: np.ndarray,
+            got: tuple[str, int, float], grid: Grid, counts: dict[str, int]) -> Candidate | None:
+    """Lock, exit-bar and bar-usability checks shared by the legs; ``None`` = dropped (counted)."""
+    if not _fillable(s, fill_idx, counts):
+        return None
+    xb = exit_bar(grid, s, fill_idx, EXIT_SESSIONS[leg])
+    if xb is None:
+        _bump(counts, "no_exit_bar")
+        return None
+    if not bb.bars_usable(s, sig_idx, xb[0] - sig_idx):
+        _bump(counts, "unusable_bar")
+        return None
+    ev = rc.Event(sym, s, sig_idx, fill_idx, rc.px(fill_px), float(atr[sig_idx]))
+    return Candidate(leg, ev, *got, exit_idx=xb[0], exit_late=xb[1])
 
 
 def brk20_candidates(series: Mapping[str, Series], grid: Grid, ex, structural, index) -> tuple[list[Candidate], dict]:
@@ -247,40 +312,62 @@ def brk20_candidates(series: Mapping[str, Series], grid: Grid, ex, structural, i
             got = _gate("brk20", sym, s, sig.idx, grid, atr, counts)
             if got is None:
                 continue
-            fill = bb.fill_for(s, sig, bb.VARIANT_LIMIT_5)
+            fill = limit_fill(grid, s, sig)
             if fill is None:
                 _bump(counts, "unfilled")
                 continue
-            if not _fillable(s, fill[0], counts):
-                continue
-            ev = rc.Event(sym, s, sig.idx, fill[0], rc.px(fill[1]), float(atr[sig.idx]))
-            out.append(Candidate("brk20", ev, *got))
+            cand = _finish("brk20", sym, s, sig.idx, fill[0], fill[1], atr, got, grid, counts)
+            if cand is not None:
+                out.append(cand)
     return out, counts
 
 
 def ins_candidates(conn, series: Mapping[str, Series], grid: Grid, structural) -> tuple[list[Candidate], dict]:
+    """Events from the stock's FULL history (the crossing's re-arm state is path-dependent from the first session,
+    so a series cut at ``SIGNALS_FROM`` re-detects earlier crossings there), kept from ``SIGNALS_FROM``."""
     store = rc.store_reader(conn)
-    threshold = load_settings().filings.insider_min_value_inr
     counts: dict[str, int] = {}
     out: list[Candidate] = []
     for sym, s in series.items():
-        w0 = int(np.searchsorted(np.array(s.dates, dtype="datetime64[D]"), np.datetime64(SIGNALS_FROM, "D")))
-        if len(s) - w0 < es.VOL_WINDOW + max(es.HORIZONS) + 2:
-            continue
         atr = rc._atr(s)
-        for t in es.insider_buy_events(s.dates[w0:], store.get_insider_trades(symbol=sym), threshold):
-            i = w0 + t
+        gp = grid.own_pos[sym]
+        for i in es.insider_buy_events(list(s.dates), store.get_insider_trades(symbol=sym), INS_FLOOR_INR):
             if not _in_window(s.dates[i], counts):
                 continue
             if i + 1 < len(s) and bb._unadjusted_at(structural.get(sym, []), s.dates[i + 1]):
                 _bump(counts, hi52.VETO_UNADJUSTED_HISTORY)
                 continue
             got = _gate("ins", sym, s, i, grid, atr, counts)
-            if got is None or not _fillable(s, i + 1, counts):
+            if got is None:
                 continue
-            ev = rc.Event(sym, s, i, i + 1, rc.px(s.open[i + 1]), float(atr[i]))
-            out.append(Candidate("ins", ev, *got))
+            if i + 1 >= len(s) or gp[i + 1] != gp[i] + 1:
+                _bump(counts, "no_fill_session")
+                continue
+            cand = _finish("ins", sym, s, i, i + 1, float(s.open[i + 1]), atr, got, grid, counts)
+            if cand is not None:
+                out.append(cand)
     return out, counts
+
+
+def one_position_per_symbol(cands: Sequence[Candidate], counts: dict[str, int]) -> list[Candidate]:
+    """The live gate holds one position per stock: a signal dated before the exit of the leg's last KEPT trade on
+    that stock (still pending or held) is dropped as ``held_overlap``. A signal on the exit date is kept."""
+    out: list[Candidate] = []
+    last_exit: dict[str, date] = {}
+    for c in sorted(cands, key=lambda c: (c.event.symbol, c.event.signal_date)):
+        sym = c.event.symbol
+        if sym in last_exit and c.event.signal_date < last_exit[sym]:
+            _bump(counts, "held_overlap")
+            continue
+        out.append(c)
+        last_exit[sym] = c.exit_date
+    return out
+
+
+def voided(c: Candidate, structural: Mapping[str, Sequence[date]]) -> bool:
+    """``exit_sim``'s void rule without the walk: a structural ex-date in (fill session, exit session]."""
+    f, x = c.event.fill_date, c.exit_date
+    return any(f < d <= x for d in structural.get(c.event.symbol, ()))
 
 
 # =============================================================================== measurement
@@ -302,6 +389,7 @@ class Trade:
     rank: int
     liquidity: float
     locked_exit: bool
+    exit_late: int = 0
 
 
 def band_cost(band: str, fees_pct: Decimal) -> Decimal:
@@ -310,23 +398,22 @@ def band_cost(band: str, fees_pct: Decimal) -> Decimal:
 
 def walk_all(cands: Sequence[Candidate], grid: Grid, structural, fees_pct: Decimal,
              counts: dict[str, int]) -> list[Trade]:
+    """Walk each candidate to the close of its exit bar (own-bar horizon = exit index - fill index)."""
     out: list[Trade] = []
     for c in cands:
-        ev, h = c.event, EXIT_SESSIONS[c.leg]
-        o = rc.walk(ev, stop=None, target=None, horizon=h, cost_pct=band_cost(c.band, fees_pct),
+        ev, x = c.event, c.exit_idx
+        o = rc.walk(ev, stop=None, target=None, horizon=x - ev.fill_idx, cost_pct=band_cost(c.band, fees_pct),
                     ex_dates=structural.get(ev.symbol, []))
         if o.status == "void_ca":
             _bump(counts, "void_ca")
             continue
-        if o.status != "exit":
-            raise AssertionError(f"{ev.symbol} {ev.fill_date}: walk ended {o.status}")
-        x = ev.fill_idx + h
-        exit_d = ev.series.dates[x]
-        bench, n = grid.benchmark(BAND_CODE[c.band], ev.signal_date, ev.fill_date, exit_d)
+        if o.status != "exit" or o.exit_d != c.exit_date:
+            raise AssertionError(f"{ev.symbol} {ev.fill_date}: walk ended {o.status} on {o.exit_d}")
+        bench, n = grid.benchmark(BAND_CODE[c.band], ev.signal_date, ev.fill_date, c.exit_date)
         gross = float(o.gross_pct)
-        out.append(Trade(c.leg, c.band, ev.symbol, ev.signal_date, ev.fill_date, exit_d, gross, float(o.net_pct),
-                         bench, n, None if bench is None else gross - bench, c.rank, c.liquidity,
-                         float(ev.series.high[x]) == float(ev.series.low[x])))
+        out.append(Trade(c.leg, c.band, ev.symbol, ev.signal_date, ev.fill_date, c.exit_date, gross,
+                         float(o.net_pct), bench, n, None if bench is None else gross - bench, c.rank, c.liquidity,
+                         float(ev.series.high[x]) == float(ev.series.low[x]), c.exit_late))
     return out
 
 
@@ -375,6 +462,8 @@ def measure_cell(trades: Sequence[Trade], cost_pct: float) -> dict[str, Any]:
         "top1_dropped_mean_net": hv.top_tail_dropped_mean(net, TOP_TAIL_FRAC),
         "held_out_n": len(held), "held_out_mean_excess": _mean(held),
         "locked_exit_sessions": sum(t.locked_exit for t in trades),
+        "late_exits": sum(t.exit_late > 0 for t in trades),
+        "late_exit_median_sessions": _median([t.exit_late for t in trades if t.exit_late > 0]),
     }
 
 
@@ -439,6 +528,10 @@ def run_study(conn, *, db_path: Path, etf, symbols: Sequence[str] | None = None,
     """The registered study. ``counts_only`` keeps funnels and per-cell trade counts and drops every return."""
     if set(BAND_SPREAD_PCT) != set(pw.BANDS) or set(BAND_SPREAD_P75_PCT) != set(pw.BANDS):
         raise rc.Refusal("band spreads are not recorded (BAND_SPREAD_PCT / BAND_SPREAD_P75_PCT)")
+    st = load_settings()
+    if not (st.ins.threshold_inr == st.filings.insider_min_value_inr == INS_FLOOR_INR):
+        raise rc.Refusal(f"the ins floor moved: ins.threshold_inr {st.ins.threshold_inr}, filings."
+                         f"insider_min_value_inr {st.filings.insider_min_value_inr}, registered {INS_FLOOR_INR}")
     t0 = time.monotonic()
     cm = CostModel.from_config()
     fees_pct = cm.fee_breakeven_pct(NOTIONAL, PRODUCT)
@@ -449,6 +542,9 @@ def run_study(conn, *, db_path: Path, etf, symbols: Sequence[str] | None = None,
     if not series:
         raise rc.Refusal("no bars_1d rows for the requested population")
     ex, structural = bb.load_ex_dates(conn), bb.load_structural_ex_dates(conn)
+    for sym, extra in STRUCTURAL_SUPPLEMENT.items():
+        for table in (ex, structural):
+            table[sym] = sorted(set(table.get(sym, [])) | set(extra))
     grid = Grid.build(series, structural)
     index = rf.index_series(conn, grid.dates[-1])
     nifty500, total_market, seeds = hv.load_membership()
@@ -462,15 +558,23 @@ def run_study(conn, *, db_path: Path, etf, symbols: Sequence[str] | None = None,
     legs: dict[str, Any] = {}
     for leg in LEGS:
         cands, counts = built[leg]
-        trades = walk_all(cands, grid, structural, fees_pct, counts)
+        cands = one_position_per_symbol(cands, counts)
         cells: dict[str, Any] = {}
+        if counts_only:   # no walk, no benchmark: the void rule is applied to dates alone
+            kept = [c for c in cands if not voided(c, structural)]
+            if len(kept) < len(cands):
+                counts["void_ca"] = len(cands) - len(kept)
+            for band in pw.BANDS:
+                cs = [c for c in kept if c.band == band]
+                cells[band] = {"trial": band in pw.WIDENING_BANDS, "n": len(cs),
+                               "n_signal_dates": len({c.event.signal_date for c in cs}),
+                               "n_symbols": len({c.event.symbol for c in cs}),
+                               "late_exits": sum(c.exit_late > 0 for c in cs)}
+            legs[leg] = {"funnel": dict(sorted(counts.items())), "trades": len(kept), "cells": cells}
+            continue
+        trades = walk_all(cands, grid, structural, fees_pct, counts)
         for band in pw.BANDS:
             ts = [t for t in trades if t.band == band]
-            if counts_only:
-                cells[band] = {"trial": band in pw.WIDENING_BANDS, "n": len(ts),
-                               "n_signal_dates": len({t.signal_date for t in ts}),
-                               "n_symbols": len({t.symbol for t in ts})}
-                continue
             m = measure_cell(ts, float(band_cost(band, fees_pct)))
             cells[band] = {
                 "trial": band in pw.WIDENING_BANDS,
@@ -516,8 +620,16 @@ def run_study(conn, *, db_path: Path, etf, symbols: Sequence[str] | None = None,
             "surveillance history. bars_1d holds names that later delisted.",
             "Known optimism: open fills assume the open is reachable (only all-day locks are caught); the "
             "official close is a VWAP no order fills at; names then under surveillance are included; spreads were "
-            "measured on one afternoon and applied backwards; brk20's benchmark runs from open(fill session) while "
-            "its fill is the limit level.",
+            "measured on one afternoon and applied backwards, and depth is not priced; brk20's benchmark runs from "
+            "open(fill session) while its fill is the limit level.",
+            "Sessions are market sessions. A stock with no EQ bar on its exit session exits at its next EQ bar "
+            "(late_exits per cell); one with no bar from there on is dropped (no_exit_bar).",
+            "One position per stock is applied per leg, from kept trades: an unfilled brk20 signal's resting order "
+            "and the other leg's positions do not block, though live they would.",
+            "Divergences from live kept as registered: ins applies the helpers' unadjusted-history veto, which the "
+            "live leg does not; a brk20 touch session locked all day is dropped even when it is a lower-circuit "
+            "lock a buy would fill in. About 69 funds that left NSE's ETF list before its 2026-10-09 copy stay in "
+            "as stocks (under one per band per day).",
             "C0 is the control and not a trial; the current-index-class split is a " + rc.SURVIVORSHIP_LABEL + ".",
         ] + ([] if registered else ["POPULATION OVERRIDDEN (--symbols/--max-symbols): smoke run, NOT the "
                                     "registered study; bands and benchmarks cover the loaded names only."]),
@@ -546,7 +658,7 @@ def render_text(doc: dict[str, Any]) -> str:
         for leg, b in doc["legs"].items():
             out.append(f"[{leg}] trades {b['trades']}  funnel {b['funnel']}")
             out += [f"  {band:<21} n {c['n']:>5}  signal dates {c['n_signal_dates']:>4}  stocks {c['n_symbols']:>4}"
-                    for band, c in b["cells"].items()]
+                    f"  late exits {c['late_exits']:>3}" for band, c in b["cells"].items()]
         return rc.ascii_text("\n".join(out))
     hdr = ("  band                    n  dates  med gross  mean net  med net    t  mean exc  exc CI            "
            "CPCV  held-out exc  verdict")
@@ -563,6 +675,8 @@ def render_text(doc: dict[str, Any]) -> str:
             failed = [str(r["id"]) for r in c["rows"] if not r["pass"]]
             if failed:
                 out.append(f"      failed criteria: {', '.join(failed)}")
+            if x["late_exits"]:
+                out.append(f"      late exits {x['late_exits']} (median {x['late_exit_median_sessions']} sessions)")
         out.append("")
     out += ["Criteria: 1 n>=" + str(MIN_N) + "; 2 median gross > cost; 3 mean net > 0 and t > 2; 4 mean excess > 0 "
             "with CI above 0; 5 CPCV promotable; 6 top-1%-dropped mean net > 0; 7 held-out mean excess > 0."]

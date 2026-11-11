@@ -748,6 +748,29 @@ the commit that adds its four trial rows).** The owner asked to raise the number
   - the arm drops MIS eligibility and keeps surveillance strict;
   - running forward tests keep their populations: the brk20 and ins kill rules, the paper no-stop test and cat v2.
   - It is an owner decision, then a plan.
+- **Amendments before any outcome** (an independent code review after registration; no return had been computed):
+  1. **Market sessions.** The fill window and the hold count sessions on the market grid, not the stock's own bars.
+     - The bhavcopy holds EQ bars only, so a stock moved out of EQ had its window and hold stretched. 114 brk20
+       candidates ran a median 62 sessions long.
+     - ins needs a bar on y+1; without one, the trade is dropped as `no_fill_session`.
+     - An exit session the stock did not trade in EQ moves to its next EQ bar. Late exits are reported per cell.
+     - A stock with no bar from the exit session on is dropped as `no_exit_bar`.
+  2. **One position per stock per leg, as the live gate holds.** A signal dated before the exit of the leg's last
+     kept trade on that stock is dropped as `held_overlap`. Before this, 983 brk20 and 55 ins candidates overlapped.
+     - An unfilled brk20 signal's resting order does not block.
+     - Nor do the other leg's positions.
+  3. **ins events come from each stock's full history**, kept from 2023-08-01. Cutting the sessions at 2023-08-01
+     re-detected nine earlier crossings on that first session.
+  4. **The ins floor is frozen at ₹1 cr.** The run refuses if `ins.threshold_inr` or
+     `filings.insider_min_value_inr` moves.
+  5. **AMIORG 2025-04-25 is a structural date.** The stock halved overnight with no `corp_actions` row.
+  6. **`--counts-only` no longer walks trades.** It voids on dates alone.
+  - **Kept as registered, and disclosed in the report:**
+    - ins keeps the helpers' unadjusted-history veto, which the live leg lacks.
+    - A brk20 touch session locked all day is dropped, even when it is a lower-circuit lock a buy would fill in.
+    - About 69 funds that left NSE's ETF list before its 2026-10-09 copy stay in as stocks, under one per band per
+      day.
+    - The spread tool banded names on the as-of day's master, with at least 15 sessions in 45 days.
 - **Tools and records:**
   - `scripts/pool_widening_study.py`: read-only, refuses market hours and the live store, writes
     `data/reports/pool_widening_<date>.{json,md}`. `--counts-only` prints funnels and per-cell counts with no
