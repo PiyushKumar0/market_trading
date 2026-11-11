@@ -722,6 +722,21 @@ data, at the account's size and costs. Evidence only; nothing is wired into the 
     whole shares at about Rs 8,000 a name skip high-priced stocks the benchmark holds; fills at the open assume a
     name locked at its upper price band could be bought, which flatters momentum. The run counts the skipped buys
     and the buys on sessions whose high equals their low.
+- **Verdicts on this sample, run 2026-11-12 (`data/reports/factor_portfolio_2026-11-09.json`, 39 periods):**
+  - **Momentum: null.** Mean e +1.12% a month (median +1.38%), positive in both halves and with the 3 best months
+    removed (+0.40%); the bootstrap share was 0.0172 against 0.0167 and the t-test p 0.051. Net 28% a year against
+    about 14% for the benchmark, worst drawdown −29%, costs 0.9% a year. By year against the benchmark: 2023 +28/+22,
+    2024 +39/+21, 2025 −0/+7, 2026 +24/−3.
+  - **Low volatility: refuted** (mean e −0.87% a month). **Composite: refuted** (−0.13%).
+  - Two data flaws were found after the outcome, both in the research copies:
+    - A renamed company whose history was re-keyed can hold bars under both symbols (LTIM and LTM, ZOMATO and
+      ETERNAL, GMRINFRA and GMRAIRPORT, L&TFH and LTF, ADANITRANS and ADANIENSOL), so it counts twice. With the old
+      symbols excluded the labels are the same (momentum +1.04%, bootstrap 0.035, t-test p 0.068).
+    - A stock moved to the trade-for-trade series loses its bars, because the daily-file parser keeps ordinary
+      series only. 16 of the 400 most traded names have a hole of 10 sessions or more, among them the sharpest
+      risers. The momentum book closed two holdings at their last value for this reason (MTARTECH, HFCL). If both
+      had then lost 30%, mean e falls by about 0.1 a month.
+  - Neither sample's verdict is a promotion. The long-history sample below reads next.
 - **Seen before registration:** the forward outcomes of hi52, brk20 and ins signals from September 2026 (hi52, a
   momentum-like rule, lagged the equal-weight universe); the anatomy of the November 2026 rally; and published reports
   that NSE's Nifty200 Momentum 30 index fell about 30% from 2024-09-27 into spring 2025 and stood about 19% below that
@@ -784,6 +799,12 @@ rows), which gives about 150 earlier periods.
 
 ## Known defects and test gaps
 
+- `bars_1d` loses a stock while it trades in the trade-for-trade series: the daily-file parser keeps ordinary series
+  only, so a name moved to `-BE` has no bars until it returns (16 of the 400 most traded names have such a hole). The
+  engine excludes those names from trading anyway, but every benchmark and portfolio study reads a market with holes
+  where the sharpest risers were.
+- A re-keyed rename can leave the same history under the old and the new symbol in research copies (five liquid pairs
+  on the 2026-11-09 copy), so cross-sectional studies count that company twice.
 - A running ticker never receives a new Kite token (moot while the engine restarts daily).
 - The 08:40 `token_check` sends a "token invalid, re-login" page when a login lands while its probe is in flight;
   the mid-day breaker ignores such a superseded token, this job does not.
