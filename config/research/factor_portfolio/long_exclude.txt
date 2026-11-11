@@ -1,0 +1,12 @@
+# Factor portfolio study, long-history sample: funds that pass the ETF test (NSE's 2026 list and the name suffixes).
+# Fixed 2026-11-12 from universe member names alone, before any return was computed.
+KOTAKGOLD     # the only one that enters a 200-name universe (2011-10 to 2012-02)
+GOLDSHARE
+RELGOLD
+SBIGETS
+KOTAKNIFTY
+N100
+ICICINIFTY
+ICICILIQ
+AXISGOLD
+AXISILVER

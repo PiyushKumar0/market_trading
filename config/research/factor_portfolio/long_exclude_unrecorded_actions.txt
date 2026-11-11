@@ -1,0 +1,17 @@
+# Factor portfolio study, long-history sample: the sensitivity run's exclusions. It decides nothing.
+# The fund list, plus four names whose bonuses or demergers the store does not flag, so each reads as a loss of
+# 17% to 33%. Fixed 2026-11-12 before any return was computed.
+KOTAKGOLD
+GOLDSHARE
+RELGOLD
+SBIGETS
+KOTAKNIFTY
+N100
+ICICINIFTY
+ICICILIQ
+AXISGOLD
+AXISILVER
+MOTHERSUMI    # four 1:2 bonuses and the 2022 demerger are filed under MOTHERSON
+GRASIM        # demerger 2017-07-19, filed as another kind
+ADANIENT      # demerger 2018-09-06, filed as another kind
+CESC          # demerger 2018-10-30, filed as another kind

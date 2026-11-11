@@ -796,6 +796,27 @@ rows), which gives about 150 earlier periods.
   reading over both samples, and the first sample recomputed from this store, are diagnostics.
 - **Tools:** the study script gains three options before this store is read by it: the session rule, the market
   proxy symbol and the formation bounds.
+- **Amended 2026-11-12 after the download and its outcome-free checks, before any return was computed:**
+  - The store holds 4,178 sessions from 2010-01-04 to 2026-11-09 and gives 150 periods. Four dates in 2025–2026
+    failed to parse; they lie outside this sample. On the 1,990,664 rows it shares with the live copy's archive rows,
+    every close is equal.
+  - The study reads a byte copy, `data/research/market_deep_2026-11-09.duckdb`, because research scripts refuse a
+    file named as the live store.
+  - Exclusion list, `config/research/factor_portfolio/long_exclude.txt`: ten funds that pass the ETF test. Only
+    KOTAKGOLD enters a 200-name universe (5 formations); the others reach the 500-name diagnostic. TATAMTRDVR stays:
+    it is a class of Tata Motors' ordinary shares, and the first sample held it.
+  - NSE files a company's past actions under its present symbol. 95 splits, bonuses and demergers in 2010–2023 are
+    dated before their symbol's first bar, so the old symbol's bars carry no structural flag. Most move the price
+    more than 35% and the jump rule zeroes them. In a 200-name universe the ones it does not are MOTHERSUMI's four
+    1:2 bonuses and its 2022 demerger. Three more demergers are filed as another kind and read as losses: GRASIM
+    2017-07-19, ADANIENT 2018-09-06, CESC 2018-10-30.
+  - Unexplained returns between −35% and −15%: 393 in the 150 periods, against about 19 a year in 2022–2026. 119
+    fall on five market-wide days (2015-08-24, three in March 2020, 2023-01-27); 2018 (37) and 2019 (59) carry the
+    credit-crisis names. Eight checked by their bars are intraday falls on heavy volume, not adjustments.
+  - The verdict reads the data as registered. One sensitivity run, fixed here, also excludes MOTHERSUMI, GRASIM,
+    ADANIENT and CESC (`long_exclude_unrecorded_actions.txt`); it decides nothing.
+  - The name rule drops every symbol that contains a hyphen, so BAJAJ-AUTO and MCDOWELL-N are in no universe, in
+    either sample.
 
 ## Known defects and test gaps
 

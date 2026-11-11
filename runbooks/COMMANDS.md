@@ -718,6 +718,15 @@ $env:MT_DATA_DIR = (Join-Path (Get-Location) "data\research\deep_history")
 .venv\Scripts\python.exe scripts\backfill_bhavcopy.py --from 2010-01-01 --to 2026-11-09 --pace-s 1.0
 .venv\Scripts\python.exe scripts\backfill_bhavcopy.py --status
 Remove-Item Env:MT_DATA_DIR      # always clear it: the next command in this shell would otherwise read the wrong store
+
+# long-history sample: the study reads a copy, because it refuses a file named as the live store
+Copy-Item data\research\deep_history\market.duckdb data\research\market_deep_2026-11-09.duckdb
+$long = "--db","data\research\market_deep_2026-11-09.duckdb","--session-min-symbols","500","--market-symbol","NIFTYBEES","--history-end","2023-08-01","--family-n","6"
+$lists = "config\research\factor_portfolio"
+.venv\Scripts\python.exe scripts\factor_portfolio_study.py @long --exclude-symbols $lists\long_exclude.txt --counts-only
+.venv\Scripts\python.exe scripts\factor_portfolio_study.py @long --exclude-symbols $lists\long_exclude.txt --tag long
+# sensitivity (decides nothing): also without four names whose bonuses and demergers the store does not flag
+.venv\Scripts\python.exe scripts\factor_portfolio_study.py @long --exclude-symbols $lists\long_exclude_unrecorded_actions.txt --tag long_sens
 ```
 
 A first-time store needs its empty `market.duckdb` created under the same `MT_DATA_DIR`:
